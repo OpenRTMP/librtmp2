@@ -1,28 +1,28 @@
-# librtmp2 Server — Produktkonzept
+# librtmp2 Server — Product Concept
 
-## Zweck
+## Purpose
 
-`librtmp2-server` ist das spätere Produkt **oberhalb** der `librtmp2`-Core-Bibliothek. Es ist ein eigenständiger RTMP / E-RTMP-Server mit **API**, **Stats-Seite** und einer schlanken operativen Oberfläche. Die Produktlogik ist strikt getrennt von der Protokollimplementierung, damit der Core auch von anderen Projekten wiederverwendet werden kann. [1]
+`librtmp2-server` is the future product **on top of** the `librtmp2` core library. It is a standalone RTMP / E-RTMP server with an **API**, a **stats page**, and a lean operational interface. Product logic is strictly separated from the protocol implementation so that the core can be reused by other projects. [1]
 
-Das Ziel ist **kein** überladener Multi-Protokoll-Monolith wie MediaMTX, sondern ein fokussierter, moderner RTMP-/E-RTMP-Server mit sauberer UX, API-first-Denke und guter Observability. [1]
-
-***
-
-## Produktvision
-
-Der Server soll das werden, was du ursprünglich beschrieben hast:
-
-- Streams dynamisch per API anlegen
-- Eine ordentliche Stats-Seite haben
-- Fokussiert auf RTMP / E-RTMP bleiben
-- Keine Drittplattform-Push-Targets benötigen
-- Schlank, containerfreundlich und selbst hostbar sein
-
-Die Bibliothek macht die Protokollarbeit, der Server macht das Produkt.
+The goal is **not** an overloaded multi-protocol monolith like MediaMTX, but a focused, modern RTMP/E-RTMP server with clean UX, an API-first mindset, and good observability. [1]
 
 ***
 
-## Technische Schichtung
+## Product Vision
+
+The server should become what was originally described:
+
+- Create streams dynamically via API
+- Have a proper stats page
+- Stay focused on RTMP / E-RTMP
+- Require no third-party push targets
+- Be lightweight, container-friendly, and self-hostable
+
+The library does the protocol work; the server is the product.
+
+***
+
+## Technical Layering
 
 ```text
 OBS / FFmpeg / App
@@ -48,38 +48,38 @@ OBS / FFmpeg / App
 
 ***
 
-## Sprach- und Komponentenwahl
+## Language and Component Choices
 
 ### Core
 - `librtmp2` in **C**
 
-### Server-Schicht
-Empfohlene Optionen:
+### Server Layer
+Recommended options:
 
-| Komponente | Empfehlung | Grund |
+| Component | Recommendation | Reason |
 |---|---|---|
-| API/HTTP | Go oder Python | gute Produktivität, saubere Web-Stacks |
-| Web-UI | plain HTML/JS oder kleines Frontend | geringes Gewicht |
-| Persistence | SQLite für Start, optional PostgreSQL | einfache erste Deployments |
-| Containerisierung | Docker | passt zu deinem Workflow  |
+| API/HTTP | Go or Python | good productivity, clean web stacks |
+| Web UI | plain HTML/JS or small frontend | low footprint |
+| Persistence | SQLite to start, optionally PostgreSQL | simple initial deployments |
+| Containerization | Docker | fits your workflow |
 
-Die Sprache der Server-Schicht kann später entschieden werden, weil sie **nicht** mehr die Protokollbasis definiert.
+The language for the server layer can be decided later, since it **no longer** defines the protocol foundation.
 
 ***
 
-## Feature-Set v1
+## Feature Set v1
 
 ### 1. RTMP/E-RTMP Ingest
 
-- Eingehende Publisher-Verbindungen annehmen
-- Stream-Key validieren
-- App-Name und Stream-Key extrahieren
-- Codec/FourCC erkennen
-- Session-Status speichern
+- Accept incoming publisher connections
+- Validate stream key
+- Extract app name and stream key
+- Detect codec/FourCC
+- Persist session status
 
 ### 2. HTTP API
 
-Beispielendpunkte:
+Example endpoints:
 
 ```text
 POST   /api/v1/streams
@@ -98,24 +98,24 @@ GET    /api/v1/stats/streams/:id
 GET    /api/v1/health
 ```
 
-### 3. Stats-Seite
+### 3. Stats Page
 
-Die UI soll modern, klar und operativ nützlich sein:
+The UI should be modern, clear, and operationally useful:
 
-- Aktive Streams
+- Active streams
 - Status: online/offline
 - Uptime
-- Eingehende Bitrate
-- Frame Rate
-- Video Codec / FourCC
-- Audio Codec
-- Anzahl Sessions
-- Fehlerrate / letzte Fehler
-- Optionale History-Charts
+- Incoming bitrate
+- Frame rate
+- Video codec / FourCC
+- Audio codec
+- Number of sessions
+- Error rate / recent errors
+- Optional history charts
 
 ### 4. Stream Registry
 
-Jeder Stream ist ein Objekt:
+Each stream is an object:
 
 ```json
 {
@@ -130,46 +130,46 @@ Jeder Stream ist ein Objekt:
 }
 ```
 
-### 5. Authentifizierung
+### 5. Authentication
 
-Mindestens:
-- statische API-Tokens
-- Stream-Key-basierte Publish-Auth
-- optional Basic Auth für Stats-Seite
+At minimum:
+- Static API tokens
+- Stream-key-based publish auth
+- Optional basic auth for stats page
 
 ***
 
-## Architekturmodule
+## Architecture Modules
 
 ### Ingest Worker
 
-Verarbeitet eingehende RTMP-Verbindungen und nutzt `librtmp2` intern. Übersetzt Library-Callbacks in Anwendungsevents.
+Handles incoming RTMP connections and uses `librtmp2` internally. Translates library callbacks into application events.
 
 ### Session Manager
 
-Hält aktive Verbindungen, Stream-Lifecycle, Online-Status, Disconnect-Reason.
+Maintains active connections, stream lifecycle, online status, and disconnect reason.
 
 ### Stats Collector
 
-Aggregiert Metriken pro Stream und Session:
+Aggregates metrics per stream and session:
 - Bytes in/out
 - Bitrate
-- FPS grob geschätzt
+- FPS (rough estimate)
 - Codec
-- Dauer
-- Fehlerzähler
+- Duration
+- Error counters
 
 ### REST API
 
-Operative Steuerung und Datenabfrage.
+Operational control and data retrieval.
 
 ### Web UI
 
-Einfaches Frontend für Übersicht und Detailseiten.
+Simple frontend for overview and detail pages.
 
 ### Persistence Layer
 
-Mindestens Tabellen / Collections für:
+At minimum, tables/collections for:
 - streams
 - api_tokens
 - session_history
@@ -177,60 +177,60 @@ Mindestens Tabellen / Collections für:
 
 ***
 
-## Datenmodell
+## Data Model
 
 ### streams
 
-| Feld | Typ | Zweck |
+| Field | Type | Purpose |
 |---|---|---|
-| id | string | Primärschlüssel |
-| name | string | Anzeigename |
-| app | string | RTMP-App |
-| stream_key | string | Publish-Key |
-| enabled | bool | Aktiv/Inaktiv |
-| require_auth | bool | Auth nötig |
-| allowed_codecs | json/text | Erlaubte Codecs |
-| created_at | timestamp | Erstellung |
-| updated_at | timestamp | Änderung |
+| id | string | Primary key |
+| name | string | Display name |
+| app | string | RTMP app |
+| stream_key | string | Publish key |
+| enabled | bool | Active/inactive |
+| require_auth | bool | Auth required |
+| allowed_codecs | json/text | Allowed codecs |
+| created_at | timestamp | Creation time |
+| updated_at | timestamp | Last updated |
 
 ### sessions
 
-| Feld | Typ | Zweck |
+| Field | Type | Purpose |
 |---|---|---|
-| id | string | Session-ID |
-| stream_id | string | Bezug zu Stream |
-| remote_addr | string | IP/Port |
-| started_at | timestamp | Verbindungsbeginn |
-| ended_at | timestamp | Verbindungsende |
+| id | string | Session ID |
+| stream_id | string | Reference to stream |
+| remote_addr | string | IP/port |
+| started_at | timestamp | Connection start |
+| ended_at | timestamp | Connection end |
 | status | string | active/closed/error |
 | video_codec | string | Codec/FourCC |
-| audio_codec | string | Audioformat |
-| bytes_in | bigint | empfangene Bytes |
-| last_error | text | letzter Fehler |
+| audio_codec | string | Audio format |
+| bytes_in | bigint | Bytes received |
+| last_error | text | Last error |
 
 ### stats_samples
 
-| Feld | Typ | Zweck |
+| Field | Type | Purpose |
 |---|---|---|
 | id | integer | PK |
-| session_id | string | Bezug |
-| ts | timestamp | Zeitpunkt |
-| bitrate_in | integer | aktuelle Bitrate |
-| fps | float | aktuelle FPS |
-| keyframe_interval | float | geschätzt |
+| session_id | string | Reference |
+| ts | timestamp | Timestamp |
+| bitrate_in | integer | Current bitrate |
+| fps | float | Current FPS |
+| keyframe_interval | float | Estimated |
 
 ***
 
-## API-Design-Prinzipien
+## API Design Principles
 
 - JSON only
-- stabile Versionierung: `/api/v1`
-- maschinenlesbare Fehlerobjekte
-- klare Statuscodes
-- idempotente GET/DELETE
-- Auditierbarkeit für administrative Aktionen
+- Stable versioning: `/api/v1`
+- Machine-readable error objects
+- Clear status codes
+- Idempotent GET/DELETE
+- Auditability for administrative actions
 
-Fehlerbeispiel:
+Error example:
 
 ```json
 {
@@ -243,29 +243,29 @@ Fehlerbeispiel:
 
 ***
 
-## Stats-UI-Prinzipien
+## Stats UI Principles
 
-Die UI soll **nicht** wie SRS aussehen. Sie soll modern, reduziert und nützlich sein.
+The UI should **not** look like SRS. It should be modern, minimal, and useful.
 
-Ansichten:
+Views:
 - Dashboard
-- Streams-Liste
-- Stream-Detailseite
-- Session-Detailseite
-- System Health
+- Streams list
+- Stream detail page
+- Session detail page
+- System health
 
-Wichtige Elemente:
-- Such- und Filterfunktion
-- Farbcodierter Status
-- Live aktualisierte Werte
-- Verlauf über letzte Minuten/Stunden
-- Mobile brauchbar, Desktop stark
+Key elements:
+- Search and filter functionality
+- Color-coded status indicators
+- Live-updated values
+- History over the last minutes/hours
+- Usable on mobile, optimized for desktop
 
 ***
 
-## Deployment-Konzept
+## Deployment Concept
 
-Empfohlene Struktur:
+Recommended structure:
 
 ```text
 services:
@@ -289,81 +289,81 @@ Ports:
 
 ### Phase A — Tech Demo
 
-- `librtmp2` minimal integrieren
-- 1 Stream-Key fest verdrahtet
-- 1 API-Route `GET /health`
-- 1 Web-Page mit aktiven Sessions
+- Integrate `librtmp2` minimally
+- 1 stream key hardcoded
+- 1 API route `GET /health`
+- 1 web page showing active sessions
 
 ### Phase B — MVP
 
-- Stream Registry
+- Stream registry
 - CRUD API
-- Login / API Token
+- Login / API token
 - Dashboard
-- Session History
+- Session history
 
-### Phase C — Produktreife
+### Phase C — Production Readiness
 
-- Persistente Metrics
-- Reconnect-Steuerung
-- feinere Codec-Richtlinien
-- bessere Charts
-- Multi-Node-Fähigkeit
+- Persistent metrics
+- Reconnect control
+- Finer codec policies
+- Better charts
+- Multi-node capability
 
-### Phase D — Cluster / Enterprise optional
+### Phase D — Cluster / Enterprise (optional)
 
-- mehrere Ingest-Nodes
-- zentrale Control Plane
-- Node-Health
-- Scheduling / Drain Mode
+- Multiple ingest nodes
+- Central control plane
+- Node health
+- Scheduling / drain mode
 
 ***
 
-## Abgrenzung zu anderen Tools
+## Differentiation from Other Tools
 
-### Gegenüber SRS
+### vs. SRS
 
-- schöneres Produkt
+- Better product experience
 - API-first
-- bessere UX
-- klarer Fokus auf RTMP/E-RTMP
-- eigener Core statt nur Wrapper langfristig
+- Better UX
+- Clear focus on RTMP/E-RTMP
+- Own core rather than just a wrapper in the long run
 
-### Gegenüber MediaMTX
+### vs. MediaMTX
 
-- weniger Protokollballast
-- gezielter Use-Case
-- modernere Stats- und API-Oberfläche
-- kein generischer Alles-Router
+- Less protocol overhead
+- More targeted use case
+- More modern stats and API surface
+- Not a generic catch-all router
 
-### Gegenüber nginx-rtmp
+### vs. nginx-rtmp
 
-- moderne Codecs / E-RTMP
-- aktive Produktarchitektur
-- API und Observability
-
-***
-
-## Erfolgskriterien
-
-`librtmp2-server` ist erfolgreich, wenn:
-
-- ein Nutzer in wenigen Minuten einen RTMP/E-RTMP-Server starten kann,
-- Streams per API angelegt werden können,
-- die Stats-Seite klarer und nützlicher ist als SRS,
-- das Produkt klein und fokussiert bleibt,
-- und der Server vollständig auf `librtmp2` basiert, nicht auf SRS.
+- Modern codecs / E-RTMP
+- Active product architecture
+- API and observability
 
 ***
 
-## GitHub-Strategie
+## Success Criteria
 
-Empfohlene Repositories unter `AlexanderWagnerDev`:
+`librtmp2-server` is successful when:
+
+- a user can start an RTMP/E-RTMP server within minutes,
+- streams can be created via API,
+- the stats page is clearer and more useful than SRS,
+- the product stays small and focused,
+- and the server is built entirely on `librtmp2`, not on SRS.
+
+***
+
+## GitHub Strategy
+
+Recommended repositories under `AlexanderWagnerDev`:
 
 - `AlexanderWagnerDev/librtmp2`
 - `AlexanderWagnerDev/librtmp2-server`
 
-Optional später:
+Optionally later:
 - `AlexanderWagnerDev/librtmp2-python`
 - `AlexanderWagnerDev/librtmp2-go`
 - `AlexanderWagnerDev/librtmp2-obs-plugin`
