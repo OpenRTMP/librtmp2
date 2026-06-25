@@ -1,66 +1,66 @@
-# librtmp2 Core — Projektkonzept
+# librtmp2 Server — Project Concept
 
-## Zweck
+## Purpose
 
-`librtmp2` ist eine moderne Open-Source-C-Bibliothek für **Legacy RTMP** und **Enhanced RTMP v1/v2**, gedacht als wiederverwendbare Protokollbasis für eigene Server, Clients, Relay-Software, OBS-/FFmpeg-Integrationen und spätere eigene Produkte. Die Bibliothek ist bewusst **nicht** selbst ein Mediaserver, sondern die unterste Schicht: Handshake, Chunking, AMF, Commands, Audio/Video-Tags, E-RTMP-Erweiterungen, Zustandsmaschine und Callback-API. [1][2]
+`librtmp2` is a modern open-source C library for **Legacy RTMP** and **Enhanced RTMP v1/v2**, designed as a reusable protocol foundation for custom servers, clients, relay software, OBS/FFmpeg integrations, and future products. The library is deliberately **not** a media server itself, but rather the lowest layer: handshake, chunking, AMF, commands, audio/video tags, E-RTMP extensions, state machine, and callback API. [1][2]
 
-Das Projekt soll unter dem GitHub-Account **`AlexanderWagnerDev`** veröffentlicht werden, mit einem Ziel-Repository wie `AlexanderWagnerDev/librtmp2`. [3]
-
-***
-
-## Hauptziele
-
-- Vollständige **Legacy-RTMP**-Basis implementieren: Handshake, Chunk Streams, Message Reassembly, Commands, Control Messages. [2]
-- **E-RTMP v1** unterstützen: ExVideoTagHeader, FourCC-Codecs, Metadata-Erweiterungen, HDR-Felder, Audio-Erweiterungen. [4]
-- **E-RTMP v2** unterstützen: Capability-Negotiation, `videoFourCcInfoMap`, Reconnect-Mechanismus, Multitrack, ModEx. [5][6]
-- Eine **saubere C-API** bereitstellen, damit spätere Server oder Tools in C, C++, Rust, Go, Python, PHP oder anderen FFI-fähigen Sprachen darauf aufbauen können.
-- Strikte **Trennung zwischen Core und Produktlogik**: keine HTTP-API, keine Stats-Seite, keine Datenbank, keine Auth-Policy im Core.
+The project will be published under the GitHub account **`AlexanderWagnerDev`**, in a target repository such as `AlexanderWagnerDev/librtmp2`. [3]
 
 ***
 
-## Nicht-Ziele
+## Main Goals
 
-Diese Dinge gehören **nicht** in `librtmp2`:
-
-- Kein HTTP-Server
-- Keine Web-UI
-- Keine Stats-Webseite
-- Keine REST-API
-- Keine Persistenz / Datenbank
-- Keine Docker-spezifische Produktlogik
-- Keine Push-Targets zu Drittplattformen
-- Kein FFmpeg-Wrapper
-- Kein vollständiger Mediaserver mit Business-Logik
-
-`librtmp2` ist absichtlich die **Protokollbibliothek**, nicht das fertige Produkt.
+- Implement a complete **Legacy RTMP** foundation: handshake, chunk streams, message reassembly, commands, control messages. [2]
+- Support **E-RTMP v1**: ExVideoTagHeader, FourCC codecs, metadata extensions, HDR fields, audio extensions. [4]
+- Support **E-RTMP v2**: capability negotiation, `videoFourCcInfoMap`, reconnect mechanism, multitrack, ModEx. [5][6]
+- Provide a **clean C API** so that future servers or tools written in C, C++, Rust, Go, Python, PHP, or other FFI-capable languages can build on top of it.
+- Strict **separation between core and product logic**: no HTTP API, no stats page, no database, no auth policy in the core.
 
 ***
 
-## Architekturprinzipien
+## Non-Goals
 
-### 1. C als Kernsprache
+The following do **not** belong in `librtmp2`:
 
-Die Core-Library soll in **C** geschrieben werden, weil sie später möglichst breit einsetzbar sein soll. Das macht direkte Nutzung in OBS, FFmpeg, GStreamer, nginx-Module, Rust-FFI, Go-Cgo oder Python-FFI möglich. Eine native C-Library ist für Infrastrukturprojekte die universellste Form der Distribution.
+- No HTTP server
+- No web UI
+- No stats web page
+- No REST API
+- No persistence / database
+- No Docker-specific product logic
+- No push targets to third-party platforms
+- No FFmpeg wrapper
+- No full media server with business logic
 
-### 2. Kleine, stabile ABI
+`librtmp2` is intentionally the **protocol library**, not the finished product.
 
-Die öffentliche API soll klein, versionierbar und langfristig stabil gehalten werden. Interne Strukturen dürfen sich ändern; öffentliche Header müssen möglichst selten brechen.
+***
+
+## Architecture Principles
+
+### 1. C as the Core Language
+
+The core library shall be written in **C** to make it as broadly usable as possible. This enables direct use in OBS, FFmpeg, GStreamer, nginx modules, Rust FFI, Go CGo, or Python FFI. A native C library is the most universal form of distribution for infrastructure projects.
+
+### 2. Small, Stable ABI
+
+The public API shall be kept small, versionable, and stable over the long term. Internal structures may change; public headers must break as rarely as possible.
 
 ### 3. Strict Core / Thin Host
 
-Die Library verarbeitet Bytes, Frames, Commands und Protokollzustände. Was ein Hostprogramm damit macht, entscheidet die Hostanwendung über Callbacks und Konfigurationsstrukturen.
+The library processes bytes, frames, commands, and protocol states. What a host program does with them is decided by the host application via callbacks and configuration structures.
 
-### 4. Deterministische Parser
+### 4. Deterministic Parsers
 
-Alle Parser müssen deterministisch, bounds-checked und fuzzbar sein. Kein undefined behavior, keine impliziten Annahmen über eingehende Pakete.
+All parsers must be deterministic, bounds-checked, and fuzzable. No undefined behavior, no implicit assumptions about incoming packets.
 
 ### 5. Graceful Degradation
 
-Unbekannte E-RTMP-v2-Erweiterungen wie unbekannte ModEx-Typen oder unbekannte Capability-Felder dürfen **nicht** sofort hart abbrechen, sondern müssen protokollgerecht ignoriert oder als „unsupported“ markiert werden. [5][6]
+Unknown E-RTMP v2 extensions — such as unknown ModEx types or unknown capability fields — must **not** cause a hard abort immediately, but must be ignored in a protocol-compliant manner or marked as "unsupported". [5][6]
 
 ***
 
-## Repository-Struktur
+## Repository Structure
 
 ```text
 librtmp2/
@@ -158,11 +158,11 @@ librtmp2/
 
 ***
 
-## Öffentliche API-Idee
+## Public API Concept
 
-Die API muss niedrigstufig genug sein, um flexibel zu bleiben, aber hoch genug, damit nicht jeder Host Chunk-Reassembly selbst machen muss.
+The API must be low-level enough to remain flexible, but high-level enough that host programs do not have to implement chunk reassembly themselves.
 
-### Zentrale Typen
+### Core Types
 
 ```c
 typedef struct lrtmp2_server lrtmp2_server_t;
@@ -173,7 +173,7 @@ typedef struct lrtmp2_frame lrtmp2_frame_t;
 typedef struct lrtmp2_error lrtmp2_error_t;
 ```
 
-### Zentrale Konstruktoren
+### Core Constructors
 
 ```c
 lrtmp2_server_t *lrtmp2_server_create(const lrtmp2_server_config_t *config);
@@ -187,7 +187,7 @@ void lrtmp2_client_destroy(lrtmp2_client_t *client);
 int lrtmp2_client_connect(lrtmp2_client_t *client, const char *url);
 ```
 
-### Callback-Modell
+### Callback Model
 
 ```c
 typedef int (*lrtmp2_on_connect_cb)(lrtmp2_conn_t *conn, void *userdata);
@@ -197,44 +197,44 @@ typedef int (*lrtmp2_on_frame_cb)(lrtmp2_conn_t *conn, const lrtmp2_frame_t *fra
 typedef void (*lrtmp2_on_close_cb)(lrtmp2_conn_t *conn, void *userdata);
 ```
 
-Der Host registriert diese Hooks und entscheidet, ob ein Publish erlaubt wird, wo Frames hingeleitet werden oder wie Logging und Auth funktionieren.
+The host registers these hooks and decides whether a publish is permitted, where frames are routed, and how logging and auth work.
 
 ***
 
-## Protokollmodule
+## Protocol Modules
 
-### 1. Handshake-Modul
+### 1. Handshake Module
 
-Legacy RTMP nutzt den klassischen C0/C1/C2 ↔ S0/S1/S2-Handshake. Die Library muss mindestens den Standard-Handshake vollständig unterstützen; komplexere Adobe-Varianten können später ergänzt werden. [2]
+Legacy RTMP uses the classic C0/C1/C2 ↔ S0/S1/S2 handshake. The library must fully support at least the standard handshake; more complex Adobe variants can be added later. [2]
 
-Aufgaben:
-- Version erkennen
-- Fixed-Length-Handshake robust lesen/schreiben
-- Timeouts behandeln
-- Partial Reads korrekt puffern
+Responsibilities:
+- Detect version
+- Robustly read/write the fixed-length handshake
+- Handle timeouts
+- Correctly buffer partial reads
 
-### 2. Chunk-Modul
+### 2. Chunk Module
 
-RTMP fragmentiert Nachrichten in Chunks mit Basic Header, Message Header, optional Extended Timestamp und Payload. Die Library braucht vollständige Reassembly pro Chunk Stream ID, inklusive Header-Typen 0–3 und State-Carry-Forward. [2]
+RTMP fragments messages into chunks with a basic header, message header, optional extended timestamp, and payload. The library requires complete reassembly per chunk stream ID, including header types 0–3 and state carry-forward. [2]
 
-Aufgaben:
-- Chunk Reader
-- Chunk Writer
-- State je `csid`
-- `SetChunkSize` sofort anwenden
-- `Abort` korrekt behandeln
+Responsibilities:
+- Chunk reader
+- Chunk writer
+- State per `csid`
+- Apply `SetChunkSize` immediately
+- Handle `Abort` correctly
 
-### 3. Message-Modul
+### 3. Message Module
 
-Message-Reassembly erzeugt semantische Nachrichten wie `SetChunkSize`, `Acknowledgement`, `WindowAcknowledgementSize`, `UserControlMessage`, Audio-, Video- und Command-Nachrichten. [2]
+Message reassembly produces semantic messages such as `SetChunkSize`, `Acknowledgement`, `WindowAcknowledgementSize`, `UserControlMessage`, audio, video, and command messages. [2]
 
-### 4. AMF-Modul
+### 4. AMF Module
 
-AMF0 ist Pflicht, AMF3 optional aber sinnvoll für Vollständigkeit. Connect-, CreateStream-, Publish- und Play-Flows benötigen sauberes Encoding und Decoding verschachtelter Objekte, Arrays und Strings.
+AMF0 is mandatory; AMF3 is optional but useful for completeness. Connect, CreateStream, Publish, and Play flows require clean encoding and decoding of nested objects, arrays, and strings.
 
-### 5. Session- und Command-Modul
+### 5. Session and Command Module
 
-Die Bibliothek braucht eine interne Zustandsmaschine für:
+The library requires an internal state machine for:
 - `connect`
 - `createStream`
 - `publish`
@@ -243,23 +243,23 @@ Die Bibliothek braucht eine interne Zustandsmaschine für:
 - `FCPublish`
 - `FCUnpublish`
 
-Das Ziel ist, Hosts nicht mit rohen AMF-Arrays alleine zu lassen.
+The goal is to avoid leaving host applications to deal with raw AMF arrays on their own.
 
 ***
 
 ## Enhanced RTMP v1
 
-E-RTMP v1 erweitert RTMP/FLV vor allem um moderne Codecs, FourCC-Signalisierung und Metadaten. [4]
+E-RTMP v1 extends RTMP/FLV primarily with modern codecs, FourCC signaling, and metadata. [4]
 
-### Kernpunkte
+### Key Points
 
-- Erkennen des `IsExHeader`-Bits im VideoTagHeader
-- Wechsel von Legacy `CodecID` zu `PacketType + FourCC`
-- Unterstützung für FourCC-basierte Codecs wie `hvc1`, `av01`, `vp09` [4]
-- Erweiterte `PacketTypeMetadata`-Frames für Dinge wie `colorInfo` und HDR-Metadaten [4]
-- `fourCcList` im Connect-Objekt unterstützen [4]
+- Detect the `IsExHeader` bit in the VideoTagHeader
+- Switch from legacy `CodecID` to `PacketType + FourCC`
+- Support FourCC-based codecs such as `hvc1`, `av01`, `vp09` [4]
+- Extended `PacketTypeMetadata` frames for things like `colorInfo` and HDR metadata [4]
+- Support `fourCcList` in the connect object [4]
 
-### Interne Strukturen
+### Internal Structures
 
 ```c
 typedef struct {
@@ -275,21 +275,21 @@ typedef struct {
 
 ## Enhanced RTMP v2
 
-E-RTMP v2 ergänzt laut Spezifikation insbesondere Capability-Negotiation, Multitrack, Reconnect und ModEx. [5][6]
+According to the specification, E-RTMP v2 adds in particular capability negotiation, multitrack, reconnect, and ModEx. [5][6]
 
-### Kernpunkte
+### Key Points
 
-- `capsEx` und `videoFourCcInfoMap` im Connect-/Response-Austausch [5]
-- Reconnect-Mechanismus für kontrollierte Umleitung oder Wartung [6]
-- Mehrere Tracks pro Session / Stream [6]
-- ModEx als Erweiterungsmechanismus ohne harte Protokollbrüche [5]
+- `capsEx` and `videoFourCcInfoMap` in the connect/response exchange [5]
+- Reconnect mechanism for controlled redirection or maintenance [6]
+- Multiple tracks per session / stream [6]
+- ModEx as an extension mechanism without hard protocol breaks [5]
 
-### Interne Aufgaben
+### Internal Tasks
 
-- Capability-Objekte parsen und serialisieren
-- Track-Deskriptoren verwalten
-- Reconnect-Frames empfangen und senden
-- Unbekannte ModEx-Typen protokollieren und ignorieren
+- Parse and serialize capability objects
+- Manage track descriptors
+- Receive and send reconnect frames
+- Log and ignore unknown ModEx types
 
 ***
 
@@ -306,7 +306,7 @@ TCP_ACCEPTED
   -> CLOSED
 ```
 
-Mit E-RTMP v2 kommt logisch ein zusätzlicher Zustand für Capability-Negotiation dazu:
+With E-RTMP v2, an additional state for capability negotiation is logically added:
 
 ```text
 CONNECTED
@@ -314,22 +314,22 @@ CONNECTED
   -> STREAM_CREATED
 ```
 
-Diese Zustandsmaschine soll vollständig im Core implementiert werden, damit Hostanwendungen auf semantisch sinnvolle Events reagieren können.
+This state machine shall be fully implemented in the core so that host applications can react to semantically meaningful events.
 
 ***
 
-## Speicher- und Sicherheitsregeln
+## Memory and Security Rules
 
-- Alle Eingabelängen vor jedem Read / Copy validieren
-- Keine direkten `malloc(len)` ohne Upper Bounds
-- Kein Vertrauen in Payload-Längen aus dem Netzwerk
-- Optional eigener Allocator-Hook für Hostintegration
-- Fuzzing für Handshake, Chunk Reader, AMF und ExVideoTagHeader
-- CI mit AddressSanitizer und UndefinedBehaviorSanitizer
+- Validate all input lengths before every read / copy
+- No direct `malloc(len)` without upper bounds
+- No trust in payload lengths from the network
+- Optional custom allocator hook for host integration
+- Fuzzing for handshake, chunk reader, AMF, and ExVideoTagHeader
+- CI with AddressSanitizer and UndefinedBehaviorSanitizer
 
 ***
 
-## Fehlerklassen
+## Error Classes
 
 ```c
 typedef enum {
@@ -346,45 +346,45 @@ typedef enum {
 } lrtmp2_error_code_t;
 ```
 
-Fehler müssen maschinenlesbar und menschenlesbar verfügbar sein.
+Errors must be available in both machine-readable and human-readable form.
 
 ***
 
-## Testing-Strategie
+## Testing Strategy
 
-### Unit-Tests
+### Unit Tests
 
-- Handshake mit Golden Bytes
-- Chunk Typ 0–3
-- Extended Timestamp
-- AMF0 primitive und komplexe Objekte
-- ExVideoTagHeader Parsing
-- FourCC Parsing
-- Capability-Negotiation Parsing
+- Handshake with golden bytes
+- Chunk types 0–3
+- Extended timestamp
+- AMF0 primitive and complex objects
+- ExVideoTagHeader parsing
+- FourCC parsing
+- Capability negotiation parsing
 
-### Integrationstests
+### Integration Tests
 
-- OBS → `librtmp2` Minimalserver
-- FFmpeg → `librtmp2` Minimalserver
-- `librtmp2` Minimalclient → SRS
-- Später HaishinKit → `librtmp2`
+- OBS → `librtmp2` minimal server
+- FFmpeg → `librtmp2` minimal server
+- `librtmp2` minimal client → SRS
+- Later HaishinKit → `librtmp2`
 
 ### Fuzzing
 
-- Handshake Parser
-- Chunk Reader
-- AMF Decoder
-- E-RTMP Header Parser
+- Handshake parser
+- Chunk reader
+- AMF decoder
+- E-RTMP header parser
 
 ***
 
-## Build-System
+## Build System
 
-Empfehlung:
-- **Meson** oder **CMake** für Plattform-Portabilität
-- zusätzlich einfacher `Makefile` für Linux-Entwicklung
+Recommendation:
+- **Meson** or **CMake** for platform portability
+- Additionally a simple `Makefile` for Linux development
 
-Beispielziele:
+Example targets:
 - `make debug`
 - `make release`
 - `make test`
@@ -392,7 +392,7 @@ Beispielziele:
 - `make asan`
 - `make install`
 
-Artefakte:
+Artifacts:
 - `librtmp2.so`
 - `librtmp2.a`
 - `librtmp2.dll`
@@ -401,51 +401,51 @@ Artefakte:
 
 ***
 
-## Releases und Versionierung
+## Releases and Versioning
 
 SemVer:
-- `0.x` solange API/ABI noch bewegt wird
-- `1.0.0` sobald Header/API stabil sind
+- `0.x` while the API/ABI is still evolving
+- `1.0.0` once the header/API is stable
 
-Geplante erste Versionen:
-- `0.1.0` Legacy RTMP Server minimal
-- `0.2.0` Legacy RTMP Client minimal
-- `0.3.0` E-RTMP v1 Receive
-- `0.4.0` E-RTMP v1 Send
-- `0.5.0` E-RTMP v2 Capability Layer
-- `0.6.0` Multitrack / Reconnect / ModEx
+Planned initial versions:
+- `0.1.0` Legacy RTMP server minimal
+- `0.2.0` Legacy RTMP client minimal
+- `0.3.0` E-RTMP v1 receive
+- `0.4.0` E-RTMP v1 send
+- `0.5.0` E-RTMP v2 capability layer
+- `0.6.0` Multitrack / reconnect / ModEx
 
 ***
 
-## Phasenplan
+## Phase Plan
 
 ### Phase 1 — Legacy Core MVP
 
 - Handshake
-- Chunk Reader/Writer
-- Message Reassembly
+- Chunk reader/writer
+- Message reassembly
 - AMF0
 - `connect` / `createStream` / `publish`
-- Minimalserver-Beispiel
+- Minimal server example
 
-**Akzeptanzkriterium:** OBS kann H.264 zu `librtmp2` senden.
+**Acceptance criterion:** OBS can send H.264 to `librtmp2`.
 
 ### Phase 2 — Client MVP
 
-- Outbound Connect
-- Publish-Flow
-- Play-Flow rudimentär
+- Outbound connect
+- Publish flow
+- Play flow (rudimentary)
 
-**Akzeptanzkriterium:** `librtmp2`-Client kann zu SRS publizieren.
+**Acceptance criterion:** `librtmp2` client can publish to SRS.
 
 ### Phase 3 — E-RTMP v1
 
 - ExVideoTagHeader
 - FourCC
-- HDR / Metadata
+- HDR / metadata
 - `fourCcList`
 
-**Akzeptanzkriterium:** HEVC/AV1-Streams werden erkannt und korrekt geparsed. [4]
+**Acceptance criterion:** HEVC/AV1 streams are detected and correctly parsed. [4]
 
 ### Phase 4 — E-RTMP v2
 
@@ -455,4 +455,49 @@ Geplante erste Versionen:
 - Multitrack
 - ModEx
 
-**Akzeptanzkriterium:** v2-Negotiation ohne Hard-Fails gegen bekannte Gegenstellen. [5]
+**Acceptance criterion:** v2 negotiation without hard failures against known peers. [5]
+
+### Phase 5 — Hardening
+
+- ASan/UBSan
+- Fuzzing
+- ABI stability
+- Packaging
+- Docs
+
+***
+
+## Success Criteria
+
+`librtmp2` is successful when:
+
+- it is buildable as a standalone, small C library,
+- OBS and FFmpeg can be tested against it,
+- it provides Legacy RTMP and E-RTMP v1/v2 as a reusable foundation,
+- other projects can build their own servers or clients on top of it,
+- and a separate product with an API and stats page can emerge from it later.
+
+***
+
+## GitHub and Organization Concept
+
+Recommended initial repository:
+
+- `https://github.com/AlexanderWagnerDev/librtmp2`
+
+Recommended branches:
+- `main`
+- `develop`
+
+Recommended labels:
+- `protocol`
+- `legacy-rtmp`
+- `e-rtmp-v1`
+- `e-rtmp-v2`
+- `amf`
+- `chunking`
+- `client`
+- `server`
+- `fuzzing`
+- `interop`
+- `good first issue`
