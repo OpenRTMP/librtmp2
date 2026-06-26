@@ -17,7 +17,7 @@ extern "C" {
 
 /* ==================== Server API ==================== */
 
-typedef struct lrtmp2_server_config {
+struct lrtmp2_server_config {
     int max_connections;
     int chunk_size;
     /* Callbacks */
@@ -28,7 +28,7 @@ typedef struct lrtmp2_server_config {
     lrtmp2_on_close_cb     on_close_cb;
     int (*on_send_data)(struct lrtmp2_conn *conn, const uint8_t *data, size_t len, void *userdata);
     void *userdata;
-} lrtmp2_server_config_t;
+};
 
 lrtmp2_server_t *lrtmp2_server_create(const lrtmp2_server_config_t *config);
 void             lrtmp2_server_destroy(lrtmp2_server_t *server);

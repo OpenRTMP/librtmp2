@@ -5,9 +5,9 @@
 *.o.d
 
 # Test binaries
-tests/run_tests
-tests/integration/run_ingest
-tests/integration/run_client
+**/run_tests
+**/run_*
+!**/test_*.c
 
 # Editor
 *.swp

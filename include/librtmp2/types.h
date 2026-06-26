@@ -11,6 +11,11 @@
 extern "C" {
 #endif
 
+/* Forward-declared opaque server config (defined in librtmp2.h) */
+struct lrtmp2_server_config;
+
+typedef struct lrtmp2_server_config lrtmp2_server_config_t;
+
 /* Opaque forward-declared types */
 typedef struct lrtmp2_server    lrtmp2_server_t;
 typedef struct lrtmp2_client    lrtmp2_client_t;

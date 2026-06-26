@@ -110,7 +110,8 @@ int lrtmp2_msg_decode(lrtmp2_conn_t *conn, const lrtmp2_chunk_message_t *chunk,
                 frame.data = payload;
 
                 lrtmp2_audio_header_t ah;
-                if (lrtmp2_ertmp_exaudio_parse(payload, payload_len, &ah) == LRTMP2_OK) {
+                if (lrtmp2_ertmp_exaudio_parse(payload, payload_len, &ah) == LRTMP2_OK &&
+                    ah.header_size <= payload_len) {
                     frame.audio_codec = ah.audio_codec;
                     frame.audio_sample_rate = ah.sample_rate;
                     frame.audio_bit_depth = ah.sample_size;
@@ -138,7 +139,8 @@ int lrtmp2_msg_decode(lrtmp2_conn_t *conn, const lrtmp2_chunk_message_t *chunk,
                 frame.data = payload;
 
                 lrtmp2_video_header_t vh;
-                if (lrtmp2_ertmp_exvideo_parse(payload, payload_len, &vh) == LRTMP2_OK) {
+                if (lrtmp2_ertmp_exvideo_parse(payload, payload_len, &vh) == LRTMP2_OK &&
+                    vh.header_size <= payload_len) {
                     frame.video_frame_type = vh.frame_type;
                     frame.composition_time = vh.composition_time;
                     if (vh.is_ex_header) {

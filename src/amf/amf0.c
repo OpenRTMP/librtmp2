@@ -257,7 +257,6 @@ int lrtmf2_amf0_skip_value(lrtmp2_buffer_t *buf)
 
     switch (type) {
         case AMF0_NUMBER:
-            return amf_read_double(buf, NULL);
             {
                 double tmp;
                 return amf_read_double(buf, &tmp);
@@ -285,7 +284,6 @@ int lrtmf2_amf0_skip_value(lrtmp2_buffer_t *buf)
                 uint32_t len;
                 rc = amf_read_u32(buf, &len);
                 if (rc != LRTMP2_OK) return rc;
-                len = len;
                 for (uint32_t i = 0; i < len; i++) {
                     uint8_t b;
                     rc = amf_read_u8(buf, &b);

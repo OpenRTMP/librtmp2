@@ -2,7 +2,7 @@
 #define LRTMP2_SESSION_CONN_H
 
 #include "librtmp2/types.h"
-#include "librtmp2/callbacks.h"
+#include "librtmp2/librtmp2.h"
 #include "handshake/handshake.h"
 #include "chunk/chunk_state.h"
 #include <stdint.h>
@@ -11,17 +11,7 @@
 /** @file Connection lifecycle and message processing */
 struct lrtmp2_server;
 
-typedef struct lrtmp2_server_config {
-    int max_connections;
-    int chunk_size;
-    /* Callbacks */
-    lrtmp2_on_connect_cb   on_connect_cb;
-    lrtmp2_on_publish_cb  on_publish_cb;
-    lrtmp2_on_play_cb      on_play_cb;
-    lrtmp2_on_frame_cb     on_frame_cb;
-    lrtmp2_on_close_cb     on_close_cb;
-    void *userdata;
-} lrtmp2_server_config_t;
+struct lrtmp2_server_config;  /* defined in include/librtmp2/librtmp2.h */
 
 struct lrtmp2_conn {
     lrtmp2_server_t           *server;

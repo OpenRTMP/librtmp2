@@ -122,7 +122,7 @@ int lrtmp2_server_listen(lrtmp2_server_t *server, const char *bind_addr)
     addr.sin_port = htons((uint16_t)port);
 
     if (strcmp(host, "0.0.0.0") == 0) {
-        addr.sin_addr.s_addr = INADDR_NONE;
+        addr.sin_addr.s_addr = INADDR_ANY;
     } else if (inet_pton(AF_INET, host, &addr.sin_addr) <= 0) {
         LRTMP2_LOG_ERROR("Invalid bind address: %s", host);
         close_socket(server->server_fd);
