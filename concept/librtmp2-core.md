@@ -501,3 +501,53 @@ Recommended labels:
 - `fuzzing`
 - `interop`
 - `good first issue`
+
+***
+
+## Implementation Status
+
+This section tracks how far the actual `src/`/`include/` tree has progressed against the Phase Plan above. It is updated as work lands, so the concept stays a living document rather than drifting from reality.
+
+### Phase 1 — Legacy Core MVP: in progress
+
+- Handshake (`src/handshake/handshake.c`) — implemented
+- Chunk reader/writer/state (`src/chunk/`) — implemented
+- Message reassembly (`src/message/`) — implemented (`control.c`, `command.c`, `message.c`)
+- AMF0 (`src/amf/amf0.c`) — implemented; AMF3 (`amf3.c`) present alongside it
+- `connect` / `createStream` / `publish` session flow (`src/session/`, `src/server/server.c`) — implemented for the server side; covered by `tests/integration/test_server_ingest.c`
+- Minimal server example (`examples/minimal_server/`) — present
+
+**Acceptance criterion status:** OBS-to-`librtmp2` ingest has not yet been verified manually; the integration test exercises the chunked publish path with synthetic H.264 data (`tests/test_data/test.h264`).
+
+### Phase 2 — Client MVP: started
+
+- `src/client/client.c` exists with an outbound connect path, but the publish/play flows on the client side (`src/session/publish.c`, `src/session/play.c`) are still minimal stubs.
+
+**Acceptance criterion status:** not yet met.
+
+### Phase 3 — E-RTMP v1: started
+
+- `src/ertmp/exvideo.c` and `src/ertmp/metadata.c` exist but are minimal stubs; FourCC dispatch and HDR/`fourCcList` handling are not yet implemented.
+
+**Acceptance criterion status:** not yet met.
+
+### Phase 4 — E-RTMP v2: not started
+
+- `connect_caps.c`, `reconnect.c`, `multitrack.c`, `modex.c` from the planned repository structure do not exist yet in `src/ertmp/`.
+
+### Phase 5 — Hardening: partially started
+
+- `Makefile` already supports `ASAN=1` / `UBSAN=1` build flags.
+- `meson.build` and `librtmp2.pc.in` exist, covering the build-system goal.
+- Fuzzing harnesses (`tests/fuzz/`) and CI interop/release workflows beyond `.github/workflows/ci.yml` are not yet present.
+
+***
+
+## References
+
+1. Adobe Systems. *Real-Time Messaging Protocol (RTMP) Specification, version 1.0*, 21 December 2012. [PDF mirror (Veriskope)](https://rtmp.veriskope.com/pdf/rtmp_specification_1.0.pdf), [documentation portal](https://rtmp.veriskope.com/docs/spec/).
+2. Real-Time Messaging Protocol Chunk Stream, Handshake, and Message format as defined in [1]; see also the legacy spec mirror in the Veovera repository: [`docs/legacy/rtmp-v1-0-spec.pdf`](https://github.com/veovera/enhanced-rtmp/blob/main/docs/legacy/rtmp-v1-0-spec.pdf).
+3. This project: [`AlexanderWagnerDev/librtmp2`](https://github.com/AlexanderWagnerDev/librtmp2).
+4. Veovera Software Organization. *Enhanced RTMP v1*: [`docs/enhanced/enhanced-rtmp-v1.md`](https://github.com/veovera/enhanced-rtmp/blob/main/docs/enhanced/enhanced-rtmp-v1.md), [PDF](https://github.com/veovera/enhanced-rtmp/blob/main/docs/enhanced/enhanced-rtmp-v1.pdf).
+5. Veovera Software Organization. *Enhanced RTMP v2* (capability negotiation, `videoFourCcInfoMap`, ModEx): [`docs/enhanced/enhanced-rtmp-v2.md`](https://github.com/veovera/enhanced-rtmp/blob/main/docs/enhanced/enhanced-rtmp-v2.md), [PDF](https://veovera.org/docs/enhanced/enhanced-rtmp-v2.pdf).
+6. Veovera Software Organization. *Enhanced RTMP v2* — reconnect and multitrack sections, same source as [5]. Project home: [`veovera/enhanced-rtmp`](https://github.com/veovera/enhanced-rtmp).
