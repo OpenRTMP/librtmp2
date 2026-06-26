@@ -31,7 +31,6 @@ message_sources = [
   'src/message/message.c',
   'src/message/control.c',
   'src/message/command.c',
-  'src/message/user_control.c',
 ]
 
 amf_sources = [
@@ -48,12 +47,7 @@ flv_sources = [
 
 ertmp_sources = [
   'src/ertmp/exvideo.c',
-  'src/ertmp/fourcc.c',
   'src/ertmp/metadata.c',
-  'src/ertmp/connect_caps.c',
-  'src/ertmp/reconnect.c',
-  'src/ertmp/multitrack.c',
-  'src/ertmp/modex.c',
 ]
 
 session_sources = [
