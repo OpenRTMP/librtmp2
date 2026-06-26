@@ -101,6 +101,7 @@ struct lrtmp2_frame {
     uint32_t audio_sample_rate;
     uint8_t audio_channels;
     uint8_t audio_bit_depth;
+    lrtmp2_fourcc_t audio_fourcc;  /* enhanced: FourCC from ExAudioTagHeader */
     /* Video-specific */
     lrtmp2_video_codec_t video_codec;
     lrtmp2_fourcc_t video_fourcc;

@@ -26,6 +26,9 @@
 static uint8_t g_received_data[MAX_RECEIVED];
 static size_t g_received_len = 0;
 static int g_frame_received = 0;
+static int g_video_frames = 0;
+static int g_audio_frames = 0;
+static char g_last_video_fourcc[5] = {0};
 static int g_publish_called = 0;
 static char g_publish_app[256];
 static char g_publish_stream[256];
@@ -33,10 +36,16 @@ static char g_publish_stream[256];
 static int on_frame_cb(lrtmp2_conn_t *conn, const lrtmp2_frame_t *frame, void *userdata) {
     (void)conn; (void)userdata;
     fprintf(stderr, "  [cb] on_frame: type=%d size=%u\n", frame->type, frame->size);
+    if (frame->type == LRTMP2_FRAME_VIDEO) {
+        g_video_frames++;
+        memcpy(g_last_video_fourcc, frame->video_fourcc.cc, 5);
+    } else if (frame->type == LRTMP2_FRAME_AUDIO) {
+        g_audio_frames++;
+    }
     if (frame->size > 0 && frame->size <= MAX_RECEIVED) {
         memcpy(g_received_data, frame->data, frame->size);
         g_received_len = frame->size;
-        g_frame_received = 1;
+        g_frame_received++;
     }
     return 0;
 }
@@ -227,6 +236,27 @@ int main(void) {
                                          5, 0x09, video_body, video_body_len);
     total += video_chunk_len;
 
+    /* ── Enhanced HEVC video frame (ExVideoTagHeader with FourCC "hvc1") ── */
+    uint8_t hevc_body[256];
+    size_t hevc_len = 0;
+    hevc_body[hevc_len++] = 0x91; /* IsExHeader=1, FT=1, PT=1 */
+    hevc_body[hevc_len++] = 'h'; hevc_body[hevc_len++] = 'v';
+    hevc_body[hevc_len++] = 'c'; hevc_body[hevc_len++] = '1';
+    hevc_body[hevc_len++] = 0x00; hevc_body[hevc_len++] = 0x00; hevc_body[hevc_len++] = 0x00;
+    uint8_t fake_hevc[] = { 0x01, 0x01, 0x60, 0x00, 0x00, 0x00, 0x80, 0x00, 0x00, 0x00, 0xFC, 0xDF, 0x09 };
+    memcpy(hevc_body + hevc_len, fake_hevc, sizeof(fake_hevc)); hevc_len += sizeof(fake_hevc);
+    total += wrap_chunk(stream + total, sizeof(stream) - total, 5, 0x09, hevc_body, hevc_len);
+
+    /* ── Enhanced Opus audio frame (ExAudioTagHeader with FourCC "Opus") ── */
+    uint8_t opus_body[128];
+    size_t opus_len = 0;
+    opus_body[opus_len++] = 0x81; /* IsExHeader=1, FT=0, PT=1 */
+    opus_body[opus_len++] = 'O'; opus_body[opus_len++] = 'p';
+    opus_body[opus_len++] = 'u'; opus_body[opus_len++] = 's';
+    uint8_t fake_opus[] = { 0x7F, 0xE8, 0x01, 0x02, 0x03, 0x04, 0x05 };
+    memcpy(opus_body + opus_len, fake_opus, sizeof(fake_opus)); opus_len += sizeof(fake_opus);
+    total += wrap_chunk(stream + total, sizeof(stream) - total, 4, 0x08, opus_body, opus_len);
+
     printf("Built RTMP stream: %zu bytes (video_chunk=%zu, idr_len=%zu)\n", total, video_chunk_len, idr_len);
 
     /* Feed to connection */
@@ -235,17 +265,19 @@ int main(void) {
            rc, lrtmp2_conn_state_str(conn->state), conn->handshake.state, g_frame_received, g_publish_called);
 
     /* Check: full session should reach PUBLISHING, with the publish callback
-     * fired and the video frame delivered via on_frame */
+     * fired and all frames delivered via on_frame */
     int success = 0;
-    if (conn->state == LRTMP2_STATE_PUBLISHING && g_publish_called && g_frame_received &&
-        strcmp(g_publish_app, "live") == 0 && strcmp(g_publish_stream, "mystream") == 0 &&
-        g_received_len == video_body_len) {
-        printf("PASS: session reached PUBLISHING, publish callback fired (app=%s stream=%s), frame received (len=%zu)\n",
-               g_publish_app, g_publish_stream, g_received_len);
+    printf("  frames: video=%d audio=%d last_fourcc=%s\n",
+           g_video_frames, g_audio_frames, g_last_video_fourcc);
+    if (conn->state == LRTMP2_STATE_PUBLISHING && g_publish_called && g_frame_received >= 3 &&
+        g_video_frames >= 2 && g_audio_frames >= 1 &&
+        strcmp(g_publish_app, "live") == 0 && strcmp(g_publish_stream, "mystream") == 0) {
+        printf("PASS: session reached PUBLISHING, publish callback fired (app=%s stream=%s), %d frames received\n",
+               g_publish_app, g_publish_stream, g_frame_received);
         success = 1;
     } else {
-        printf("FAIL: state=%s publish_called=%d frame_received=%d\n",
-               lrtmp2_conn_state_str(conn->state), g_publish_called, g_frame_received);
+        printf("FAIL: state=%d publish_called=%d frames=%d video=%d audio=%d\n",
+               conn->state, g_publish_called, g_frame_received, g_video_frames, g_audio_frames);
     }
 
     lrtmp2_conn_destroy(conn);

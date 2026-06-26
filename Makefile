@@ -68,7 +68,7 @@ src/%/%.o: src/%/%.c
 TEST_SRCS := $(wildcard tests/unit/*.c)
 TEST_OBJS := $(TEST_SRCS:.c=.o)
 
-$(TEST_BIN): $(OBJS) $(TEST_OBJS) tests/unit/main.c
+$(TEST_BIN): $(OBJS) $(TEST_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(OBJS) $(TEST_OBJS) $(LDFLAGS) -lm
 
 tests/%.o: tests/%.c
@@ -92,12 +92,16 @@ test: $(TEST_BIN)
 
 INTEGRATION_BIN = tests/integration/run_ingest
 CLIENT_INTEGRATION_BIN = tests/integration/run_client
+ERTMP_INTEGRATION_BIN = tests/integration/run_ertmp_v1
 
 $(INTEGRATION_BIN): $(OBJS) tests/integration/test_server_ingest.c
 	$(CC) $(CFLAGS) -o $@ tests/integration/test_server_ingest.c $(OBJS) $(LDFLAGS) -lm -lpthread
 
 $(CLIENT_INTEGRATION_BIN): $(OBJS) tests/integration/test_client_publish.c
 	$(CC) $(CFLAGS) -o $@ tests/integration/test_client_publish.c $(OBJS) $(LDFLAGS) -lm -lpthread
+
+$(ERTMP_INTEGRATION_BIN): $(OBJS) tests/integration/test_server_ertmp_v1.c
+	$(CC) $(CFLAGS) -o $@ tests/integration/test_server_ertmp_v1.c $(OBJS) $(LDFLAGS) -lm -lpthread
 
 clean:
 	rm -f $(OBJS) $(TEST_OBJS) $(TARGETS) $(TEST_BIN) $(INTEGRATION_BIN) $(CLIENT_INTEGRATION_BIN) examples/**/*.o tests/integration/*.o

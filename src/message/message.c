@@ -108,14 +108,20 @@ int lrtmp2_msg_decode(lrtmp2_conn_t *conn, const lrtmp2_chunk_message_t *chunk,
                 frame.timestamp = chunk->timestamp;
                 frame.size = payload_len;
                 frame.data = payload;
-                /* Parse audio tag: first byte = codec(4) + sample_rate(2) + channels(1) + bit_depth(1) */
-                if (payload_len > 0) {
-                    uint8_t tag = payload[0];
-                    frame.audio_codec = (lrtmp2_audio_codec_t)((tag >> 4) & 0x0F);
-                    frame.audio_sample_rate = (tag >> 2) & 0x03;
-                    frame.audio_bit_depth = (tag >> 1) & 0x01;
-                    frame.audio_channels = tag & 0x01;
+
+                lrtmp2_audio_header_t ah;
+                if (lrtmp2_ertmp_exaudio_parse(payload, payload_len, &ah) == LRTMP2_OK) {
+                    frame.audio_codec = ah.audio_codec;
+                    frame.audio_sample_rate = ah.sample_rate;
+                    frame.audio_bit_depth = ah.sample_size;
+                    frame.audio_channels = ah.channels;
+                    if (ah.is_ex_header) {
+                        memcpy(frame.audio_fourcc.cc, ah.fourcc, sizeof(ah.fourcc));
+                    }
+                    frame.data = payload + ah.header_size;
+                    frame.size = payload_len - ah.header_size;
                 }
+
                 if (conn->on_frame_cb) {
                     conn->on_frame_cb(conn, &frame, conn->userdata);
                 }
