@@ -35,9 +35,6 @@ It is designed to be embedded into custom servers, clients, relay tools, OBS/FFm
 OBS / FFmpeg / App
         │
         ▼
-  librtmp2-server  ←  future product built on top
-        │
-        ▼
       librtmp2          ← this library
       ├── Handshake
       ├── Chunking
@@ -198,15 +195,6 @@ librtmp2/
 Detailed design documents are located in [`concept/`](concept/):
 
 - [`concept/librtmp2-core.md`](concept/librtmp2-core.md) — Core library architecture, API design, protocol modules, security rules
-- [`concept/librtmp2-server.md`](concept/librtmp2-server.md) — Future server product built on top of this library
-
----
-
-## Related Projects
-
-| Repository | Description |
-|---|---|
-| `AlexanderWagnerDev/librtmp2-server` | RTMP/E-RTMP server with HTTP API and stats UI (planned) |
 
 ---
 
