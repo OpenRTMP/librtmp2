@@ -73,7 +73,7 @@ jobs:
       env:
         SAN: "1"
 
-    - name: Interop — Enhanced-RTMP (AV1 FourCC) ingest (ASan/UBSan)
+    - name: Interop — Enhanced-RTMP (HEVC + AV1 FourCC) ingest (ASan/UBSan)
       run: ./tests/interop/enhanced_rtmp_interop.sh
       env:
         SAN: "1"
