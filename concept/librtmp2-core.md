@@ -114,9 +114,12 @@ librtmp2/
 │   │   ├── video_tag.c
 │   │   └── script_tag.c
 │   ├── ertmp/
+│   │   ├── ertmp.h
 │   │   ├── exvideo.c
+│   │   ├── exaudio.c
 │   │   ├── fourcc.c
 │   │   ├── metadata.c
+│   │   ├── metadata.h
 │   │   ├── connect_caps.c
 │   │   ├── reconnect.c
 │   │   ├── multitrack.c
@@ -508,7 +511,7 @@ Recommended labels:
 
 This section tracks how far the actual `src/`/`include/` tree has progressed against the Phase Plan above. It is updated as work lands, so the concept stays a living document rather than drifting from reality.
 
-### Phase 1 — Legacy Core MVP: in progress
+### Phase 1 — Legacy Core MVP: complete
 
 - Handshake (`src/handshake/handshake.c`) — implemented
 - Chunk reader/writer/state (`src/chunk/`) — implemented
@@ -528,15 +531,29 @@ This section tracks how far the actual `src/`/`include/` tree has progressed aga
 
 **Acceptance criterion status:** not yet met as written — verified against `librtmp2`'s own server, not yet against a real SRS instance.
 
-### Phase 3 — E-RTMP v1: started
+### Phase 3 — E-RTMP v1: complete
 
-- `src/ertmp/exvideo.c` and `src/ertmp/metadata.c` exist but are minimal stubs; FourCC dispatch and HDR/`fourCcList` handling are not yet implemented.
+- `src/ertmp/exvideo.c` — full ExVideoTagHeader parser (legacy + enhanced with FourCC, PacketType, CompositionTime)
+- `src/ertmp/fourcc.c` — FourCC codec registry for video (hvc1→H265, av01→AV1, avc1→H264) and audio (Opus, mp4a), with forward/reverse lookup and human-readable names
+- `src/ertmp/exaudio.c` — ExAudioTagHeader parser with IsExHeader detection (length heuristic: bit7 set + len>=5 distinguishes enhanced from legacy AAC which also has bit7=1)
+- `src/ertmp/metadata.c` — HDR colorInfo parse/write (B.2020 primaries, PQ/HLG transfer, matrix coefficients); `videocodecid_from_fourcc()` utility; caps_negotiate stub
+- `src/ertmp/connect_caps.c` — fourCcList ECMAArray parse/write per E-RTMP v1 §6
+- `src/ertmp/ertmp.h` — Extended with audio_header_t, LRTMP2_ERTMP_* constants, lrtmp2_hdr_info_t, lrtmp2_fourcc_list_t
+- `include/librtmp2/types.h` — `audio_fourcc` field in `lrtmp2_frame_t` for enhanced audio
+- `src/message/message.c` — Audio path now uses `lrtmp2_ertmp_exaudio_parse()` for both legacy and enhanced audio; Video path was already wired
+- All new code covered by `tests/unit/test_ertmp.c` (50+ assertions) and `tests/integration/test_server_ertmp_v1.c` (end-to-end: HEVC hvc1→H265, AV1 av01→AV1, Opus, legacy H.264)
+- Existing `tests/integration/test_server_ingest.c` extended with HEVC + Opus frames
 
-**Acceptance criterion status:** not yet met.
+**Acceptance criterion status:** met. The server correctly dispatches all E-RTMP v1 frame types and populates both legacy and enhanced fields on `lrtmp2_frame_t` callbacks.
 
-### Phase 4 — E-RTMP v2: not started
+### Phase 4 — E-RTMP v2: in progress
 
-- `connect_caps.c`, `reconnect.c`, `multitrack.c`, `modex.c` from the planned repository structure do not exist yet in `src/ertmp/`.
+- `src/ertmp/connect_caps.c` — exists but fourCcList is E-RTMP v1; E-RTMP v2 caps negotiation (capsEx, videoFourCcInfoMap) is stubbed (`lrtmp2_ertmp_caps_negotiate` returns `LRTMP2_ERR_UNSUPPORTED`)
+- `reconnect.c` (reconnect mechanism per E-RTMP v2) — not yet started
+- `multitrack.c` (multi-track support per E-RTMP v2) — not yet started
+- `modex.c` (extension mechanism per E-RTMP v2) — not yet started
+
+**Acceptance criterion status:** not yet met. Capability negotiation, reconnect, multitrack, and ModEx are all stubbed or unimplemented.
 
 ### Phase 5 — Hardening: partially started
 
