@@ -15,6 +15,7 @@ core_sources = [
   'src/core/bytes.c',
   'src/core/log.c',
   'src/core/errors.c',
+  'src/core/lib.c',
 ]
 
 handshake_sources = [
