@@ -73,6 +73,11 @@ jobs:
       env:
         SAN: "1"
 
+    - name: Interop — Enhanced-RTMP (AV1 FourCC) ingest (ASan/UBSan)
+      run: ./tests/interop/enhanced_rtmp_interop.sh
+      env:
+        SAN: "1"
+
   interop-play:
     runs-on: ubuntu-latest
     steps:
