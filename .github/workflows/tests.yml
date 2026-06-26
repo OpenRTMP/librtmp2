@@ -1,4 +1,4 @@
-name: Build & Unit Tests
+name: Tests
 
 on:
   push:
@@ -7,7 +7,8 @@ on:
     branches: [ main, develop ]
 
 jobs:
-  build-linux:
+  unit-tests-make:
+    name: unit tests (make, ${{ matrix.cc }})
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -18,32 +19,28 @@ jobs:
     - name: Install dependencies
       run: sudo apt-get update && sudo apt-get install -y meson ninja-build
 
-    - name: Build (debug)
-      run: make debug
-      env:
-        CC: ${{ matrix.cc }}
-
-    - name: Build (release)
+    - name: Compile (release, sanity)
       run: make release
       env:
         CC: ${{ matrix.cc }}
 
-    - name: Run tests
+    - name: Run unit tests
       run: make test
       env:
         CC: ${{ matrix.cc }}
 
-    - name: Build (ASan)
-      run: make asan
+    - name: Run unit tests (ASan)
+      run: make clean && make DEBUG=1 ASAN=1 test
       env:
         CC: ${{ matrix.cc }}
 
-    - name: Build (UBSan)
-      run: make ubsan
+    - name: Run unit tests (UBSan)
+      run: make clean && make DEBUG=1 UBSAN=1 test
       env:
         CC: ${{ matrix.cc }}
 
-  build-meson:
+  unit-tests-meson:
+    name: unit tests (meson)
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v7
@@ -57,5 +54,5 @@ jobs:
     - name: Meson compile
       run: meson compile -C builddir
 
-    - name: Meson test
+    - name: Run unit tests
       run: meson test -C builddir
