@@ -21,11 +21,12 @@
 int lrtmp2_chunk_read(lrtmp2_buffer_t *buf,
                        lrtmp2_chunk_stream_t *stream,
                        lrtmp2_chunk_message_t *msg,
-                       uint8_t *out_buf, size_t out_cap, size_t *out_len)
+                       const uint8_t **out_payload, size_t *out_len)
 {
-    if (!buf || !msg || !out_buf || !out_len) {
+    if (!buf || !msg || !out_payload || !out_len) {
         return LRTMP2_ERR_INTERNAL;
     }
+    *out_payload = NULL;
     *out_len = 0;
 
     if (buf->size - buf->read_pos == 0) {
@@ -196,19 +197,17 @@ int lrtmp2_chunk_read(lrtmp2_buffer_t *buf,
                       cs->reassembly_bytes_read, msg->is_complete);
 
     if (msg->is_complete) {
-        size_t copy_len = (msg_length < out_cap) ? msg_length : out_cap;
-        if (copy_len > 0) {
-            memcpy(out_buf, cs->reassembly_buf->data, copy_len);
-        }
-        *out_len = copy_len;
+        /* Hand back the reassembly buffer directly (zero-copy). Valid until the
+         * next read on this stream. */
+        *out_payload = (msg_length > 0 && cs->reassembly_buf) ? cs->reassembly_buf->data : NULL;
+        *out_len = msg_length;
         cs->reassembly_bytes_read = 0;  /* reset for next message on this csid */
-        return (copy_len > 0) ? (int)copy_len : 1;
+        return 1;
     }
 
     /* Progress made on this physical chunk, but message not complete yet:
      * return a positive sentinel (never 0) so callers don't mistake this
      * for "no data available" and stop looping. */
-    *out_len = 0;
     return 1;
 
 need_more:

@@ -177,11 +177,11 @@ static int client_pump(lrtmp2_client_t *client, const char *wanted_name,
                         int play_mode)
 {
     lrtmp2_chunk_message_t msg;
-    static uint8_t payload[CLIENT_PAYLOAD_MAX];
-    size_t payload_len;
+    const uint8_t *payload = NULL;
+    size_t payload_len = 0;
 
     for (;;) {
-        int rc = lrtmp2_chunk_read(client->recv_buffer, NULL, &msg, payload, sizeof(payload), &payload_len);
+        int rc = lrtmp2_chunk_read(client->recv_buffer, NULL, &msg, &payload, &payload_len);
         if (rc == 0) {
             int rrc = client_recv_more(client);
             if (rrc != LRTMP2_OK) return rrc;
@@ -203,7 +203,7 @@ static int client_pump(lrtmp2_client_t *client, const char *wanted_name,
             case RTMP_MSG_AMF0_COMMAND: {
                 lrtmp2_buffer_t buf;
                 memset(&buf, 0, sizeof(buf));
-                buf.data = payload;
+                buf.data = (uint8_t *)payload;
                 buf.size = payload_len;
                 buf.capacity = payload_len;
                 buf.read_pos = 0;

@@ -201,19 +201,20 @@ int lrtmp2_conn_do_handshake(lrtmp2_conn_t *conn)
 int lrtmp2_conn_read_messages(lrtmp2_conn_t *conn)
 {
     lrtmp2_chunk_message_t msg;
-    uint8_t payload[4096];
+    const uint8_t *payload = NULL;
     size_t payload_len = 0;
     int rc;
 
     while (lrtmp2_buffer_available(conn->recv_buffer) > 0) {
+        payload = NULL;
         payload_len = 0;
-        rc = lrtmp2_chunk_read(conn->recv_buffer, NULL, &msg, payload, sizeof(payload), &payload_len);
+        rc = lrtmp2_chunk_read(conn->recv_buffer, NULL, &msg, &payload, &payload_len);
 
         if (rc == 0) break;
         if (rc < 0) return rc;
 
         if (msg.is_complete) {
-            rc = lrtmp2_msg_decode(conn, &msg, payload, msg.msg_length);
+            rc = lrtmp2_msg_decode(conn, &msg, payload, payload_len);
             if (rc != LRTMP2_OK) return rc;
             /* Send any queued responses (e.g. connect result) */
             lrtmp2_conn_flush(conn);
