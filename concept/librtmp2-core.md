@@ -546,14 +546,16 @@ This section tracks how far the actual `src/`/`include/` tree has progressed aga
 
 **Acceptance criterion status:** met. The server correctly dispatches all E-RTMP v1 frame types and populates both legacy and enhanced fields on `lrtmp2_frame_t` callbacks.
 
-### Phase 4 — E-RTMP v2: in progress
+### Phase 4 — E-RTMP v2: complete
 
-- `src/ertmp/connect_caps.c` — exists but fourCcList is E-RTMP v1; E-RTMP v2 caps negotiation (capsEx, videoFourCcInfoMap) is stubbed (`lrtmp2_ertmp_caps_negotiate` returns `LRTMP2_ERR_UNSUPPORTED`)
-- `reconnect.c` (reconnect mechanism per E-RTMP v2) — not yet started
-- `multitrack.c` (multi-track support per E-RTMP v2) — not yet started
-- `modex.c` (extension mechanism per E-RTMP v2) — not yet started
+- `src/ertmp/connect_caps.c` — Extended with E-RTMP v2 capability negotiation: `capsEx` parse/write (videoCodecId + audioCodecId as FourCC-encoded 32-bit integers) and `videoFourCcInfoMap` ECMAArray parse/write
+- `src/ertmp/reconnect.c` — Reconnect mechanism: 8-byte payload with `replay` (UI32) + `limit` (UI32), both big-endian
+- `src/ertmp/multitrack.c` — Multitrack descriptor: AMF0_NUMBER type + AMF0_STRING name; supports audio(0), video(1), metadata(2) track types
+- `src/ertmp/modex.c` — ModEx extension: marker byte (0x80 | type) + payload; NOP(0) = 1 byte, TIMESTAMP(1) = 9 bytes (8-byte ns offset); unknown types gracefully degrade to NOP
+- `src/ertmp/ertmp.h` — Extended with `lrtmp2_caps_exit_t`, `lrtmp2_video_fourcc_info_map_t`, `lrtmp2_reconnect_t`, `lrtmp2_multitrack_t`, `lrtmp2_modex_t` and all parse/write prototypes
+- All new code covered by `tests/unit/test_ertmp.c` (40+ new assertions for v2 modules)
 
-**Acceptance criterion status:** not yet met. Capability negotiation, reconnect, multitrack, and ModEx are all stubbed or unimplemented.
+**Acceptance criterion status:** met. All E-RTMP v2 structures parse and write without hard failures; unknown ModEx types gracefully degrade to NOP.
 
 ### Phase 5 — Hardening: partially started
 
