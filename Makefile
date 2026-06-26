@@ -90,5 +90,10 @@ install: $(LIB_SO) $(LIB_A)
 test: $(TEST_BIN)
 	./$(TEST_BIN)
 
+INTEGRATION_BIN = tests/integration/run_ingest
+
+$(INTEGRATION_BIN): $(OBJS) tests/integration/test_server_ingest.c
+	$(CC) $(CFLAGS) -o $@ tests/integration/test_server_ingest.c $(OBJS) $(LDFLAGS) -lm -lpthread
+
 clean:
-	rm -f $(OBJS) $(TEST_OBJS) $(TARGETS) $(TEST_BIN) examples/**/*.o
+	rm -f $(OBJS) $(TEST_OBJS) $(TARGETS) $(TEST_BIN) $(INTEGRATION_BIN) examples/**/*.o tests/integration/*.o

@@ -59,4 +59,10 @@ int lrtmp2_conn_read_messages(lrtmp2_conn_t *conn);
 /* Response helpers */
 int lrtmp2_conn_send_connect_response(lrtmp2_conn_t *conn);
 
+/* Send raw bytes over the connection socket */
+int lrtmp2_conn_send_raw(lrtmp2_conn_t *conn, const uint8_t *data, size_t len);
+
+/* Send the current contents of send_buffer over the socket */
+int lrtmp2_conn_flush(lrtmp2_conn_t *conn);
+
 #endif

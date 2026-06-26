@@ -12,6 +12,9 @@
 #include "message/message.h"
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>
+#include <errno.h>
+#include <sys/socket.h>
 #include "librtmp2/types.h"
 
 /* RTMP message type IDs */
@@ -75,10 +78,23 @@ int lrtmp2_conn_recv(lrtmp2_conn_t *conn, const uint8_t *data, size_t len)
     int rc = lrtmp2_buffer_write(conn->recv_buffer, data, len);
     if (rc < 0) return rc;
 
-    while (lrtmp2_buffer_available(conn->recv_buffer) > 0) {
+    /* Process while data available, OR while still in handshake state.
+     * Don't break on rc==0 — we may need another process() call to
+     * advance the state machine even after a successful step. */
+    for (;;) {
+        size_t avail = lrtmp2_buffer_available(conn->recv_buffer);
+        fprintf(stderr, "DBG recv_loop: avail=%zu state=%d\n", avail, conn->state);
+        if (avail == 0 && conn->state != LRTMP2_STATE_HANDSHAKE) {
+            fprintf(stderr, "DBG recv_loop: break (no data, not handshake)\n");
+            break;
+        }
         rc = lrtmp2_conn_process(conn);
-        if (rc == 0) break;
-        if (rc < 0) return rc;
+        fprintf(stderr, "DBG recv_loop: process rc=%d state=%d\n", rc, conn->state);
+        if (rc < 0) { fprintf(stderr, "DBG recv_loop: return error\n"); return rc; }
+        if (rc == 0 && conn->state != LRTMP2_STATE_HANDSHAKE) {
+            fprintf(stderr, "DBG recv_loop: break (rc=0, not handshake)\n");
+            break;
+        }
     }
 
     return LRTMP2_OK;
@@ -124,6 +140,13 @@ int lrtmp2_conn_do_handshake(lrtmp2_conn_t *conn)
             rc = lrtmp2_handshake_server_read_c1(&conn->handshake, conn->recv_buffer);
             if (rc == 0) return 0;
             if (rc < 0) return rc;
+            /* Send S0+S1+S2 to client (skip if no socket, e.g. in tests) */
+            if (conn->client_fd >= 0) {
+                rc = lrtmp2_conn_send_raw(conn, conn->handshake.out.data, conn->handshake.out.size);
+                if (rc != LRTMP2_OK) return rc;
+            }
+            conn->handshake.out.size = 0;
+            conn->handshake.out.read_pos = 0;
             break;
 
         case LRTMP2_HS_SERVER_WAIT_C2:
@@ -160,10 +183,41 @@ int lrtmp2_conn_read_messages(lrtmp2_conn_t *conn)
         if (msg.is_complete) {
             rc = lrtmp2_msg_decode(conn, &msg, payload, msg.msg_length);
             if (rc != LRTMP2_OK) return rc;
+            /* Send any queued responses (e.g. connect result) */
+            lrtmp2_conn_flush(conn);
         }
     }
 
     return LRTMP2_OK;
+}
+
+int lrtmp2_conn_send_raw(lrtmp2_conn_t *conn, const uint8_t *data, size_t len)
+{
+    if (!conn || !data || len == 0) return LRTMP2_ERR_INTERNAL;
+    if (conn->client_fd < 0) return LRTMP2_OK;  /* no socket, silently skip */
+
+    size_t sent = 0;
+    while (sent < len) {
+        ssize_t n = send(conn->client_fd, data + sent, len - sent, 0);
+        if (n <= 0) {
+            if (errno == EINTR) continue;
+            return LRTMP2_ERR_IO;
+        }
+        sent += (size_t)n;
+    }
+    return LRTMP2_OK;
+}
+
+int lrtmp2_conn_flush(lrtmp2_conn_t *conn)
+{
+    if (!conn) return LRTMP2_ERR_INTERNAL;
+    if (conn->client_fd < 0) return LRTMP2_OK;  /* no socket, silently skip */
+    if (conn->send_buffer->size == 0) return LRTMP2_OK;
+
+    int rc = lrtmp2_conn_send_raw(conn, conn->send_buffer->data, conn->send_buffer->size);
+    conn->send_buffer->size = 0;
+    conn->send_buffer->read_pos = 0;
+    return rc;
 }
 
 int lrtmp2_conn_send_connect_response(lrtmp2_conn_t *conn)

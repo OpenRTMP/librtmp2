@@ -219,6 +219,38 @@ int lrtmp2_server_broadcast(lrtmp2_server_t *server, const uint8_t *data, size_t
     return LRTMP2_OK;
 }
 
+int lrtmp2_server_process_connections(lrtmp2_server_t *server)
+{
+    if (!server) return LRTMP2_ERR_INTERNAL;
+
+    pthread_mutex_lock((pthread_mutex_t *)&server->connections_mutex);
+    lrtmp2_conn_t *conn = server->connections;
+    while (conn) {
+        if (conn->client_fd >= 0 && conn->state < LRTMP2_STATE_CLOSING) {
+            /* Try to receive data (non-blocking) */
+            uint8_t tmp_buf[4096];
+            ssize_t n = recv(conn->client_fd, tmp_buf, sizeof(tmp_buf), MSG_DONTWAIT);
+            if (n > 0) {
+                lrtmp2_conn_recv(conn, tmp_buf, (size_t)n);
+                lrtmp2_conn_process(conn);
+                lrtmp2_conn_flush(conn);
+            } else if (n == 0) {
+                /* Client disconnected */
+                conn->state = LRTMP2_STATE_CLOSING;
+                if (server->config->on_close_cb) {
+                    server->config->on_close_cb(conn, server->config->userdata);
+                }
+            } else if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+                /* Real error */
+                conn->state = LRTMP2_STATE_CLOSING;
+            }
+        }
+        conn = conn->next;
+    }
+    pthread_mutex_unlock((pthread_mutex_t *)&server->connections_mutex);
+    return LRTMP2_OK;
+}
+
 void lrtmp2_stream_append_to_server(lrtmp2_server_t *server, lrtmp2_stream_t *stream)
 {
     pthread_mutex_lock((pthread_mutex_t *)&server->streams_mutex);

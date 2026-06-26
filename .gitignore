@@ -1,0 +1,13 @@
+# Build artifacts
+*.o
+*.a
+*.so
+*.o.d
+
+# Test binaries
+tests/run_tests
+tests/integration/run_ingest
+
+# Editor
+*.swp
+*~

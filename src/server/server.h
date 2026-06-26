@@ -25,4 +25,7 @@ int  lrtmp2_server_poll(lrtmp2_server_t *server, int timeout_ms);
 void lrtmp2_server_stop(lrtmp2_server_t *server);
 void lrtmp2_stream_append_to_server(lrtmp2_server_t *server, lrtmp2_stream_t *stream);
 
+/* Process all active connections: recv data, process messages, flush responses */
+int lrtmp2_server_process_connections(lrtmp2_server_t *server);
+
 #endif
