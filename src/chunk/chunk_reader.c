@@ -23,7 +23,7 @@ int lrtmp2_chunk_read(lrtmp2_buffer_t *buf,
                        lrtmp2_chunk_message_t *msg,
                        uint8_t *out_buf, size_t *out_len)
 {
-    if (!buf || !stream || !msg || !out_buf || !out_len) {
+    if (!buf || !msg || !out_buf || !out_len) {
         return LRTMP2_ERR_INTERNAL;
     }
     *out_len = 0;
@@ -34,6 +34,7 @@ int lrtmp2_chunk_read(lrtmp2_buffer_t *buf,
 
     /* Save read position for rollback on incomplete reads */
     size_t start_pos = buf->read_pos;
+
 
     /* --- Basic header: fmt(2 bits) + csid(6/14/22 bits) --- */
     uint8_t first_byte;

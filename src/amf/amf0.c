@@ -215,15 +215,27 @@ int lrtmf2_amf0_read_long_string(lrtmp2_buffer_t *buf, char *out, size_t max_len
 
 int lrtmf2_amf0_read_object_begin(lrtmp2_buffer_t *buf)
 {
-    /* Just reads and validates the object marker — caller handles key-value iteration */
-    (void)buf;
+    uint8_t type;
+    int rc = amf_read_u8(buf, &type);
+    if (rc != LRTMP2_OK) return rc;
+    if (type != AMF0_OBJECT) return LRTMP2_ERR_AMF;
     return LRTMP2_OK;
 }
 
 int lrtmf2_amf0_read_object_key(lrtmp2_buffer_t *buf, char *out, size_t max_len, size_t *out_len)
 {
     /* Object key is a 2-byte length + UTF-8 string (no type marker) */
-    return lrtmf2_amf0_read_string(buf, out, max_len, out_len);
+    uint16_t klen;
+    int rc = amf_read_u16(buf, &klen);
+    if (rc != LRTMP2_OK) return rc;
+
+    if (klen + 1 > max_len) return LRTMP2_ERR_AMF;
+
+    rc = lrtmp2_buffer_read(buf, (uint8_t *)out, klen);
+    if (rc != LRTMP2_OK) return rc;
+    out[klen] = '\0';
+    *out_len = klen;
+    return LRTMP2_OK;
 }
 
 int lrtmf2_amf0_is_object_end(lrtmp2_buffer_t *buf)

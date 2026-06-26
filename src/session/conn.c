@@ -12,7 +12,6 @@
 #include "message/message.h"
 #include <string.h>
 #include <stdlib.h>
-#include <stdio.h>
 #include <errno.h>
 #include <sys/socket.h>
 #include "librtmp2/types.h"
@@ -78,21 +77,20 @@ int lrtmp2_conn_recv(lrtmp2_conn_t *conn, const uint8_t *data, size_t len)
     int rc = lrtmp2_buffer_write(conn->recv_buffer, data, len);
     if (rc < 0) return rc;
 
-    /* Process while data available, OR while still in handshake state.
-     * Don't break on rc==0 — we may need another process() call to
-     * advance the state machine even after a successful step. */
-    for (;;) {
+    /* Process all buffered data. Loop until either:
+     * - No more data AND not in handshake state
+     * - Error occurs
+     * - State machine requests stop (rc==0 and no pending data) */
+    for (int max_iter = 100; max_iter > 0; max_iter--) {
         size_t avail = lrtmp2_buffer_available(conn->recv_buffer);
-        fprintf(stderr, "DBG recv_loop: avail=%zu state=%d\n", avail, conn->state);
         if (avail == 0 && conn->state != LRTMP2_STATE_HANDSHAKE) {
-            fprintf(stderr, "DBG recv_loop: break (no data, not handshake)\n");
             break;
         }
         rc = lrtmp2_conn_process(conn);
-        fprintf(stderr, "DBG recv_loop: process rc=%d state=%d\n", rc, conn->state);
-        if (rc < 0) { fprintf(stderr, "DBG recv_loop: return error\n"); return rc; }
-        if (rc == 0 && conn->state != LRTMP2_STATE_HANDSHAKE) {
-            fprintf(stderr, "DBG recv_loop: break (rc=0, not handshake)\n");
+        if (rc < 0) return rc;
+        if (rc == 0 &&
+            lrtmp2_buffer_available(conn->recv_buffer) == 0 &&
+            conn->state < LRTMP2_STATE_CLOSING) {
             break;
         }
     }
@@ -177,6 +175,7 @@ int lrtmp2_conn_read_messages(lrtmp2_conn_t *conn)
     while (lrtmp2_buffer_available(conn->recv_buffer) > 0) {
         payload_len = 0;
         rc = lrtmp2_chunk_read(conn->recv_buffer, NULL, &msg, payload, &payload_len);
+
         if (rc == 0) break;
         if (rc < 0) return rc;
 
