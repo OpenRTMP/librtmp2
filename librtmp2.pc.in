@@ -1,0 +1,9 @@
+prefix=@PREFIX@
+libdir=${prefix}/lib
+includedir=${prefix}/include/librtmp2
+
+Name: librtmp2
+Description: Modern C library for Legacy RTMP and Enhanced RTMP v1/v2
+Version: @VERSION@
+Libs: -L${libdir} -llibrtmp2
+Cflags: -I${includedir}

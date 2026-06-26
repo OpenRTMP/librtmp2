@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        cc: [gcc, clang]
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install dependencies
+      run: sudo apt-get update && sudo apt-get install -y meson ninja-build
+
+    - name: Build (debug)
+      run: make debug
+      env:
+        CC: ${{ matrix.cc }}
+
+    - name: Build (release)
+      run: make release
+      env:
+        CC: ${{ matrix.cc }}
+
+    - name: Run tests
+      run: make test
+      env:
+        CC: ${{ matrix.cc }}
+
+    - name: Build (ASan)
+      run: make asan
+      env:
+        CC: ${{ matrix.cc }}
+
+    - name: Build (UBSan)
+      run: make ubsan
+      env:
+        CC: ${{ matrix.cc }}
+
+  build-meson:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install dependencies
+      run: sudo apt-get update && sudo apt-get install -y meson ninja-build
+
+    - name: Meson setup
+      run: meson setup builddir
+
+    - name: Meson compile
+      run: meson compile -C builddir
+
+    - name: Meson test
+      run: meson test -C builddir
