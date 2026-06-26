@@ -29,7 +29,7 @@
 
 #define RTMP_MSG_WINDOW_ACK_SIZE      0x05
 
-lrtmp2_conn_t *lrtmp2_conn_create(lrtmp2_server_t *server, lrtmp2_server_config_t *config)
+lrtmp2_conn_t *lrtmp2_conn_create(lrtmp2_server_t *server, const lrtmp2_server_config_t *config)
 {
     lrtmp2_conn_t *conn = LRTMP2_CALLOC(1, sizeof(lrtmp2_conn_t));
     if (!conn) return NULL;

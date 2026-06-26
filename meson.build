@@ -82,6 +82,7 @@ librtmp2_shared = shared_library('librtmp2',
   all_sources,
   include_directories : include_directories('include', 'src'),
   version : meson.project_version(),
+  soversion : '0',
   install : true,
 )
 

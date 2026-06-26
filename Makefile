@@ -49,6 +49,7 @@ ubsan:
 
 fuzz: asan
 	@echo "Fuzz targets built with ASan"
+	@echo "Run with: clang -fsanitize=fuzzer,address -o fuzz_all fuzz_entry.c [objects]"
 
 all: $(TARGETS) $(TEST_BIN)
 
@@ -82,7 +83,9 @@ PREFIX ?= /usr/local
 
 install: $(LIB_SO) $(LIB_A)
 	install -d $(PREFIX)/lib $(PREFIX)/include/librtmp2 $(PREFIX)/lib/pkgconfig
-	install -m 644 $(LIB_SO) $(PREFIX)/lib/
+	install -m 755 $(LIB_SO) $(PREFIX)/lib/$(LIB_SO).0.1.0
+	ln -sf $(LIB_SO).0.1.0 $(PREFIX)/lib/$(LIB_SO).0
+	ln -sf $(LIB_SO).0 $(PREFIX)/lib/$(LIB_SO)
 	install -m 644 $(LIB_A) $(PREFIX)/lib/
 	install -m 644 include/librtmp2/*.h $(PREFIX)/include/librtmp2/
 	sed 's|@PREFIX@|$(PREFIX)|g; s|@LIBS@|-llibrtmp2|g' librtmp2.pc.in > $(PREFIX)/lib/pkgconfig/librtmp2.pc
@@ -93,6 +96,7 @@ test: $(TEST_BIN)
 INTEGRATION_BIN = tests/integration/run_ingest
 CLIENT_INTEGRATION_BIN = tests/integration/run_client
 ERTMP_INTEGRATION_BIN = tests/integration/run_ertmp_v1
+ERTMP_V2_INTEGRATION_BIN = tests/integration/run_ertmp_v2
 
 $(INTEGRATION_BIN): $(OBJS) tests/integration/test_server_ingest.c
 	$(CC) $(CFLAGS) -o $@ tests/integration/test_server_ingest.c $(OBJS) $(LDFLAGS) -lm -lpthread
@@ -103,5 +107,8 @@ $(CLIENT_INTEGRATION_BIN): $(OBJS) tests/integration/test_client_publish.c
 $(ERTMP_INTEGRATION_BIN): $(OBJS) tests/integration/test_server_ertmp_v1.c
 	$(CC) $(CFLAGS) -o $@ tests/integration/test_server_ertmp_v1.c $(OBJS) $(LDFLAGS) -lm -lpthread
 
+$(ERTMP_V2_INTEGRATION_BIN): $(OBJS) tests/integration/test_server_ertmp_v2.c
+	$(CC) $(CFLAGS) -o $@ tests/integration/test_server_ertmp_v2.c $(OBJS) $(LDFLAGS) -lm -lpthread
+
 clean:
-	rm -f $(OBJS) $(TEST_OBJS) $(TARGETS) $(TEST_BIN) $(INTEGRATION_BIN) $(CLIENT_INTEGRATION_BIN) examples/**/*.o tests/integration/*.o
+	rm -f $(OBJS) $(TEST_OBJS) $(TARGETS) $(TEST_BIN) $(INTEGRATION_BIN) $(CLIENT_INTEGRATION_BIN) $(ERTMP_INTEGRATION_BIN) $(ERTMP_V2_INTEGRATION_BIN) examples/**/*.o tests/integration/*.o

@@ -50,7 +50,7 @@ struct lrtmp2_conn {
 };
 
 /* Lifecycle */
-lrtmp2_conn_t *lrtmp2_conn_create(lrtmp2_server_t *server, lrtmp2_server_config_t *config);
+lrtmp2_conn_t *lrtmp2_conn_create(lrtmp2_server_t *server, const lrtmp2_server_config_t *config);
 void lrtmp2_conn_destroy(lrtmp2_conn_t *conn);
 
 /* Data flow */
