@@ -520,11 +520,13 @@ This section tracks how far the actual `src/`/`include/` tree has progressed aga
 
 **Acceptance criterion status:** OBS-to-`librtmp2` ingest still has not been verified against a real OBS client, but the full server-side command flow is now exercised end-to-end by `tests/integration/test_server_ingest.c`: a synthetic byte stream (handshake + `connect` + `createStream` + `publish` + one video chunk built from the real IDR NALU in `tests/test_data/test.h264`) drives the connection to `PUBLISHING`, fires `on_publish_cb` with the correct app/stream name, and delivers the video frame via `on_frame_cb`. Along the way this also fixed several bugs that had hidden the dispatcher gap: `lrtmp2_cmd_read_connect()` mis-parsed multi-field connect objects, AMF0 number values read via `lrtmf2_amf0_read_number()` were never preceded by their type-marker byte at several call sites, and `lrtmp2_conn_create()` never copied `on_publish_cb`/`on_frame_cb`/etc. from the server config onto the connection, so callbacks silently never fired.
 
-### Phase 2 — Client MVP: started
+### Phase 2 — Client MVP: implemented, verified against `librtmp2`'s own server
 
-- `src/client/client.c` exists with an outbound connect path, but the publish/play flows on the client side (`src/session/publish.c`, `src/session/play.c`) are still minimal stubs.
+- `src/client/client.c` implements the full outbound flow: handshake (C0/C1/C2), `connect`, `createStream`, `publish`, `play`, `lrtmp2_client_send_frame()`, and `lrtmp2_client_poll()` for receiving frames while playing.
+- End-to-end coverage added in `tests/integration/test_client_publish.c`: a real `lrtmp2_client_t` (on its own thread) and a real `lrtmp2_server_t` talk over loopback TCP through the full handshake → `connect` → `createStream` → `publish` → `send_frame` flow, with the frame round-tripping to the server's `on_frame_cb`.
+- Getting this test working surfaced and fixed several latent bugs: `lrtmp2_conn_do_handshake()` was treating `LRTMP2_OK` (0) as a "stop" signal and never reaching the S0/S1/S2 send step; `lrtmf2_amf0_write_object_key()` wrote the key length but never the key bytes, corrupting every AMF0 object with a non-empty key; the hand-built `SetChunkSize` chunk was missing its `msg_stream_id` field; `lrtmp2_conn_create()` ignored `config->chunk_size`; and the chunk-stream state table in `chunk_state.c` was process-global rather than per-thread, which could corrupt csid state when client and server run in the same process.
 
-**Acceptance criterion status:** not yet met.
+**Acceptance criterion status:** not yet met as written — verified against `librtmp2`'s own server, not yet against a real SRS instance.
 
 ### Phase 3 — E-RTMP v1: started
 
