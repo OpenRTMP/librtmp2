@@ -12,11 +12,15 @@
 
 int lrtmp2_chunk_write(lrtmp2_buffer_t *out,
                         const lrtmp2_chunk_message_t *msg,
-                        const uint8_t *payload, size_t payload_len)
+                        const uint8_t *payload, size_t payload_len,
+                        size_t chunk_size)
 {
     if (!out || !msg) return LRTMP2_ERR_INTERNAL;
 
-    size_t chunk_size = LRTMP2_DEFAULT_CHUNK_SIZE;
+    /* A zero (unset) chunk size falls back to the protocol default. The peer
+     * must be reading at this same size (i.e. the value we last announced via
+     * SetChunkSize), otherwise it will mis-frame multi-chunk messages. */
+    if (chunk_size == 0) chunk_size = LRTMP2_DEFAULT_CHUNK_SIZE;
     uint32_t csid = msg->csid;
     uint8_t fmt = msg->fmt;
     uint32_t ts = msg->timestamp;

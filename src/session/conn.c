@@ -79,6 +79,7 @@ void lrtmp2_conn_destroy(lrtmp2_conn_t *conn)
     if (!conn) return;
     if (conn->recv_buffer) lrtmp2_buffer_destroy(conn->recv_buffer);
     if (conn->send_buffer) lrtmp2_buffer_destroy(conn->send_buffer);
+    lrtmp2_handshake_cleanup(&conn->handshake);
     pthread_mutex_destroy(&conn->send_mutex);
     lrtmp2_chunk_streams_destroy();
     LRTMP2_LOG_DEBUG("Connection destroyed");
@@ -200,19 +201,20 @@ int lrtmp2_conn_do_handshake(lrtmp2_conn_t *conn)
 int lrtmp2_conn_read_messages(lrtmp2_conn_t *conn)
 {
     lrtmp2_chunk_message_t msg;
-    uint8_t payload[4096];
+    const uint8_t *payload = NULL;
     size_t payload_len = 0;
     int rc;
 
     while (lrtmp2_buffer_available(conn->recv_buffer) > 0) {
+        payload = NULL;
         payload_len = 0;
-        rc = lrtmp2_chunk_read(conn->recv_buffer, NULL, &msg, payload, sizeof(payload), &payload_len);
+        rc = lrtmp2_chunk_read(conn->recv_buffer, NULL, &msg, &payload, &payload_len);
 
         if (rc == 0) break;
         if (rc < 0) return rc;
 
         if (msg.is_complete) {
-            rc = lrtmp2_msg_decode(conn, &msg, payload, msg.msg_length);
+            rc = lrtmp2_msg_decode(conn, &msg, payload, payload_len);
             if (rc != LRTMP2_OK) return rc;
             /* Send any queued responses (e.g. connect result) */
             lrtmp2_conn_flush(conn);
@@ -263,7 +265,7 @@ static int lrtmp2_conn_send_command(lrtmp2_conn_t *conn, uint32_t msg_stream_id,
     cmd_msg.msg_type_id = RTMP_MSG_AMF0_COMMAND;
     cmd_msg.msg_stream_id = msg_stream_id;
 
-    return lrtmp2_chunk_write(conn->send_buffer, &cmd_msg, amf_data, amf_len);
+    return lrtmp2_chunk_write(conn->send_buffer, &cmd_msg, amf_data, amf_len, conn->chunk_size);
 }
 
 int lrtmp2_conn_send_connect_response(lrtmp2_conn_t *conn, double transaction_id)
@@ -279,7 +281,7 @@ int lrtmp2_conn_send_connect_response(lrtmp2_conn_t *conn, double transaction_id
         scs_msg.msg_length = 4;
         scs_msg.msg_type_id = RTMP_MSG_SET_CHUNK_SIZE;
         uint32_t net_cs = lrtmp2_hton32(conn->chunk_size);
-        lrtmp2_chunk_write(conn->send_buffer, &scs_msg, (uint8_t *)&net_cs, 4);
+        lrtmp2_chunk_write(conn->send_buffer, &scs_msg, (uint8_t *)&net_cs, 4, conn->chunk_size);
     }
 
     /* Build AMF0 _result command */

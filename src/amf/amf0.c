@@ -249,7 +249,13 @@ int lrtmf2_amf0_is_object_end(lrtmp2_buffer_t *buf)
     return (peek[0] == 0x00 && peek[1] == 0x00 && peek[2] == 0x09) ? 1 : 0;
 }
 
-int lrtmf2_amf0_skip_value(lrtmp2_buffer_t *buf)
+/* Maximum AMF0 object/array nesting accepted while skipping. Untrusted input
+ * (network commands, FLV script tags) could otherwise nest objects deeply
+ * enough to overflow the stack via recursion. 32 is far beyond any legitimate
+ * RTMP command payload. */
+#define AMF0_MAX_SKIP_DEPTH 32
+
+static int amf0_skip_value_depth(lrtmp2_buffer_t *buf, int depth)
 {
     amf0_type_t type;
     int rc = lrtmf2_amf0_read_type(buf, &type);
@@ -293,6 +299,10 @@ int lrtmf2_amf0_skip_value(lrtmp2_buffer_t *buf)
             }
         case AMF0_OBJECT:
         case AMF0_ECMA_ARRAY:
+            if (depth >= AMF0_MAX_SKIP_DEPTH) {
+                LRTMP2_LOG_WARN("AMF0 nesting too deep (>%d), rejecting", AMF0_MAX_SKIP_DEPTH);
+                return LRTMP2_ERR_AMF;
+            }
             /* Skip key-value pairs until end marker */
             while (1) {
                 /* Check for object end */
@@ -313,7 +323,7 @@ int lrtmf2_amf0_skip_value(lrtmp2_buffer_t *buf)
                     if (rc != LRTMP2_OK) return rc;
                 }
                 /* Skip value */
-                rc = lrtmf2_amf0_skip_value(buf);
+                rc = amf0_skip_value_depth(buf, depth + 1);
                 if (rc != LRTMP2_OK) return rc;
             }
             break;
@@ -326,4 +336,9 @@ int lrtmf2_amf0_skip_value(lrtmp2_buffer_t *buf)
     }
 
     return LRTMP2_OK;
+}
+
+int lrtmf2_amf0_skip_value(lrtmp2_buffer_t *buf)
+{
+    return amf0_skip_value_depth(buf, 0);
 }

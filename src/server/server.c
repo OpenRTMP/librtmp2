@@ -165,50 +165,73 @@ int lrtmp2_server_poll(lrtmp2_server_t *server, int timeout_ms)
         return LRTMP2_ERR_INTERNAL;
     }
 
-    struct pollfd pfd;
-    pfd.fd = server->server_fd;
-    pfd.events = POLLIN;
+    /* Poll the listen socket plus every active client socket so a single
+     * poll() call drives both accepting new connections and servicing data on
+     * existing ones. (Polling only the listen fd would never wake for client
+     * data, so handshakes/commands would never be processed.) */
+    enum { POLL_BASE = 1 };
+    nfds_t cap = POLL_BASE;
+    pthread_mutex_lock((pthread_mutex_t *)&server->connections_mutex);
+    for (lrtmp2_conn_t *c = server->connections; c; c = c->next) {
+        if (c->client_fd >= 0 && c->state < LRTMP2_STATE_CLOSING) cap++;
+    }
+    struct pollfd *pfds = LRTMP2_MALLOC(cap * sizeof(*pfds));
+    if (!pfds) {
+        pthread_mutex_unlock((pthread_mutex_t *)&server->connections_mutex);
+        return LRTMP2_ERR_INTERNAL;
+    }
+    pfds[0].fd = server->server_fd;
+    pfds[0].events = POLLIN;
+    pfds[0].revents = 0;
+    nfds_t nfds = POLL_BASE;
+    for (lrtmp2_conn_t *c = server->connections; c && nfds < cap; c = c->next) {
+        if (c->client_fd >= 0 && c->state < LRTMP2_STATE_CLOSING) {
+            pfds[nfds].fd = c->client_fd;
+            pfds[nfds].events = POLLIN;
+            pfds[nfds].revents = 0;
+            nfds++;
+        }
+    }
+    pthread_mutex_unlock((pthread_mutex_t *)&server->connections_mutex);
 
-    int rc = poll(&pfd, 1, timeout_ms);
+    int rc = poll(pfds, nfds, timeout_ms);
+    int listen_ready = (rc > 0 && (pfds[0].revents & POLLIN));
+    LRTMP2_FREE(pfds);
+
     if (rc < 0) {
         if (errno == EINTR) return 0;
         return LRTMP2_ERR_IO;
     }
 
-    if (rc == 0) return 0;  /* timeout */
-
-    /* Accept new connection */
-    struct sockaddr_in client_addr;
-    socklen_t addr_len = sizeof(client_addr);
-    int client_fd = accept(server->server_fd, (struct sockaddr *)&client_addr, &addr_len);
-
-    if (client_fd == INVALID_SOCKET) {
-        LRTMP2_LOG_WARN("Accept failed: %s", strerror(errno));
-        return 0;  /* don't fail on transient accept errors */
+    /* Accept a new connection if the listen socket is ready. */
+    if (listen_ready) {
+        struct sockaddr_in client_addr;
+        socklen_t addr_len = sizeof(client_addr);
+        int client_fd = accept(server->server_fd, (struct sockaddr *)&client_addr, &addr_len);
+        if (client_fd == INVALID_SOCKET) {
+            LRTMP2_LOG_WARN("Accept failed: %s", strerror(errno));
+        } else {
+            LRTMP2_LOG_INFO("New connection from %s:%d",
+                             inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
+            lrtmp2_conn_t *conn = lrtmp2_conn_create((lrtmp2_server_t *)server, server->config);
+            if (!conn) {
+                LRTMP2_LOG_ERROR("Failed to create connection context");
+                close_socket(client_fd);
+            } else {
+                conn->client_fd = client_fd;
+                pthread_mutex_lock((pthread_mutex_t *)&server->connections_mutex);
+                conn->next = server->connections;
+                server->connections = conn;
+                pthread_mutex_unlock((pthread_mutex_t *)&server->connections_mutex);
+                if (server->config->on_connect_cb) {
+                    server->config->on_connect_cb(conn, server->config->userdata);
+                }
+            }
+        }
     }
 
-    LRTMP2_LOG_INFO("New connection from %s:%d",
-                     inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
-
-    /* Create connection context */
-    lrtmp2_conn_t *conn = lrtmp2_conn_create((lrtmp2_server_t *)server, server->config);
-    if (!conn) {
-        LRTMP2_LOG_ERROR("Failed to create connection context");
-        close_socket(client_fd);
-        return LRTMP2_ERR_INTERNAL;
-    }
-    conn->client_fd = client_fd;
-
-    /* Add to server's connection list */
-    pthread_mutex_lock((pthread_mutex_t *)&server->connections_mutex);
-    conn->next = server->connections;
-    server->connections = conn;
-    pthread_mutex_unlock((pthread_mutex_t *)&server->connections_mutex);
-
-    /* Call connect callback */
-    if (server->config->on_connect_cb) {
-        server->config->on_connect_cb(conn, server->config->userdata);
-    }
+    /* Service data on all active connections (recv/process/flush). */
+    lrtmp2_server_process_connections(server);
 
     return LRTMP2_OK;
 }

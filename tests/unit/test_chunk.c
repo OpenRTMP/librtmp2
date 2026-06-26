@@ -24,7 +24,7 @@ int test_chunk_write_read_basic(void)
     msg.msg_stream_id = 1;
 
     uint8_t payload[] = "hello world";
-    int rc = lrtmp2_chunk_write(out, &msg, payload, 11);
+    int rc = lrtmp2_chunk_write(out, &msg, payload, 11, LRTMP2_DEFAULT_CHUNK_SIZE);
     if (rc != 0) {
         printf("FAIL: chunk_write returned %d\n", rc);
         lrtmp2_buffer_destroy(out);
@@ -34,11 +34,11 @@ int test_chunk_write_read_basic(void)
     /* Read it back */
     lrtmp2_chunk_stream_t *cs = lrtmp2_chunk_stream_get(2);
     lrtmp2_chunk_message_t read_msg;
-    uint8_t read_payload[256];
+    const uint8_t *read_payload = NULL;
     size_t read_len;
 
     out->read_pos = 0;
-    rc = lrtmp2_chunk_read(out, cs, &read_msg, read_payload, sizeof(read_payload), &read_len);
+    rc = lrtmp2_chunk_read(out, cs, &read_msg, &read_payload, &read_len);
     if (rc <= 0) {
         printf("FAIL: chunk_read returned %d\n", rc);
         lrtmp2_buffer_destroy(out);
@@ -89,7 +89,7 @@ int test_chunk_multi_fragment(void)
     /* A single write call fragments the 512-byte payload internally into
      * multiple physical chunks (csid's chunk_size defaults to 128), emitting
      * fmt=3 continuation headers for each chunk after the first. */
-    lrtmp2_chunk_write(out, &msg, large_payload, 512);
+    lrtmp2_chunk_write(out, &msg, large_payload, 512, LRTMP2_DEFAULT_CHUNK_SIZE);
 
     /* Read and reassemble */
     lrtmp2_chunk_stream_t *cs = lrtmp2_chunk_stream_get(4);
@@ -99,7 +99,7 @@ int test_chunk_multi_fragment(void)
     uint8_t reassembled[1024];
     size_t total_read = 0;
     lrtmp2_chunk_message_t read_msg;
-    uint8_t buf[1024];
+    const uint8_t *rbuf = NULL;
     size_t rlen;
 
     out->read_pos = 0;
@@ -107,14 +107,14 @@ int test_chunk_multi_fragment(void)
     /* Read physical chunks until the full message is reassembled */
     int complete = 0;
     for (int i = 0; i < 10 && !complete; i++) {
-        int rc = lrtmp2_chunk_read(out, cs, &read_msg, buf, sizeof(buf), &rlen);
+        int rc = lrtmp2_chunk_read(out, cs, &read_msg, &rbuf, &rlen);
         if (rc <= 0) {
             printf("FAIL: chunk_read fragment %d returned %d\n", i, rc);
             lrtmp2_buffer_destroy(out);
             return 0;
         }
         if (read_msg.is_complete) {
-            memcpy(reassembled, buf, rlen);
+            memcpy(reassembled, rbuf, rlen);
             total_read = rlen;
             complete = 1;
         }

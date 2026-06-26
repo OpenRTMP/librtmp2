@@ -37,11 +37,18 @@ static int buffer_ensure_capacity(lrtmp2_buffer_t *buf, size_t needed)
 {
     if (needed <= buf->capacity) return LRTMP2_OK;
 
-    size_t new_cap = buf->capacity;
+    if (needed > LRTMP2_BUFFER_MAX_SIZE) {
+        return LRTMP2_ERR_INTERNAL;
+    }
+
+    /* A zero-initialized buffer has capacity 0; start from a sane minimum so
+     * the doubling loop makes progress (0 * factor would loop forever). */
+    size_t new_cap = buf->capacity ? buf->capacity : BUFFER_INITIAL_SIZE;
     while (new_cap < needed) {
         new_cap *= BUFFER_GROW_FACTOR;
         if (new_cap > LRTMP2_BUFFER_MAX_SIZE) {
-            return LRTMP2_ERR_INTERNAL;
+            new_cap = LRTMP2_BUFFER_MAX_SIZE;
+            break;
         }
     }
 

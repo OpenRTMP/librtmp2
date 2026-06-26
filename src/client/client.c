@@ -83,6 +83,8 @@ void lrtmp2_client_destroy(lrtmp2_client_t *client)
     }
     if (client->send_buffer) lrtmp2_buffer_destroy(client->send_buffer);
     if (client->recv_buffer) lrtmp2_buffer_destroy(client->recv_buffer);
+    lrtmp2_handshake_cleanup(&client->handshake);
+    lrtmp2_chunk_streams_destroy();
     LRTMP2_FREE(client);
 }
 
@@ -155,7 +157,8 @@ static int client_send_command(lrtmp2_client_t *client, uint32_t msg_stream_id,
     cmd_msg.msg_type_id = RTMP_MSG_AMF0_COMMAND;
     cmd_msg.msg_stream_id = msg_stream_id;
 
-    int rc = lrtmp2_chunk_write(client->send_buffer, &cmd_msg, amf_data, amf_len);
+    int rc = lrtmp2_chunk_write(client->send_buffer, &cmd_msg, amf_data, amf_len,
+                                LRTMP2_DEFAULT_CHUNK_SIZE);
     if (rc != LRTMP2_OK) return rc;
     return client_flush(client);
 }
@@ -174,11 +177,11 @@ static int client_pump(lrtmp2_client_t *client, const char *wanted_name,
                         int play_mode)
 {
     lrtmp2_chunk_message_t msg;
-    static uint8_t payload[CLIENT_PAYLOAD_MAX];
-    size_t payload_len;
+    const uint8_t *payload = NULL;
+    size_t payload_len = 0;
 
     for (;;) {
-        int rc = lrtmp2_chunk_read(client->recv_buffer, NULL, &msg, payload, sizeof(payload), &payload_len);
+        int rc = lrtmp2_chunk_read(client->recv_buffer, NULL, &msg, &payload, &payload_len);
         if (rc == 0) {
             int rrc = client_recv_more(client);
             if (rrc != LRTMP2_OK) return rrc;
@@ -200,7 +203,7 @@ static int client_pump(lrtmp2_client_t *client, const char *wanted_name,
             case RTMP_MSG_AMF0_COMMAND: {
                 lrtmp2_buffer_t buf;
                 memset(&buf, 0, sizeof(buf));
-                buf.data = payload;
+                buf.data = (uint8_t *)payload;
                 buf.size = payload_len;
                 buf.capacity = payload_len;
                 buf.read_pos = 0;
@@ -480,7 +483,8 @@ int lrtmp2_client_send_frame(lrtmp2_client_t *client, const lrtmp2_frame_t *fram
     }
     cmsg.fmt = 0;
 
-    int rc = lrtmp2_chunk_write(client->send_buffer, &cmsg, frame->data, frame->size);
+    int rc = lrtmp2_chunk_write(client->send_buffer, &cmsg, frame->data, frame->size,
+                                LRTMP2_DEFAULT_CHUNK_SIZE);
     if (rc != LRTMP2_OK) return rc;
     return client_flush(client);
 }
