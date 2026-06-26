@@ -140,8 +140,10 @@ int lrtmf2_amf0_write_object_key(lrtmp2_buffer_t *buf, const char *key)
     size_t len = strlen(key);
     if (len > UINT16_MAX) return LRTMP2_ERR_AMF;
     uint16_t net_len = lrtmp2_byteswap16((uint16_t)len);
-    return lrtmp2_buffer_write(buf, (uint8_t *)&net_len, 2);
+    int rc = lrtmp2_buffer_write(buf, (uint8_t *)&net_len, 2);
+    if (rc != LRTMP2_OK) return rc;
     /* Note: value follows separately */
+    return lrtmp2_buffer_write(buf, (const uint8_t *)key, len);
 }
 
 int lrtmf2_amf0_write_ecma_array_begin(lrtmp2_buffer_t *buf, uint32_t count)

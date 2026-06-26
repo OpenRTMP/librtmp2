@@ -29,9 +29,18 @@ int lrtmp2_cmd_build_fcpublish(lrtmp2_buffer_t *buf, const char *stream_name);
 int lrtmp2_cmd_build_fcunpublish(lrtmp2_buffer_t *buf, const char *stream_name);
 int lrtmp2_cmd_build_deletestream(lrtmp2_buffer_t *buf, double transaction_id, uint32_t stream_id);
 
+int lrtmp2_cmd_build_create_stream_result(lrtmp2_buffer_t *buf, double transaction_id, double stream_id);
+int lrtmp2_cmd_build_onstatus(lrtmp2_buffer_t *buf, const char *level, const char *code, const char *description);
+
 /* Decoder */
+int lrtmp2_cmd_peek_name(lrtmp2_buffer_t *buf, char *out, size_t max_len);
 int lrtmp2_cmd_read_connect(lrtmp2_buffer_t *buf, lrtmp2_connect_info_t *info);
+int lrtmp2_cmd_read_create_stream(lrtmp2_buffer_t *buf, double *transaction_id);
 int lrtmp2_cmd_read_publish(lrtmp2_buffer_t *buf, char *stream_name, size_t max_name, char *app, size_t max_app);
 int lrtmp2_cmd_read_play(lrtmp2_buffer_t *buf, char *stream_name, size_t max_name);
+
+/* Client-side: read a server "_result" response */
+int lrtmp2_cmd_read_connect_result(lrtmp2_buffer_t *buf, double *transaction_id);
+int lrtmp2_cmd_read_create_stream_result(lrtmp2_buffer_t *buf, double *transaction_id, double *stream_id);
 
 #endif

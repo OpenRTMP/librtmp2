@@ -33,4 +33,8 @@ void lrtmp2_chunk_streams_init(void);
 lrtmp2_chunk_stream_t *lrtmp2_chunk_stream_get(uint32_t csid);
 void lrtmp2_chunk_stream_reset(lrtmp2_chunk_stream_t *stream);
 
+/* SetChunkSize applies to all chunk streams from a given peer, but chunk_size
+ * is tracked per-csid; this propagates a new size to every active stream. */
+void lrtmp2_chunk_stream_set_all_chunk_size(uint32_t chunk_size);
+
 #endif

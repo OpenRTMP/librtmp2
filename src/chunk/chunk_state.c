@@ -7,8 +7,8 @@
 
 #define MAX_CHUNK_STREAMS 8
 
-static lrtmp2_chunk_stream_t g_streams[MAX_CHUNK_STREAMS];
-static int g_initialized = 0;
+static __thread lrtmp2_chunk_stream_t g_streams[MAX_CHUNK_STREAMS];
+static __thread int g_initialized = 0;
 
 void lrtmp2_chunk_streams_init(void)
 {
@@ -41,6 +41,16 @@ lrtmp2_chunk_stream_t *lrtmp2_chunk_stream_get(uint32_t csid)
 
     LRTMP2_LOG_ERROR("No free chunk stream slots for csid=%u", csid);
     return NULL;
+}
+
+void lrtmp2_chunk_stream_set_all_chunk_size(uint32_t chunk_size)
+{
+    if (!g_initialized) lrtmp2_chunk_streams_init();
+    for (int i = 0; i < MAX_CHUNK_STREAMS; i++) {
+        if (g_streams[i].in_use) {
+            g_streams[i].chunk_size = chunk_size;
+        }
+    }
 }
 
 void lrtmp2_chunk_stream_reset(lrtmp2_chunk_stream_t *stream)

@@ -34,6 +34,9 @@ struct lrtmp2_conn {
     uint32_t                   peer_chunk_size;
     uint32_t                   window_ack_size;
     int                        client_fd;
+    char                       app[256];
+    uint32_t                   next_stream_id;
+    lrtmp2_stream_t           *current_stream;
     /* Callbacks */
     lrtmp2_on_connect_cb      on_connect_cb;
     lrtmp2_on_publish_cb     on_publish_cb;
@@ -56,8 +59,14 @@ int lrtmp2_conn_process(lrtmp2_conn_t *conn);
 int lrtmp2_conn_do_handshake(lrtmp2_conn_t *conn);
 int lrtmp2_conn_read_messages(lrtmp2_conn_t *conn);
 
+/* Command dispatch: decode AMF0 command messages (connect/createStream/publish/play/...) */
+int lrtmp2_conn_handle_command(lrtmp2_conn_t *conn, const uint8_t *payload, size_t payload_len);
+
 /* Response helpers */
-int lrtmp2_conn_send_connect_response(lrtmp2_conn_t *conn);
+int lrtmp2_conn_send_connect_response(lrtmp2_conn_t *conn, double transaction_id);
+int lrtmp2_conn_send_create_stream_response(lrtmp2_conn_t *conn, double transaction_id, uint32_t stream_id);
+int lrtmp2_conn_send_onstatus(lrtmp2_conn_t *conn, uint32_t stream_id, const char *level,
+                               const char *code, const char *description);
 
 /* Send raw bytes over the connection socket */
 int lrtmp2_conn_send_raw(lrtmp2_conn_t *conn, const uint8_t *data, size_t len);

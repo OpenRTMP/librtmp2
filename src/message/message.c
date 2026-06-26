@@ -6,7 +6,9 @@
 #include "message.h"
 #include "message/control.h"
 #include "message/command.h"
+#include "session/conn.h"
 #include "core/log.h"
+#include "ertmp/ertmp.h"
 #include <string.h>
 #include "librtmp2/types.h"
 
@@ -44,6 +46,7 @@ int lrtmp2_msg_decode(lrtmp2_conn_t *conn, const lrtmp2_chunk_message_t *chunk,
                 uint32_t cs;
                 if (lrtmp2_msg_read_set_chunk_size(payload, &cs) == LRTMP2_OK) {
                     conn->peer_chunk_size = cs;
+                    lrtmp2_chunk_stream_set_all_chunk_size(cs);
                     LRTMP2_LOG_INFO("Peer SetChunkSize: %u", cs);
                 }
             }
@@ -127,12 +130,27 @@ int lrtmp2_msg_decode(lrtmp2_conn_t *conn, const lrtmp2_chunk_message_t *chunk,
                 frame.timestamp = chunk->timestamp;
                 frame.size = payload_len;
                 frame.data = payload;
-                /* Parse video tag: first byte = frame_type(4) + codec(4) */
-                if (payload_len > 0) {
-                    uint8_t tag = payload[0];
-                    frame.video_frame_type = (tag >> 4) & 0x0F;
-                    frame.video_codec = (lrtmp2_video_codec_t)(tag & 0x0F);
+
+                lrtmp2_video_header_t vh;
+                if (lrtmp2_ertmp_exvideo_parse(payload, payload_len, &vh) == LRTMP2_OK) {
+                    frame.video_frame_type = vh.frame_type;
+                    frame.composition_time = vh.composition_time;
+                    if (vh.is_ex_header) {
+                        memcpy(frame.video_fourcc.cc, vh.fourcc, sizeof(vh.fourcc));
+                        if (memcmp(vh.fourcc, "avc1", 4) == 0) {
+                            frame.video_codec = LRTMP2_VIDEO_H264;
+                        } else if (memcmp(vh.fourcc, "hvc1", 4) == 0) {
+                            frame.video_codec = LRTMP2_VIDEO_H265;
+                        } else if (memcmp(vh.fourcc, "av01", 4) == 0) {
+                            frame.video_codec = LRTMP2_VIDEO_AV1;
+                        }
+                    } else if (payload_len > 0) {
+                        frame.video_codec = (lrtmp2_video_codec_t)(payload[0] & 0x0F);
+                    }
+                    frame.data = payload + vh.header_size;
+                    frame.size = payload_len - vh.header_size;
                 }
+
                 if (conn->on_frame_cb) {
                     conn->on_frame_cb(conn, &frame, conn->userdata);
                 }
@@ -140,20 +158,7 @@ int lrtmp2_msg_decode(lrtmp2_conn_t *conn, const lrtmp2_chunk_message_t *chunk,
             break;
 
         case RTMP_MSG_AMF0_COMMAND:
-            {
-                /* This is a connect/publish/play command — deliver as frame */
-                lrtmp2_frame_t frame;
-                memset(&frame, 0, sizeof(frame));
-                frame.type = LRTMP2_FRAME_SCRIPT;
-                frame.timestamp = chunk->timestamp;
-                frame.size = payload_len;
-                frame.data = payload;
-                frame.is_metadata = 1;
-                if (conn->on_frame_cb) {
-                    conn->on_frame_cb(conn, &frame, conn->userdata);
-                }
-            }
-            break;
+            return lrtmp2_conn_handle_command(conn, payload, payload_len);
 
         case RTMP_MSG_AMF0_DATA:
             LRTMP2_LOG_DEBUG("AMF0 data message, %zu bytes", payload_len);

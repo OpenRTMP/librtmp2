@@ -38,7 +38,7 @@ int test_chunk_write_read_basic(void)
     size_t read_len;
 
     out->read_pos = 0;
-    rc = lrtmp2_chunk_read(out, cs, &read_msg, read_payload, &read_len);
+    rc = lrtmp2_chunk_read(out, cs, &read_msg, read_payload, sizeof(read_payload), &read_len);
     if (rc <= 0) {
         printf("FAIL: chunk_read returned %d\n", rc);
         lrtmp2_buffer_destroy(out);
@@ -86,15 +86,10 @@ int test_chunk_multi_fragment(void)
     msg.msg_type_id = 0x09;  /* video */
     msg.msg_stream_id = 1;
 
-    /* Write first chunk (128 bytes) */
-    lrtmp2_chunk_write(out, &msg, large_payload, 128);
-
-    /* Write second chunk (128 bytes) */
-    msg.fmt = 3;  /* no header reuse for simplicity */
-    lrtmp2_chunk_write(out, &msg, large_payload + 128, 128);
-
-    /* Write third chunk (256 bytes) */
-    lrtmp2_chunk_write(out, &msg, large_payload + 256, 256);
+    /* A single write call fragments the 512-byte payload internally into
+     * multiple physical chunks (csid's chunk_size defaults to 128), emitting
+     * fmt=3 continuation headers for each chunk after the first. */
+    lrtmp2_chunk_write(out, &msg, large_payload, 512);
 
     /* Read and reassemble */
     lrtmp2_chunk_stream_t *cs = lrtmp2_chunk_stream_get(4);
@@ -104,23 +99,25 @@ int test_chunk_multi_fragment(void)
     uint8_t reassembled[1024];
     size_t total_read = 0;
     lrtmp2_chunk_message_t read_msg;
-    uint8_t buf[256];
+    uint8_t buf[1024];
     size_t rlen;
 
     out->read_pos = 0;
 
-    /* Read all chunks */
-    for (int i = 0; i < 3; i++) {
-        rc_t:
-        ;
-        int rc = lrtmp2_chunk_read(out, cs, &read_msg, buf, &rlen);
+    /* Read physical chunks until the full message is reassembled */
+    int complete = 0;
+    for (int i = 0; i < 10 && !complete; i++) {
+        int rc = lrtmp2_chunk_read(out, cs, &read_msg, buf, sizeof(buf), &rlen);
         if (rc <= 0) {
             printf("FAIL: chunk_read fragment %d returned %d\n", i, rc);
             lrtmp2_buffer_destroy(out);
             return 0;
         }
-        memcpy(reassembled + total_read, buf, rlen);
-        total_read += rlen;
+        if (read_msg.is_complete) {
+            memcpy(reassembled, buf, rlen);
+            total_read = rlen;
+            complete = 1;
+        }
     }
 
     if (total_read != 512) {
@@ -145,7 +142,7 @@ int test_chunk_main(void)
     int passed = 0;
     printf("Running chunk tests...\n");
     if (test_chunk_write_read_basic()) passed++;
-    /* Skip multi-fragment test for now — requires proper fmt handling */
-    printf("Chunk tests: %d/1 passed\n", passed);
-    return (passed >= 1) ? 0 : 1;
+    if (test_chunk_multi_fragment()) passed++;
+    printf("Chunk tests: %d/2 passed\n", passed);
+    return (passed >= 2) ? 0 : 1;
 }

@@ -1,10 +1,13 @@
 /**
- * test_server_ingest.c — Integration test: RTMP server handshake + message ingest
+ * test_server_ingest.c — Integration test: RTMP server handshake + full session
  *
  * Tests the full server ingress pipeline without real network threads:
  *   1. Create a server and connection
- *   2. Push a crafted RTMP byte stream (handshake + connect chunk + video chunk) into conn
- *   3. Process and verify handshake completes and frames are received
+ *   2. Push a crafted RTMP byte stream: handshake, connect, createStream,
+ *      publish, and a video chunk built from tests/test_data/test.h264
+ *   3. Process and verify handshake + command dispatch (connect/createStream/
+ *      publish) drives the connection into PUBLISHING state, and that the
+ *      video frame is delivered via the on_frame callback.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -13,6 +16,7 @@
 
 #include "server/server.h"
 #include "session/conn.h"
+#include "session/state_machine.h"
 #include "core/log.h"
 #include "core/alloc.h"
 #include "core/bytes.h"
@@ -22,6 +26,9 @@
 static uint8_t g_received_data[MAX_RECEIVED];
 static size_t g_received_len = 0;
 static int g_frame_received = 0;
+static int g_publish_called = 0;
+static char g_publish_app[256];
+static char g_publish_stream[256];
 
 static int on_frame_cb(lrtmp2_conn_t *conn, const lrtmp2_frame_t *frame, void *userdata) {
     (void)conn; (void)userdata;
@@ -34,20 +41,68 @@ static int on_frame_cb(lrtmp2_conn_t *conn, const lrtmp2_frame_t *frame, void *u
     return 0;
 }
 
+static int on_publish_cb(lrtmp2_conn_t *conn, const char *app, const char *stream_key, void *userdata) {
+    (void)conn; (void)userdata;
+    fprintf(stderr, "  [cb] on_publish: app=%s stream=%s\n", app, stream_key);
+    g_publish_called = 1;
+    snprintf(g_publish_app, sizeof(g_publish_app), "%s", app);
+    snprintf(g_publish_stream, sizeof(g_publish_stream), "%s", stream_key);
+    return 0;
+}
+
+/* --- Minimal AMF0 byte-builder helpers (mirrors what a real RTMP client sends) --- */
+
+static uint8_t *amf_put_string(uint8_t *p, const char *s) {
+    *p++ = 0x02; /* AMF0_STRING */
+    uint16_t len = (uint16_t)strlen(s);
+    *p++ = (uint8_t)(len >> 8);
+    *p++ = (uint8_t)(len & 0xFF);
+    memcpy(p, s, len);
+    return p + len;
+}
+
+static uint8_t *amf_put_number(uint8_t *p, double value) {
+    *p++ = 0x00; /* AMF0_NUMBER */
+    uint64_t bits;
+    memcpy(&bits, &value, sizeof(bits));
+    for (int i = 7; i >= 0; i--) *p++ = (uint8_t)((bits >> (i * 8)) & 0xFF);
+    return p;
+}
+
+static uint8_t *amf_put_null(uint8_t *p) {
+    *p++ = 0x05; /* AMF0_NULL */
+    return p;
+}
+
 /* Build AMF0 connect body (without chunk header) */
 static size_t build_connect_body(uint8_t *buf, size_t buf_size) {
+    (void)buf_size;
     uint8_t *p = buf;
-    /* "connect" */
-    *p++ = 0x02; *p++ = 0x00; *p++ = 0x07; memcpy(p, "connect", 7); p += 7;
-    /* 1.0 */
-    *p++ = 0x00;
-    uint64_t one = 0x3FF0000000000000ULL;
-    for (int i = 7; i >= 0; i--) *p++ = (uint8_t)((one >> (i*8)) & 0xFF);
+    p = amf_put_string(p, "connect");
+    p = amf_put_number(p, 1.0);
     /* { "app": "live" } */
     *p++ = 0x03;
     *p++ = 0x00; *p++ = 0x03; memcpy(p, "app", 3); p += 3;
     *p++ = 0x02; *p++ = 0x00; *p++ = 0x04; memcpy(p, "live", 4); p += 4;
     *p++ = 0x00; *p++ = 0x00; *p++ = 0x09;
+    return (size_t)(p - buf);
+}
+
+static size_t build_create_stream_body(uint8_t *buf) {
+    uint8_t *p = buf;
+    p = amf_put_string(p, "createStream");
+    p = amf_put_number(p, 2.0);
+    p = amf_put_null(p);
+    return (size_t)(p - buf);
+}
+
+static size_t build_publish_body(uint8_t *buf, const char *stream_name) {
+    uint8_t *p = buf;
+    p = amf_put_string(p, "publish");
+    p = amf_put_number(p, 3.0);
+    p = amf_put_null(p);
+    p = amf_put_string(p, stream_name);
+    p = amf_put_string(p, "live");
     return (size_t)(p - buf);
 }
 
@@ -61,10 +116,9 @@ static size_t wrap_chunk(uint8_t *out, size_t out_size,
     *p++ = csid;
     /* Message header: timestamp(3) + msg_length(3) + msg_type(1) + stream_id(4) */
     *p++ = 0x00; *p++ = 0x00; *p++ = 0x00; /* timestamp = 0 */
-    uint32_t net_len = lrtmp2_hton32((uint32_t)body_len);
-    *p++ = (uint8_t)(net_len >> 16);
-    *p++ = (uint8_t)(net_len >> 8);
-    *p++ = (uint8_t)(net_len);
+    *p++ = (uint8_t)((body_len >> 16) & 0xFF);
+    *p++ = (uint8_t)((body_len >> 8) & 0xFF);
+    *p++ = (uint8_t)(body_len & 0xFF);
     *p++ = (uint8_t)msg_type;
     *p++ = 0x00; *p++ = 0x00; *p++ = 0x00; *p++ = 0x00; /* stream_id = 0 */
     /* Payload */
@@ -72,8 +126,45 @@ static size_t wrap_chunk(uint8_t *out, size_t out_size,
     return (size_t)(p - out);
 }
 
+/* Extract the first IDR slice NALU (starting with 0x65) from an Annex-B
+ * encoded buffer (start codes 00 00 00 01). Returns NALU length, or 0. */
+static size_t extract_idr_nalu(const uint8_t *data, size_t len, const uint8_t **nalu_out) {
+    size_t i = 0;
+    while (i + 4 < len) {
+        if (data[i] == 0x00 && data[i+1] == 0x00 && data[i+2] == 0x00 && data[i+3] == 0x01) {
+            size_t nalu_start = i + 4;
+            size_t nalu_end = len;
+            for (size_t j = nalu_start; j + 4 <= len; j++) {
+                if (data[j] == 0x00 && data[j+1] == 0x00 && data[j+2] == 0x00 && data[j+3] == 0x01) {
+                    nalu_end = j;
+                    break;
+                }
+            }
+            if ((data[nalu_start] & 0x1F) == 5) { /* IDR slice */
+                *nalu_out = data + nalu_start;
+                return nalu_end - nalu_start;
+            }
+            i = nalu_end;
+        } else {
+            i++;
+        }
+    }
+    return 0;
+}
+
 int main(void) {
-    printf("=== librtmp2 integration: handshake + ingest ===\n\n");
+    printf("=== librtmp2 integration: handshake + full session ===\n\n");
+
+    /* Load the real H.264 sample (Annex-B) used to build the video chunk */
+    FILE *f = fopen("tests/test_data/test.h264", "rb");
+    if (!f) { printf("FAIL: could not open tests/test_data/test.h264\n"); return 1; }
+    uint8_t h264_data[4096];
+    size_t h264_len = fread(h264_data, 1, sizeof(h264_data), f);
+    fclose(f);
+
+    const uint8_t *idr_nalu = NULL;
+    size_t idr_len = extract_idr_nalu(h264_data, h264_len, &idr_nalu);
+    if (!idr_nalu || idr_len == 0) { printf("FAIL: no IDR NALU found in test.h264\n"); return 1; }
 
     /* Create server with callbacks */
     lrtmp2_server_config_t config;
@@ -81,6 +172,7 @@ int main(void) {
     config.max_connections = 10;
     config.chunk_size = 4096;
     config.on_frame_cb = on_frame_cb;
+    config.on_publish_cb = on_publish_cb;
 
     lrtmp2_server_t *server = lrtmp2_server_create(&config);
     if (!server) { printf("FAIL: server_create\n"); return 1; }
@@ -108,54 +200,52 @@ int main(void) {
     /* Connect command as chunk on csid 2 */
     uint8_t connect_body[256];
     size_t connect_body_len = build_connect_body(connect_body, sizeof(connect_body));
-    size_t connect_chunk_len = wrap_chunk(stream + total, sizeof(stream) - total,
-                                           2, 0x14, connect_body, connect_body_len);
-    total += connect_chunk_len;
+    total += wrap_chunk(stream + total, sizeof(stream) - total, 2, 0x14, connect_body, connect_body_len);
 
-    /* Video frame as chunk on csid 5 (video stream) */
+    /* createStream command as chunk on csid 2 */
+    uint8_t create_stream_body[64];
+    size_t create_stream_body_len = build_create_stream_body(create_stream_body);
+    total += wrap_chunk(stream + total, sizeof(stream) - total, 2, 0x14, create_stream_body, create_stream_body_len);
+
+    /* publish command as chunk on csid 2 */
+    uint8_t publish_body[128];
+    size_t publish_body_len = build_publish_body(publish_body, "mystream");
+    total += wrap_chunk(stream + total, sizeof(stream) - total, 2, 0x14, publish_body, publish_body_len);
+
+    /* Video frame as chunk on csid 5 (video stream): AVC keyframe NALU
+     * built from the real IDR slice extracted from test.h264 */
     uint8_t video_body[1024];
     size_t video_body_len = 0;
-    video_body[video_body_len++] = 0x27; /* AVC keyframe */
-    video_body[video_body_len++] = 0x01; /* AVC NALU */
+    video_body[video_body_len++] = 0x17; /* FrameType=keyframe(1), CodecID=AVC(7) */
+    video_body[video_body_len++] = 0x01; /* AVCPacketType = NALU */
     video_body[video_body_len++] = 0x00; video_body[video_body_len++] = 0x00; video_body[video_body_len++] = 0x00; /* composition time */
-    /* SPS */
-    video_body[video_body_len++] = 0x01; /* config version */
-    video_body[video_body_len++] = 0x42; /* profile */
-    video_body[video_body_len++] = 0x00; /* profile compat */
-    video_body[video_body_len++] = 0x1f; /* level */
-    video_body[video_body_len++] = 0xff; /* reserved */
-    video_body[video_body_len++] = 0xe1; /* sps */
-    video_body[video_body_len++] = 0x00; video_body[video_body_len++] = 0x1a; /* sps length = 26 */
-    uint8_t sps[] = {0x67, 0x42, 0x00, 0x1f, 0xda, 0x01, 0x40, 0x16, 0xec, 0x04, 0x40, 0x00, 0x00, 0x03, 0x00, 0x10, 0x00, 0x00, 0x03, 0x03, 0x20};
-    memcpy(video_body + video_body_len, sps, sizeof(sps)); video_body_len += sizeof(sps);
-    /* PPS */
-    video_body[video_body_len++] = 0x01; /* num pps */
-    video_body[video_body_len++] = 0x00; video_body[video_body_len++] = 0x09; /* pps length = 9 */
-    uint8_t pps[] = {0x68, 0xce, 0x3c, 0x80};
-    memcpy(video_body + video_body_len, pps, sizeof(pps)); video_body_len += sizeof(pps);
+    uint32_t nalu_len_be = lrtmp2_hton32((uint32_t)idr_len);
+    memcpy(video_body + video_body_len, &nalu_len_be, 4); video_body_len += 4;
+    memcpy(video_body + video_body_len, idr_nalu, idr_len); video_body_len += idr_len;
 
     size_t video_chunk_len = wrap_chunk(stream + total, sizeof(stream) - total,
                                          5, 0x09, video_body, video_body_len);
     total += video_chunk_len;
 
-    printf("Built RTMP stream: %zu bytes (video_chunk=%zu)\n", total, video_chunk_len);
+    printf("Built RTMP stream: %zu bytes (video_chunk=%zu, idr_len=%zu)\n", total, video_chunk_len, idr_len);
 
     /* Feed to connection */
-    rc = lrtmp2_conn_recv(conn, stream, total);
-    printf("conn_recv: rc=%d state=%d hs=%d frames=%d\n",
-           rc, conn->state, conn->handshake.state, g_frame_received);
+    int rc = lrtmp2_conn_recv(conn, stream, total);
+    printf("conn_recv: rc=%d state=%s hs=%d frames=%d publish_called=%d\n",
+           rc, lrtmp2_conn_state_str(conn->state), conn->handshake.state, g_frame_received, g_publish_called);
 
-    /* Check: handshake should complete and video frame should be received */
+    /* Check: full session should reach PUBLISHING, with the publish callback
+     * fired and the video frame delivered via on_frame */
     int success = 0;
-    if (conn->state >= LRTMP2_STATE_CONNECTED && g_frame_received) {
-        printf("PASS: handshake complete (state=%d) and frame received (len=%zu)\n", conn->state, g_received_len);
+    if (conn->state == LRTMP2_STATE_PUBLISHING && g_publish_called && g_frame_received &&
+        strcmp(g_publish_app, "live") == 0 && strcmp(g_publish_stream, "mystream") == 0 &&
+        g_received_len == video_body_len) {
+        printf("PASS: session reached PUBLISHING, publish callback fired (app=%s stream=%s), frame received (len=%zu)\n",
+               g_publish_app, g_publish_stream, g_received_len);
         success = 1;
-    } else if (conn->state >= LRTMP2_STATE_CONNECTED) {
-        printf("PARTIAL: handshake complete (state=%d) but no frame received\n", conn->state);
-        success = 1; /* still success for handshake */
     } else {
-        printf("FAIL: handshake incomplete (state=%d)\n", conn->state);
-        success = 0;
+        printf("FAIL: state=%s publish_called=%d frame_received=%d\n",
+               lrtmp2_conn_state_str(conn->state), g_publish_called, g_frame_received);
     }
 
     lrtmp2_conn_destroy(conn);
