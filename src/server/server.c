@@ -219,7 +219,7 @@ int lrtmp2_server_broadcast(lrtmp2_server_t *server, const uint8_t *data, size_t
     return LRTMP2_OK;
 }
 
-static inline void lrtmp2_stream_append_to_server(lrtmp2_server_t *server, lrtmp2_stream_t *stream)
+void lrtmp2_stream_append_to_server(lrtmp2_server_t *server, lrtmp2_stream_t *stream)
 {
     pthread_mutex_lock((pthread_mutex_t *)&server->streams_mutex);
     stream->next = server->streams;

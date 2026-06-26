@@ -18,10 +18,11 @@ typedef struct lrtmp2_server {
     pthread_mutex_t        streams_mutex;
 } lrtmp2_server_t;
 
-lrtmp2_server_t *lrtmp2_server_create(const lrtmp2_server_config_t *config);
+lrtmp2_server_t *lrtmp2_server_create(const lrtmp2_server_config_t *config); /* config is stored by pointer */
 void lrtmp2_server_destroy(lrtmp2_server_t *server);
 int  lrtmp2_server_listen(lrtmp2_server_t *server, const char *bind_addr);
 int  lrtmp2_server_poll(lrtmp2_server_t *server, int timeout_ms);
 void lrtmp2_server_stop(lrtmp2_server_t *server);
+void lrtmp2_stream_append_to_server(lrtmp2_server_t *server, lrtmp2_stream_t *stream);
 
 #endif

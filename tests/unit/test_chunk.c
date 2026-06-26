@@ -140,7 +140,7 @@ int test_chunk_multi_fragment(void)
     return 1;
 }
 
-int main(void)
+int test_chunk_main(void)
 {
     int passed = 0;
     printf("Running chunk tests...\n");

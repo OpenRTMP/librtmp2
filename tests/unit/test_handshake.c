@@ -1,7 +1,7 @@
 /**
  * test_handshake.c — Unit tests for RTMP handshake
  */
-#include "handshake.h"
+#include "handshake/handshake.h"
 #include "core/buffer.h"
 #include <stdio.h>
 #include <string.h>
@@ -137,7 +137,7 @@ int test_handshake_client(void)
     }
 }
 
-int main(void)
+int test_handshake_main(void)
 {
     int passed = 0;
     int total = 2;

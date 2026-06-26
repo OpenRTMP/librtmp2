@@ -13,11 +13,13 @@
 #define close_socket closesocket
 #define SHUT_RDWR SD_BOTH
 #else
+#include <unistd.h>
+#include <stdio.h>
+#define close_socket close
+#endif
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
-#include <unistd.h>
-#endif
 
 lrtmp2_client_t *lrtmp2_client_create(lrtmp2_server_config_t *config)
 {

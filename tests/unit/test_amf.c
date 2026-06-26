@@ -107,7 +107,7 @@ int test_amf0_null(void)
     return 1;
 }
 
-int main(void)
+int test_amf_main(void)
 {
     int passed = 0;
     printf("Running AMF0 tests...\n");
