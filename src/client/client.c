@@ -165,6 +165,10 @@ static int client_send_command(lrtmp2_client_t *client, uint32_t msg_stream_id,
  * causes audio/video frames to be delivered via client->config->on_frame_cb.
  * Returns LRTMP2_OK once `wanted_name` has been seen and handled (when
  * wanted_name is non-NULL), or propagates errors. */
+/* client_pump() reads and dispatches messages from recv_buffer.
+ * - wanted_name + on_match: block until command with named arrives, then call on_match
+ * - play_mode: deliver A/V frames via on_frame_cb (one frame per call)
+ * - both NULL/NULL: plays frames, returns LRTMP2_OK after one frame */
 static int client_pump(lrtmp2_client_t *client, const char *wanted_name,
                         int (*on_match)(lrtmp2_client_t *, lrtmp2_buffer_t *),
                         int play_mode)

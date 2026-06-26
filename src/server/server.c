@@ -61,7 +61,16 @@ void lrtmp2_server_destroy(lrtmp2_server_t *server)
 
     /* Destroy all connections */
     pthread_mutex_lock(&server->connections_mutex);
-    /* (Connection cleanup would go here — close sockets, free memory) */
+    lrtmp2_conn_t *conn = server->connections;
+    while (conn) {
+        lrtmp2_conn_t *next = conn->next;
+        if (conn->client_fd >= 0) {
+            close_socket(conn->client_fd);
+        }
+        lrtmp2_conn_destroy(conn);
+        conn = next;
+    }
+    server->connections = NULL;
     pthread_mutex_unlock(&server->connections_mutex);
 
     /* Destroy all streams */
@@ -225,7 +234,9 @@ int lrtmp2_server_process_connections(lrtmp2_server_t *server)
 
     pthread_mutex_lock((pthread_mutex_t *)&server->connections_mutex);
     lrtmp2_conn_t *conn = server->connections;
+    lrtmp2_conn_t *prev = NULL;
     while (conn) {
+        lrtmp2_conn_t *next = conn->next;
         if (conn->client_fd >= 0 && conn->state < LRTMP2_STATE_CLOSING) {
             /* Try to receive data (non-blocking) */
             uint8_t tmp_buf[4096];
@@ -240,12 +251,21 @@ int lrtmp2_server_process_connections(lrtmp2_server_t *server)
                 if (server->config->on_close_cb) {
                     server->config->on_close_cb(conn, server->config->userdata);
                 }
+                conn->client_fd = -1;  /* block further processing */
             } else if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
                 /* Real error */
                 conn->state = LRTMP2_STATE_CLOSING;
             }
         }
-        conn = conn->next;
+
+        /* Remove dead connections from list (naturally freeded inside conn_destroy). */
+        if (conn->state >= LRTMP2_STATE_CLOSING && conn->client_fd < 0) {
+            if (prev) prev->next = next; else server->connections = next;
+            lrtmp2_conn_destroy(conn);
+        } else {
+            prev = conn;
+        }
+        conn = next;
     }
     pthread_mutex_unlock((pthread_mutex_t *)&server->connections_mutex);
     return LRTMP2_OK;

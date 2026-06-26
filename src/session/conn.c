@@ -91,21 +91,35 @@ int lrtmp2_conn_recv(lrtmp2_conn_t *conn, const uint8_t *data, size_t len)
     int rc = lrtmp2_buffer_write(conn->recv_buffer, data, len);
     if (rc < 0) return rc;
 
-    /* Process all buffered data. Loop until either:
-     * - No more data AND not in handshake state
-     * - Error occurs
-     * - State machine requests stop (rc==0 and no pending data) */
-    for (int max_iter = 100; max_iter > 0; max_iter--) {
+    /* Process all buffered data. Use a no-progress bound: if many
+     * iterations pass without consuming data or reaching a terminal
+     * state, bail out to avoid starving callers that feed data in
+     * small chunks. 65536 is well beyond any real chunk count for a
+     * single recv() call. */
+    int max_iter = 65536;
+    int no_progress = 0;
+    while (max_iter-- > 0) {
         size_t avail = lrtmp2_buffer_available(conn->recv_buffer);
         if (avail == 0 && conn->state != LRTMP2_STATE_HANDSHAKE) {
             break;
         }
+        size_t before = avail;
         rc = lrtmp2_conn_process(conn);
         if (rc < 0) return rc;
-        if (rc == 0 &&
-            lrtmp2_buffer_available(conn->recv_buffer) == 0 &&
-            conn->state < LRTMP2_STATE_CLOSING) {
-            break;
+        if (rc == 0) {
+            /* No progress: process returned "need more / nothing to do".
+             * If it also didn't consume any bytes, we're stuck. */
+            size_t after = lrtmp2_buffer_available(conn->recv_buffer);
+            if (after == before) {
+                if (++no_progress > 3) break;
+            } else {
+                no_progress = 0;
+            }
+            if (after == 0 && conn->state < LRTMP2_STATE_CLOSING) {
+                break;
+            }
+        } else {
+            no_progress = 0;
         }
     }
 
