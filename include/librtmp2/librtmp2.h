@@ -42,6 +42,19 @@ lrtmp2_client_t *lrtmp2_client_create(const lrtmp2_server_config_t *config);
 void             lrtmp2_client_destroy(lrtmp2_client_t *client);
 int              lrtmp2_client_connect(lrtmp2_client_t *client, const char *url);
 
+/* App-level command flow, run after lrtmp2_client_connect() */
+int              lrtmp2_client_publish(lrtmp2_client_t *client);
+int              lrtmp2_client_play(lrtmp2_client_t *client);
+
+/* Send one audio/video frame while publishing */
+int              lrtmp2_client_send_frame(lrtmp2_client_t *client, const lrtmp2_frame_t *frame);
+
+/* Pump incoming data while playing: delivers frames via config->on_frame_cb.
+ * Blocks for up to timeout_ms waiting for data; returns LRTMP2_OK on success
+ * (including a timeout with no data), or a negative error code on I/O/protocol
+ * failure or peer disconnect. */
+int              lrtmp2_client_poll(lrtmp2_client_t *client, int timeout_ms);
+
 /* ==================== Frame API ==================== */
 
 /* Frames are delivered via on_frame_cb callback. See librtmp2/types.h for lrtmp2_frame_t. */

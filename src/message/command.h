@@ -39,4 +39,8 @@ int lrtmp2_cmd_read_create_stream(lrtmp2_buffer_t *buf, double *transaction_id);
 int lrtmp2_cmd_read_publish(lrtmp2_buffer_t *buf, char *stream_name, size_t max_name, char *app, size_t max_app);
 int lrtmp2_cmd_read_play(lrtmp2_buffer_t *buf, char *stream_name, size_t max_name);
 
+/* Client-side: read a server "_result" response */
+int lrtmp2_cmd_read_connect_result(lrtmp2_buffer_t *buf, double *transaction_id);
+int lrtmp2_cmd_read_create_stream_result(lrtmp2_buffer_t *buf, double *transaction_id, double *stream_id);
+
 #endif

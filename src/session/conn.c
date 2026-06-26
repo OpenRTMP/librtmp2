@@ -64,7 +64,7 @@ lrtmp2_conn_t *lrtmp2_conn_create(lrtmp2_server_t *server, lrtmp2_server_config_
         return NULL;
     }
 
-    conn->chunk_size = LRTMP2_DEFAULT_CHUNK_SIZE;
+    conn->chunk_size = (config && config->chunk_size > 0) ? (uint32_t)config->chunk_size : LRTMP2_DEFAULT_CHUNK_SIZE;
     conn->peer_chunk_size = LRTMP2_DEFAULT_CHUNK_SIZE;
     conn->window_ack_size = 0;
 
@@ -143,27 +143,30 @@ int lrtmp2_conn_do_handshake(lrtmp2_conn_t *conn)
     switch (conn->handshake.state) {
         case LRTMP2_HS_SERVER_WAIT_C0:
             rc = lrtmp2_handshake_server_read_c0(&conn->handshake, conn->recv_buffer);
-            if (rc == 0) return 0;
             if (rc < 0) return rc;
             conn->state = LRTMP2_STATE_HANDSHAKE;
             /* fall through */
 
         case LRTMP2_HS_SERVER_WAIT_C1:
             rc = lrtmp2_handshake_server_read_c1(&conn->handshake, conn->recv_buffer);
-            if (rc == 0) return 0;
             if (rc < 0) return rc;
-            /* Send S0+S1+S2 to client (skip if no socket, e.g. in tests) */
+            /* Send S0+S1+S2 to client (skip if no socket, e.g. in tests).
+             * handshake.out only contains S1+S2; S0 is the 1-byte version
+             * marker and must be sent ahead of it. */
             if (conn->client_fd >= 0) {
+                uint8_t s0 = 0x03; /* RTMP_VERSION */
+                rc = lrtmp2_conn_send_raw(conn, &s0, 1);
+                if (rc != LRTMP2_OK) return rc;
                 rc = lrtmp2_conn_send_raw(conn, conn->handshake.out.data, conn->handshake.out.size);
                 if (rc != LRTMP2_OK) return rc;
             }
             conn->handshake.out.size = 0;
             conn->handshake.out.read_pos = 0;
-            break;
+            /* Still waiting on C2 — do not mark CONNECTED yet. */
+            return LRTMP2_OK;
 
         case LRTMP2_HS_SERVER_WAIT_C2:
             rc = lrtmp2_handshake_server_read_c2(&conn->handshake, conn->recv_buffer);
-            if (rc == 0) return 0;
             if (rc < 0) return rc;
             break;
 
@@ -188,7 +191,7 @@ int lrtmp2_conn_read_messages(lrtmp2_conn_t *conn)
 
     while (lrtmp2_buffer_available(conn->recv_buffer) > 0) {
         payload_len = 0;
-        rc = lrtmp2_chunk_read(conn->recv_buffer, NULL, &msg, payload, &payload_len);
+        rc = lrtmp2_chunk_read(conn->recv_buffer, NULL, &msg, payload, sizeof(payload), &payload_len);
 
         if (rc == 0) break;
         if (rc < 0) return rc;
@@ -254,17 +257,14 @@ int lrtmp2_conn_send_connect_response(lrtmp2_conn_t *conn, double transaction_id
 
     /* Send SetChunkSize (msg type 0x01 on csid 2) */
     {
-        uint8_t scs_msg[8];
-        /* Basic header: fmt=0, csid=2 */
-        scs_msg[0] = 0x02;
-        /* Message header: timestamp(3) + msg_length(3) + msg_type(1) */
-        scs_msg[1] = scs_msg[2] = scs_msg[3] = 0; /* timestamp = 0 */
-        scs_msg[4] = 0; scs_msg[5] = 0; scs_msg[6] = 4; /* length = 4 */
-        scs_msg[7] = RTMP_MSG_SET_CHUNK_SIZE;
-        lrtmp2_buffer_write(conn->send_buffer, scs_msg, 8);
-        /* Body: 4 bytes big-endian chunk size */
+        lrtmp2_chunk_message_t scs_msg;
+        memset(&scs_msg, 0, sizeof(scs_msg));
+        scs_msg.csid = 2;
+        scs_msg.fmt = 0;
+        scs_msg.msg_length = 4;
+        scs_msg.msg_type_id = RTMP_MSG_SET_CHUNK_SIZE;
         uint32_t net_cs = lrtmp2_hton32(conn->chunk_size);
-        lrtmp2_buffer_write(conn->send_buffer, (uint8_t *)&net_cs, 4);
+        lrtmp2_chunk_write(conn->send_buffer, &scs_msg, (uint8_t *)&net_cs, 4);
     }
 
     /* Build AMF0 _result command */

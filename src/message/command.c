@@ -338,3 +338,48 @@ int lrtmp2_cmd_read_play(lrtmp2_buffer_t *buf, char *stream_name, size_t max_nam
     /* Read stream name */
     return lrtmf2_amf0_read_string(buf, stream_name, max_name, &len);
 }
+
+int lrtmp2_cmd_read_connect_result(lrtmp2_buffer_t *buf, double *transaction_id)
+{
+    if (!buf || !transaction_id) return LRTMP2_ERR_INTERNAL;
+
+    size_t len;
+    char name[64];
+    if (lrtmf2_amf0_read_string(buf, name, sizeof(name), &len) != LRTMP2_OK) {
+        return LRTMP2_ERR_AMF;
+    }
+
+    if (amf0_read_number_value(buf, transaction_id) != LRTMP2_OK) {
+        return LRTMP2_ERR_AMF;
+    }
+
+    /* Properties object, then information object: both skippable */
+    lrtmf2_amf0_skip_value(buf);
+    lrtmf2_amf0_skip_value(buf);
+
+    return LRTMP2_OK;
+}
+
+int lrtmp2_cmd_read_create_stream_result(lrtmp2_buffer_t *buf, double *transaction_id, double *stream_id)
+{
+    if (!buf || !transaction_id || !stream_id) return LRTMP2_ERR_INTERNAL;
+
+    size_t len;
+    char name[64];
+    if (lrtmf2_amf0_read_string(buf, name, sizeof(name), &len) != LRTMP2_OK) {
+        return LRTMP2_ERR_AMF;
+    }
+
+    if (amf0_read_number_value(buf, transaction_id) != LRTMP2_OK) {
+        return LRTMP2_ERR_AMF;
+    }
+
+    /* Command object: typically null */
+    lrtmf2_amf0_skip_value(buf);
+
+    if (amf0_read_number_value(buf, stream_id) != LRTMP2_OK) {
+        return LRTMP2_ERR_AMF;
+    }
+
+    return LRTMP2_OK;
+}

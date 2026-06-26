@@ -45,6 +45,7 @@ int lrtmp2_msg_decode(lrtmp2_conn_t *conn, const lrtmp2_chunk_message_t *chunk,
                 uint32_t cs;
                 if (lrtmp2_msg_read_set_chunk_size(payload, &cs) == LRTMP2_OK) {
                     conn->peer_chunk_size = cs;
+                    lrtmp2_chunk_stream_set_all_chunk_size(cs);
                     LRTMP2_LOG_INFO("Peer SetChunkSize: %u", cs);
                 }
             }

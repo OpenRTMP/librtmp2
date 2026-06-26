@@ -17,17 +17,13 @@ int lrtmp2_chunk_write(lrtmp2_buffer_t *out,
     if (!out || !msg) return LRTMP2_ERR_INTERNAL;
 
     size_t chunk_size = LRTMP2_DEFAULT_CHUNK_SIZE;
-    size_t offset = 0;
-
-    /* Determine fmt: use fmt 1 if same stream_id, msg_length, msg_type as last on this csid */
-    /* For simplicity, we'll use fmt 0 for the first chunk and fmt 1 for subsequent */
-    
-    /* --- Basic header --- */
-    uint8_t hdr[3];
-    size_t hdr_len;
-
     uint32_t csid = msg->csid;
     uint8_t fmt = msg->fmt;
+    uint32_t ts = msg->timestamp;
+
+    /* --- First chunk: full basic header + message header --- */
+    uint8_t hdr[3];
+    size_t hdr_len;
 
     if (csid < 64) {
         hdr[0] = (uint8_t)((fmt << 6) | csid);
@@ -42,19 +38,12 @@ int lrtmp2_chunk_write(lrtmp2_buffer_t *out,
         hdr[2] = (uint8_t)(((csid - 64) >> 8) & 0xFF);
         hdr_len = 3;
     }
-
     lrtmp2_buffer_write(out, hdr, hdr_len);
 
-    /* --- Message header --- */
     /* timestamp (3 bytes) — if >= 0xFFFFFF, needs extended timestamp */
-    uint32_t ts = msg->timestamp;
-    if (ts >= 0xFFFFFF) {
+    {
         uint8_t ts_buf[3];
-        lrtmp2_hton24(ts_buf, 0xFFFFFF);
-        lrtmp2_buffer_write(out, ts_buf, 3);
-    } else {
-        uint8_t ts_buf[3];
-        lrtmp2_hton24(ts_buf, ts);
+        lrtmp2_hton24(ts_buf, (ts >= 0xFFFFFF) ? 0xFFFFFF : ts);
         lrtmp2_buffer_write(out, ts_buf, 3);
     }
 
@@ -76,20 +65,48 @@ int lrtmp2_chunk_write(lrtmp2_buffer_t *out,
         lrtmp2_buffer_write(out, sid, 4);
     }
 
-    /* Extended timestamp if needed */
     if (ts >= 0xFFFFFF) {
         uint32_t net_ts = lrtmp2_hton32(ts);
         lrtmp2_buffer_write(out, (uint8_t *)&net_ts, 4);
     }
 
-    /* --- Payload --- */
-    size_t to_write = (payload_len < chunk_size) ? payload_len : chunk_size;
-    if (to_write > 0) {
-        lrtmp2_buffer_write(out, payload, to_write);
+    /* --- Payload: fragment across multiple chunks if it exceeds chunk_size.
+     * Continuation chunks use fmt=3 (same csid, no message header repeated). */
+    size_t offset = 0;
+    while (offset < payload_len) {
+        size_t to_write = payload_len - offset;
+        if (to_write > chunk_size) to_write = chunk_size;
+
+        lrtmp2_buffer_write(out, payload + offset, to_write);
+        offset += to_write;
+
+        if (offset < payload_len) {
+            /* Continuation chunk header (fmt=3) */
+            uint8_t chdr[3];
+            size_t chdr_len;
+            if (csid < 64) {
+                chdr[0] = (uint8_t)((3 << 6) | csid);
+                chdr_len = 1;
+            } else if (csid < 320) {
+                chdr[0] = (uint8_t)(3 << 6);
+                chdr[1] = (uint8_t)(csid - 64);
+                chdr_len = 2;
+            } else {
+                chdr[0] = (uint8_t)((3 << 6) | 1);
+                chdr[1] = (uint8_t)((csid - 64) & 0xFF);
+                chdr[2] = (uint8_t)(((csid - 64) >> 8) & 0xFF);
+                chdr_len = 3;
+            }
+            lrtmp2_buffer_write(out, chdr, chdr_len);
+            if (ts >= 0xFFFFFF) {
+                uint32_t net_ts = lrtmp2_hton32(ts);
+                lrtmp2_buffer_write(out, (uint8_t *)&net_ts, 4);
+            }
+        }
     }
 
-    LRTMP2_LOG_DEBUG("chunk written: csid=%u fmt=%u ts=%u len=%u payload=%zu/%zu",
-                      csid, fmt, ts, msg->msg_length, to_write, payload_len);
+    LRTMP2_LOG_DEBUG("chunk written: csid=%u fmt=%u ts=%u len=%u payload=%zu",
+                      csid, fmt, ts, msg->msg_length, payload_len);
 
     return LRTMP2_OK;
 }

@@ -91,9 +91,13 @@ test: $(TEST_BIN)
 	./$(TEST_BIN)
 
 INTEGRATION_BIN = tests/integration/run_ingest
+CLIENT_INTEGRATION_BIN = tests/integration/run_client
 
 $(INTEGRATION_BIN): $(OBJS) tests/integration/test_server_ingest.c
 	$(CC) $(CFLAGS) -o $@ tests/integration/test_server_ingest.c $(OBJS) $(LDFLAGS) -lm -lpthread
 
+$(CLIENT_INTEGRATION_BIN): $(OBJS) tests/integration/test_client_publish.c
+	$(CC) $(CFLAGS) -o $@ tests/integration/test_client_publish.c $(OBJS) $(LDFLAGS) -lm -lpthread
+
 clean:
-	rm -f $(OBJS) $(TEST_OBJS) $(TARGETS) $(TEST_BIN) $(INTEGRATION_BIN) examples/**/*.o tests/integration/*.o
+	rm -f $(OBJS) $(TEST_OBJS) $(TARGETS) $(TEST_BIN) $(INTEGRATION_BIN) $(CLIENT_INTEGRATION_BIN) examples/**/*.o tests/integration/*.o
