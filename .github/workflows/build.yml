@@ -1,4 +1,4 @@
-name: CI
+name: Build & Unit Tests
 
 on:
   push:
@@ -59,41 +59,3 @@ jobs:
 
     - name: Meson test
       run: meson test -C builddir
-
-  interop-ffmpeg:
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@v7
-
-    - name: Install ffmpeg
-      run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
-
-    - name: Interop — publish from real ffmpeg (ASan/UBSan)
-      run: ./tests/interop/ffmpeg_interop.sh
-      env:
-        SAN: "1"
-
-    - name: Interop — Enhanced-RTMP (HEVC + AV1 FourCC) ingest (ASan/UBSan)
-      run: ./tests/interop/enhanced_rtmp_interop.sh
-      env:
-        SAN: "1"
-
-  interop-play:
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@v7
-
-    - name: Install ffmpeg
-      run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
-
-    - name: Download mediamtx (real RTMP server)
-      run: |
-        ver=v1.9.3
-        curl -fsSL "https://github.com/bluenviron/mediamtx/releases/download/${ver}/mediamtx_${ver}_linux_amd64.tar.gz" \
-          | tar xz -C "$RUNNER_TEMP" mediamtx
-        echo "MEDIAMTX=$RUNNER_TEMP/mediamtx" >> "$GITHUB_ENV"
-
-    - name: Interop — play (pull) from real server (ASan/UBSan)
-      run: ./tests/interop/play_interop.sh
-      env:
-        SAN: "1"
