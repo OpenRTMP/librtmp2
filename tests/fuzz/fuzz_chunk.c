@@ -5,6 +5,7 @@
 #include <stddef.h>
 #include <string.h>
 #include "chunk/chunk_reader.h"
+#include "core/buffer.h"
 
 int fuzz_chunk(const uint8_t *data, size_t size) {
     if (size < 1) return 0;
@@ -27,6 +28,9 @@ int fuzz_chunk(const uint8_t *data, size_t size) {
         if (rc <= 0) break;
     }
 
+    /* The caller owns an externally-provided chunk stream: chunk_read may have
+     * allocated its reassembly buffer, so free it here to avoid leaking. */
+    if (stream.reassembly_buf) lrtmp2_buffer_destroy(stream.reassembly_buf);
     lrtmp2_buffer_destroy(buf);
     return 0;
 }

@@ -244,14 +244,14 @@ int lrtmp2_cmd_read_connect(lrtmp2_buffer_t *buf, lrtmp2_connect_info_t *info)
                 break;
             }
             case AMF0_BOOLEAN:
-                lrtmf2_amf0_skip_value(buf);
-                break;
             case AMF0_NULL:
             case AMF0_UNDEFINED:
-                lrtmf2_amf0_skip_value(buf);
-                break;
             default:
-                lrtmf2_amf0_skip_value(buf);
+                /* Skip values we don't extract; bail on malformed/overly
+                 * nested input so we don't loop over misaligned bytes. */
+                if (lrtmf2_amf0_skip_value(buf) != LRTMP2_OK) {
+                    return LRTMP2_ERR_AMF;
+                }
                 break;
         }
     }
