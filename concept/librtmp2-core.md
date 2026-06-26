@@ -513,11 +513,12 @@ This section tracks how far the actual `src/`/`include/` tree has progressed aga
 - Handshake (`src/handshake/handshake.c`) — implemented
 - Chunk reader/writer/state (`src/chunk/`) — implemented
 - Message reassembly (`src/message/`) — implemented (`control.c`, `command.c`, `message.c`)
-- AMF0 (`src/amf/amf0.c`) — implemented; AMF3 (`amf3.c`) present alongside it
-- `connect` / `createStream` / `publish` session flow (`src/session/`, `src/server/server.c`) — implemented for the server side; covered by `tests/integration/test_server_ingest.c`
+- AMF0 (`src/amf/amf0.c`) — implemented; AMF3 (`src/amf/amf3.c`) present alongside it
+- Handshake + chunk/message decode + frame delivery on the server side (`src/session/conn.c`, `src/server/server.c`) — implemented and covered by `tests/integration/test_server_ingest.c`
+- `connect` / `createStream` / `publish` command encode/decode helpers (`src/message/command.c`) — implemented, but there is no server-side dispatcher wiring them up yet: `lrtmp2_conn_send_connect_response()` (`src/session/conn.c`) has no call sites, and there are no `createStream`/`publish` command handlers
 - Minimal server example (`examples/minimal_server/`) — present
 
-**Acceptance criterion status:** OBS-to-`librtmp2` ingest has not yet been verified manually; the integration test exercises the chunked publish path with synthetic H.264 data (`tests/test_data/test.h264`).
+**Acceptance criterion status:** OBS-to-`librtmp2` ingest has not yet been verified manually. The integration test builds a synthetic byte stream in memory (handshake + a `connect` chunk + one video chunk) and only exercises handshake completion plus chunk/message decoding and frame delivery via the `on_frame` callback — it does not read `tests/test_data/test.h264` and does not drive a `createStream`/`publish` command flow.
 
 ### Phase 2 — Client MVP: started
 

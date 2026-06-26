@@ -73,21 +73,21 @@ all_sources = (core_sources + handshake_sources + chunk_sources +
 # Library
 librtmp2_shared = shared_library('librtmp2',
   all_sources,
-  include_directories : include_directories('include'),
+  include_directories : include_directories('include', 'src'),
   version : meson.project_version(),
   install : true,
 )
 
 librtmp2_static = static_library('librtmp2',
   all_sources,
-  include_directories : include_directories('include'),
+  include_directories : include_directories('include', 'src'),
   install : true,
 )
 
 # Declare dependency for subprojects / pkg-config
 librtmp2_dep = declare_dependency(
   link_with : librtmp2_static,
-  include_directories : include_directories('include'),
+  include_directories : include_directories('include', 'src'),
 )
 
 # pkg-config
