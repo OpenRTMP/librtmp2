@@ -21,7 +21,8 @@
 /* Chunk writer functions */
 int lrtmp2_chunk_write(lrtmp2_buffer_t *out,
                         const lrtmp2_chunk_message_t *msg,
-                        const uint8_t *payload, size_t payload_len);
+                        const uint8_t *payload, size_t payload_len,
+                        size_t chunk_size);
 int lrtmp2_chunk_write_extended_timestamp(lrtmp2_buffer_t *out, uint32_t timestamp);
 
 /* Message write helpers */

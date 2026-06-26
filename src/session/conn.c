@@ -264,7 +264,7 @@ static int lrtmp2_conn_send_command(lrtmp2_conn_t *conn, uint32_t msg_stream_id,
     cmd_msg.msg_type_id = RTMP_MSG_AMF0_COMMAND;
     cmd_msg.msg_stream_id = msg_stream_id;
 
-    return lrtmp2_chunk_write(conn->send_buffer, &cmd_msg, amf_data, amf_len);
+    return lrtmp2_chunk_write(conn->send_buffer, &cmd_msg, amf_data, amf_len, conn->chunk_size);
 }
 
 int lrtmp2_conn_send_connect_response(lrtmp2_conn_t *conn, double transaction_id)
@@ -280,7 +280,7 @@ int lrtmp2_conn_send_connect_response(lrtmp2_conn_t *conn, double transaction_id
         scs_msg.msg_length = 4;
         scs_msg.msg_type_id = RTMP_MSG_SET_CHUNK_SIZE;
         uint32_t net_cs = lrtmp2_hton32(conn->chunk_size);
-        lrtmp2_chunk_write(conn->send_buffer, &scs_msg, (uint8_t *)&net_cs, 4);
+        lrtmp2_chunk_write(conn->send_buffer, &scs_msg, (uint8_t *)&net_cs, 4, conn->chunk_size);
     }
 
     /* Build AMF0 _result command */

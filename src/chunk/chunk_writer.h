@@ -6,12 +6,14 @@
 #include "librtmp2/types.h"
 
 /**
- * Write a single chunk to `out`.
- * Caller is responsible for splitting payload into chunk_size pieces.
+ * Write a full message to `out`, fragmenting the payload into chunks of at
+ * most `chunk_size` bytes. Pass the size last announced to the peer via
+ * SetChunkSize (0 selects the protocol default).
  */
 int lrtmp2_chunk_write(lrtmp2_buffer_t *out,
                         const lrtmp2_chunk_message_t *msg,
-                        const uint8_t *payload, size_t payload_len);
+                        const uint8_t *payload, size_t payload_len,
+                        size_t chunk_size);
 
 /**
  * Write an extended timestamp chunk (for protocol control messages).

@@ -157,7 +157,8 @@ static int client_send_command(lrtmp2_client_t *client, uint32_t msg_stream_id,
     cmd_msg.msg_type_id = RTMP_MSG_AMF0_COMMAND;
     cmd_msg.msg_stream_id = msg_stream_id;
 
-    int rc = lrtmp2_chunk_write(client->send_buffer, &cmd_msg, amf_data, amf_len);
+    int rc = lrtmp2_chunk_write(client->send_buffer, &cmd_msg, amf_data, amf_len,
+                                LRTMP2_DEFAULT_CHUNK_SIZE);
     if (rc != LRTMP2_OK) return rc;
     return client_flush(client);
 }
@@ -482,7 +483,8 @@ int lrtmp2_client_send_frame(lrtmp2_client_t *client, const lrtmp2_frame_t *fram
     }
     cmsg.fmt = 0;
 
-    int rc = lrtmp2_chunk_write(client->send_buffer, &cmsg, frame->data, frame->size);
+    int rc = lrtmp2_chunk_write(client->send_buffer, &cmsg, frame->data, frame->size,
+                                LRTMP2_DEFAULT_CHUNK_SIZE);
     if (rc != LRTMP2_OK) return rc;
     return client_flush(client);
 }
