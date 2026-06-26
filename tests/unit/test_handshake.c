@@ -28,11 +28,9 @@ int test_handshake_server(void)
     memcpy(c2+4, &net_peer, 4); /* peer time */
     for (int i=8; i<1536; i++) c2[i] = (uint8_t)(~i);
 
-    lrtmp2_buffer_reset(buf);
     lrtmp2_buffer_write(buf, c0, 1);
     lrtmp2_buffer_write(buf, c1, 1536);
     lrtmp2_buffer_write(buf, c2, 1536);
-    lrtmp2_buffer_reset(buf);
 
     lrtmp2_handshake_server_init(&hs);
 
@@ -92,11 +90,9 @@ int test_handshake_client(void)
     memcpy(s2+4, &net_peer, 4);   /* peer time */
     for (int i=8; i<1536; i++) s2[i] = (uint8_t)(~i*2);
 
-    lrtmp2_buffer_reset(buf);
     lrtmp2_buffer_write(buf, s0, 1);
     lrtmp2_buffer_write(buf, s1, 1536);
     lrtmp2_buffer_write(buf, s2, 1536);
-    lrtmp2_buffer_reset(buf);
 
     lrtmp2_handshake_client_init(&hs);
 

@@ -41,17 +41,15 @@ int test_amf0_string_roundtrip(void)
     const char *input = "hello RTMP";
     lrtmf2_amf0_write_string(buf, input);
 
-    uint8_t type;
-    lrtmp2_buffer_read(buf, &type, 1);
-    if (type != AMF0_STRING) {
-        printf("FAIL: expected STRING type 0x02, got 0x%02x\n", type);
+    /* read_string reads the type byte itself */
+    char output[256];
+    size_t out_len;
+    int rc = lrtmf2_amf0_read_string(buf, output, sizeof(output), &out_len);
+    if (rc != LRTMP2_OK) {
+        printf("FAIL: read_string returned %d\n", rc);
         lrtmp2_buffer_destroy(buf);
         return 0;
     }
-
-    char output[256];
-    size_t out_len;
-    lrtmf2_amf0_read_string(buf, output, sizeof(output), &out_len);
     if (strcmp(output, input) != 0) {
         printf("FAIL: string roundtrip: expected '%s', got '%s'\n", input, output);
         lrtmp2_buffer_destroy(buf);

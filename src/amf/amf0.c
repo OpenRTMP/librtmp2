@@ -32,6 +32,7 @@ static int amf_read_u16(lrtmp2_buffer_t *buf, uint16_t *val)
 {
     uint8_t b[2];
     if (lrtmp2_buffer_read(buf, b, 2) != 0) return LRTMP2_ERR_IO;
+    /* AMF0 stores multi-byte values in big-endian (network byte order) */
     *val = (uint16_t)((b[0] << 8) | b[1]);
     return LRTMP2_OK;
 }
@@ -178,10 +179,14 @@ int lrtmf2_amf0_read_boolean(lrtmp2_buffer_t *buf, int *val)
 
 int lrtmf2_amf0_read_string(lrtmp2_buffer_t *buf, char *out, size_t max_len, size_t *out_len)
 {
-    uint16_t str_len;
-    int rc = amf_read_u16(buf, &str_len);
+    uint8_t type;
+    int rc = amf_read_u8(buf, &type);
     if (rc != LRTMP2_OK) return rc;
-    str_len = lrtmp2_byteswap16(str_len);
+    if (type != AMF0_STRING) return LRTMP2_ERR_AMF;
+
+    uint16_t str_len;
+    rc = amf_read_u16(buf, &str_len);
+    if (rc != LRTMP2_OK) return rc;
 
     if (str_len + 1 > max_len) return LRTMP2_ERR_AMF;
 
@@ -197,7 +202,7 @@ int lrtmf2_amf0_read_long_string(lrtmp2_buffer_t *buf, char *out, size_t max_len
     uint32_t str_len;
     int rc = amf_read_u32(buf, &str_len);
     if (rc != LRTMP2_OK) return rc;
-    str_len = lrtmp2_byteswap32(str_len);
+    /* str_len already in host order from amf_read_u32 */
 
     if (str_len + 1 > max_len) return LRTMP2_ERR_AMF;
 
@@ -254,7 +259,7 @@ int lrtmf2_amf0_skip_value(lrtmp2_buffer_t *buf)
                 rc = amf_read_u16(buf, &len);
                 if (rc != LRTMP2_OK) return rc;
                 /* Advance read position */
-                for (uint16_t i = 0; i < lrtmp2_byteswap16(len); i++) {
+                for (uint16_t i = 0; i < len; i++) {
                     uint8_t b;
                     rc = amf_read_u8(buf, &b);
                     if (rc != LRTMP2_OK) return rc;
@@ -266,7 +271,7 @@ int lrtmf2_amf0_skip_value(lrtmp2_buffer_t *buf)
                 uint32_t len;
                 rc = amf_read_u32(buf, &len);
                 if (rc != LRTMP2_OK) return rc;
-                len = lrtmp2_byteswap32(len);
+                len = len;
                 for (uint32_t i = 0; i < len; i++) {
                     uint8_t b;
                     rc = amf_read_u8(buf, &b);
@@ -289,7 +294,7 @@ int lrtmf2_amf0_skip_value(lrtmp2_buffer_t *buf)
                 uint16_t klen;
                 rc = amf_read_u16(buf, &klen);
                 if (rc != LRTMP2_OK) return rc;
-                klen = lrtmp2_byteswap16(klen);
+                /* klen already in host order */
                 for (uint16_t i = 0; i < klen; i++) {
                     uint8_t b;
                     rc = amf_read_u8(buf, &b);

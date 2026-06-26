@@ -37,7 +37,7 @@ int test_chunk_write_read_basic(void)
     uint8_t read_payload[256];
     size_t read_len;
 
-    lrtmp2_buffer_reset(out);
+    out->read_pos = 0;
     rc = lrtmp2_chunk_read(out, cs, &read_msg, read_payload, &read_len);
     if (rc <= 0) {
         printf("FAIL: chunk_read returned %d\n", rc);
@@ -107,7 +107,7 @@ int test_chunk_multi_fragment(void)
     uint8_t buf[256];
     size_t rlen;
 
-    lrtmp2_buffer_reset(out);
+    out->read_pos = 0;
 
     /* Read all chunks */
     for (int i = 0; i < 3; i++) {
