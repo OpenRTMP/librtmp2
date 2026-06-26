@@ -7,6 +7,7 @@
 # Test binaries
 tests/run_tests
 tests/integration/run_ingest
+tests/integration/run_client
 
 # Editor
 *.swp
