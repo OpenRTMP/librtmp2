@@ -9,7 +9,7 @@
 struct lrtmp2_server;
 
 typedef struct lrtmp2_server {
-    lrtmp2_server_config_t *config;
+    const lrtmp2_server_config_t *config;
     int                     running;
     int                     server_fd;
     struct lrtmp2_conn     *connections;

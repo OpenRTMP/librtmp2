@@ -2,7 +2,7 @@
 
 project('librtmp2', 'c',
   version : '0.1.0',
-  default_options : ['c_std=c11', 'warning_level=3'],
+  default_options : ['c_std=c11', 'warning_level=2'],
   meson_version : '>= 0.50.0'
 )
 
@@ -49,6 +49,12 @@ flv_sources = [
 ertmp_sources = [
   'src/ertmp/exvideo.c',
   'src/ertmp/metadata.c',
+  'src/ertmp/exaudio.c',
+  'src/ertmp/fourcc.c',
+  'src/ertmp/connect_caps.c',
+  'src/ertmp/reconnect.c',
+  'src/ertmp/multitrack.c',
+  'src/ertmp/modex.c',
 ]
 
 session_sources = [
@@ -110,6 +116,7 @@ if build_tests
     'tests/unit/test_chunk.c',
     'tests/unit/test_amf.c',
     'tests/unit/test_buffer.c',
+    'tests/unit/test_ertmp.c',
   ]
   test_exec = executable('test_librtmp2',
     test_sources,

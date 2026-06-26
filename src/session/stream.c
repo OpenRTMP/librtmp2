@@ -3,6 +3,7 @@
  */
 #include "session/stream.h"
 #include "session/conn.h"
+#include "server/server.h"
 #include "core/log.h"
 #include "core/alloc.h"
 #include <string.h>
