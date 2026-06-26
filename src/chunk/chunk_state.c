@@ -53,6 +53,18 @@ void lrtmp2_chunk_stream_set_all_chunk_size(uint32_t chunk_size)
     }
 }
 
+void lrtmp2_chunk_streams_destroy(void)
+{
+    for (int i = 0; i < MAX_CHUNK_STREAMS; i++) {
+        if (g_streams[i].reassembly_buf) {
+            lrtmp2_buffer_destroy(g_streams[i].reassembly_buf);
+            g_streams[i].reassembly_buf = NULL;
+        }
+        g_streams[i].in_use = 0;
+    }
+    g_initialized = 0;
+}
+
 void lrtmp2_chunk_stream_reset(lrtmp2_chunk_stream_t *stream)
 {
     if (!stream) return;

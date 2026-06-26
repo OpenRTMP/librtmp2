@@ -219,15 +219,15 @@ int lrtmp2_cmd_read_connect(lrtmp2_buffer_t *buf, lrtmp2_connect_info_t *info)
                     return LRTMP2_ERR_AMF;
                 }
                 if (strcmp(key, "app") == 0) {
-                    snprintf(info->app, sizeof(info->app), "%s", value);
+                    snprintf(info->app, sizeof(info->app), "%.*s", (int)(sizeof(info->app) - 1), value);
                 } else if (strcmp(key, "tcUrl") == 0) {
-                    snprintf(info->tcUrl, sizeof(info->tcUrl), "%s", value);
+                    snprintf(info->tcUrl, sizeof(info->tcUrl), "%.*s", (int)(sizeof(info->tcUrl) - 1), value);
                 } else if (strcmp(key, "pageUrl") == 0) {
-                    snprintf(info->pageUrl, sizeof(info->pageUrl), "%s", value);
+                    snprintf(info->pageUrl, sizeof(info->pageUrl), "%.*s", (int)(sizeof(info->pageUrl) - 1), value);
                 } else if (strcmp(key, "swfUrl") == 0) {
-                    snprintf(info->swfUrl, sizeof(info->swfUrl), "%s", value);
+                    snprintf(info->swfUrl, sizeof(info->swfUrl), "%.*s", (int)(sizeof(info->swfUrl) - 1), value);
                 } else if (strcmp(key, "flashVer") == 0) {
-                    snprintf(info->flashVer, sizeof(info->flashVer), "%s", value);
+                    snprintf(info->flashVer, sizeof(info->flashVer), "%.*s", (int)(sizeof(info->flashVer) - 1), value);
                 }
                 break;
             }

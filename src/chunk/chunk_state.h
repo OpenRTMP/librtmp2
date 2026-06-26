@@ -37,4 +37,7 @@ void lrtmp2_chunk_stream_reset(lrtmp2_chunk_stream_t *stream);
  * is tracked per-csid; this propagates a new size to every active stream. */
 void lrtmp2_chunk_stream_set_all_chunk_size(uint32_t chunk_size);
 
+/* Destroy all chunk streams and free reassembly buffers. Call at connection close. */
+void lrtmp2_chunk_streams_destroy(void);
+
 #endif

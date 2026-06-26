@@ -143,6 +143,7 @@ int test_chunk_main(void)
     printf("Running chunk tests...\n");
     if (test_chunk_write_read_basic()) passed++;
     if (test_chunk_multi_fragment()) passed++;
+    lrtmp2_chunk_streams_destroy();
     printf("Chunk tests: %d/2 passed\n", passed);
     return (passed >= 2) ? 0 : 1;
 }

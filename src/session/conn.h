@@ -15,7 +15,7 @@ struct lrtmp2_server_config;  /* defined in include/librtmp2/librtmp2.h */
 
 struct lrtmp2_conn {
     lrtmp2_server_t           *server;
-    lrtmp2_server_config_t    *config;
+    const lrtmp2_server_config_t *config;
     lrtmp2_conn_state_t        state;
     lrtmp2_handshake_t         handshake;
     lrtmp2_buffer_t           *recv_buffer;

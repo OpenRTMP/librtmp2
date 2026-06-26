@@ -13,9 +13,9 @@ int test_buffer_basic(void)
         return 0;
     }
 
-    const uint8_t *data = "hello world";
+    const char *data = "hello world";
     size_t len = strlen(data);
-    if (lrtmp2_buffer_write(buf, data, len) != 0) {
+    if (lrtmp2_buffer_write(buf, (const uint8_t *)data, len) != 0) {
         printf("FAIL: buffer_write failed\n");
         lrtmp2_buffer_destroy(buf);
         return 0;

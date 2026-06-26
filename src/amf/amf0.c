@@ -45,7 +45,7 @@ static int amf_read_u32(lrtmp2_buffer_t *buf, uint32_t *val)
     return LRTMP2_OK;
 }
 
-static int amf_read_i32(lrtmp2_buffer_t *buf, int32_t *val)
+__attribute__((unused)) static int amf_read_i32(lrtmp2_buffer_t *buf, int32_t *val)
 {
     return amf_read_u32(buf, (uint32_t *)val);
 }
@@ -190,7 +190,7 @@ int lrtmf2_amf0_read_string(lrtmp2_buffer_t *buf, char *out, size_t max_len, siz
     rc = amf_read_u16(buf, &str_len);
     if (rc != LRTMP2_OK) return rc;
 
-    if (str_len + 1 > max_len) return LRTMP2_ERR_AMF;
+    if (str_len >= max_len) return LRTMP2_ERR_AMF;
 
     rc = lrtmp2_buffer_read(buf, (uint8_t *)out, str_len);
     if (rc != LRTMP2_OK) return rc;
@@ -231,7 +231,7 @@ int lrtmf2_amf0_read_object_key(lrtmp2_buffer_t *buf, char *out, size_t max_len,
     int rc = amf_read_u16(buf, &klen);
     if (rc != LRTMP2_OK) return rc;
 
-    if (klen + 1 > max_len) return LRTMP2_ERR_AMF;
+    if (klen >= max_len) return LRTMP2_ERR_AMF;
 
     rc = lrtmp2_buffer_read(buf, (uint8_t *)out, klen);
     if (rc != LRTMP2_OK) return rc;
