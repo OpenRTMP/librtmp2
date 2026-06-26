@@ -4,7 +4,7 @@
  * Connects to an RTMP server and plays a stream.
  * Usage: ./minimal_client rtmp://host:port/app/stream_key
  */
-#include "librtmp2.h"
+#include "librtmp2/librtmp2.h"
 #include <stdio.h>
 #include <stdlib.h>
 
