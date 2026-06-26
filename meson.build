@@ -72,9 +72,9 @@ client_sources = [
   'src/client/client.c',
 ]
 
-all_sources = core_sources + handshake_sources + chunk_sources +
+all_sources = (core_sources + handshake_sources + chunk_sources +
               message_sources + amf_sources + flv_sources + ertmp_sources +
-              session_sources + server_sources + client_sources
+              session_sources + server_sources + client_sources)
 
 # Library
 librtmp2_shared = shared_library('librtmp2',
