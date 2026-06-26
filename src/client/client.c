@@ -34,6 +34,7 @@
 #else
 #include <unistd.h>
 #include <stdio.h>
+#include <sys/select.h>
 #define close_socket close
 #endif
 #include <sys/socket.h>
