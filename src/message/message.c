@@ -6,6 +6,7 @@
 #include "message.h"
 #include "message/control.h"
 #include "message/command.h"
+#include "session/conn.h"
 #include "core/log.h"
 #include <string.h>
 #include "librtmp2/types.h"
@@ -140,20 +141,7 @@ int lrtmp2_msg_decode(lrtmp2_conn_t *conn, const lrtmp2_chunk_message_t *chunk,
             break;
 
         case RTMP_MSG_AMF0_COMMAND:
-            {
-                /* This is a connect/publish/play command — deliver as frame */
-                lrtmp2_frame_t frame;
-                memset(&frame, 0, sizeof(frame));
-                frame.type = LRTMP2_FRAME_SCRIPT;
-                frame.timestamp = chunk->timestamp;
-                frame.size = payload_len;
-                frame.data = payload;
-                frame.is_metadata = 1;
-                if (conn->on_frame_cb) {
-                    conn->on_frame_cb(conn, &frame, conn->userdata);
-                }
-            }
-            break;
+            return lrtmp2_conn_handle_command(conn, payload, payload_len);
 
         case RTMP_MSG_AMF0_DATA:
             LRTMP2_LOG_DEBUG("AMF0 data message, %zu bytes", payload_len);
