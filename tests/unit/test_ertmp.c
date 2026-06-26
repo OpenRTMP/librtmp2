@@ -8,6 +8,10 @@
  * - HDR colorInfo parse/write (metadata.c)
  * - fourCcList parse/write (connect_caps.c)
  * - videocodecid from FourCC (metadata.c)
+ * - capsEx / videoFourCcInfoMap (connect_caps.c) — E-RTMP v2
+ * - reconnect (reconnect.c) — E-RTMP v2
+ * - multitrack (multitrack.c) — E-RTMP v2
+ * - modex (modex.c) — E-RTMP v2
  */
 #include <stdio.h>
 #include <string.h>
@@ -317,16 +321,181 @@ static void test_fourcc_list(void) {
     ASSERT(rc == LRTMP2_ERR_IO, "short data → IO");
 }
 
+/* ── E-RTMP v2: capsEx / videoFourCcInfoMap ─────────────────────── */
+
+static void test_caps(void) {
+    printf("\n--- capsEx ---\n");
+
+    lrtmp2_caps_exit_t caps;
+
+    /* video=hvc1 (0x68766331), audio=Opus (0x4F707573) */
+    uint8_t raw[] = { 0x68, 0x76, 0x63, 0x31, 0x4F, 0x70, 0x75, 0x73 };
+    int rc = lrtmp2_ertmp_caps_exit_parse(&caps, raw, sizeof(raw));
+    ASSERT(rc == LRTMP2_OK, "caps_exit_parse OK");
+    ASSERT(caps.video_codec_32 == 0x68766331, "video_codec_32 == hvc1");
+    ASSERT(caps.audio_codec_32 == 0x4F707573, "audio_codec_32 == Opus");
+
+    /* Write roundtrip */
+    uint8_t buf[16];
+    size_t written = lrtmp2_ertmp_caps_exit_write(&caps, buf, sizeof(buf));
+    ASSERT(written == 8, "caps_exit_write → 8 bytes");
+    ASSERT(memcmp(buf, raw, 8) == 0, "caps_exit_write matches input");
+
+    /* videoFourCcInfoMap */
+    lrtmp2_video_fourcc_info_map_t map;
+    uint8_t map_raw[] = {
+        0x00, 0x00, 0x00, 0x02, /* count = 2 */
+        0x00, 0x04, 'h', 'v', 'c', '1',
+        0x00, 0x04, 'a', 'v', '0', '1'
+    };
+    rc = lrtmp2_ertmp_video_fourcc_info_map_parse(&map, map_raw, sizeof(map_raw));
+    ASSERT(rc == 2, "video_fourcc_info_map_parse → 2 entries");
+    ASSERT(strcmp(map.entries[0].cc, "hvc1") == 0, "map entry[0] == hvc1");
+    ASSERT(strcmp(map.entries[1].cc, "av01") == 0, "map entry[1] == av01");
+
+    size_t map_w = lrtmp2_ertmp_video_fourcc_info_map_write(&map, buf, sizeof(buf));
+    ASSERT(map_w == 4 + 2 * 6, "video_fourcc_info_map_write size");
+    ASSERT(memcmp(buf, map_raw, map_w) == 0, "map write matches");
+
+    /* Edge cases */
+    rc = lrtmp2_ertmp_caps_exit_parse(NULL, raw, 8);
+    ASSERT(rc == LRTMP2_ERR_INTERNAL, "NULL caps → INTERNAL");
+    rc = lrtmp2_ertmp_caps_exit_parse(&caps, raw, 4);
+    ASSERT(rc == LRTMP2_ERR_IO, "short caps → IO");
+}
+
+/* ── E-RTMP v2: reconnect ──────────────────────────────────────────── */
+
+static void test_reconnect(void) {
+    printf("\n--- reconnect ---\n");
+
+    lrtmp2_reconnect_t rc;
+
+    /* replay=0x00000001, limit=0x0000000A */
+    uint8_t raw[] = { 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x0A };
+    int rc2 = lrtmp2_ertmp_reconnect_parse(&rc, raw, sizeof(raw));
+    ASSERT(rc2 == LRTMP2_OK, "reconnect_parse OK");
+    ASSERT(rc.replay == 1, "replay == 1");
+    ASSERT(rc.limit == 10, "limit == 10");
+
+    /* Write roundtrip */
+    uint8_t buf[16];
+    size_t written = lrtmp2_ertmp_reconnect_write(&rc, buf, sizeof(buf));
+    ASSERT(written == 8, "reconnect_write → 8 bytes");
+    ASSERT(memcmp(buf, raw, 8) == 0, "reconnect_write matches input");
+
+    /* Edge cases */
+    rc2 = lrtmp2_ertmp_reconnect_parse(&rc, raw, 4);
+    ASSERT(rc2 == LRTMP2_ERR_IO, "short reconnect → IO");
+
+    /* limit=0 means "no limit" per spec */
+    uint8_t raw2[] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+    rc2 = lrtmp2_ertmp_reconnect_parse(&rc, raw2, sizeof(raw2));
+    ASSERT(rc2 == LRTMP2_OK, "reconnect_parse zeros OK");
+    ASSERT(rc.replay == 0 && rc.limit == 0, "replay=0 limit=0");
+}
+
+/* ── E-RTMP v2: multitrack ───────────────────────────────────────── */
+
+static void test_multitrack(void) {
+    printf("\n--- multitrack ---\n");
+
+    lrtmp2_multitrack_t mt;
+
+    /* type=0 (audio), name="audio_track" (11 chars) */
+    uint8_t raw_audio[] = {
+        0x00, /* AMF0_NUMBER marker */
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, /* number = 0 (audio) */
+        0x00, 0x0B, 'a', 'u', 'd', 'i', 'o', '_', 't', 'r', 'a', 'c', 'k' /* string */
+    };
+    int rc = lrtmp2_ertmp_multitrack_parse(&mt, raw_audio, sizeof(raw_audio));
+    ASSERT(rc == LRTMP2_OK, "multitrack_parse OK");
+    ASSERT(mt.type == LRTMP2_MULTITRACK_TYPE_AUDIO, "type == audio");
+    ASSERT(strcmp(mt.track_name, "audio_track") == 0, "name == audio_track");
+
+    /* Write roundtrip */
+    uint8_t buf[64];
+    size_t written = lrtmp2_ertmp_multitrack_write(&mt, buf, sizeof(buf));
+    ASSERT(written > 0, "multitrack_write > 0");
+
+    /* Video track: type=1 (video), name="video" (5 chars) */
+    uint8_t raw_vid[] = {
+        0x00, /* marker */
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, /* number = 1 (video) */
+        0x00, 0x05, 'v', 'i', 'd', 'e', 'o'
+    };
+    rc = lrtmp2_ertmp_multitrack_parse(&mt, raw_vid, sizeof(raw_vid));
+    ASSERT(rc == LRTMP2_OK, "multitrack_parse video OK");
+    ASSERT(mt.type == LRTMP2_MULTITRACK_TYPE_VIDEO, "type == video");
+    ASSERT(strcmp(mt.track_name, "video") == 0, "name == video");
+}
+
+/* ── E-RTMP v2: modex ───────────────────────────────────────────── */
+
+static void test_modex(void) {
+    printf("\n--- modex ---\n");
+
+    lrtmp2_modex_t modex;
+
+    /* NOP */
+    uint8_t nop_raw[] = { 0x80 };
+    int rc = lrtmp2_ertmp_modex_parse(&modex, nop_raw, sizeof(nop_raw));
+    ASSERT(rc == LRTMP2_OK, "modex_parse NOP OK");
+    ASSERT(modex.type == LRTMP2_MODEX_TYPE_NOP, "NOP type");
+
+    /* TIMESTAMP offset = 0x123456789ABCDEF0 */
+    uint8_t ts_raw[] = {
+        0x81, /* marker | TIMESTAMP */
+        0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0
+    };
+    rc = lrtmp2_ertmp_modex_parse(&modex, ts_raw, sizeof(ts_raw));
+    ASSERT(rc == LRTMP2_OK, "modex_parse TIMESTAMP OK");
+    ASSERT(modex.type == LRTMP2_MODEX_TYPE_TIMESTAMP, "TIMESTAMP type");
+    ASSERT(modex.offset == 0x123456789ABCDEF0ULL, "offset value");
+
+    /* Write roundtrip */
+    uint8_t buf[16];
+    size_t written = lrtmp2_ertmp_modex_write(&modex, buf, sizeof(buf));
+    ASSERT(written == 9, "modex_write TIMESTAMP → 9 bytes");
+    ASSERT(memcmp(buf, ts_raw, 9) == 0, "modex_write matches");
+
+    /* NOP write */
+    modex.type = LRTMP2_MODEX_TYPE_NOP;
+    modex.offset = 0;
+    written = lrtmp2_ertmp_modex_write(&modex, buf, sizeof(buf));
+    ASSERT(written == 1, "modex_write NOP → 1 byte");
+    ASSERT(buf[0] == 0x80, "NOP byte == 0x80");
+
+    /* Edge cases */
+    rc = lrtmp2_ertmp_modex_parse(&modex, nop_raw, 0);
+    ASSERT(rc == LRTMP2_ERR_IO, "empty → IO");
+
+    /* Invalid marker (no high bit) */
+    uint8_t bad_raw[] = { 0x00 };
+    rc = lrtmp2_ertmp_modex_parse(&modex, bad_raw, sizeof(bad_raw));
+    ASSERT(rc == LRTMP2_ERR_PROTOCOL, "no marker → PROTOCOL");
+
+    /* Unknown type — should be ignored gracefully */
+    uint8_t unknown_raw[] = { 0x85, 0xDE, 0xAD }; /* type=5, undefined */
+    rc = lrtmp2_ertmp_modex_parse(&modex, unknown_raw, sizeof(unknown_raw));
+    ASSERT(rc == LRTMP2_OK, "unknown type → OK (graceful)");
+    ASSERT(modex.type == LRTMP2_MODEX_TYPE_NOP, "unknown → NOP");
+}
+
 /* ── Main ─────────────────────────────────────────────────────────── */
 
 int test_ertmp_main(void) {
-    printf("=== librtmp2 E-RTMP v1 unit tests ===");
+    printf("=== librtmp2 E-RTMP v1+v2 unit tests ===");
 
     test_fourcc();
     test_exvideo();
     test_exaudio();
     test_hdr();
     test_fourcc_list();
+    test_caps();
+    test_reconnect();
+    test_multitrack();
+    test_modex();
 
     printf("\n=== Results: %d failures ===\n", g_failures);
     return g_failures > 0 ? 1 : 0;

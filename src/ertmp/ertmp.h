@@ -106,4 +106,64 @@ int    lrtmp2_ertmp_fourcc_list_add(lrtmp2_fourcc_list_t *list, const char *cc);
 int    lrtmp2_ertmp_fourcc_list_parse(lrtmp2_fourcc_list_t *list, const uint8_t *data, size_t len);
 size_t lrtmp2_ertmp_fourcc_list_write(const lrtmp2_fourcc_list_t *list, uint8_t *buf, size_t buf_size);
 
+/* ── Enhanced RTMP v2 capability negotiation (connect_caps.c) ────── */
+
+typedef struct {
+    lrtmp2_fourcc_t entries[LRTMP2_MAX_FOURCCS];
+    size_t count;
+} lrtmp2_video_fourcc_info_map_t;
+
+typedef struct {
+    uint32_t version;          /* protocol version */
+    int      video_codec_32;   /* videoCodecId (FourCC-encoded) */
+    int      audio_codec_32;   /* audioCodecId (FourCC-encoded) */
+} lrtmp2_caps_exit_t;
+
+int   lrtmp2_ertmp_caps_exit_parse(lrtmp2_caps_exit_t *caps, const uint8_t *data, size_t len);
+size_t lrtmp2_ertmp_caps_exit_write(const lrtmp2_caps_exit_t *caps, uint8_t *buf, size_t buf_size);
+
+int   lrtmp2_ertmp_video_fourcc_info_map_parse(lrtmp2_video_fourcc_info_map_t *map, const uint8_t *data, size_t len);
+size_t lrtmp2_ertmp_video_fourcc_info_map_write(const lrtmp2_video_fourcc_info_map_t *map, uint8_t *buf, size_t buf_size);
+
+/* ── Enhanced RTMP v2 reconnect (reconnect.c) ────────────────────── */
+
+typedef struct {
+    uint32_t replay;
+    uint32_t limit;
+} lrtmp2_reconnect_t;
+
+int   lrtmp2_ertmp_reconnect_parse(lrtmp2_reconnect_t *rc, const uint8_t *data, size_t len);
+size_t lrtmp2_ertmp_reconnect_write(const lrtmp2_reconnect_t *rc, uint8_t *buf, size_t buf_size);
+
+/* ── Enhanced RTMP v2 multitrack (multitrack.c) ─────────────────── */
+
+typedef enum {
+    LRTMP2_MULTITRACK_TYPE_AUDIO = 0,
+    LRTMP2_MULTITRACK_TYPE_VIDEO = 1,
+    LRTMP2_MULTITRACK_TYPE_METDATA = 2,  /* note: spec typo */
+} lrtmp2_multitrack_type_t;
+
+typedef struct {
+    lrtmp2_multitrack_type_t type;
+    char track_name[64];
+} lrtmp2_multitrack_t;
+
+int   lrtmp2_ertmp_multitrack_parse(lrtmp2_multitrack_t *mt, const uint8_t *data, size_t len);
+size_t lrtmp2_ertmp_multitrack_write(const lrtmp2_multitrack_t *mt, uint8_t *buf, size_t buf_size);
+
+/* ── Enhanced RTMP v2 ModEx (modex.c) ──────────────────────────── */
+
+typedef enum {
+    LRTMP2_MODEX_TYPE_NOP = 0,
+    LRTMP2_MODEX_TYPE_TIMESTAMP = 1,
+} lrtmp2_modex_type_t;
+
+typedef struct {
+    lrtmp2_modex_type_t type;
+    uint64_t offset;
+} lrtmp2_modex_t;
+
+int   lrtmp2_ertmp_modex_parse(lrtmp2_modex_t *modex, const uint8_t *data, size_t len);
+size_t lrtmp2_ertmp_modex_write(const lrtmp2_modex_t *modex, uint8_t *buf, size_t buf_size);
+
 #endif
