@@ -4,7 +4,7 @@
  * Listens on port 1935, accepts one connection, logs incoming frames.
  * Usage: ./minimal_server [bind_addr:port]
  */
-#include "librtmp2.h"
+#include "librtmp2/librtmp2.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

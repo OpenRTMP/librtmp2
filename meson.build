@@ -15,6 +15,7 @@ core_sources = [
   'src/core/bytes.c',
   'src/core/log.c',
   'src/core/errors.c',
+  'src/core/lib.c',
 ]
 
 handshake_sources = [
@@ -31,7 +32,6 @@ message_sources = [
   'src/message/message.c',
   'src/message/control.c',
   'src/message/command.c',
-  'src/message/user_control.c',
 ]
 
 amf_sources = [
@@ -48,12 +48,7 @@ flv_sources = [
 
 ertmp_sources = [
   'src/ertmp/exvideo.c',
-  'src/ertmp/fourcc.c',
   'src/ertmp/metadata.c',
-  'src/ertmp/connect_caps.c',
-  'src/ertmp/reconnect.c',
-  'src/ertmp/multitrack.c',
-  'src/ertmp/modex.c',
 ]
 
 session_sources = [
@@ -72,28 +67,28 @@ client_sources = [
   'src/client/client.c',
 ]
 
-all_sources = core_sources + handshake_sources + chunk_sources +
+all_sources = (core_sources + handshake_sources + chunk_sources +
               message_sources + amf_sources + flv_sources + ertmp_sources +
-              session_sources + server_sources + client_sources
+              session_sources + server_sources + client_sources)
 
 # Library
 librtmp2_shared = shared_library('librtmp2',
   all_sources,
-  include_directories : include_directories('include'),
+  include_directories : include_directories('include', 'src'),
   version : meson.project_version(),
   install : true,
 )
 
 librtmp2_static = static_library('librtmp2',
   all_sources,
-  include_directories : include_directories('include'),
+  include_directories : include_directories('include', 'src'),
   install : true,
 )
 
 # Declare dependency for subprojects / pkg-config
 librtmp2_dep = declare_dependency(
   link_with : librtmp2_static,
-  include_directories : include_directories('include'),
+  include_directories : include_directories('include', 'src'),
 )
 
 # pkg-config
