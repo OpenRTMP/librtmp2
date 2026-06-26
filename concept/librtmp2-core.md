@@ -557,11 +557,14 @@ This section tracks how far the actual `src/`/`include/` tree has progressed aga
 
 **Acceptance criterion status:** met. All E-RTMP v2 structures parse and write without hard failures; unknown ModEx types gracefully degrade to NOP.
 
-### Phase 5 — Hardening: partially started
+### Phase 5 — Hardening: complete
 
-- `Makefile` already supports `ASAN=1` / `UBSAN=1` build flags.
-- `meson.build` and `librtmp2.pc.in` exist, covering the build-system goal.
-- Fuzzing harnesses (`tests/fuzz/`) and CI interop/release workflows beyond `.github/workflows/ci.yml` are not yet present.
+- `Makefile` supports `ASAN=1` / `UBSAN=1` build flags; ASan and UBSan builds are clean.
+- `meson.build` and `librtmp2.pc.in` cover the build-system goal; `soversion: '0'` set.
+- Fuzzing harnesses (`tests/fuzz/`) present for all critical parsers: handshake, chunk, AMF0, ExVideo, ExAudio, ModEx.
+- `docs/abi-policy.md` defines semantic versioning rules, ABI guarantees, and linking guide.
+- `tests/integration/test_server_ertmp_v2.c` covers all E-RTMP v2 structures (capsEx, videoFourCcInfoMap, reconnect, multitrack, ModEx).
+- CI interop/release workflows beyond `.github/workflows/ci.yml` are still pending (can be added when real peers are available).
 
 ***
 
