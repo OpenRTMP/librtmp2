@@ -63,6 +63,7 @@ int test_handshake_server(void)
         rc = 0;
     }
 cleanup:
+    lrtmp2_handshake_cleanup(&hs);
     lrtmp2_buffer_destroy(buf);
     return rc;
 }
@@ -127,6 +128,7 @@ int test_handshake_client(void)
         rc = 0;
     }
 cleanup_client:
+    lrtmp2_handshake_cleanup(&hs);
     lrtmp2_buffer_destroy(buf);
     return rc;
 }

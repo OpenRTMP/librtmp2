@@ -24,6 +24,16 @@ static uint32_t get_time(void)
     return (uint32_t)(time(NULL) & 0xFFFFFFFF);
 }
 
+void lrtmp2_handshake_cleanup(lrtmp2_handshake_t *hs)
+{
+    if (!hs) return;
+    LRTMP2_FREE(hs->out.data);
+    hs->out.data = NULL;
+    hs->out.size = 0;
+    hs->out.capacity = 0;
+    hs->out.read_pos = 0;
+}
+
 /* --- Server-side handshake --- */
 
 int lrtmp2_handshake_server_init(lrtmp2_handshake_t *hs)

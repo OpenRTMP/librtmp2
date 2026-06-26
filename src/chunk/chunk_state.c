@@ -12,6 +12,15 @@ static __thread int g_initialized = 0;
 
 void lrtmp2_chunk_streams_init(void)
 {
+    /* Free any reassembly buffers left over from a previous lifecycle so a
+     * re-init does not leak them. */
+    if (g_initialized) {
+        for (int i = 0; i < MAX_CHUNK_STREAMS; i++) {
+            if (g_streams[i].reassembly_buf) {
+                lrtmp2_buffer_destroy(g_streams[i].reassembly_buf);
+            }
+        }
+    }
     memset(g_streams, 0, sizeof(g_streams));
     g_initialized = 1;
 }
@@ -68,11 +77,11 @@ void lrtmp2_chunk_streams_destroy(void)
 void lrtmp2_chunk_stream_reset(lrtmp2_chunk_stream_t *stream)
 {
     if (!stream) return;
-    if (stream->reassembly_buf) {
-        lrtmp2_buffer_destroy(stream->reassembly_buf);
-    }
-    lrtmp2_buffer_t *buf = stream->reassembly_buf;  /* save pointer */
+    /* Keep the reassembly buffer allocated for reuse; just clear its contents
+     * and reset the rest of the stream state. */
+    lrtmp2_buffer_t *buf = stream->reassembly_buf;
     memset(stream, 0, sizeof(*stream));
-    stream->reassembly_buf = buf;  /* keep the buffer allocated for reuse */
+    stream->reassembly_buf = buf;
+    if (buf) lrtmp2_buffer_reset(buf);
     stream->chunk_size = LRTMP2_DEFAULT_CHUNK_SIZE;
 }

@@ -35,6 +35,10 @@ int lrtmp2_handshake_client_read_s0(lrtmp2_handshake_t *hs, lrtmp2_buffer_t *buf
 int lrtmp2_handshake_client_read_s1(lrtmp2_handshake_t *hs, lrtmp2_buffer_t *buf);
 int lrtmp2_handshake_client_read_s2(lrtmp2_handshake_t *hs, lrtmp2_buffer_t *buf);
 
+/* Release the internal output buffer allocated during the handshake.
+ * Safe to call on a zero-initialized or already-cleaned handshake. */
+void lrtmp2_handshake_cleanup(lrtmp2_handshake_t *hs);
+
 static inline int lrtmp2_handshake_complete(const lrtmp2_handshake_t *hs) {
     return hs->state == LRTMP2_HS_DONE;
 }

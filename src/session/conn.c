@@ -79,6 +79,7 @@ void lrtmp2_conn_destroy(lrtmp2_conn_t *conn)
     if (!conn) return;
     if (conn->recv_buffer) lrtmp2_buffer_destroy(conn->recv_buffer);
     if (conn->send_buffer) lrtmp2_buffer_destroy(conn->send_buffer);
+    lrtmp2_handshake_cleanup(&conn->handshake);
     pthread_mutex_destroy(&conn->send_mutex);
     lrtmp2_chunk_streams_destroy();
     LRTMP2_LOG_DEBUG("Connection destroyed");

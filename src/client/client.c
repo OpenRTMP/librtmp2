@@ -83,6 +83,8 @@ void lrtmp2_client_destroy(lrtmp2_client_t *client)
     }
     if (client->send_buffer) lrtmp2_buffer_destroy(client->send_buffer);
     if (client->recv_buffer) lrtmp2_buffer_destroy(client->recv_buffer);
+    lrtmp2_handshake_cleanup(&client->handshake);
+    lrtmp2_chunk_streams_destroy();
     LRTMP2_FREE(client);
 }
 

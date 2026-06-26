@@ -119,8 +119,9 @@ int lrtmp2_msg_decode(lrtmp2_conn_t *conn, const lrtmp2_chunk_message_t *chunk,
                     if (ah.is_ex_header) {
                         memcpy(frame.audio_fourcc.cc, ah.fourcc, sizeof(ah.fourcc));
                     }
-                    frame.data = payload + ah.header_size;
-                    frame.size = payload_len - ah.header_size;
+                    /* frame.data/size keep the full message payload (including the
+                     * codec/FLV header); parsed fields above expose the metadata.
+                     * This matches the client-side delivery semantics. */
                 }
 
                 if (conn->on_frame_cb) {
@@ -155,8 +156,9 @@ int lrtmp2_msg_decode(lrtmp2_conn_t *conn, const lrtmp2_chunk_message_t *chunk,
                     } else if (payload_len > 0) {
                         frame.video_codec = (lrtmp2_video_codec_t)(payload[0] & 0x0F);
                     }
-                    frame.data = payload + vh.header_size;
-                    frame.size = payload_len - vh.header_size;
+                    /* frame.data/size keep the full message payload (including the
+                     * codec/FLV header); parsed fields above expose the metadata.
+                     * This matches the client-side delivery semantics. */
                 }
 
                 if (conn->on_frame_cb) {
