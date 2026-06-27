@@ -6,7 +6,12 @@
 #include "librtmp2/types.h"
 
 #define LRTMP2_DEFAULT_CHUNK_SIZE 128
-#define LRTMP2_MAX_CHUNK_STREAMS  8
+
+/* Upper bound on the number of distinct chunk streams a single connection may
+ * open. The registry grows on demand up to this cap; the cap exists only to keep
+ * a malicious or buggy peer from exhausting memory by announcing endless csids.
+ * RTMP csids range up to 65599, but real clients use a small handful. */
+#define LRTMP2_MAX_CHUNK_STREAMS 4096
 
 typedef struct {
     uint32_t csid;
@@ -23,13 +28,21 @@ typedef struct {
 /* Per-connection chunk-stream registry. Each connection (or client) owns one of
  * these so concurrent connections served in a single thread do not share — and
  * corrupt — each other's chunk streams, reassembly buffers, or negotiated chunk
- * size. Embed it directly in the owning struct; no separate allocation needed. */
+ * size.
+ *
+ * Streams are individually heap-allocated and referenced through a dynamically
+ * grown pointer array, so the registry handles an arbitrary number of parallel
+ * chunk streams (up to LRTMP2_MAX_CHUNK_STREAMS) and a stream pointer handed to
+ * a caller stays valid even when the registry grows to admit new csids. */
 typedef struct {
-    lrtmp2_chunk_stream_t streams[LRTMP2_MAX_CHUNK_STREAMS];
+    lrtmp2_chunk_stream_t **streams; /* array of stream pointers (heap) */
+    size_t count;                    /* number of allocated stream nodes */
+    size_t capacity;                 /* capacity of the streams array */
     /* Chunk size applied to chunk streams created after the peer's SetChunkSize.
      * Without this, streams opened later (e.g. ffmpeg's audio/video csids, which
      * it opens after announcing its chunk size) would default to 128 and the
-     * incoming media would be mis-framed. */
+     * incoming media would be mis-framed. This is also the connection's current
+     * view of the peer's chunk size. */
     uint32_t default_chunk_size;
     int initialized;
 } lrtmp2_chunk_registry_t;
@@ -44,12 +57,13 @@ typedef struct {
     int      is_complete;
 } lrtmp2_chunk_message_t;
 
-/* Initialize (or re-initialize) a registry. Frees any reassembly buffers left
- * over from a previous lifecycle so a re-init does not leak them. */
+/* Initialize (or re-initialize) a registry. Frees any streams/reassembly buffers
+ * left over from a previous lifecycle so a re-init does not leak them. */
 void lrtmp2_chunk_registry_init(lrtmp2_chunk_registry_t *reg);
 
-/* Find an existing chunk stream for `csid` in `reg`, or allocate a new slot.
- * Returns NULL if all slots are in use. */
+/* Find an existing chunk stream for `csid` in `reg`, or allocate a new one,
+ * growing the registry as needed. Returns NULL on allocation failure or when the
+ * LRTMP2_MAX_CHUNK_STREAMS cap is reached. */
 lrtmp2_chunk_stream_t *lrtmp2_chunk_stream_get(lrtmp2_chunk_registry_t *reg, uint32_t csid);
 
 void lrtmp2_chunk_stream_reset(lrtmp2_chunk_registry_t *reg, lrtmp2_chunk_stream_t *stream);
@@ -59,8 +73,8 @@ void lrtmp2_chunk_stream_reset(lrtmp2_chunk_registry_t *reg, lrtmp2_chunk_stream
  * remembers it for streams created later. */
 void lrtmp2_chunk_stream_set_all_chunk_size(lrtmp2_chunk_registry_t *reg, uint32_t chunk_size);
 
-/* Destroy all chunk streams in `reg` and free reassembly buffers. Call at
- * connection close. The registry struct itself is not freed. */
+/* Destroy all chunk streams in `reg` and free reassembly buffers and the stream
+ * array. Call at connection close. The registry struct itself is not freed. */
 void lrtmp2_chunk_registry_destroy(lrtmp2_chunk_registry_t *reg);
 
 #endif

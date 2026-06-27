@@ -65,7 +65,6 @@ lrtmp2_conn_t *lrtmp2_conn_create(lrtmp2_server_t *server, const lrtmp2_server_c
     }
 
     conn->chunk_size = (config && config->chunk_size > 0) ? (uint32_t)config->chunk_size : LRTMP2_DEFAULT_CHUNK_SIZE;
-    conn->peer_chunk_size = LRTMP2_DEFAULT_CHUNK_SIZE;
     conn->window_ack_size = 0;
 
     pthread_mutex_init(&conn->send_mutex, NULL);

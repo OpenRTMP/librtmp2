@@ -59,7 +59,6 @@ lrtmp2_client_t *lrtmp2_client_create(const lrtmp2_server_config_t *config)
     client->client_fd = -1;
     client->state = LRTMP2_CLIENT_DISCONNECTED;
     client->config = config;
-    client->peer_chunk_size = LRTMP2_DEFAULT_CHUNK_SIZE;
     lrtmp2_handshake_client_init(&client->handshake);
 
     client->send_buffer = lrtmp2_buffer_create();
@@ -194,7 +193,6 @@ static int client_pump(lrtmp2_client_t *client, const char *wanted_name,
             case RTMP_MSG_SET_CHUNK_SIZE: {
                 uint32_t cs;
                 if (lrtmp2_msg_read_set_chunk_size(payload, &cs) == LRTMP2_OK) {
-                    client->peer_chunk_size = cs;
                     lrtmp2_chunk_stream_set_all_chunk_size(&client->chunk_reg, cs);
                     LRTMP2_LOG_INFO("Peer SetChunkSize: %u", cs);
                 }

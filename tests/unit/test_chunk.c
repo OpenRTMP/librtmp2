@@ -150,12 +150,65 @@ int test_chunk_multi_fragment(void)
     return 1;
 }
 
+int test_chunk_registry_grow(void)
+{
+    /* Open far more chunk streams than the old fixed limit (8) to verify the
+     * registry grows dynamically, hands back distinct stable nodes, returns the
+     * same node for a repeated csid, and reuses freed slots. */
+    lrtmp2_chunk_registry_t reg;
+    memset(&reg, 0, sizeof(reg));
+    lrtmp2_chunk_registry_init(&reg);
+
+    enum { N = 100 };
+    lrtmp2_chunk_stream_t *nodes[N];
+    for (int i = 0; i < N; i++) {
+        nodes[i] = lrtmp2_chunk_stream_get(&reg, (uint32_t)(100 + i));
+        if (!nodes[i]) {
+            printf("FAIL: registry_get returned NULL at csid %d\n", 100 + i);
+            lrtmp2_chunk_registry_destroy(&reg);
+            return 0;
+        }
+    }
+
+    /* Repeated lookups must return the identical node, and nodes must be
+     * distinct from one another. */
+    for (int i = 0; i < N; i++) {
+        if (lrtmp2_chunk_stream_get(&reg, (uint32_t)(100 + i)) != nodes[i]) {
+            printf("FAIL: repeated get for csid %d returned a different node\n", 100 + i);
+            lrtmp2_chunk_registry_destroy(&reg);
+            return 0;
+        }
+        for (int j = i + 1; j < N; j++) {
+            if (nodes[i] == nodes[j]) {
+                printf("FAIL: csid %d and %d share a node\n", 100 + i, 100 + j);
+                lrtmp2_chunk_registry_destroy(&reg);
+                return 0;
+            }
+        }
+    }
+
+    /* Free one slot and confirm a new csid reuses that node rather than growing. */
+    nodes[0]->in_use = 0;
+    size_t count_before = reg.count;
+    lrtmp2_chunk_stream_t *reused = lrtmp2_chunk_stream_get(&reg, 9999);
+    if (reused != nodes[0] || reg.count != count_before) {
+        printf("FAIL: freed slot was not reused (count %zu -> %zu)\n", count_before, reg.count);
+        lrtmp2_chunk_registry_destroy(&reg);
+        return 0;
+    }
+
+    lrtmp2_chunk_registry_destroy(&reg);
+    printf("PASS: chunk registry dynamic growth\n");
+    return 1;
+}
+
 int test_chunk_main(void)
 {
     int passed = 0;
     printf("Running chunk tests...\n");
     if (test_chunk_write_read_basic()) passed++;
     if (test_chunk_multi_fragment()) passed++;
-    printf("Chunk tests: %d/2 passed\n", passed);
-    return (passed >= 2) ? 0 : 1;
+    if (test_chunk_registry_grow()) passed++;
+    printf("Chunk tests: %d/3 passed\n", passed);
+    return (passed >= 3) ? 0 : 1;
 }
