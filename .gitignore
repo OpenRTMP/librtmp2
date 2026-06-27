@@ -4,6 +4,10 @@
 *.so
 *.o.d
 
+# ABI dumps
+abi-dumps/
+install-abi-*/
+
 # Test binaries
 **/run_tests
 **/run_*

@@ -22,9 +22,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y meson ninja-build
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y meson ninja-build abigail-tools libabigail-dev abi-compliance-checker
 
       - name: Build (release)
         run: make release
@@ -34,6 +38,9 @@ jobs:
 
       - name: Run unit tests (ASan)
         run: make clean && make DEBUG=1 ASAN=1 test
+
+      - name: ABI compliance check
+        run: ./scripts/abi-baseline.sh compare HEAD
 
   package:
     name: build & package
