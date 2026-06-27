@@ -25,6 +25,11 @@ int  lrtmp2_server_poll(lrtmp2_server_t *server, int timeout_ms);
 void lrtmp2_server_stop(lrtmp2_server_t *server);
 void lrtmp2_stream_append_to_server(lrtmp2_server_t *server, lrtmp2_stream_t *stream);
 
+/* Unlink and destroy every stream owned by `conn` from the server's stream
+ * list. Must be called before a connection is freed, otherwise each
+ * createStream() call leaks a stream node for the lifetime of the server. */
+void lrtmp2_stream_remove_owned_by_conn(lrtmp2_server_t *server, struct lrtmp2_conn *conn);
+
 /* Process all active connections: recv data, process messages, flush responses */
 int lrtmp2_server_process_connections(lrtmp2_server_t *server);
 

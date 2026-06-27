@@ -97,7 +97,7 @@ int lrtmf2_amf3_read_string(lrtmp2_buffer_t *buf, char *out, size_t max_len, siz
         return LRTMP2_OK;
     }
 
-    if (len + 1 > max_len) return LRTMP2_ERR_AMF;
+    if (max_len == 0 || len >= max_len) return LRTMP2_ERR_AMF;
 
     if (lrtmp2_buffer_read(buf, (uint8_t *)out, len) != 0) return LRTMP2_ERR_IO;
     out[len] = '\0';

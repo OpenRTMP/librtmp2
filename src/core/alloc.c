@@ -31,9 +31,13 @@ void *lrtmp2_malloc(size_t size)
 
 void *lrtmp2_calloc(size_t nmemb, size_t size)
 {
-    void *p = lrtmp2_malloc(nmemb * size);
+    if (nmemb != 0 && size > (size_t)-1 / nmemb) {
+        return NULL;  /* nmemb * size would overflow */
+    }
+    size_t total = nmemb * size;
+    void *p = lrtmp2_malloc(total);
     if (p) {
-        memset(p, 0, nmemb * size);
+        memset(p, 0, total);
     }
     return p;
 }

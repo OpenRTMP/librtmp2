@@ -6,6 +6,7 @@
 #include "session/stream.h"
 #include "session/publish.h"
 #include "session/play.h"
+#include "server/server.h"
 #include "core/alloc.h"
 #include "core/log.h"
 #include "amf/amf.h"
@@ -76,6 +77,9 @@ lrtmp2_conn_t *lrtmp2_conn_create(lrtmp2_server_t *server, const lrtmp2_server_c
 void lrtmp2_conn_destroy(lrtmp2_conn_t *conn)
 {
     if (!conn) return;
+    /* Streams created via createStream() are tracked in the server-wide list;
+     * free them here, otherwise they leak for the server's lifetime. */
+    if (conn->server) lrtmp2_stream_remove_owned_by_conn(conn->server, conn);
     if (conn->recv_buffer) lrtmp2_buffer_destroy(conn->recv_buffer);
     if (conn->send_buffer) lrtmp2_buffer_destroy(conn->send_buffer);
     lrtmp2_handshake_cleanup(&conn->handshake);

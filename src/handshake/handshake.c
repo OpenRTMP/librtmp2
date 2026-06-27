@@ -94,6 +94,7 @@ int lrtmp2_handshake_server_read_c1(lrtmp2_handshake_t *hs, lrtmp2_buffer_t *buf
 
     if (!hs->out.data) {
         hs->out.data = LRTMP2_MALLOC(2 * HANDSHAKE_SIZE);
+        if (!hs->out.data) return LRTMP2_ERR_INTERNAL;
         hs->out.capacity = 2 * HANDSHAKE_SIZE;
     }
     hs->out.size = 0;
@@ -140,6 +141,7 @@ int lrtmp2_handshake_client_generate_c0c1(lrtmp2_handshake_t *hs)
 
     if (!hs->out.data) {
         hs->out.data = LRTMP2_MALLOC(1 + 2 * HANDSHAKE_SIZE);
+        if (!hs->out.data) return LRTMP2_ERR_INTERNAL;
         hs->out.capacity = 1 + 2 * HANDSHAKE_SIZE;
     }
 
