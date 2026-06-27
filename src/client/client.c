@@ -47,8 +47,6 @@
 #define RTMP_MSG_VIDEO                0x09
 #define RTMP_MSG_AMF0_COMMAND         0x14
 
-#define CLIENT_PAYLOAD_MAX (256 * 1024)
-
 static int on_connect_result(lrtmp2_client_t *client, lrtmp2_buffer_t *buf);
 
 lrtmp2_client_t *lrtmp2_client_create(const lrtmp2_server_config_t *config)

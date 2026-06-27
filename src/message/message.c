@@ -142,13 +142,6 @@ int lrtmp2_msg_decode(lrtmp2_conn_t *conn, const lrtmp2_chunk_message_t *chunk,
 {
     if (!conn || !chunk || !payload) return LRTMP2_ERR_INTERNAL;
 
-    lrtmp2_buffer_t buf;
-    memset(&buf, 0, sizeof(buf));
-    buf.data = (uint8_t *)payload;  /* safe: we only read */
-    buf.size = payload_len;
-    buf.read_pos = 0;
-    buf.capacity = payload_len;
-
     switch (chunk->msg_type_id) {
         case RTMP_MSG_SET_CHUNK_SIZE:
             {

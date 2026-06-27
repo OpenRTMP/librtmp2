@@ -363,7 +363,12 @@ int lrtmp2_conn_handle_command(lrtmp2_conn_t *conn, const uint8_t *payload, size
         lrtmp2_connect_info_t info;
         if (lrtmp2_cmd_read_connect(&buf, &info) != LRTMP2_OK) return LRTMP2_ERR_AMF;
         snprintf(conn->app, sizeof(conn->app), "%s", info.app);
-        lrtmp2_conn_transition(conn, LRTMP2_STATE_APP_CONNECTED);
+        /* The transition result is advisory: a backward/duplicate transition is
+         * logged and rejected inside lrtmp2_conn_transition (the state is left
+         * unchanged), but we still acknowledge the command, since re-issued or
+         * out-of-order control commands from a peer are tolerated rather than
+         * fatal. The (void) marks the ignore as intentional. */
+        (void)lrtmp2_conn_transition(conn, LRTMP2_STATE_APP_CONNECTED);
         lrtmp2_conn_send_connect_response(conn, info.transaction_id);
         LRTMP2_LOG_INFO("connect: app=%s", conn->app);
         if (conn->on_connect_cb) {
@@ -385,7 +390,7 @@ int lrtmp2_conn_handle_command(lrtmp2_conn_t *conn, const uint8_t *payload, size
             conn->next_stream_id++;
             uint32_t stream_id = conn->next_stream_id;
             conn->current_stream = lrtmp2_stream_create(conn, stream_id);
-            lrtmp2_conn_transition(conn, LRTMP2_STATE_STREAM_CREATED);
+            (void)lrtmp2_conn_transition(conn, LRTMP2_STATE_STREAM_CREATED);  /* advisory; see connect handler */
             lrtmp2_conn_send_create_stream_response(conn, txn, stream_id);
             LRTMP2_LOG_INFO("createStream: stream_id=%u", stream_id);
         }
@@ -398,7 +403,7 @@ int lrtmp2_conn_handle_command(lrtmp2_conn_t *conn, const uint8_t *payload, size
         if (conn->current_stream) {
             lrtmp2_publish_begin(conn->current_stream, stream_name);
         }
-        lrtmp2_conn_transition(conn, LRTMP2_STATE_PUBLISHING);
+        (void)lrtmp2_conn_transition(conn, LRTMP2_STATE_PUBLISHING);  /* advisory; see connect handler */
         uint32_t stream_id = conn->current_stream ? conn->current_stream->stream_id : 0;
         lrtmp2_conn_send_onstatus(conn, stream_id, "status", "NetStream.Publish.Start", "Publishing");
         LRTMP2_LOG_INFO("publish: stream=%s", stream_name);
@@ -413,7 +418,7 @@ int lrtmp2_conn_handle_command(lrtmp2_conn_t *conn, const uint8_t *payload, size
             lrtmp2_play_begin(conn, stream_name);
             conn->current_stream->is_playing = 1;
         }
-        lrtmp2_conn_transition(conn, LRTMP2_STATE_PLAYING);
+        (void)lrtmp2_conn_transition(conn, LRTMP2_STATE_PLAYING);  /* advisory; see connect handler */
         uint32_t stream_id = conn->current_stream ? conn->current_stream->stream_id : 0;
         lrtmp2_conn_send_onstatus(conn, stream_id, "status", "NetStream.Play.Start", "Playing");
         LRTMP2_LOG_INFO("play: stream=%s", stream_name);
