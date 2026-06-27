@@ -11,11 +11,12 @@ int test_chunk_main(void);
 int test_ertmp_main(void);
 int test_server_main(void);
 int test_control_main(void);
+int test_message_main(void);
 
 int main(void)
 {
     int total_passed = 0;
-    int total_tests = 7;
+    int total_tests = 8;
 
     printf("=== librtmp2 unit tests ===\n\n");
 
@@ -39,6 +40,9 @@ int main(void)
 
     printf("\n--- Control ---\n");
     total_passed += (test_control_main() == 0) ? 1 : 0;
+
+    printf("\n--- Message ---\n");
+    total_passed += (test_message_main() == 0) ? 1 : 0;
 
     printf("\n=== Results: %d/%d suites passed ===\n", total_passed, total_tests);
     return (total_passed == total_tests) ? 0 : 1;

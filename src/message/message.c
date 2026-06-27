@@ -140,7 +140,13 @@ int lrtmp2_msg_decode_aggregate(lrtmp2_conn_t *conn, const lrtmp2_chunk_message_
 int lrtmp2_msg_decode(lrtmp2_conn_t *conn, const lrtmp2_chunk_message_t *chunk,
                        const uint8_t *payload, size_t payload_len)
 {
-    if (!conn || !chunk || !payload) return LRTMP2_ERR_INTERNAL;
+    /* A zero-length message is delivered by the chunk reader as payload=NULL,
+     * payload_len=0, is_complete=1 (see lrtmp2_chunk_read). That is legitimate
+     * wire input — some peers send empty data/audio/video messages — so only a
+     * NULL payload that claims a non-zero length is an internal inconsistency.
+     * Each per-type handler below guards on payload_len before dereferencing
+     * payload, so a 0-length message flows through harmlessly. */
+    if (!conn || !chunk || (!payload && payload_len > 0)) return LRTMP2_ERR_INTERNAL;
 
     switch (chunk->msg_type_id) {
         case RTMP_MSG_SET_CHUNK_SIZE:
