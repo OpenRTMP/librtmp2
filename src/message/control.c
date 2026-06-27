@@ -138,7 +138,10 @@ int lrtmp2_msg_read_set_peer_bandwidth(const uint8_t *data, uint32_t *window, ui
 int lrtmp2_msg_read_user_control(const uint8_t *data, uint16_t *event_type, uint32_t *param1, uint32_t *param2)
 {
     if (!data || !event_type || !param1) return LRTMP2_ERR_INTERNAL;
-    *event_type = lrtmp2_byteswap16(*(const uint16_t *)data);
+    /* Read the 2-byte event type byte-wise: `data` points into a payload buffer
+     * with no alignment guarantee, so casting to uint16_t* would be an unaligned
+     * (undefined-behaviour) access on strict-alignment targets. */
+    *event_type = (uint16_t)((data[0] << 8) | data[1]);
     *param1 = lrtmp2_ntoh32(data + 2);
     if (param2) {
         *param2 = lrtmp2_ntoh32(data + 6);

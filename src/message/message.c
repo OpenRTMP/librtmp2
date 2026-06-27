@@ -153,7 +153,8 @@ int lrtmp2_msg_decode(lrtmp2_conn_t *conn, const lrtmp2_chunk_message_t *chunk,
         case RTMP_MSG_SET_CHUNK_SIZE:
             {
                 uint32_t cs;
-                if (lrtmp2_msg_read_set_chunk_size(payload, &cs) == LRTMP2_OK) {
+                if (payload_len >= 4 &&
+                    lrtmp2_msg_read_set_chunk_size(payload, &cs) == LRTMP2_OK) {
                     lrtmp2_chunk_stream_set_all_chunk_size(&conn->chunk_reg, cs);
                     LRTMP2_LOG_INFO("Peer SetChunkSize: %u", cs);
                 }
@@ -163,7 +164,8 @@ int lrtmp2_msg_decode(lrtmp2_conn_t *conn, const lrtmp2_chunk_message_t *chunk,
         case RTMP_MSG_ABORT_MESSAGE:
             {
                 uint32_t csid;
-                if (lrtmp2_msg_read_abort_message(payload, &csid) == LRTMP2_OK) {
+                if (payload_len >= 4 &&
+                    lrtmp2_msg_read_abort_message(payload, &csid) == LRTMP2_OK) {
                     lrtmp2_chunk_stream_t *cs =
                         lrtmp2_chunk_stream_get(&conn->chunk_reg, csid);
                     if (cs) {
@@ -177,7 +179,8 @@ int lrtmp2_msg_decode(lrtmp2_conn_t *conn, const lrtmp2_chunk_message_t *chunk,
         case RTMP_MSG_ACKNOWLEDGEMENT:
             {
                 uint32_t seq;
-                if (lrtmp2_msg_read_acknowledgement_size(payload, &seq) == LRTMP2_OK) {
+                if (payload_len >= 4 &&
+                    lrtmp2_msg_read_acknowledgement_size(payload, &seq) == LRTMP2_OK) {
                     LRTMP2_LOG_DEBUG("Acknowledgement: seq=%u", seq);
                 }
             }
@@ -186,7 +189,8 @@ int lrtmp2_msg_decode(lrtmp2_conn_t *conn, const lrtmp2_chunk_message_t *chunk,
         case RTMP_MSG_WINDOW_ACK_SIZE:
             {
                 uint32_t win;
-                if (lrtmp2_msg_read_window_ack_size(payload, &win) == LRTMP2_OK) {
+                if (payload_len >= 4 &&
+                    lrtmp2_msg_read_window_ack_size(payload, &win) == LRTMP2_OK) {
                     conn->window_ack_size = win;
                     LRTMP2_LOG_INFO("WindowAckSize: %u", win);
                 }
@@ -197,7 +201,8 @@ int lrtmp2_msg_decode(lrtmp2_conn_t *conn, const lrtmp2_chunk_message_t *chunk,
             {
                 uint32_t win;
                 uint8_t limit;
-                if (lrtmp2_msg_read_set_peer_bandwidth(payload, &win, &limit) == LRTMP2_OK) {
+                if (payload_len >= 5 &&
+                    lrtmp2_msg_read_set_peer_bandwidth(payload, &win, &limit) == LRTMP2_OK) {
                     LRTMP2_LOG_INFO("SetPeerBandwidth: win=%u limit=%u", win, limit);
                 }
             }
@@ -206,8 +211,14 @@ int lrtmp2_msg_decode(lrtmp2_conn_t *conn, const lrtmp2_chunk_message_t *chunk,
         case RTMP_MSG_USER_CONTROL:
             {
                 uint16_t evt;
-                uint32_t p1, p2;
-                if (lrtmp2_msg_read_user_control(payload, &evt, &p1, &p2) == LRTMP2_OK) {
+                uint32_t p1, p2 = 0;
+                /* event(2) + param1(4) = 6 bytes minimum; the optional second
+                 * param (e.g. SetBufferLength) needs 4 more. Only ask for it
+                 * when those bytes are present, else read_user_control would read
+                 * past the payload. */
+                if (payload_len >= 6 &&
+                    lrtmp2_msg_read_user_control(payload, &evt, &p1,
+                                                 payload_len >= 10 ? &p2 : NULL) == LRTMP2_OK) {
                     LRTMP2_LOG_DEBUG("UserControl: event=%u p1=%u p2=%u", evt, p1, p2);
                 }
             }

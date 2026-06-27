@@ -285,24 +285,35 @@ int lrtmp2_server_process_connections(lrtmp2_server_t *server)
             ssize_t n = recv(conn->client_fd, tmp_buf, sizeof(tmp_buf), MSG_DONTWAIT);
             if (n > 0) {
                 /* conn_recv already drives conn_process (and flushes responses)
-                 * internally; just flush any trailing queued bytes afterwards. */
-                lrtmp2_conn_recv(conn, tmp_buf, (size_t)n);
-                lrtmp2_conn_flush(conn);
-            } else if (n == 0) {
-                /* Client disconnected */
-                conn->state = LRTMP2_STATE_CLOSING;
-                if (server->config->on_close_cb) {
-                    server->config->on_close_cb(conn, server->config->userdata);
+                 * internally; just flush any trailing queued bytes afterwards.
+                 * A negative return means malformed/oversized input — tear the
+                 * connection down rather than spinning on un-parseable bytes. */
+                if (lrtmp2_conn_recv(conn, tmp_buf, (size_t)n) == LRTMP2_OK) {
+                    lrtmp2_conn_flush(conn);
+                } else {
+                    conn->state = LRTMP2_STATE_CLOSING;
                 }
-                conn->client_fd = -1;  /* block further processing */
+            } else if (n == 0) {
+                /* Client disconnected gracefully */
+                conn->state = LRTMP2_STATE_CLOSING;
             } else if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
-                /* Real error */
+                /* Real socket error */
                 conn->state = LRTMP2_STATE_CLOSING;
             }
         }
 
-        /* Remove dead connections from list (freed inside conn_destroy). */
-        if (conn->state >= LRTMP2_STATE_CLOSING && conn->client_fd < 0) {
+        /* Tear down any connection that has entered CLOSING. Close the socket and
+         * fire on_close exactly once (gated on a still-open fd), then unlink and
+         * free. Doing the close here — rather than only on the n==0 path — avoids
+         * leaking the socket fd and the connection struct on the error path. */
+        if (conn->state >= LRTMP2_STATE_CLOSING) {
+            if (conn->client_fd >= 0) {
+                close_socket(conn->client_fd);
+                conn->client_fd = -1;
+                if (server->config->on_close_cb) {
+                    server->config->on_close_cb(conn, server->config->userdata);
+                }
+            }
             if (prev) prev->next = next; else server->connections = next;
             lrtmp2_conn_destroy(conn);
         } else {

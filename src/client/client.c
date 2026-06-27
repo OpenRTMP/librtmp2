@@ -192,7 +192,8 @@ static int client_pump(lrtmp2_client_t *client, const char *wanted_name,
         switch (msg.msg_type_id) {
             case RTMP_MSG_SET_CHUNK_SIZE: {
                 uint32_t cs;
-                if (lrtmp2_msg_read_set_chunk_size(payload, &cs) == LRTMP2_OK) {
+                if (payload_len >= 4 &&
+                    lrtmp2_msg_read_set_chunk_size(payload, &cs) == LRTMP2_OK) {
                     lrtmp2_chunk_stream_set_all_chunk_size(&client->chunk_reg, cs);
                     LRTMP2_LOG_INFO("Peer SetChunkSize: %u", cs);
                 }
