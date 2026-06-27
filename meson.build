@@ -118,6 +118,8 @@ if build_tests
     'tests/unit/test_amf.c',
     'tests/unit/test_buffer.c',
     'tests/unit/test_ertmp.c',
+    'tests/unit/test_control.c',
+    'tests/unit/test_server.c',
   ]
   test_exec = executable('test_librtmp2',
     test_sources,
