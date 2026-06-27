@@ -7,15 +7,41 @@
 #include "core/alloc.h"
 #include <string.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <time.h>
 
 #define RTMP_VERSION     0x03
 #define HANDSHAKE_SIZE   1536
 
+/* SplitMix64: a small, fast PRNG used purely to fill the handshake's random
+ * payload. */
+static uint64_t splitmix64(uint64_t *state)
+{
+    uint64_t z = (*state += 0x9E3779B97F4A7C15ULL);
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+    return z ^ (z >> 31);
+}
+
+/* Fill `buf` with pseudo-random bytes. The previous implementation used the
+ * unseeded libc rand(), so the bytes were identical on every process start.
+ * We seed a per-call PRNG from the clock plus the destination address: this
+ * avoids touching the application's global rand() state and stays race-free
+ * for concurrent handshakes (each fills a distinct buffer). The simple RTMP
+ * handshake does not require cryptographic randomness — S2 merely echoes the
+ * peer's payload — so this is about determinism/quality, not security. */
 static void fill_random(uint8_t *buf, size_t len)
 {
-    for (size_t i = 0; i < len; i++) {
-        buf[i] = (uint8_t)(rand() & 0xFF);
+    uint64_t state = (uint64_t)time(NULL);
+    state ^= (uint64_t)(uintptr_t)buf;
+    state ^= (uint64_t)clock() << 16;
+
+    size_t i = 0;
+    while (i < len) {
+        uint64_t r = splitmix64(&state);
+        for (int b = 0; b < 8 && i < len; b++, i++) {
+            buf[i] = (uint8_t)(r >> (b * 8));
+        }
     }
 }
 

@@ -27,12 +27,55 @@ static int amf3_read_u8(lrtmp2_buffer_t *buf, uint8_t *val)
     return lrtmp2_buffer_read(buf, val, 1) == 0 ? 0 : -1;
 }
 
-static int amf3_read_u32(lrtmp2_buffer_t *buf, uint32_t *val)
+/* Read a U29 variable-length integer (AMF3 §1.3.1): up to four bytes, the
+ * first three contributing 7 bits each with bit 7 as a continuation flag; if a
+ * fourth byte is reached it contributes all 8 bits. */
+static int amf3_read_u29(lrtmp2_buffer_t *buf, uint32_t *val)
+{
+    uint32_t result = 0;
+    uint8_t b;
+    for (int i = 0; i < 4; i++) {
+        if (amf3_read_u8(buf, &b) != 0) return -1;
+        if (i < 3) {
+            result = (result << 7) | (uint32_t)(b & 0x7F);
+            if ((b & 0x80) == 0) {
+                *val = result;
+                return 0;
+            }
+        } else {
+            result = (result << 8) | b;
+        }
+    }
+    *val = result;
+    return 0;
+}
+
+/* Write a 29-bit value in U29 variable-length form (1–4 bytes). */
+static int amf3_write_u29(lrtmp2_buffer_t *buf, uint32_t val)
 {
     uint8_t b[4];
-    if (lrtmp2_buffer_read(buf, b, 4) != 0) return -1;
-    *val = ((uint32_t)b[0] << 24) | ((uint32_t)b[1] << 16) | ((uint32_t)b[2] << 8) | b[3];
-    return 0;
+    size_t n;
+    val &= 0x1FFFFFFF;
+    if (val < 0x80) {
+        b[0] = (uint8_t)val;
+        n = 1;
+    } else if (val < 0x4000) {
+        b[0] = (uint8_t)((val >> 7) | 0x80);
+        b[1] = (uint8_t)(val & 0x7F);
+        n = 2;
+    } else if (val < 0x200000) {
+        b[0] = (uint8_t)((val >> 14) | 0x80);
+        b[1] = (uint8_t)(((val >> 7) & 0x7F) | 0x80);
+        b[2] = (uint8_t)(val & 0x7F);
+        n = 3;
+    } else {
+        b[0] = (uint8_t)((val >> 22) | 0x80);
+        b[1] = (uint8_t)(((val >> 15) & 0x7F) | 0x80);
+        b[2] = (uint8_t)(((val >> 8) & 0x7F) | 0x80);
+        b[3] = (uint8_t)(val & 0xFF);
+        n = 4;
+    }
+    return lrtmp2_buffer_write(buf, b, n);
 }
 
 static int amf3_read_double(lrtmp2_buffer_t *buf, double *val)
@@ -60,7 +103,7 @@ int lrtmf2_amf3_read_null(lrtmp2_buffer_t *buf)
 
 int lrtmf2_amf3_read_integer(lrtmp2_buffer_t *buf, uint32_t *val)
 {
-    return amf3_read_u32(buf, val) == 0 ? LRTMP2_OK : LRTMP2_ERR_IO;
+    return amf3_read_u29(buf, val) == 0 ? LRTMP2_OK : LRTMP2_ERR_IO;
 }
 
 int lrtmf2_amf3_read_double(lrtmp2_buffer_t *buf, double *val)
@@ -84,7 +127,7 @@ int lrtmf2_amf3_read_string(lrtmp2_buffer_t *buf, char *out, size_t max_len, siz
     if (amf3_read_u8(buf, &t) != 0 || t != AMF3_STRING) return LRTMP2_ERR_AMF;
 
     uint32_t ref;
-    if (amf3_read_u32(buf, &ref) != 0) return LRTMP2_ERR_IO;
+    if (amf3_read_u29(buf, &ref) != 0) return LRTMP2_ERR_IO;
 
     /* U29 encoding: low bit = inline flag */
     uint32_t len = ref >> 1;
@@ -115,8 +158,7 @@ int lrtmf2_amf3_write_integer(lrtmp2_buffer_t *buf, uint32_t val)
 {
     uint8_t t = AMF3_INTEGER;
     lrtmp2_buffer_write(buf, &t, 1);
-    uint32_t net = lrtmp2_byteswap32(val);
-    return lrtmp2_buffer_write(buf, (uint8_t *)&net, 4);
+    return amf3_write_u29(buf, val);
 }
 
 int lrtmf2_amf3_write_double(lrtmp2_buffer_t *buf, double val)
@@ -133,10 +175,13 @@ int lrtmf2_amf3_write_double(lrtmp2_buffer_t *buf, double val)
 int lrtmf2_amf3_write_string(lrtmp2_buffer_t *buf, const char *str)
 {
     size_t len = strlen(str);
+    /* The inline length is carried in the high 28 bits of a U29 (low bit is the
+     * inline flag), so lengths must fit in 28 bits. */
+    if (len > 0x0FFFFFFF) return LRTMP2_ERR_AMF;
     uint8_t t = AMF3_STRING;
     lrtmp2_buffer_write(buf, &t, 1);
     /* U29: (len << 1) | 1 = inline */
-    uint32_t u29 = lrtmp2_byteswap32((uint32_t)((len << 1) | 1));
-    lrtmp2_buffer_write(buf, (uint8_t *)&u29, 4);
+    int rc = amf3_write_u29(buf, (uint32_t)((len << 1) | 1));
+    if (rc != LRTMP2_OK) return rc;
     return lrtmp2_buffer_write(buf, (const uint8_t *)str, len);
 }
