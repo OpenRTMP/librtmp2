@@ -83,12 +83,12 @@ PREFIX ?= /usr/local
 
 install: $(LIB_SO) $(LIB_A)
 	mkdir -p $(PREFIX)/lib/pkgconfig $(PREFIX)/include/librtmp2
-	install -m 755 $(LIB_SO) $(PREFIX)/lib/$(LIB_SO).0.1.0
-	ln -sf $(LIB_SO).0.1.0 $(PREFIX)/lib/$(LIB_SO).0
+	install -m 755 $(LIB_SO) $(PREFIX)/lib/$(LIB_SO).0.0.1
+	ln -sf $(LIB_SO).0.0.1 $(PREFIX)/lib/$(LIB_SO).0
 	ln -sf $(LIB_SO).0 $(PREFIX)/lib/$(LIB_SO)
 	install -m 644 $(LIB_A) $(PREFIX)/lib/
 	install -m 644 include/librtmp2/*.h $(PREFIX)/include/librtmp2/
-	sed 's|@PREFIX@|$(PREFIX)|g; s|@VERSION@|0.1.0|g; s|@LIBS@|-llibrtmp2|g' librtmp2.pc.in > $(PREFIX)/lib/pkgconfig/librtmp2.pc
+	sed 's|@PREFIX@|$(PREFIX)|g; s|@VERSION@|0.0.1-alpha|g; s|@LIBS@|-llibrtmp2|g' librtmp2.pc.in > $(PREFIX)/lib/pkgconfig/librtmp2.pc
 
 test: $(TEST_BIN)
 	./$(TEST_BIN)
