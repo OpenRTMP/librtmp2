@@ -4,7 +4,7 @@ CC ?= gcc
 AR ?= ar
 CFLAGS_EXTRA ?=
 
-CFLAGS = -Wall -Wextra -Wpedantic -Wshadow -Wstrict-prototypes -Wno-implicit-function-declaration -Wno-return-type
+CFLAGS = -Wall -Wextra -Wpedantic -Wshadow -Wstrict-prototypes
 CFLAGS += -Iinclude -Isrc
 
 ifdef DEBUG
