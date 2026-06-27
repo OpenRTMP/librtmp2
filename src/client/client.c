@@ -249,6 +249,18 @@ static int client_pump(lrtmp2_client_t *client, const char *wanted_name,
     }
 }
 
+/* Parse a TCP port from a NUL-terminated string. Returns the port on success,
+ * or -1 if the string is empty, non-numeric, has trailing junk, or falls
+ * outside 1..65535. atoi() silently turned all of those into a bogus port. */
+static int parse_port(const char *s)
+{
+    if (!s || *s == '\0') return -1;
+    char *end = NULL;
+    long v = strtol(s, &end, 10);
+    if (end == s || *end != '\0' || v < 1 || v > 65535) return -1;
+    return (int)v;
+}
+
 int lrtmp2_client_connect(lrtmp2_client_t *client, const char *url)
 {
     if (!client || !url) return LRTMP2_ERR_INTERNAL;
@@ -287,7 +299,12 @@ int lrtmp2_client_connect(lrtmp2_client_t *client, const char *url)
 
     char *colon = strrchr(host, ':');
     if (colon) {
-        port = atoi(colon + 1);
+        int parsed = parse_port(colon + 1);
+        if (parsed < 0) {
+            LRTMP2_LOG_ERROR("Invalid port in URL: %s", colon + 1);
+            return LRTMP2_ERR_INTERNAL;
+        }
+        port = parsed;
         *colon = '\0';
     }
 

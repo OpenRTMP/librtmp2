@@ -107,6 +107,18 @@ void lrtmp2_server_destroy(lrtmp2_server_t *server)
     LRTMP2_FREE(server);
 }
 
+/* Parse a TCP port from a NUL-terminated string. Returns the port on success,
+ * or -1 if the string is empty, non-numeric, has trailing junk, or falls
+ * outside 1..65535. atoi() silently turned all of those into a bogus port. */
+static int parse_port(const char *s)
+{
+    if (!s || *s == '\0') return -1;
+    char *end = NULL;
+    long v = strtol(s, &end, 10);
+    if (end == s || *end != '\0' || v < 1 || v > 65535) return -1;
+    return (int)v;
+}
+
 int lrtmp2_server_listen(lrtmp2_server_t *server, const char *bind_addr)
 {
     if (!server || !bind_addr) return LRTMP2_ERR_INTERNAL;
@@ -121,7 +133,11 @@ int lrtmp2_server_listen(lrtmp2_server_t *server, const char *bind_addr)
         if (host_len >= sizeof(host)) return LRTMP2_ERR_INTERNAL;
         memcpy(host, bind_addr, host_len);
         host[host_len] = '\0';
-        port = atoi(colon + 1);
+        port = parse_port(colon + 1);
+        if (port < 0) {
+            LRTMP2_LOG_ERROR("Invalid port in bind address: %s", colon + 1);
+            return LRTMP2_ERR_INTERNAL;
+        }
     } else {
         snprintf(host, sizeof(host), "%s", bind_addr);
     }
