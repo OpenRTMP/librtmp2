@@ -15,17 +15,16 @@
 
 int lrtmp2_ertmp_multitrack_parse(lrtmp2_multitrack_t *mt, const uint8_t *data, size_t len)
 {
-    if (!mt || !data || len < 7) return LRTMP2_ERR_IO;
+    /* Need at least the AMF0_NUMBER marker (1) + the 8-byte value before the
+     * track-name field. The name-length read below is guarded separately. */
+    if (!mt || !data || len < 9) return LRTMP2_ERR_IO;
 
     memset(mt, 0, sizeof(*mt));
 
     /* track_type is sent as AMF0_NUMBER (UI64 big-endian) */
     if (data[0] != 0x00) return LRTMP2_ERR_PROTOCOL;
 
-    /* Skip 8-byte number (AMF0_NUMBER) */
-    uint8_t type_byte = data[8];  /* first byte of AMF0_NUMBER is always 0x00 */
-    (void)type_byte;
-    /* Re-read the type from bytes 1..8 as a 64-bit value */
+    /* Read the type from bytes 1..8 as a 64-bit value */
     uint64_t type_val = 0;
     for (int i = 0; i < 8; i++) {
         type_val = (type_val << 8) | data[1 + i];
