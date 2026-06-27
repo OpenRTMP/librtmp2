@@ -410,13 +410,10 @@ SemVer:
 - `0.x` while the API/ABI is still evolving
 - `1.0.0` once the header/API is stable
 
-Planned initial versions:
-- `0.1.0` Legacy RTMP server minimal
-- `0.2.0` Legacy RTMP client minimal
-- `0.3.0` E-RTMP v1 receive
-- `0.4.0` E-RTMP v1 send
-- `0.5.0` E-RTMP v2 capability layer
-- `0.6.0` Multitrack / reconnect / ModEx
+The first public release is `0.1.0` and ships the complete feature set at once
+(legacy RTMP plus E-RTMP v1/v2), rather than staging features across a sequence
+of `0.x` releases. The phase plan below describes the build order, not a release
+schedule.
 
 ***
 

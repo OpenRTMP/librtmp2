@@ -6,20 +6,26 @@ state of the code. The concept document holds the authoritative,
 continuously-updated implementation-status tracker; this file is the
 release-oriented summary.
 
-## Version Milestones (SemVer)
+## Release Strategy
 
-While the API/ABI is still evolving the project stays in the `0.x` range; `1.0.0`
-is cut once the public headers in `include/librtmp2/` are considered stable (see
-[`abi-policy.md`](abi-policy.md)).
+The first public release is `0.1.0` and ships the complete feature set below —
+legacy RTMP plus E-RTMP v1/v2 — rather than staging features across a sequence
+of `0.x` releases. The project stays in the `0.x` range while the API/ABI is
+still evolving; `1.0.0` is cut once the public headers in
+`include/librtmp2/` are considered stable (see [`abi-policy.md`](abi-policy.md)).
 
-| Version | Milestone | Status |
-|---------|-----------|--------|
-| `0.1.0` | Legacy RTMP server — minimal | Implemented; end-to-end tested in-tree |
-| `0.2.0` | Legacy RTMP client — minimal | Implemented; tested against own server |
-| `0.3.0` | E-RTMP v1 receive (HEVC/AV1 detection) | Implemented + tested |
-| `0.4.0` | E-RTMP v1 send | Implemented + tested |
-| `0.5.0` | E-RTMP v2 capability layer | Implemented + tested |
-| `0.6.0` | Multitrack / reconnect / ModEx | Implemented + tested |
+## Feature Status
+
+Everything below is implemented and targeted for the `0.1.0` release.
+
+| Feature | Status |
+|---------|--------|
+| Legacy RTMP server — minimal | Implemented; end-to-end tested in-tree |
+| Legacy RTMP client — minimal | Implemented; tested against own server |
+| E-RTMP v1 receive (HEVC/AV1 detection) | Implemented + tested |
+| E-RTMP v1 send | Implemented + tested |
+| E-RTMP v2 capability layer | Implemented + tested |
+| Multitrack / reconnect / ModEx | Implemented + tested |
 
 ## Phase Status
 
