@@ -58,13 +58,54 @@ int test_buffer_ensure_capacity(void)
     return 1;
 }
 
+int test_buffer_compact_after_read(void)
+{
+    lrtmp2_buffer_t *buf = lrtmp2_buffer_create();
+    if (!buf) {
+        printf("FAIL: buffer_create returned NULL\n");
+        return 0;
+    }
+
+    const size_t chunk = 64 * 1024;
+    uint8_t *block = malloc(chunk);
+    if (!block) {
+        printf("FAIL: malloc failed\n");
+        lrtmp2_buffer_destroy(buf);
+        return 0;
+    }
+    memset(block, 0xCD, chunk);
+
+    /* Fill, consume, and refill many times without compaction this would
+     * eventually hit LRTMP2_BUFFER_MAX_SIZE even though no data is retained. */
+    for (int i = 0; i < 512; i++) {
+        if (lrtmp2_buffer_write(buf, block, chunk) != 0) {
+            printf("FAIL: write failed on iteration %d\n", i);
+            free(block);
+            lrtmp2_buffer_destroy(buf);
+            return 0;
+        }
+        if (lrtmp2_buffer_read(buf, block, chunk) != 0) {
+            printf("FAIL: read failed on iteration %d\n", i);
+            free(block);
+            lrtmp2_buffer_destroy(buf);
+            return 0;
+        }
+    }
+
+    free(block);
+    lrtmp2_buffer_destroy(buf);
+    printf("PASS: compact-after-read test\n");
+    return 1;
+}
+
 int test_buffer_main(void)
 {
     int passed = 0;
     printf("Running buffer tests...\n");
     if (test_buffer_basic()) passed++;
     if (test_buffer_ensure_capacity()) passed++;
+    if (test_buffer_compact_after_read()) passed++;
 
     printf("Buffer tests: %d passed\n", passed);
-    return (passed == 2) ? 0 : 1;
+    return (passed == 3) ? 0 : 1;
 }

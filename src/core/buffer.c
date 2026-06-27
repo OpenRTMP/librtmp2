@@ -33,6 +33,18 @@ void lrtmp2_buffer_destroy(lrtmp2_buffer_t *buf)
     LRTMP2_FREE(buf);
 }
 
+static void buffer_compact(lrtmp2_buffer_t *buf)
+{
+    if (!buf || buf->read_pos == 0) return;
+
+    size_t avail = buf->size - buf->read_pos;
+    if (avail > 0) {
+        memmove(buf->data, buf->data + buf->read_pos, avail);
+    }
+    buf->size = avail;
+    buf->read_pos = 0;
+}
+
 static int buffer_ensure_capacity(lrtmp2_buffer_t *buf, size_t needed)
 {
     if (needed <= buf->capacity) return LRTMP2_OK;
@@ -63,6 +75,12 @@ static int buffer_ensure_capacity(lrtmp2_buffer_t *buf, size_t needed)
 int lrtmp2_buffer_write(lrtmp2_buffer_t *buf, const uint8_t *data, size_t len)
 {
     if (!buf || !data) return LRTMP2_ERR_INTERNAL;
+
+    buffer_compact(buf);
+
+    if (len > LRTMP2_BUFFER_MAX_SIZE || buf->size > LRTMP2_BUFFER_MAX_SIZE - len) {
+        return LRTMP2_ERR_INTERNAL;
+    }
 
     size_t needed = buf->size + len;
     int rc = buffer_ensure_capacity(buf, needed);
