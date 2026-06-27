@@ -89,10 +89,18 @@ int lrtmp2_msg_write_user_control_set_buffer_length(lrtmp2_buffer_t *buf, uint32
 
 /* --- Decoder --- */
 
+#define LRTMP2_MIN_CHUNK_SIZE 1u
+#define LRTMP2_MAX_CHUNK_SIZE 0xFFFFFFu  /* 24-bit RTMP limit */
+
 int lrtmp2_msg_read_set_chunk_size(const uint8_t *data, uint32_t *chunk_size)
 {
     if (!data || !chunk_size) return LRTMP2_ERR_INTERNAL;
-    *chunk_size = lrtmp2_ntoh32(data);
+    uint32_t cs = lrtmp2_ntoh32(data);
+    if (cs < LRTMP2_MIN_CHUNK_SIZE || cs > LRTMP2_MAX_CHUNK_SIZE) {
+        LRTMP2_LOG_WARN("SetChunkSize out of range: %u", cs);
+        return LRTMP2_ERR_PROTOCOL;
+    }
+    *chunk_size = cs;
     LRTMP2_LOG_DEBUG("SetChunkSize: %u", *chunk_size);
     return LRTMP2_OK;
 }

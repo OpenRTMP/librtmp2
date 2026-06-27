@@ -9,11 +9,13 @@ int test_buffer_main(void);
 int test_amf_main(void);
 int test_chunk_main(void);
 int test_ertmp_main(void);
+int test_server_main(void);
+int test_control_main(void);
 
 int main(void)
 {
     int total_passed = 0;
-    int total_tests = 5;
+    int total_tests = 7;
 
     printf("=== librtmp2 unit tests ===\n\n");
 
@@ -31,6 +33,12 @@ int main(void)
 
     printf("\n--- E-RTMP v1 ---\n");
     total_passed += (test_ertmp_main() == 0) ? 1 : 0;
+
+    printf("\n--- Server ---\n");
+    total_passed += (test_server_main() == 0) ? 1 : 0;
+
+    printf("\n--- Control ---\n");
+    total_passed += (test_control_main() == 0) ? 1 : 0;
 
     printf("\n=== Results: %d/%d suites passed ===\n", total_passed, total_tests);
     return (total_passed == total_tests) ? 0 : 1;
