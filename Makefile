@@ -30,7 +30,8 @@ LIB_SO = liblibrtmp2.so
 LIB_A  = liblibrtmp2.a
 TEST_BIN = tests/run_tests
 
-TARGETS = $(LIB_SO) $(LIB_A)
+DUMP_FRAMES_BIN = examples/dump_frames/dump_frames
+TARGETS = $(LIB_SO) $(LIB_A) $(DUMP_FRAMES_BIN)
 
 # Default target
 .PHONY: debug release test asan fuzz install clean
@@ -76,7 +77,11 @@ tests/%.o: tests/%.c
 	$(CC) $(CFLAGS) -fPIC -c -o $@ $<
 
 # Examples
-examples/minimal_server/minimal_server.c: $(LIB_A)
+$(DUMP_FRAMES_BIN): examples/dump_frames/dump_frames.c $(LIB_A)
+	$(CC) $(CFLAGS) -o $@ $< $(LIB_A) $(LDFLAGS) -lm -lpthread
+
+examples/minimal_server/minimal_server.o: examples/minimal_server/minimal_server.c $(LIB_A)
+	$(CC) $(CFLAGS) -c -o $@ $<
 
 # Install
 PREFIX ?= /usr/local
@@ -88,7 +93,7 @@ install: $(LIB_SO) $(LIB_A)
 	ln -sf $(LIB_SO).0 $(PREFIX)/lib/$(LIB_SO)
 	install -m 644 $(LIB_A) $(PREFIX)/lib/
 	install -m 644 include/librtmp2/*.h $(PREFIX)/include/librtmp2/
-	sed 's|@PREFIX@|$(PREFIX)|g; s|@VERSION@|0.0.1|g; s|@LIBS@|-llibrtmp2|g' librtmp2.pc.in > $(PREFIX)/lib/pkgconfig/librtmp2.pc
+	sed 's|@PREFIX@|$(PREFIX)|g; s|@VERSION@|0.1.0|g; s|@LIBS@|-llibrtmp2|g' librtmp2.pc.in > $(PREFIX)/lib/pkgconfig/librtmp2.pc
 
 test: $(TEST_BIN)
 	./$(TEST_BIN)

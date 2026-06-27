@@ -1,0 +1,115 @@
+name: ABI Compliance Check
+
+on:
+  pull_request:
+    branches: [ main, develop ]
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  abi-check:
+    name: ABI compliance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            abi-compliance-checker \
+            abigail-tools \
+            libabigail-dev \
+            meson ninja-build \
+            pkg-config
+
+      - name: Build current (with debug symbols for ABI dump)
+        run: |
+          make clean
+          make DEBUG=1 all
+          make install PREFIX="$PWD/install-current"
+
+      - name: Generate ABI dump (current)
+        run: |
+          mkdir -p abi-dumps
+          # Use abidw to generate an ABI dump from the public headers + shared lib
+          abidw install-current/lib/liblibrtmp2.so \
+            --out-file abi-dumps/librtmp2-current.xml
+          echo "Current ABI dump:"
+          wc -l abi-dumps/librtmp2-current.xml
+
+      - name: Determine baseline ref
+        id: baseline
+        run: |
+          # Try to find the previous release tag
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          if [ -z "$PREV_TAG" ]; then
+            # Fallback: try common tag patterns
+            PREV_TAG=$(git tag --list 'v*' --sort=-version:refname | head -1 2>/dev/null || echo "")
+          fi
+          if [ -z "$PREV_TAG" ]; then
+            echo "No previous tag found. Skipping comparison."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Comparing against $PREV_TAG"
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "tag=$PREV_TAG" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout and build baseline
+        if: steps.baseline.outputs.skip == 'false'
+        run: |
+          git stash
+          git checkout ${{ steps.baseline.outputs.tag }}
+          make clean
+          make DEBUG=1 all
+          make install PREFIX="$PWD/install-baseline"
+          abidw install-baseline/lib/liblibrtmp2.so \
+            --out-file abi-dumps/librtmp2-baseline.xml
+          git checkout -
+          git stash pop
+
+      - name: Run ABI compliance check
+        if: steps.baseline.outputs.skip == 'false'
+        run: |
+          abi-compliance-checker \
+            -l librtmp2 \
+            -old abi-dumps/librtmp2-baseline.xml \
+            -new abi-dumps/librtmp2-current.xml \
+            -report-path abi-report.html \
+            -xml 2>&1 | tee abi-check-result.txt
+
+          # Check for breaking changes
+          if grep -q "Binary compatibility: Incompatible" abi-check-result.txt; then
+            echo "::error::ABI BREAKING CHANGES DETECTED!"
+            echo "::error::See abi-report.html for details."
+            exit 1
+          fi
+
+          if grep -q "Source compatibility: Incompatible" abi-check-result.txt; then
+            echo "::warning::Source compatibility issues detected."
+            echo "::warning::See abi-report.html for details."
+          fi
+
+          echo "✅ ABI check passed"
+
+      - name: Upload ABI report
+        if: steps.baseline.outputs.skip == 'false' && always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: abi-report
+          path: |
+            abi-report.html
+            abi-check-result.txt
+            abi-dumps/
+
+      - name: Upload baseline dump (for future comparisons)
+        if: steps.baseline.outputs.skip == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: abi-baseline-dump
+          path: abi-dumps/
