@@ -206,7 +206,7 @@ int lrtmf2_amf0_read_long_string(lrtmp2_buffer_t *buf, char *out, size_t max_len
     if (rc != LRTMP2_OK) return rc;
     /* str_len already in host order from amf_read_u32 */
 
-    if (str_len + 1 > max_len) return LRTMP2_ERR_AMF;
+    if (max_len == 0 || str_len >= max_len) return LRTMP2_ERR_AMF;
 
     rc = lrtmp2_buffer_read(buf, (uint8_t *)out, str_len);
     if (rc != LRTMP2_OK) return rc;
@@ -277,12 +277,8 @@ static int amf0_skip_value_depth(lrtmp2_buffer_t *buf, int depth)
                 uint16_t len;
                 rc = amf_read_u16(buf, &len);
                 if (rc != LRTMP2_OK) return rc;
-                /* Advance read position */
-                for (uint16_t i = 0; i < len; i++) {
-                    uint8_t b;
-                    rc = amf_read_u8(buf, &b);
-                    if (rc != LRTMP2_OK) return rc;
-                }
+                if (lrtmp2_buffer_available(buf) < len) return LRTMP2_ERR_IO;
+                lrtmp2_buffer_drain(buf, len);
                 return LRTMP2_OK;
             }
         case AMF0_LONG_STRING:
@@ -290,11 +286,8 @@ static int amf0_skip_value_depth(lrtmp2_buffer_t *buf, int depth)
                 uint32_t len;
                 rc = amf_read_u32(buf, &len);
                 if (rc != LRTMP2_OK) return rc;
-                for (uint32_t i = 0; i < len; i++) {
-                    uint8_t b;
-                    rc = amf_read_u8(buf, &b);
-                    if (rc != LRTMP2_OK) return rc;
-                }
+                if (lrtmp2_buffer_available(buf) < len) return LRTMP2_ERR_IO;
+                lrtmp2_buffer_drain(buf, len);
                 return LRTMP2_OK;
             }
         case AMF0_OBJECT:
@@ -317,11 +310,8 @@ static int amf0_skip_value_depth(lrtmp2_buffer_t *buf, int depth)
                 rc = amf_read_u16(buf, &klen);
                 if (rc != LRTMP2_OK) return rc;
                 /* klen already in host order */
-                for (uint16_t i = 0; i < klen; i++) {
-                    uint8_t b;
-                    rc = amf_read_u8(buf, &b);
-                    if (rc != LRTMP2_OK) return rc;
-                }
+                if (lrtmp2_buffer_available(buf) < klen) return LRTMP2_ERR_IO;
+                lrtmp2_buffer_drain(buf, klen);
                 /* Skip value */
                 rc = amf0_skip_value_depth(buf, depth + 1);
                 if (rc != LRTMP2_OK) return rc;

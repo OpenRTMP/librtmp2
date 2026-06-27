@@ -322,6 +322,25 @@ void lrtmp2_stream_append_to_server(lrtmp2_server_t *server, lrtmp2_stream_t *st
     pthread_mutex_unlock((pthread_mutex_t *)&server->streams_mutex);
 }
 
+void lrtmp2_stream_remove_owned_by_conn(lrtmp2_server_t *server, struct lrtmp2_conn *conn)
+{
+    if (!server) return;
+    pthread_mutex_lock(&server->streams_mutex);
+    lrtmp2_stream_t *s = server->streams;
+    lrtmp2_stream_t *prev = NULL;
+    while (s) {
+        lrtmp2_stream_t *next = s->next;
+        if (s->conn == conn) {
+            if (prev) prev->next = next; else server->streams = next;
+            lrtmp2_stream_destroy(s);
+        } else {
+            prev = s;
+        }
+        s = next;
+    }
+    pthread_mutex_unlock(&server->streams_mutex);
+}
+
 void lrtmp2_server_stop(lrtmp2_server_t *server)
 {
     if (!server) return;

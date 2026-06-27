@@ -191,7 +191,12 @@ int lrtmp2_chunk_read(lrtmp2_buffer_t *buf,
             size_t n = to_read - off;
             if (n > sizeof(tmp)) n = sizeof(tmp);
             if (lrtmp2_buffer_read(buf, tmp, n) != 0) goto need_more;
-            lrtmp2_buffer_write(cs->reassembly_buf, tmp, n);
+            if (lrtmp2_buffer_write(cs->reassembly_buf, tmp, n) != LRTMP2_OK) {
+                /* Reassembly buffer couldn't grow (OOM or size cap). Bail out
+                 * rather than reporting a complete message backed by a
+                 * buffer smaller than msg_length (would cause an over-read). */
+                return LRTMP2_ERR_INTERNAL;
+            }
             off += n;
         }
     }
