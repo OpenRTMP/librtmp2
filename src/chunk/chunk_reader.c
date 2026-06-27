@@ -51,10 +51,11 @@ int lrtmp2_chunk_read(lrtmp2_buffer_t *buf,
         if (lrtmp2_buffer_read(buf, &b, 1) != 0) goto need_more;
         csid = 64 + b;
     } else if (csid == 1) {
-        /* 3-byte form: csid = 64 + byte2 + byte3*256 */
-        uint8_t b[3];
-        if (lrtmp2_buffer_read(buf, b, 3) != 0) goto need_more;
-        csid = 64 + b[1] + b[2] * 256;
+        /* 3-byte form: the indicator byte is followed by exactly 2 bytes,
+         * csid = 64 + byte0 + byte1*256 (byte0 low, byte1 high). */
+        uint8_t b[2];
+        if (lrtmp2_buffer_read(buf, b, 2) != 0) goto need_more;
+        csid = 64 + b[0] + b[1] * 256;
     }
     /* csid 2-63: 1-byte form, no extra read needed */
 
