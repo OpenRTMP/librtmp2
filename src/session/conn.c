@@ -65,6 +65,12 @@ static int lrtmp2_conn_send_acknowledgement(lrtmp2_conn_t *conn, uint32_t seq)
     return conn_send_control(conn, RTMP_MSG_ACKNOWLEDGEMENT, b, sizeof(b));
 }
 
+int lrtmp2_conn_get_fd(const lrtmp2_conn_t *conn)
+{
+    if (!conn) return -1;
+    return conn->client_fd;
+}
+
 lrtmp2_conn_t *lrtmp2_conn_create(lrtmp2_server_t *server, const lrtmp2_server_config_t *config)
 {
     lrtmp2_conn_t *conn = LRTMP2_CALLOC(1, sizeof(lrtmp2_conn_t));

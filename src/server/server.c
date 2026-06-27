@@ -225,7 +225,6 @@ int lrtmp2_server_poll(lrtmp2_server_t *server, int timeout_ms)
 
     int rc = poll(pfds, nfds, timeout_ms);
     int listen_ready = (rc > 0 && (pfds[0].revents & POLLIN));
-    LRTMP2_FREE(pfds);
 
     if (rc < 0) {
         if (errno == EINTR) return 0;
@@ -275,6 +274,7 @@ int lrtmp2_server_poll(lrtmp2_server_t *server, int timeout_ms)
     /* Service data on all active connections (recv/process/flush). */
     lrtmp2_server_process_connections(server);
 
+    LRTMP2_FREE(pfds);
     return LRTMP2_OK;
 }
 

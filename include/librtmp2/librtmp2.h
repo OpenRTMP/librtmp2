@@ -36,6 +36,9 @@ int              lrtmp2_server_listen(lrtmp2_server_t *server, const char *bind_
 int              lrtmp2_server_poll(lrtmp2_server_t *server, int timeout_ms);
 void             lrtmp2_server_stop(lrtmp2_server_t *server);
 
+/* Accessors */
+int              lrtmp2_conn_get_fd(const lrtmp2_conn_t *conn);
+
 /* ==================== Client API ==================== */
 
 lrtmp2_client_t *lrtmp2_client_create(const lrtmp2_server_config_t *config);
