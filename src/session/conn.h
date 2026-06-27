@@ -20,8 +20,10 @@ struct lrtmp2_conn {
     lrtmp2_handshake_t         handshake;
     lrtmp2_buffer_t           *recv_buffer;
     lrtmp2_buffer_t           *send_buffer;
+    lrtmp2_chunk_registry_t    chunk_reg;  /* per-connection chunk-stream state;
+                                            * chunk_reg.default_chunk_size tracks
+                                            * the peer's negotiated chunk size */
     uint32_t                   chunk_size;
-    uint32_t                   peer_chunk_size;
     uint32_t                   window_ack_size;
     int                        client_fd;
     char                       app[256];

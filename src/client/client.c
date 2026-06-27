@@ -59,7 +59,6 @@ lrtmp2_client_t *lrtmp2_client_create(const lrtmp2_server_config_t *config)
     client->client_fd = -1;
     client->state = LRTMP2_CLIENT_DISCONNECTED;
     client->config = config;
-    client->peer_chunk_size = LRTMP2_DEFAULT_CHUNK_SIZE;
     lrtmp2_handshake_client_init(&client->handshake);
 
     client->send_buffer = lrtmp2_buffer_create();
@@ -84,7 +83,7 @@ void lrtmp2_client_destroy(lrtmp2_client_t *client)
     if (client->send_buffer) lrtmp2_buffer_destroy(client->send_buffer);
     if (client->recv_buffer) lrtmp2_buffer_destroy(client->recv_buffer);
     lrtmp2_handshake_cleanup(&client->handshake);
-    lrtmp2_chunk_streams_destroy();
+    lrtmp2_chunk_registry_destroy(&client->chunk_reg);
     LRTMP2_FREE(client);
 }
 
@@ -181,7 +180,7 @@ static int client_pump(lrtmp2_client_t *client, const char *wanted_name,
     size_t payload_len = 0;
 
     for (;;) {
-        int rc = lrtmp2_chunk_read(client->recv_buffer, NULL, &msg, &payload, &payload_len);
+        int rc = lrtmp2_chunk_read(client->recv_buffer, &client->chunk_reg, NULL, &msg, &payload, &payload_len);
         if (rc == 0) {
             int rrc = client_recv_more(client);
             if (rrc != LRTMP2_OK) return rrc;
@@ -194,8 +193,7 @@ static int client_pump(lrtmp2_client_t *client, const char *wanted_name,
             case RTMP_MSG_SET_CHUNK_SIZE: {
                 uint32_t cs;
                 if (lrtmp2_msg_read_set_chunk_size(payload, &cs) == LRTMP2_OK) {
-                    client->peer_chunk_size = cs;
-                    lrtmp2_chunk_stream_set_all_chunk_size(cs);
+                    lrtmp2_chunk_stream_set_all_chunk_size(&client->chunk_reg, cs);
                     LRTMP2_LOG_INFO("Peer SetChunkSize: %u", cs);
                 }
                 break;
@@ -315,7 +313,7 @@ int lrtmp2_client_connect(lrtmp2_client_t *client, const char *url)
     }
 
     client->state = LRTMP2_CLIENT_HANDSHAKING;
-    lrtmp2_chunk_streams_init();
+    lrtmp2_chunk_registry_init(&client->chunk_reg);
 
     /* C0+C1 */
     int rc = lrtmp2_handshake_client_generate_c0c1(&client->handshake);

@@ -19,8 +19,13 @@
  * only until the next lrtmp2_chunk_read() call for the same stream, so the
  * caller must consume it before reading again. Zero-copy: there is no fixed
  * output buffer, so arbitrarily large messages are returned without truncation.
+ *
+ * Chunk-stream state is looked up by csid in `registry` (per-connection). Pass an
+ * explicit `stream` to bypass the registry and use caller-owned state instead
+ * (used by tests/fuzzers); at least one of `registry`/`stream` must be non-NULL.
  */
 int lrtmp2_chunk_read(lrtmp2_buffer_t *buf,
+                       lrtmp2_chunk_registry_t *registry,
                        lrtmp2_chunk_stream_t *stream,
                        lrtmp2_chunk_message_t *msg,
                        const uint8_t **out_payload, size_t *out_len);

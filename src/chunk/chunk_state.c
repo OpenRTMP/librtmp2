@@ -1,88 +1,126 @@
 /**
- * chunk_state.c — Per-chunk-stream state
+ * chunk_state.c — Per-connection chunk-stream state
  */
 #include "chunk_state.h"
 #include "core/log.h"
 #include <string.h>
 
-#define MAX_CHUNK_STREAMS 8
+#define LRTMP2_CHUNK_STREAMS_INITIAL_CAP 8
 
-static __thread lrtmp2_chunk_stream_t g_streams[MAX_CHUNK_STREAMS];
-static __thread int g_initialized = 0;
-/* Chunk size applied to chunk streams created after the peer's SetChunkSize.
- * Without this, streams opened later (e.g. ffmpeg's audio/video csids, which
- * it opens after announcing its chunk size) would default to 128 and the
- * incoming media would be mis-framed. */
-static __thread uint32_t g_default_chunk_size = LRTMP2_DEFAULT_CHUNK_SIZE;
-
-void lrtmp2_chunk_streams_init(void)
+static void registry_free_streams(lrtmp2_chunk_registry_t *reg)
 {
-    /* Free any reassembly buffers left over from a previous lifecycle so a
-     * re-init does not leak them. */
-    if (g_initialized) {
-        for (int i = 0; i < MAX_CHUNK_STREAMS; i++) {
-            if (g_streams[i].reassembly_buf) {
-                lrtmp2_buffer_destroy(g_streams[i].reassembly_buf);
-            }
-        }
+    if (!reg->streams) return;
+    for (size_t i = 0; i < reg->count; i++) {
+        lrtmp2_chunk_stream_t *s = reg->streams[i];
+        if (!s) continue;
+        if (s->reassembly_buf) lrtmp2_buffer_destroy(s->reassembly_buf);
+        LRTMP2_FREE(s);
     }
-    memset(g_streams, 0, sizeof(g_streams));
-    g_default_chunk_size = LRTMP2_DEFAULT_CHUNK_SIZE;
-    g_initialized = 1;
+    LRTMP2_FREE(reg->streams);
+    reg->streams = NULL;
+    reg->count = 0;
+    reg->capacity = 0;
 }
 
-lrtmp2_chunk_stream_t *lrtmp2_chunk_stream_get(uint32_t csid)
+void lrtmp2_chunk_registry_init(lrtmp2_chunk_registry_t *reg)
 {
-    if (!g_initialized) lrtmp2_chunk_streams_init();
-
-    /* Find existing or allocate new */
-    for (int i = 0; i < MAX_CHUNK_STREAMS; i++) {
-        if (g_streams[i].csid == csid && g_streams[i].in_use) {
-            return &g_streams[i];
-        }
+    if (!reg) return;
+    /* Free anything left over from a previous lifecycle so a re-init does not
+     * leak streams or their reassembly buffers. */
+    if (reg->initialized) {
+        registry_free_streams(reg);
     }
-
-    /* Allocate a new slot */
-    for (int i = 0; i < MAX_CHUNK_STREAMS; i++) {
-        if (!g_streams[i].in_use) {
-            memset(&g_streams[i], 0, sizeof(g_streams[i]));
-            g_streams[i].csid = csid;
-            g_streams[i].in_use = 1;
-            g_streams[i].chunk_size = g_default_chunk_size;
-            LRTMP2_LOG_DEBUG("Allocated chunk stream csid=%u (slot %d)", csid, i);
-            return &g_streams[i];
-        }
-    }
-
-    LRTMP2_LOG_ERROR("No free chunk stream slots for csid=%u", csid);
-    return NULL;
+    reg->streams = NULL;
+    reg->count = 0;
+    reg->capacity = 0;
+    reg->default_chunk_size = LRTMP2_DEFAULT_CHUNK_SIZE;
+    reg->initialized = 1;
 }
 
-void lrtmp2_chunk_stream_set_all_chunk_size(uint32_t chunk_size)
+lrtmp2_chunk_stream_t *lrtmp2_chunk_stream_get(lrtmp2_chunk_registry_t *reg, uint32_t csid)
 {
-    if (!g_initialized) lrtmp2_chunk_streams_init();
+    if (!reg) return NULL;
+    if (!reg->initialized) lrtmp2_chunk_registry_init(reg);
+
+    /* Find an existing stream for this csid. */
+    for (size_t i = 0; i < reg->count; i++) {
+        if (reg->streams[i]->in_use && reg->streams[i]->csid == csid) {
+            return reg->streams[i];
+        }
+    }
+
+    /* Reuse a previously freed slot if one exists (keeps its reassembly buffer
+     * allocated for reuse). */
+    for (size_t i = 0; i < reg->count; i++) {
+        lrtmp2_chunk_stream_t *s = reg->streams[i];
+        if (!s->in_use) {
+            lrtmp2_buffer_t *buf = s->reassembly_buf;
+            memset(s, 0, sizeof(*s));
+            s->reassembly_buf = buf;
+            if (buf) lrtmp2_buffer_reset(buf);
+            s->csid = csid;
+            s->in_use = 1;
+            s->chunk_size = reg->default_chunk_size;
+            return s;
+        }
+    }
+
+    /* Need a new stream node — guard against unbounded growth from a hostile
+     * peer announcing endless csids. */
+    if (reg->count >= LRTMP2_MAX_CHUNK_STREAMS) {
+        LRTMP2_LOG_ERROR("Chunk stream cap (%d) reached for csid=%u",
+                          LRTMP2_MAX_CHUNK_STREAMS, csid);
+        return NULL;
+    }
+
+    /* Grow the pointer array if full. */
+    if (reg->count == reg->capacity) {
+        size_t new_cap = reg->capacity ? reg->capacity * 2 : LRTMP2_CHUNK_STREAMS_INITIAL_CAP;
+        if (new_cap > LRTMP2_MAX_CHUNK_STREAMS) new_cap = LRTMP2_MAX_CHUNK_STREAMS;
+        lrtmp2_chunk_stream_t **grown =
+            LRTMP2_REALLOC(reg->streams, new_cap * sizeof(*grown));
+        if (!grown) {
+            LRTMP2_LOG_ERROR("Failed to grow chunk stream array for csid=%u", csid);
+            return NULL;
+        }
+        reg->streams = grown;
+        reg->capacity = new_cap;
+    }
+
+    lrtmp2_chunk_stream_t *s = LRTMP2_CALLOC(1, sizeof(*s));
+    if (!s) {
+        LRTMP2_LOG_ERROR("Failed to allocate chunk stream for csid=%u", csid);
+        return NULL;
+    }
+    s->csid = csid;
+    s->in_use = 1;
+    s->chunk_size = reg->default_chunk_size;
+    reg->streams[reg->count++] = s;
+    LRTMP2_LOG_DEBUG("Allocated chunk stream csid=%u (slot %zu)", csid, reg->count - 1);
+    return s;
+}
+
+void lrtmp2_chunk_stream_set_all_chunk_size(lrtmp2_chunk_registry_t *reg, uint32_t chunk_size)
+{
+    if (!reg) return;
+    if (!reg->initialized) lrtmp2_chunk_registry_init(reg);
     /* Apply to existing streams and remember it for streams created later. */
-    g_default_chunk_size = chunk_size;
-    for (int i = 0; i < MAX_CHUNK_STREAMS; i++) {
-        if (g_streams[i].in_use) {
-            g_streams[i].chunk_size = chunk_size;
+    reg->default_chunk_size = chunk_size;
+    for (size_t i = 0; i < reg->count; i++) {
+        if (reg->streams[i]->in_use) {
+            reg->streams[i]->chunk_size = chunk_size;
         }
     }
 }
 
-void lrtmp2_chunk_streams_destroy(void)
+void lrtmp2_chunk_registry_destroy(lrtmp2_chunk_registry_t *reg)
 {
-    for (int i = 0; i < MAX_CHUNK_STREAMS; i++) {
-        if (g_streams[i].reassembly_buf) {
-            lrtmp2_buffer_destroy(g_streams[i].reassembly_buf);
-            g_streams[i].reassembly_buf = NULL;
-        }
-        g_streams[i].in_use = 0;
-    }
-    g_initialized = 0;
+    if (!reg) return;
+    registry_free_streams(reg);
+    reg->initialized = 0;
 }
 
-void lrtmp2_chunk_stream_reset(lrtmp2_chunk_stream_t *stream)
+void lrtmp2_chunk_stream_reset(lrtmp2_chunk_registry_t *reg, lrtmp2_chunk_stream_t *stream)
 {
     if (!stream) return;
     /* Keep the reassembly buffer allocated for reuse; just clear its contents
@@ -91,5 +129,8 @@ void lrtmp2_chunk_stream_reset(lrtmp2_chunk_stream_t *stream)
     memset(stream, 0, sizeof(*stream));
     stream->reassembly_buf = buf;
     if (buf) lrtmp2_buffer_reset(buf);
-    stream->chunk_size = LRTMP2_DEFAULT_CHUNK_SIZE;
+    /* Restore the negotiated chunk size (not the wire default) so a reset stream
+     * keeps framing correctly after a SetChunkSize. */
+    stream->chunk_size = (reg && reg->initialized) ? reg->default_chunk_size
+                                                   : LRTMP2_DEFAULT_CHUNK_SIZE;
 }

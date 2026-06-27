@@ -169,8 +169,7 @@ librtmp2/
 │   └── fuzz/
 ├── examples/
 │   ├── minimal_server/
-│   ├── minimal_client/
-│   └── dump_frames/
+│   └── minimal_client/
 ├── docs/
 └── concept/                Project concept documents
 ```

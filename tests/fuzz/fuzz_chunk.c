@@ -23,7 +23,7 @@ int fuzz_chunk(const uint8_t *data, size_t size) {
 
     for (int i = 0; i < 64 && lrtmp2_buffer_available(buf) > 0; i++) {
         memset(&msg, 0, sizeof(msg));
-        int rc = lrtmp2_chunk_read(buf, &stream, &msg, &out_payload, &out_len);
+        int rc = lrtmp2_chunk_read(buf, NULL, &stream, &msg, &out_payload, &out_len);
         if (rc <= 0) break;
     }
 
