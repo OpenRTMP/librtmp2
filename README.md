@@ -178,14 +178,19 @@ librtmp2/
 
 ## Roadmap
 
-| Version | Milestone |
-|---------|-----------|
-| `0.1.0` | Legacy RTMP server — minimal (OBS → librtmp2 working) |
-| `0.2.0` | Legacy RTMP client — minimal (librtmp2 → SRS working) |
-| `0.3.0` | E-RTMP v1 receive (HEVC/AV1 detection) |
-| `0.4.0` | E-RTMP v1 send |
-| `0.5.0` | E-RTMP v2 capability layer |
-| `0.6.0` | Multitrack / reconnect / ModEx |
+The first public release is `0.1.0` and ships the complete feature set below in
+one go, rather than staging it across separate `0.x` releases.
+
+| Feature | Status |
+|---------|--------|
+| Legacy RTMP server — minimal | Implemented |
+| Legacy RTMP client — minimal | Implemented |
+| E-RTMP v1 receive (HEVC/AV1 detection) | Implemented |
+| E-RTMP v1 send | Implemented |
+| E-RTMP v2 capability layer | Implemented |
+| Multitrack / reconnect / ModEx | Implemented |
+
+See [`docs/roadmap.md`](docs/roadmap.md) for full status and open items.
 
 ---
 

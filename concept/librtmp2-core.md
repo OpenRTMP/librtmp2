@@ -410,13 +410,10 @@ SemVer:
 - `0.x` while the API/ABI is still evolving
 - `1.0.0` once the header/API is stable
 
-Planned initial versions:
-- `0.1.0` Legacy RTMP server minimal
-- `0.2.0` Legacy RTMP client minimal
-- `0.3.0` E-RTMP v1 receive
-- `0.4.0` E-RTMP v1 send
-- `0.5.0` E-RTMP v2 capability layer
-- `0.6.0` Multitrack / reconnect / ModEx
+The first public release is `0.1.0` and ships the complete feature set at once
+(legacy RTMP plus E-RTMP v1/v2), rather than staging features across a sequence
+of `0.x` releases. The phase plan below describes the build order, not a release
+schedule.
 
 ***
 
@@ -564,7 +561,9 @@ This section tracks how far the actual `src/`/`include/` tree has progressed aga
 - Fuzzing harnesses (`tests/fuzz/`) present for all critical parsers: handshake, chunk, AMF0, ExVideo, ExAudio, ModEx.
 - `docs/abi-policy.md` defines semantic versioning rules, ABI guarantees, and linking guide.
 - `tests/integration/test_server_ertmp_v2.c` covers all E-RTMP v2 structures (capsEx, videoFourCcInfoMap, reconnect, multitrack, ModEx).
-- CI interop/release workflows beyond `.github/workflows/ci.yml` are still pending (can be added when real peers are available).
+- CI is split across `tests.yml`, `interop-ffmpeg.yml`, and `interop-play.yml`; `release.yml` builds, version-checks, and packages tagged releases (source + prebuilt tarballs with SHA-256 sums).
+- `docs/` now carries `architecture.md`, `protocol-mapping-legacy.md`, `protocol-mapping-ertmp-v1.md`, `protocol-mapping-ertmp-v2.md`, `roadmap.md`, and `abi-policy.md`.
+- Still pending: real-peer interop verification against OBS/SRS/HaishinKit, the `dump_frames` example, and `CHANGELOG.md` / `CONTRIBUTING.md`.
 
 ***
 
