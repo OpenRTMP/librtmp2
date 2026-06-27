@@ -35,10 +35,19 @@ int lrtmp2_script_tag_parse(const uint8_t *data, size_t len, lrtmp2_script_tag_t
             return LRTMP2_ERR_AMF;
     }
 
-    /* Second value is the ECMA array with metadata */
+    /* Second value is the metadata, usually an ECMA array (sometimes a plain
+     * object). The type marker is consumed by read_type() here, so we must NOT
+     * call read_object_begin() afterwards (it would consume a second byte and
+     * desync the stream — for an ECMA array that byte is the first of the 4-byte
+     * associative count). */
     if (lrtmf2_amf0_read_type(&buf, &type) == LRTMP2_OK) {
-        if (type == AMF0_ECMA_ARRAY) {
-            lrtmf2_amf0_read_object_begin(&buf);
+        if (type == AMF0_ECMA_ARRAY || type == AMF0_OBJECT) {
+            if (type == AMF0_ECMA_ARRAY) {
+                /* Consume the 4-byte associative-element count. */
+                uint8_t count_bytes[4];
+                if (lrtmp2_buffer_read(&buf, count_bytes, 4) != LRTMP2_OK)
+                    return LRTMP2_ERR_AMF;
+            }
             /* Skip to end — full metadata parsing is optional. Bail on any
              * read failure so malformed/truncated input (e.g. an array with
              * no end marker) cannot spin this loop forever. */

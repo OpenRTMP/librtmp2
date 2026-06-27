@@ -256,6 +256,134 @@ int test_chunk_reject_msg_length_shrink(void)
     return 1;
 }
 
+int test_chunk_fmt2_partial_no_ts_drift(void)
+{
+    /* Regression: a fmt=1/2 header whose payload has not fully arrived yet must
+     * not apply its timestamp delta a second time when the chunk is re-parsed
+     * after the buffer rollback. */
+    lrtmp2_chunk_registry_t reg;
+    memset(&reg, 0, sizeof(reg));
+    lrtmp2_chunk_registry_init(&reg);
+    lrtmp2_chunk_stream_t *cs = lrtmp2_chunk_stream_get(&reg, 3);
+    cs->chunk_size = 128;
+
+    lrtmp2_buffer_t *buf = lrtmp2_buffer_create();
+    lrtmp2_chunk_message_t rm;
+    const uint8_t *rp = NULL;
+    size_t rl = 0;
+
+    /* Chunk 1: fmt=0, csid=3, ts=1000, len=4, type=0x14, then 4 payload bytes */
+    uint8_t c1[12 + 4];
+    memset(c1, 0, sizeof(c1));
+    c1[0] = 0x03;
+    c1[1] = 0x00; c1[2] = 0x03; c1[3] = 0xE8; /* ts=1000 */
+    c1[4] = 0x00; c1[5] = 0x00; c1[6] = 0x04; /* len=4 */
+    c1[7] = 0x14;
+    memset(c1 + 12, 'A', 4);
+    lrtmp2_buffer_write(buf, c1, sizeof(c1));
+
+    int rc = lrtmp2_chunk_read(buf, &reg, cs, &rm, &rp, &rl);
+    if (rc <= 0 || !rm.is_complete || rm.timestamp != 1000) {
+        printf("FAIL: chunk1 read rc=%d complete=%d ts=%u\n", rc, rm.is_complete, rm.timestamp);
+        goto fail;
+    }
+
+    /* Chunk 2: fmt=2, csid=3, delta=500 — feed the header WITHOUT its payload. */
+    uint8_t c2_hdr[4];
+    c2_hdr[0] = 0x83;                                      /* fmt=2, csid=3 */
+    c2_hdr[1] = 0x00; c2_hdr[2] = 0x01; c2_hdr[3] = 0xF4; /* delta=500 */
+    lrtmp2_buffer_write(buf, c2_hdr, sizeof(c2_hdr));
+
+    rc = lrtmp2_chunk_read(buf, &reg, cs, &rm, &rp, &rl);
+    if (rc != 0) {  /* header present, payload missing -> need_more (0) */
+        printf("FAIL: chunk2 header-only expected rc=0, got %d\n", rc);
+        goto fail;
+    }
+
+    /* Deliver the 4-byte payload and read again — timestamp must be 1500, not 2000. */
+    uint8_t c2_payload[4];
+    memset(c2_payload, 'B', 4);
+    lrtmp2_buffer_write(buf, c2_payload, sizeof(c2_payload));
+
+    rc = lrtmp2_chunk_read(buf, &reg, cs, &rm, &rp, &rl);
+    if (rc <= 0 || !rm.is_complete) {
+        printf("FAIL: chunk2 full read rc=%d complete=%d\n", rc, rm.is_complete);
+        goto fail;
+    }
+    if (rm.timestamp != 1500) {
+        printf("FAIL: timestamp drift — expected 1500, got %u\n", rm.timestamp);
+        goto fail;
+    }
+
+    lrtmp2_chunk_registry_destroy(&reg);
+    lrtmp2_buffer_destroy(buf);
+    printf("PASS: fmt=2 partial read does not double-apply timestamp delta\n");
+    return 1;
+fail:
+    lrtmp2_chunk_registry_destroy(&reg);
+    lrtmp2_buffer_destroy(buf);
+    return 0;
+}
+
+int test_chunk_fmt3_extended_timestamp(void)
+{
+    /* Regression: continuation (fmt=3) chunks of a message that uses extended
+     * timestamps repeat the 4-byte extended timestamp before their payload. The
+     * reader must consume it instead of treating it as payload bytes. */
+    lrtmp2_buffer_t *out = lrtmp2_buffer_create();
+    lrtmp2_chunk_registry_t reg;
+    memset(&reg, 0, sizeof(reg));
+    lrtmp2_chunk_registry_init(&reg);
+
+    uint8_t payload[300];
+    for (int i = 0; i < 300; i++) payload[i] = (uint8_t)i;
+
+    lrtmp2_chunk_message_t msg;
+    memset(&msg, 0, sizeof(msg));
+    msg.csid = 6;
+    msg.fmt = 0;
+    msg.timestamp = 0x01000000;   /* >= 0xFFFFFF -> extended timestamp in use */
+    msg.msg_length = 300;
+    msg.msg_type_id = 0x09;       /* video */
+    msg.msg_stream_id = 1;
+
+    /* Writer fragments into 128-byte chunks and emits fmt=3 continuation chunks,
+     * each repeating the 4-byte extended timestamp. */
+    lrtmp2_chunk_write(out, &msg, payload, 300, LRTMP2_DEFAULT_CHUNK_SIZE);
+
+    lrtmp2_chunk_stream_t *cs = lrtmp2_chunk_stream_get(&reg, 6);
+    cs->chunk_size = 128;
+
+    uint8_t reassembled[512];
+    size_t total = 0;
+    lrtmp2_chunk_message_t rm;
+    const uint8_t *rp = NULL;
+    size_t rl = 0;
+    out->read_pos = 0;
+    int complete = 0;
+    for (int i = 0; i < 10 && !complete; i++) {
+        int rc = lrtmp2_chunk_read(out, &reg, cs, &rm, &rp, &rl);
+        if (rc <= 0) { printf("FAIL: ext-ts fragment %d rc=%d\n", i, rc); goto fail; }
+        if (rm.is_complete) { memcpy(reassembled, rp, rl); total = rl; complete = 1; }
+    }
+    if (total != 300 || memcmp(reassembled, payload, 300) != 0) {
+        printf("FAIL: ext-ts reassembly mismatch (total=%zu)\n", total);
+        goto fail;
+    }
+    if (rm.timestamp != 0x01000000) {
+        printf("FAIL: ext-ts value wrong: got %u\n", rm.timestamp);
+        goto fail;
+    }
+    lrtmp2_chunk_registry_destroy(&reg);
+    lrtmp2_buffer_destroy(out);
+    printf("PASS: fmt=3 continuation consumes extended timestamp\n");
+    return 1;
+fail:
+    lrtmp2_chunk_registry_destroy(&reg);
+    lrtmp2_buffer_destroy(out);
+    return 0;
+}
+
 int test_chunk_main(void)
 {
     int passed = 0;
@@ -264,6 +392,8 @@ int test_chunk_main(void)
     if (test_chunk_multi_fragment()) passed++;
     if (test_chunk_registry_grow()) passed++;
     if (test_chunk_reject_msg_length_shrink()) passed++;
-    printf("Chunk tests: %d/4 passed\n", passed);
-    return (passed >= 4) ? 0 : 1;
+    if (test_chunk_fmt2_partial_no_ts_drift()) passed++;
+    if (test_chunk_fmt3_extended_timestamp()) passed++;
+    printf("Chunk tests: %d/6 passed\n", passed);
+    return (passed >= 6) ? 0 : 1;
 }

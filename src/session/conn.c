@@ -363,12 +363,23 @@ int lrtmp2_conn_handle_command(lrtmp2_conn_t *conn, const uint8_t *payload, size
     } else if (strcmp(name, "createStream") == 0) {
         double txn = 0.0;
         lrtmp2_cmd_read_create_stream(&buf, &txn);
-        conn->next_stream_id++;
-        uint32_t stream_id = conn->next_stream_id;
-        conn->current_stream = lrtmp2_stream_create(conn, stream_id);
-        lrtmp2_conn_transition(conn, LRTMP2_STATE_STREAM_CREATED);
-        lrtmp2_conn_send_create_stream_response(conn, txn, stream_id);
-        LRTMP2_LOG_INFO("createStream: stream_id=%u", stream_id);
+        /* Each createStream allocates a stream tracked for the connection's
+         * lifetime. Cap the count so a peer cannot exhaust memory by sending an
+         * endless stream of createStream commands. Real clients create one (a
+         * few at most). */
+        if (conn->next_stream_id >= LRTMP2_MAX_STREAMS_PER_CONN) {
+            LRTMP2_LOG_WARN("createStream rejected: per-connection stream cap (%d) reached",
+                            LRTMP2_MAX_STREAMS_PER_CONN);
+            lrtmp2_conn_send_onstatus(conn, 0, "error", "NetStream.Failed",
+                                      "Too many streams");
+        } else {
+            conn->next_stream_id++;
+            uint32_t stream_id = conn->next_stream_id;
+            conn->current_stream = lrtmp2_stream_create(conn, stream_id);
+            lrtmp2_conn_transition(conn, LRTMP2_STATE_STREAM_CREATED);
+            lrtmp2_conn_send_create_stream_response(conn, txn, stream_id);
+            LRTMP2_LOG_INFO("createStream: stream_id=%u", stream_id);
+        }
     } else if (strcmp(name, "publish") == 0) {
         char stream_name[256];
         char publish_type[64];
