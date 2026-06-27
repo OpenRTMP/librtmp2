@@ -159,15 +159,23 @@ int lrtmp2_conn_do_handshake(lrtmp2_conn_t *conn)
 {
     int rc;
 
+    /* The handshake reads return LRTMP2_ERR_IO when the (partial) C0/C1/C2 has
+     * not fully arrived yet. That is a "need more data" condition, not a fatal
+     * error: C0 and C1 routinely arrive in separate TCP segments. Returning the
+     * negative code here would propagate up through conn_recv and make the
+     * server tear the connection down mid-handshake, so map it to 0 (no
+     * progress, wait for more) and only treat other negatives as fatal. */
     switch (conn->handshake.state) {
         case LRTMP2_HS_SERVER_WAIT_C0:
             rc = lrtmp2_handshake_server_read_c0(&conn->handshake, conn->recv_buffer);
+            if (rc == LRTMP2_ERR_IO) return 0;
             if (rc < 0) return rc;
             conn->state = LRTMP2_STATE_HANDSHAKE;
             /* fall through */
 
         case LRTMP2_HS_SERVER_WAIT_C1:
             rc = lrtmp2_handshake_server_read_c1(&conn->handshake, conn->recv_buffer);
+            if (rc == LRTMP2_ERR_IO) return 0;
             if (rc < 0) return rc;
             /* Send S0+S1+S2 to client (skip if no socket, e.g. in tests).
              * handshake.out only contains S1+S2; S0 is the 1-byte version
@@ -186,6 +194,7 @@ int lrtmp2_conn_do_handshake(lrtmp2_conn_t *conn)
 
         case LRTMP2_HS_SERVER_WAIT_C2:
             rc = lrtmp2_handshake_server_read_c2(&conn->handshake, conn->recv_buffer);
+            if (rc == LRTMP2_ERR_IO) return 0;
             if (rc < 0) return rc;
             break;
 
