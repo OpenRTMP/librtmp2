@@ -1,7 +1,7 @@
 # meson.build for librtmp2
 
 project('librtmp2', 'c',
-  version : '0.0.1-alpha',
+  version : '0.0.1',
   default_options : ['c_std=c11', 'warning_level=2'],
   meson_version : '>= 0.50.0'
 )
