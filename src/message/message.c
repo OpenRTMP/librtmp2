@@ -164,6 +164,11 @@ int lrtmp2_msg_decode(lrtmp2_conn_t *conn, const lrtmp2_chunk_message_t *chunk,
             {
                 uint32_t csid;
                 if (lrtmp2_msg_read_abort_message(payload, &csid) == LRTMP2_OK) {
+                    lrtmp2_chunk_stream_t *cs =
+                        lrtmp2_chunk_stream_get(&conn->chunk_reg, csid);
+                    if (cs) {
+                        lrtmp2_chunk_stream_reset(&conn->chunk_reg, cs);
+                    }
                     LRTMP2_LOG_INFO("AbortMessage: csid=%u", csid);
                 }
             }

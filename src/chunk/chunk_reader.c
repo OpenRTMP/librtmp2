@@ -88,6 +88,11 @@ int lrtmp2_chunk_read(lrtmp2_buffer_t *buf,
                 if (lrtmp2_buffer_read(buf, ext, 4) != 0) goto need_more;
                 timestamp = lrtmp2_ntoh32(ext);
             }
+            /* fmt=0 starts a new message; discard any partial reassembly. */
+            cs->reassembly_bytes_read = 0;
+            if (cs->reassembly_buf) {
+                lrtmp2_buffer_reset(cs->reassembly_buf);
+            }
             /* Update state */
             cs->type0_timestamp = timestamp;
             cs->type0_msg_length = msg_length;
@@ -155,7 +160,16 @@ int lrtmp2_chunk_read(lrtmp2_buffer_t *buf,
     /* --- Payload: read up to chunk_size bytes for this physical chunk,
      * accumulating into the chunk stream's reassembly buffer until the full
      * message (msg_length bytes) has been collected. --- */
-    size_t remaining = msg_length - cs->reassembly_bytes_read;
+    if (cs->reassembly_bytes_read > msg_length) {
+        LRTMP2_LOG_WARN("chunk csid=%u: msg_length shrank below reassembly progress "
+                        "(%u < %u)", csid, msg_length, cs->reassembly_bytes_read);
+        return LRTMP2_ERR_CHUNK;
+    }
+    size_t remaining = (size_t)(msg_length - cs->reassembly_bytes_read);
+    if (cs->chunk_size == 0) {
+        LRTMP2_LOG_WARN("chunk csid=%u: invalid chunk_size=0", csid);
+        return LRTMP2_ERR_CHUNK;
+    }
     size_t to_read = (remaining < cs->chunk_size) ? remaining : cs->chunk_size;
 
     if (buf->size - buf->read_pos < to_read) {

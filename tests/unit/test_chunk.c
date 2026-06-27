@@ -202,6 +202,60 @@ int test_chunk_registry_grow(void)
     return 1;
 }
 
+int test_chunk_reject_msg_length_shrink(void)
+{
+    /* A peer must not be able to shrink msg_length below bytes already
+     * reassembled for the current message on the same csid. */
+    lrtmp2_chunk_registry_t reg;
+    memset(&reg, 0, sizeof(reg));
+    lrtmp2_chunk_registry_init(&reg);
+    lrtmp2_chunk_stream_t *cs = lrtmp2_chunk_stream_get(&reg, 3);
+    cs->chunk_size = 128;
+
+    lrtmp2_buffer_t *buf = lrtmp2_buffer_create();
+
+    uint8_t c1[12 + 128];
+    c1[0] = 0x03;
+    c1[4] = 0x01; c1[5] = 0xF4; /* msg_length=500 */
+    c1[7] = 0x14;
+    memset(c1 + 12, 'A', 128);
+    lrtmp2_buffer_write(buf, c1, sizeof(c1));
+
+    uint8_t c2[8 + 128];
+    c2[0] = 0x43; /* fmt=1 */
+    c2[4] = 0x00; c2[5] = 0x00; c2[6] = 0x0A; /* msg_length=10 */
+    c2[7] = 0x14;
+    memset(c2 + 8, 'B', 128);
+    lrtmp2_buffer_write(buf, c2, sizeof(c2));
+
+    buf->read_pos = 0;
+    lrtmp2_chunk_message_t rm;
+    const uint8_t *rp = NULL;
+    size_t rl = 0;
+
+    int rc = lrtmp2_chunk_read(buf, &reg, cs, &rm, &rp, &rl);
+    if (rc <= 0) {
+        printf("FAIL: first chunk_read returned %d\n", rc);
+        lrtmp2_chunk_registry_destroy(&reg);
+        lrtmp2_buffer_destroy(buf);
+        return 0;
+    }
+
+    rc = lrtmp2_chunk_read(buf, &reg, cs, &rm, &rp, &rl);
+    if (rc != LRTMP2_ERR_CHUNK || rm.is_complete) {
+        printf("FAIL: expected LRTMP2_ERR_CHUNK on msg_length shrink, got %d complete=%d\n",
+               rc, rm.is_complete);
+        lrtmp2_chunk_registry_destroy(&reg);
+        lrtmp2_buffer_destroy(buf);
+        return 0;
+    }
+
+    lrtmp2_chunk_registry_destroy(&reg);
+    lrtmp2_buffer_destroy(buf);
+    printf("PASS: chunk rejects msg_length shrink mid-reassembly\n");
+    return 1;
+}
+
 int test_chunk_main(void)
 {
     int passed = 0;
@@ -209,6 +263,7 @@ int test_chunk_main(void)
     if (test_chunk_write_read_basic()) passed++;
     if (test_chunk_multi_fragment()) passed++;
     if (test_chunk_registry_grow()) passed++;
-    printf("Chunk tests: %d/3 passed\n", passed);
-    return (passed >= 3) ? 0 : 1;
+    if (test_chunk_reject_msg_length_shrink()) passed++;
+    printf("Chunk tests: %d/4 passed\n", passed);
+    return (passed >= 4) ? 0 : 1;
 }

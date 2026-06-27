@@ -35,6 +35,19 @@ typedef int socklen_t;
 
 #include <stdio.h>
 
+static int server_count_active_connections(lrtmp2_server_t *server)
+{
+    int count = 0;
+    pthread_mutex_lock((pthread_mutex_t *)&server->connections_mutex);
+    for (lrtmp2_conn_t *c = server->connections; c; c = c->next) {
+        if (c->client_fd >= 0 && c->state < LRTMP2_STATE_CLOSING) {
+            count++;
+        }
+    }
+    pthread_mutex_unlock((pthread_mutex_t *)&server->connections_mutex);
+    return count;
+}
+
 lrtmp2_server_t *lrtmp2_server_create(const lrtmp2_server_config_t *config)
 {
     if (!config) return NULL;
@@ -210,6 +223,12 @@ int lrtmp2_server_poll(lrtmp2_server_t *server, int timeout_ms)
         int client_fd = accept(server->server_fd, (struct sockaddr *)&client_addr, &addr_len);
         if (client_fd == INVALID_SOCKET) {
             LRTMP2_LOG_WARN("Accept failed: %s", strerror(errno));
+        } else if (server->config->max_connections > 0 &&
+                   server_count_active_connections(server) >= server->config->max_connections) {
+            LRTMP2_LOG_WARN("Rejecting connection from %s:%d: max_connections=%d reached",
+                             inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port),
+                             server->config->max_connections);
+            close_socket(client_fd);
         } else {
             LRTMP2_LOG_INFO("New connection from %s:%d",
                              inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
