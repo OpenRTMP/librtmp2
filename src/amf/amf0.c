@@ -296,6 +296,15 @@ static int amf0_skip_value_depth(lrtmp2_buffer_t *buf, int depth)
                 LRTMP2_LOG_WARN("AMF0 nesting too deep (>%d), rejecting", AMF0_MAX_SKIP_DEPTH);
                 return LRTMP2_ERR_AMF;
             }
+            if (type == AMF0_ECMA_ARRAY) {
+                /* ECMA arrays carry a 4-byte associative-element count before
+                 * the key/value pairs. The count is advisory (the array is
+                 * still terminated by 0x00 0x00 0x09), but the 4 bytes must be
+                 * consumed or the following pairs would be misread. */
+                uint32_t ecma_count;
+                rc = amf_read_u32(buf, &ecma_count);
+                if (rc != LRTMP2_OK) return rc;
+            }
             /* Skip key-value pairs until end marker */
             while (1) {
                 /* Check for object end */
