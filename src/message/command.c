@@ -24,6 +24,32 @@ static int amf0_read_number_value(lrtmp2_buffer_t *buf, double *val)
     return lrtmf2_amf0_read_number(buf, val);
 }
 
+/* Read an AMF0 string value into `out`, truncating (not failing) when it is
+ * longer than `out_size`. Unlike lrtmf2_amf0_read_string(), an over-long
+ * string does not abort the whole parse: the excess is drained so the stream
+ * stays aligned for the next field. This keeps a `connect` carrying a long
+ * tcUrl/flashVer usable instead of dropping the connection. */
+static int amf0_read_string_trunc(lrtmp2_buffer_t *buf, char *out, size_t out_size)
+{
+    uint8_t type;
+    if (lrtmp2_buffer_read(buf, &type, 1) != LRTMP2_OK) return LRTMP2_ERR_AMF;
+    if (type != AMF0_STRING) return LRTMP2_ERR_AMF;
+
+    uint8_t lb[2];
+    if (lrtmp2_buffer_read(buf, lb, 2) != LRTMP2_OK) return LRTMP2_ERR_AMF;
+    size_t slen = ((size_t)lb[0] << 8) | lb[1];
+
+    if (lrtmp2_buffer_available(buf) < slen) return LRTMP2_ERR_IO;
+
+    size_t copy = (out_size && slen >= out_size) ? out_size - 1 : slen;
+    if (copy > 0 && lrtmp2_buffer_read(buf, (uint8_t *)out, copy) != LRTMP2_OK) {
+        return LRTMP2_ERR_AMF;
+    }
+    if (out_size > 0) out[copy] = '\0';
+    lrtmp2_buffer_drain(buf, slen - copy);
+    return LRTMP2_OK;
+}
+
 /* --- Encoder --- */
 
 int lrtmp2_cmd_build_connect(lrtmp2_buffer_t *buf, const char *app, const char *tcUrl,
@@ -213,21 +239,26 @@ int lrtmp2_cmd_read_connect(lrtmp2_buffer_t *buf, lrtmp2_connect_info_t *info)
 
         switch (type) {
             case AMF0_STRING: {
-                size_t vlen;
-                char value[512];
-                if (lrtmf2_amf0_read_string(buf, value, sizeof(value), &vlen) != LRTMP2_OK) {
-                    return LRTMP2_ERR_AMF;
-                }
+                char *dst = NULL;
+                size_t dst_size = 0;
                 if (strcmp(key, "app") == 0) {
-                    snprintf(info->app, sizeof(info->app), "%.*s", (int)(sizeof(info->app) - 1), value);
+                    dst = info->app; dst_size = sizeof(info->app);
                 } else if (strcmp(key, "tcUrl") == 0) {
-                    snprintf(info->tcUrl, sizeof(info->tcUrl), "%.*s", (int)(sizeof(info->tcUrl) - 1), value);
+                    dst = info->tcUrl; dst_size = sizeof(info->tcUrl);
                 } else if (strcmp(key, "pageUrl") == 0) {
-                    snprintf(info->pageUrl, sizeof(info->pageUrl), "%.*s", (int)(sizeof(info->pageUrl) - 1), value);
+                    dst = info->pageUrl; dst_size = sizeof(info->pageUrl);
                 } else if (strcmp(key, "swfUrl") == 0) {
-                    snprintf(info->swfUrl, sizeof(info->swfUrl), "%.*s", (int)(sizeof(info->swfUrl) - 1), value);
+                    dst = info->swfUrl; dst_size = sizeof(info->swfUrl);
                 } else if (strcmp(key, "flashVer") == 0) {
-                    snprintf(info->flashVer, sizeof(info->flashVer), "%.*s", (int)(sizeof(info->flashVer) - 1), value);
+                    dst = info->flashVer; dst_size = sizeof(info->flashVer);
+                }
+                if (dst) {
+                    if (amf0_read_string_trunc(buf, dst, dst_size) != LRTMP2_OK) {
+                        return LRTMP2_ERR_AMF;
+                    }
+                } else if (lrtmf2_amf0_skip_value(buf) != LRTMP2_OK) {
+                    /* Unknown string property: consume it so we stay aligned. */
+                    return LRTMP2_ERR_AMF;
                 }
                 break;
             }
