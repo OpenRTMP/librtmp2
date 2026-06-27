@@ -26,9 +26,44 @@
 #define RTMP_MSG_AMF0_COMMAND         0x14
 #define RTMP_MSG_AMF0_DATA            0x12
 #define RTMP_MSG_SET_CHUNK_SIZE       0x01
-
-
+#define RTMP_MSG_ACKNOWLEDGEMENT      0x03
 #define RTMP_MSG_WINDOW_ACK_SIZE      0x05
+#define RTMP_MSG_SET_PEER_BANDWIDTH   0x06
+
+/* Window the server advertises to the peer (bytes between Acknowledgements) and
+ * the peer-bandwidth limit it requests. 2.5 MB / "dynamic" mirrors common RTMP
+ * server defaults. */
+#define LRTMP2_SERVER_WINDOW_ACK_SIZE 2500000u
+#define LRTMP2_SERVER_PEER_BANDWIDTH  2500000u
+#define LRTMP2_PEER_BANDWIDTH_DYNAMIC 2
+
+/* Frame and queue a protocol control message (csid 2, stream 0) into the send
+ * buffer. Used for SetChunkSize / WindowAckSize / SetPeerBandwidth / Acknowledgement. */
+static int conn_send_control(lrtmp2_conn_t *conn, uint8_t type,
+                             const uint8_t *data, size_t len)
+{
+    lrtmp2_chunk_message_t m;
+    memset(&m, 0, sizeof(m));
+    m.csid = 2;
+    m.fmt = 0;
+    m.msg_length = (uint32_t)len;
+    m.msg_type_id = type;
+    m.msg_stream_id = 0;
+    return lrtmp2_chunk_write(conn->send_buffer, &m, data, len, conn->chunk_size);
+}
+
+/* Send an Acknowledgement carrying the running received-byte count. RTMP peers
+ * that honour WindowAckSize stop sending once an unacknowledged window has built
+ * up, so failing to ack stalls high-throughput ingest. */
+static int lrtmp2_conn_send_acknowledgement(lrtmp2_conn_t *conn, uint32_t seq)
+{
+    uint8_t b[4];
+    b[0] = (uint8_t)(seq >> 24);
+    b[1] = (uint8_t)(seq >> 16);
+    b[2] = (uint8_t)(seq >> 8);
+    b[3] = (uint8_t)(seq);
+    return conn_send_control(conn, RTMP_MSG_ACKNOWLEDGEMENT, b, sizeof(b));
+}
 
 lrtmp2_conn_t *lrtmp2_conn_create(lrtmp2_server_t *server, const lrtmp2_server_config_t *config)
 {
@@ -96,6 +131,10 @@ int lrtmp2_conn_recv(lrtmp2_conn_t *conn, const uint8_t *data, size_t len)
     int rc = lrtmp2_buffer_write(conn->recv_buffer, data, len);
     if (rc < 0) return rc;
 
+    /* Count every received byte for window acknowledgement (wraps at 2^32 like
+     * the RTMP sequence number). */
+    conn->bytes_received += (uint32_t)len;
+
     /* Process all buffered data. Use a no-progress bound: if many
      * iterations pass without consuming data or reaching a terminal
      * state, bail out to avoid starving callers that feed data in
@@ -126,6 +165,14 @@ int lrtmp2_conn_recv(lrtmp2_conn_t *conn, const uint8_t *data, size_t len)
         } else {
             no_progress = 0;
         }
+    }
+
+    /* Send an Acknowledgement once at least a full window of bytes has been
+     * received since the last one. Queued to send_buffer; the caller flushes. */
+    if (conn->window_ack_size > 0 &&
+        (conn->bytes_received - conn->bytes_at_last_ack) >= conn->window_ack_size) {
+        lrtmp2_conn_send_acknowledgement(conn, conn->bytes_received);
+        conn->bytes_at_last_ack = conn->bytes_received;
     }
 
     return LRTMP2_OK;
@@ -159,15 +206,23 @@ int lrtmp2_conn_do_handshake(lrtmp2_conn_t *conn)
 {
     int rc;
 
+    /* The handshake reads return LRTMP2_ERR_IO when the (partial) C0/C1/C2 has
+     * not fully arrived yet. That is a "need more data" condition, not a fatal
+     * error: C0 and C1 routinely arrive in separate TCP segments. Returning the
+     * negative code here would propagate up through conn_recv and make the
+     * server tear the connection down mid-handshake, so map it to 0 (no
+     * progress, wait for more) and only treat other negatives as fatal. */
     switch (conn->handshake.state) {
         case LRTMP2_HS_SERVER_WAIT_C0:
             rc = lrtmp2_handshake_server_read_c0(&conn->handshake, conn->recv_buffer);
+            if (rc == LRTMP2_ERR_IO) return 0;
             if (rc < 0) return rc;
             conn->state = LRTMP2_STATE_HANDSHAKE;
             /* fall through */
 
         case LRTMP2_HS_SERVER_WAIT_C1:
             rc = lrtmp2_handshake_server_read_c1(&conn->handshake, conn->recv_buffer);
+            if (rc == LRTMP2_ERR_IO) return 0;
             if (rc < 0) return rc;
             /* Send S0+S1+S2 to client (skip if no socket, e.g. in tests).
              * handshake.out only contains S1+S2; S0 is the 1-byte version
@@ -186,6 +241,7 @@ int lrtmp2_conn_do_handshake(lrtmp2_conn_t *conn)
 
         case LRTMP2_HS_SERVER_WAIT_C2:
             rc = lrtmp2_handshake_server_read_c2(&conn->handshake, conn->recv_buffer);
+            if (rc == LRTMP2_ERR_IO) return 0;
             if (rc < 0) return rc;
             break;
 
@@ -275,16 +331,29 @@ int lrtmp2_conn_send_connect_response(lrtmp2_conn_t *conn, double transaction_id
 {
     if (!conn) return LRTMP2_ERR_INTERNAL;
 
+    /* Window Acknowledgement Size (type 0x05): tell the peer how often to ack us. */
+    {
+        uint8_t b[4];
+        uint32_t net = lrtmp2_hton32(LRTMP2_SERVER_WINDOW_ACK_SIZE);
+        memcpy(b, &net, 4);
+        conn_send_control(conn, RTMP_MSG_WINDOW_ACK_SIZE, b, 4);
+    }
+
+    /* Set Peer Bandwidth (type 0x06): 4-byte window + 1-byte limit type. */
+    {
+        uint8_t b[5];
+        uint32_t net = lrtmp2_hton32(LRTMP2_SERVER_PEER_BANDWIDTH);
+        memcpy(b, &net, 4);
+        b[4] = LRTMP2_PEER_BANDWIDTH_DYNAMIC;
+        conn_send_control(conn, RTMP_MSG_SET_PEER_BANDWIDTH, b, 5);
+    }
+
     /* Send SetChunkSize (msg type 0x01 on csid 2) */
     {
-        lrtmp2_chunk_message_t scs_msg;
-        memset(&scs_msg, 0, sizeof(scs_msg));
-        scs_msg.csid = 2;
-        scs_msg.fmt = 0;
-        scs_msg.msg_length = 4;
-        scs_msg.msg_type_id = RTMP_MSG_SET_CHUNK_SIZE;
         uint32_t net_cs = lrtmp2_hton32(conn->chunk_size);
-        lrtmp2_chunk_write(conn->send_buffer, &scs_msg, (uint8_t *)&net_cs, 4, conn->chunk_size);
+        uint8_t b[4];
+        memcpy(b, &net_cs, 4);
+        conn_send_control(conn, RTMP_MSG_SET_CHUNK_SIZE, b, 4);
     }
 
     /* Build AMF0 _result command */
@@ -354,7 +423,12 @@ int lrtmp2_conn_handle_command(lrtmp2_conn_t *conn, const uint8_t *payload, size
         lrtmp2_connect_info_t info;
         if (lrtmp2_cmd_read_connect(&buf, &info) != LRTMP2_OK) return LRTMP2_ERR_AMF;
         snprintf(conn->app, sizeof(conn->app), "%s", info.app);
-        lrtmp2_conn_transition(conn, LRTMP2_STATE_APP_CONNECTED);
+        /* The transition result is advisory: a backward/duplicate transition is
+         * logged and rejected inside lrtmp2_conn_transition (the state is left
+         * unchanged), but we still acknowledge the command, since re-issued or
+         * out-of-order control commands from a peer are tolerated rather than
+         * fatal. The (void) marks the ignore as intentional. */
+        (void)lrtmp2_conn_transition(conn, LRTMP2_STATE_APP_CONNECTED);
         lrtmp2_conn_send_connect_response(conn, info.transaction_id);
         LRTMP2_LOG_INFO("connect: app=%s", conn->app);
         if (conn->on_connect_cb) {
@@ -363,12 +437,23 @@ int lrtmp2_conn_handle_command(lrtmp2_conn_t *conn, const uint8_t *payload, size
     } else if (strcmp(name, "createStream") == 0) {
         double txn = 0.0;
         lrtmp2_cmd_read_create_stream(&buf, &txn);
-        conn->next_stream_id++;
-        uint32_t stream_id = conn->next_stream_id;
-        conn->current_stream = lrtmp2_stream_create(conn, stream_id);
-        lrtmp2_conn_transition(conn, LRTMP2_STATE_STREAM_CREATED);
-        lrtmp2_conn_send_create_stream_response(conn, txn, stream_id);
-        LRTMP2_LOG_INFO("createStream: stream_id=%u", stream_id);
+        /* Each createStream allocates a stream tracked for the connection's
+         * lifetime. Cap the count so a peer cannot exhaust memory by sending an
+         * endless stream of createStream commands. Real clients create one (a
+         * few at most). */
+        if (conn->next_stream_id >= LRTMP2_MAX_STREAMS_PER_CONN) {
+            LRTMP2_LOG_WARN("createStream rejected: per-connection stream cap (%d) reached",
+                            LRTMP2_MAX_STREAMS_PER_CONN);
+            lrtmp2_conn_send_onstatus(conn, 0, "error", "NetStream.Failed",
+                                      "Too many streams");
+        } else {
+            conn->next_stream_id++;
+            uint32_t stream_id = conn->next_stream_id;
+            conn->current_stream = lrtmp2_stream_create(conn, stream_id);
+            (void)lrtmp2_conn_transition(conn, LRTMP2_STATE_STREAM_CREATED);  /* advisory; see connect handler */
+            lrtmp2_conn_send_create_stream_response(conn, txn, stream_id);
+            LRTMP2_LOG_INFO("createStream: stream_id=%u", stream_id);
+        }
     } else if (strcmp(name, "publish") == 0) {
         char stream_name[256];
         char publish_type[64];
@@ -378,7 +463,7 @@ int lrtmp2_conn_handle_command(lrtmp2_conn_t *conn, const uint8_t *payload, size
         if (conn->current_stream) {
             lrtmp2_publish_begin(conn->current_stream, stream_name);
         }
-        lrtmp2_conn_transition(conn, LRTMP2_STATE_PUBLISHING);
+        (void)lrtmp2_conn_transition(conn, LRTMP2_STATE_PUBLISHING);  /* advisory; see connect handler */
         uint32_t stream_id = conn->current_stream ? conn->current_stream->stream_id : 0;
         lrtmp2_conn_send_onstatus(conn, stream_id, "status", "NetStream.Publish.Start", "Publishing");
         LRTMP2_LOG_INFO("publish: stream=%s", stream_name);
@@ -393,7 +478,7 @@ int lrtmp2_conn_handle_command(lrtmp2_conn_t *conn, const uint8_t *payload, size
             lrtmp2_play_begin(conn, stream_name);
             conn->current_stream->is_playing = 1;
         }
-        lrtmp2_conn_transition(conn, LRTMP2_STATE_PLAYING);
+        (void)lrtmp2_conn_transition(conn, LRTMP2_STATE_PLAYING);  /* advisory; see connect handler */
         uint32_t stream_id = conn->current_stream ? conn->current_stream->stream_id : 0;
         lrtmp2_conn_send_onstatus(conn, stream_id, "status", "NetStream.Play.Start", "Playing");
         LRTMP2_LOG_INFO("play: stream=%s", stream_name);

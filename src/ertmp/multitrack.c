@@ -49,12 +49,16 @@ size_t lrtmp2_ertmp_multitrack_write(const lrtmp2_multitrack_t *mt, uint8_t *buf
     if (!mt || !buf) return 0;
 
     size_t name_len = strlen(mt->track_name);
+    /* The name length is carried in a 2-byte AMF0 string-length field; a longer
+     * name could not be represented (the copied bytes and the length would
+     * disagree), so refuse it rather than emit a corrupt record. */
+    if (name_len > 0xFFFF) return 0;
     size_t needed = 1 + 8 + 2 + name_len; /* marker(1) + number(8) + str_len(2) + name(N) */
     if (buf_size < needed) return 0;
 
     /* AMF0_NUMBER marker */
     *buf++ = 0x00;
-    /* 8-byte number (little-endian as per spec for multitrack) */
+    /* 8-byte number, big-endian (matches lrtmp2_ertmp_multitrack_parse) */
     uint64_t type_val = (uint64_t)mt->type;
     for (int i = 7; i >= 0; i--) *buf++ = (uint8_t)((type_val >> (i * 8)) & 0xFF);
     /* AMF0_STRING: 2-byte length + N bytes */

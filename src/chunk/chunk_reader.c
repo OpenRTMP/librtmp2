@@ -63,11 +63,19 @@ int lrtmp2_chunk_read(lrtmp2_buffer_t *buf,
     lrtmp2_chunk_stream_t *cs = stream ? stream : lrtmp2_chunk_stream_get(registry, csid);
     if (!cs) return LRTMP2_ERR_INTERNAL;
 
-    /* --- Message header: depends on fmt --- */
+    /* --- Message header: depends on fmt ---
+     *
+     * The per-chunk-stream state (cs->type0_*) is NOT mutated here: a header may
+     * parse fully while its payload is still incomplete, in which case we jump to
+     * `need_more`, roll the buffer back, and re-parse on the next call. Committing
+     * timestamp/length state in-place would then add a fmt=1/2 timestamp delta a
+     * second time. Everything is computed into locals and committed below, once
+     * the whole physical chunk is known to be present. */
     uint32_t timestamp = 0;
     uint32_t msg_length = 0;
     uint8_t  msg_type_id = 0;
     uint32_t msg_stream_id = 0;
+    int      ext_ts = 0;   /* this message carries extended (4-byte) timestamps */
 
     switch (fmt) {
         case 0:
@@ -88,17 +96,15 @@ int lrtmp2_chunk_read(lrtmp2_buffer_t *buf,
                 uint8_t ext[4];
                 if (lrtmp2_buffer_read(buf, ext, 4) != 0) goto need_more;
                 timestamp = lrtmp2_ntoh32(ext);
+                ext_ts = 1;
             }
-            /* fmt=0 starts a new message; discard any partial reassembly. */
+            /* fmt=0 starts a new message; discard any partial reassembly. (Safe
+             * to do before the payload check: it is idempotent across re-parses
+             * and a new fmt=0 always supersedes a partial message anyway.) */
             cs->reassembly_bytes_read = 0;
             if (cs->reassembly_buf) {
                 lrtmp2_buffer_reset(cs->reassembly_buf);
             }
-            /* Update state */
-            cs->type0_timestamp = timestamp;
-            cs->type0_msg_length = msg_length;
-            cs->type0_msg_type_id = msg_type_id;
-            cs->type0_msg_stream_id = msg_stream_id;
             break;
 
         case 1:
@@ -115,15 +121,11 @@ int lrtmp2_chunk_read(lrtmp2_buffer_t *buf,
                 uint8_t ext[4];
                 if (lrtmp2_buffer_read(buf, ext, 4) != 0) goto need_more;
                 timestamp = lrtmp2_ntoh32(ext);
+                ext_ts = 1;
             }
-            /* Same stream_id as previous */
+            /* Same stream_id as previous; timestamp is a delta over the running one */
             msg_stream_id = cs->type0_msg_stream_id;
             timestamp += cs->type0_timestamp;
-            /* Update running timestamp for subsequent delta-based chunks */
-            cs->type0_timestamp = timestamp;
-            cs->type0_msg_length = msg_length;
-            cs->type0_msg_type_id = msg_type_id;
-            /* cs->type0_msg_stream_id unchanged */
             break;
 
         case 2:
@@ -137,21 +139,30 @@ int lrtmp2_chunk_read(lrtmp2_buffer_t *buf,
                 uint8_t ext[4];
                 if (lrtmp2_buffer_read(buf, ext, 4) != 0) goto need_more;
                 timestamp = lrtmp2_ntoh32(ext);
+                ext_ts = 1;
             }
             /* Same msg_length, msg_type_id, msg_stream_id as previous */
             msg_length = cs->type0_msg_length;
             msg_type_id = cs->type0_msg_type_id;
             msg_stream_id = cs->type0_msg_stream_id;
             timestamp += cs->type0_timestamp;
-            cs->type0_timestamp = timestamp;
             break;
 
         case 3:
-            /* 0 bytes: exact same header as previous chunk of same type */
+            /* 0 bytes: exact same header as previous chunk of same type. If the
+             * message uses extended timestamps, each fmt=3 continuation chunk
+             * repeats the 4-byte extended timestamp before its payload (RTMP
+             * spec 5.3.1.3); consume it so it is not mistaken for payload. */
             timestamp = cs->type0_timestamp;
             msg_length = cs->type0_msg_length;
             msg_type_id = cs->type0_msg_type_id;
             msg_stream_id = cs->type0_msg_stream_id;
+            ext_ts = cs->type0_ext_ts;
+            if (ext_ts) {
+                uint8_t ext[4];
+                if (lrtmp2_buffer_read(buf, ext, 4) != 0) goto need_more;
+                timestamp = lrtmp2_ntoh32(ext);
+            }
             break;
 
         default:
@@ -176,6 +187,15 @@ int lrtmp2_chunk_read(lrtmp2_buffer_t *buf,
     if (buf->size - buf->read_pos < to_read) {
         goto need_more;  /* not enough data for this chunk payload */
     }
+
+    /* The whole physical chunk is present — now it is safe to commit the header
+     * state. Until this point a rollback via `need_more` must leave cs untouched
+     * so a re-parse reproduces identical results. */
+    cs->type0_timestamp = timestamp;
+    cs->type0_msg_length = msg_length;
+    cs->type0_msg_type_id = msg_type_id;
+    cs->type0_msg_stream_id = msg_stream_id;
+    cs->type0_ext_ts = ext_ts;
 
     if (!cs->reassembly_buf) {
         cs->reassembly_buf = lrtmp2_buffer_create();

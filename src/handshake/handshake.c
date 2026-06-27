@@ -112,11 +112,14 @@ int lrtmp2_handshake_server_read_c1(lrtmp2_handshake_t *hs, lrtmp2_buffer_t *buf
     memset(s1 + 4, 0, 4);
     fill_random(s1 + 8, 1528);
 
+    /* S2 echoes the client's C1 verbatim (timestamp in bytes 0-3 and the
+     * 1528-byte random tail), with only the time2 field (bytes 4-7) replaced by
+     * our read time. The simple-handshake spec requires S2's random to match the
+     * C1 it answers; the previous code sent fresh random, which strict peers
+     * reject. */
     uint8_t s2[HANDSHAKE_SIZE];
-    memcpy(s2, &net_time, 4);
-    uint32_t peer_net = lrtmp2_hton32(hs->peer_time);
-    memcpy(s2 + 4, &peer_net, 4);
-    fill_random(s2 + 8, 1528);
+    memcpy(s2, c1, HANDSHAKE_SIZE);
+    memcpy(s2 + 4, &net_time, 4);
 
     if (!hs->out.data) {
         hs->out.data = LRTMP2_MALLOC(2 * HANDSHAKE_SIZE);
@@ -222,11 +225,12 @@ int lrtmp2_handshake_client_read_s1(lrtmp2_handshake_t *hs, lrtmp2_buffer_t *buf
 
     hs->peer_time = lrtmp2_ntoh32(s1);
 
+    /* C2 echoes the server's S1 verbatim (timestamp + random), with only the
+     * time2 field (bytes 4-7) set to our read time, per the simple handshake. */
     uint8_t c2[HANDSHAKE_SIZE];
-    uint32_t net_time = lrtmp2_hton32(hs->peer_time);
-    memcpy(c2, &net_time, 4);
-    memcpy(c2 + 4, &net_time, 4);
-    fill_random(c2 + 8, 1528);
+    memcpy(c2, s1, HANDSHAKE_SIZE);
+    uint32_t c2_time2 = lrtmp2_hton32(get_time());
+    memcpy(c2 + 4, &c2_time2, 4);
 
     hs->out.size = 0;
     hs->out.read_pos = 0;

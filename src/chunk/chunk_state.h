@@ -20,6 +20,7 @@ typedef struct {
     uint32_t type0_msg_length;
     uint8_t  type0_msg_type_id;
     uint32_t type0_msg_stream_id;
+    int      type0_ext_ts;      /* current message uses extended timestamps */
     uint32_t reassembly_bytes_read;  /* bytes read so far for current message */
     lrtmp2_buffer_t *reassembly_buf; /* buffer for reassembling partial messages */
     int in_use;

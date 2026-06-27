@@ -237,17 +237,24 @@ int lrtmp2_server_poll(lrtmp2_server_t *server, int timeout_ms)
         struct sockaddr_in client_addr;
         socklen_t addr_len = sizeof(client_addr);
         int client_fd = accept(server->server_fd, (struct sockaddr *)&client_addr, &addr_len);
+        /* inet_ntop writes into a caller-supplied buffer (unlike inet_ntoa's
+         * shared static buffer), so it is safe if the server is ever driven
+         * from multiple threads. */
+        char client_ip[INET_ADDRSTRLEN] = "?";
+        if (client_fd != INVALID_SOCKET) {
+            inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, sizeof(client_ip));
+        }
         if (client_fd == INVALID_SOCKET) {
             LRTMP2_LOG_WARN("Accept failed: %s", strerror(errno));
         } else if (server->config->max_connections > 0 &&
                    server_count_active_connections(server) >= server->config->max_connections) {
             LRTMP2_LOG_WARN("Rejecting connection from %s:%d: max_connections=%d reached",
-                             inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port),
+                             client_ip, ntohs(client_addr.sin_port),
                              server->config->max_connections);
             close_socket(client_fd);
         } else {
             LRTMP2_LOG_INFO("New connection from %s:%d",
-                             inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
+                             client_ip, ntohs(client_addr.sin_port));
             lrtmp2_conn_t *conn = lrtmp2_conn_create((lrtmp2_server_t *)server, server->config);
             if (!conn) {
                 LRTMP2_LOG_ERROR("Failed to create connection context");

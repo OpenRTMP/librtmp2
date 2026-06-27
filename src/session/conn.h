@@ -9,6 +9,12 @@
 #include <pthread.h>
 
 /** @file Connection lifecycle and message processing */
+
+/* Upper bound on streams a single connection may create via createStream. Each
+ * one is heap-allocated and tracked until the connection closes; the cap stops a
+ * hostile peer from exhausting memory with endless createStream commands. */
+#define LRTMP2_MAX_STREAMS_PER_CONN 16
+
 struct lrtmp2_server;
 
 struct lrtmp2_server_config;  /* defined in include/librtmp2/librtmp2.h */
@@ -24,7 +30,12 @@ struct lrtmp2_conn {
                                             * chunk_reg.default_chunk_size tracks
                                             * the peer's negotiated chunk size */
     uint32_t                   chunk_size;
-    uint32_t                   window_ack_size;
+    uint32_t                   window_ack_size;   /* peer's advertised window; we
+                                                   * must Acknowledge once we have
+                                                   * received this many bytes */
+    uint32_t                   bytes_received;    /* running total of bytes fed in
+                                                   * (RTMP ack sequence number) */
+    uint32_t                   bytes_at_last_ack; /* bytes_received at last ack sent */
     int                        client_fd;
     char                       app[256];
     uint32_t                   next_stream_id;
