@@ -4,7 +4,7 @@ A modern, open-source **C library** for Legacy RTMP and Enhanced RTMP v1/v2.
 `librtmp2` is a reusable protocol foundation — not a media server.
 
 [![License](https://img.shields.io/github/license/AlexanderWagnerDev/librtmp2)](LICENSE)
-[![Status](https://img.shields.io/badge/status-alpha-orange)]()
+[![Status](https://img.shields.io/badge/status-v0.1.0-green)]()
 [![Language](https://img.shields.io/badge/language-C-blue)]()
 
 ---
@@ -201,6 +201,10 @@ Detailed design documents are located in [`concept/`](concept/):
 - [`concept/librtmp2-core.md`](concept/librtmp2-core.md) — Core library architecture, API design, protocol modules, security rules
 
 ---
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for release notes.
 
 ## License
 
