@@ -12,6 +12,9 @@
  *   <output_dir>/frame_000002.script (AMF0/AMF3 onMetaData)
  *   <output_dir>/frame_000003.metadata
  */
+/* _POSIX_C_SOURCE needed for clock_gettime / CLOCK_MONOTONIC */
+#define _POSIX_C_SOURCE 199309L
+
 #include "librtmp2/librtmp2.h"
 #include <stdio.h>
 #include <stdlib.h>
