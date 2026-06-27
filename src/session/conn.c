@@ -26,9 +26,44 @@
 #define RTMP_MSG_AMF0_COMMAND         0x14
 #define RTMP_MSG_AMF0_DATA            0x12
 #define RTMP_MSG_SET_CHUNK_SIZE       0x01
-
-
+#define RTMP_MSG_ACKNOWLEDGEMENT      0x03
 #define RTMP_MSG_WINDOW_ACK_SIZE      0x05
+#define RTMP_MSG_SET_PEER_BANDWIDTH   0x06
+
+/* Window the server advertises to the peer (bytes between Acknowledgements) and
+ * the peer-bandwidth limit it requests. 2.5 MB / "dynamic" mirrors common RTMP
+ * server defaults. */
+#define LRTMP2_SERVER_WINDOW_ACK_SIZE 2500000u
+#define LRTMP2_SERVER_PEER_BANDWIDTH  2500000u
+#define LRTMP2_PEER_BANDWIDTH_DYNAMIC 2
+
+/* Frame and queue a protocol control message (csid 2, stream 0) into the send
+ * buffer. Used for SetChunkSize / WindowAckSize / SetPeerBandwidth / Acknowledgement. */
+static int conn_send_control(lrtmp2_conn_t *conn, uint8_t type,
+                             const uint8_t *data, size_t len)
+{
+    lrtmp2_chunk_message_t m;
+    memset(&m, 0, sizeof(m));
+    m.csid = 2;
+    m.fmt = 0;
+    m.msg_length = (uint32_t)len;
+    m.msg_type_id = type;
+    m.msg_stream_id = 0;
+    return lrtmp2_chunk_write(conn->send_buffer, &m, data, len, conn->chunk_size);
+}
+
+/* Send an Acknowledgement carrying the running received-byte count. RTMP peers
+ * that honour WindowAckSize stop sending once an unacknowledged window has built
+ * up, so failing to ack stalls high-throughput ingest. */
+static int lrtmp2_conn_send_acknowledgement(lrtmp2_conn_t *conn, uint32_t seq)
+{
+    uint8_t b[4];
+    b[0] = (uint8_t)(seq >> 24);
+    b[1] = (uint8_t)(seq >> 16);
+    b[2] = (uint8_t)(seq >> 8);
+    b[3] = (uint8_t)(seq);
+    return conn_send_control(conn, RTMP_MSG_ACKNOWLEDGEMENT, b, sizeof(b));
+}
 
 lrtmp2_conn_t *lrtmp2_conn_create(lrtmp2_server_t *server, const lrtmp2_server_config_t *config)
 {
@@ -96,6 +131,10 @@ int lrtmp2_conn_recv(lrtmp2_conn_t *conn, const uint8_t *data, size_t len)
     int rc = lrtmp2_buffer_write(conn->recv_buffer, data, len);
     if (rc < 0) return rc;
 
+    /* Count every received byte for window acknowledgement (wraps at 2^32 like
+     * the RTMP sequence number). */
+    conn->bytes_received += (uint32_t)len;
+
     /* Process all buffered data. Use a no-progress bound: if many
      * iterations pass without consuming data or reaching a terminal
      * state, bail out to avoid starving callers that feed data in
@@ -126,6 +165,14 @@ int lrtmp2_conn_recv(lrtmp2_conn_t *conn, const uint8_t *data, size_t len)
         } else {
             no_progress = 0;
         }
+    }
+
+    /* Send an Acknowledgement once at least a full window of bytes has been
+     * received since the last one. Queued to send_buffer; the caller flushes. */
+    if (conn->window_ack_size > 0 &&
+        (conn->bytes_received - conn->bytes_at_last_ack) >= conn->window_ack_size) {
+        lrtmp2_conn_send_acknowledgement(conn, conn->bytes_received);
+        conn->bytes_at_last_ack = conn->bytes_received;
     }
 
     return LRTMP2_OK;
@@ -284,16 +331,29 @@ int lrtmp2_conn_send_connect_response(lrtmp2_conn_t *conn, double transaction_id
 {
     if (!conn) return LRTMP2_ERR_INTERNAL;
 
+    /* Window Acknowledgement Size (type 0x05): tell the peer how often to ack us. */
+    {
+        uint8_t b[4];
+        uint32_t net = lrtmp2_hton32(LRTMP2_SERVER_WINDOW_ACK_SIZE);
+        memcpy(b, &net, 4);
+        conn_send_control(conn, RTMP_MSG_WINDOW_ACK_SIZE, b, 4);
+    }
+
+    /* Set Peer Bandwidth (type 0x06): 4-byte window + 1-byte limit type. */
+    {
+        uint8_t b[5];
+        uint32_t net = lrtmp2_hton32(LRTMP2_SERVER_PEER_BANDWIDTH);
+        memcpy(b, &net, 4);
+        b[4] = LRTMP2_PEER_BANDWIDTH_DYNAMIC;
+        conn_send_control(conn, RTMP_MSG_SET_PEER_BANDWIDTH, b, 5);
+    }
+
     /* Send SetChunkSize (msg type 0x01 on csid 2) */
     {
-        lrtmp2_chunk_message_t scs_msg;
-        memset(&scs_msg, 0, sizeof(scs_msg));
-        scs_msg.csid = 2;
-        scs_msg.fmt = 0;
-        scs_msg.msg_length = 4;
-        scs_msg.msg_type_id = RTMP_MSG_SET_CHUNK_SIZE;
         uint32_t net_cs = lrtmp2_hton32(conn->chunk_size);
-        lrtmp2_chunk_write(conn->send_buffer, &scs_msg, (uint8_t *)&net_cs, 4, conn->chunk_size);
+        uint8_t b[4];
+        memcpy(b, &net_cs, 4);
+        conn_send_control(conn, RTMP_MSG_SET_CHUNK_SIZE, b, 4);
     }
 
     /* Build AMF0 _result command */

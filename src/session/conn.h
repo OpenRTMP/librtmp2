@@ -30,7 +30,12 @@ struct lrtmp2_conn {
                                             * chunk_reg.default_chunk_size tracks
                                             * the peer's negotiated chunk size */
     uint32_t                   chunk_size;
-    uint32_t                   window_ack_size;
+    uint32_t                   window_ack_size;   /* peer's advertised window; we
+                                                   * must Acknowledge once we have
+                                                   * received this many bytes */
+    uint32_t                   bytes_received;    /* running total of bytes fed in
+                                                   * (RTMP ack sequence number) */
+    uint32_t                   bytes_at_last_ack; /* bytes_received at last ack sent */
     int                        client_fd;
     char                       app[256];
     uint32_t                   next_stream_id;
