@@ -11,7 +11,9 @@
 int test_chunk_write_read_basic(void)
 {
     lrtmp2_buffer_t *out = lrtmp2_buffer_create();
-    lrtmp2_chunk_streams_init();
+    lrtmp2_chunk_registry_t reg;
+    memset(&reg, 0, sizeof(reg));
+    lrtmp2_chunk_registry_init(&reg);
 
     /* Write a simple chunk */
     lrtmp2_chunk_message_t msg;
@@ -32,37 +34,42 @@ int test_chunk_write_read_basic(void)
     }
 
     /* Read it back */
-    lrtmp2_chunk_stream_t *cs = lrtmp2_chunk_stream_get(2);
+    lrtmp2_chunk_stream_t *cs = lrtmp2_chunk_stream_get(&reg, 2);
     lrtmp2_chunk_message_t read_msg;
     const uint8_t *read_payload = NULL;
     size_t read_len;
 
     out->read_pos = 0;
-    rc = lrtmp2_chunk_read(out, cs, &read_msg, &read_payload, &read_len);
+    rc = lrtmp2_chunk_read(out, &reg, cs, &read_msg, &read_payload, &read_len);
     if (rc <= 0) {
         printf("FAIL: chunk_read returned %d\n", rc);
+        lrtmp2_chunk_registry_destroy(&reg);
         lrtmp2_buffer_destroy(out);
         return 0;
     }
 
     if (read_msg.msg_length != 11) {
         printf("FAIL: expected msg_length 11, got %u\n", read_msg.msg_length);
+        lrtmp2_chunk_registry_destroy(&reg);
         lrtmp2_buffer_destroy(out);
         return 0;
     }
 
     if (read_len != 11) {
         printf("FAIL: expected payload len 11, got %zu\n", read_len);
+        lrtmp2_chunk_registry_destroy(&reg);
         lrtmp2_buffer_destroy(out);
         return 0;
     }
 
     if (memcmp(read_payload, payload, 11) != 0) {
         printf("FAIL: payload mismatch\n");
+        lrtmp2_chunk_registry_destroy(&reg);
         lrtmp2_buffer_destroy(out);
         return 0;
     }
 
+    lrtmp2_chunk_registry_destroy(&reg);
     lrtmp2_buffer_destroy(out);
     printf("PASS: chunk write/read basic\n");
     return 1;
@@ -72,7 +79,9 @@ int test_chunk_multi_fragment(void)
 {
     /* Test chunk reassembly: write a large message in multiple chunks */
     lrtmp2_buffer_t *out = lrtmp2_buffer_create();
-    lrtmp2_chunk_streams_init();
+    lrtmp2_chunk_registry_t reg;
+    memset(&reg, 0, sizeof(reg));
+    lrtmp2_chunk_registry_init(&reg);
 
     uint8_t large_payload[512];
     memset(large_payload, 0xAB, sizeof(large_payload));
@@ -92,7 +101,7 @@ int test_chunk_multi_fragment(void)
     lrtmp2_chunk_write(out, &msg, large_payload, 512, LRTMP2_DEFAULT_CHUNK_SIZE);
 
     /* Read and reassemble */
-    lrtmp2_chunk_stream_t *cs = lrtmp2_chunk_stream_get(4);
+    lrtmp2_chunk_stream_t *cs = lrtmp2_chunk_stream_get(&reg, 4);
     cs->chunk_size = 128;
     cs->reassembly_bytes_read = 0;
 
@@ -107,9 +116,10 @@ int test_chunk_multi_fragment(void)
     /* Read physical chunks until the full message is reassembled */
     int complete = 0;
     for (int i = 0; i < 10 && !complete; i++) {
-        int rc = lrtmp2_chunk_read(out, cs, &read_msg, &rbuf, &rlen);
+        int rc = lrtmp2_chunk_read(out, &reg, cs, &read_msg, &rbuf, &rlen);
         if (rc <= 0) {
             printf("FAIL: chunk_read fragment %d returned %d\n", i, rc);
+            lrtmp2_chunk_registry_destroy(&reg);
             lrtmp2_buffer_destroy(out);
             return 0;
         }
@@ -122,16 +132,19 @@ int test_chunk_multi_fragment(void)
 
     if (total_read != 512) {
         printf("FAIL: expected 512 bytes reassembled, got %zu\n", total_read);
+        lrtmp2_chunk_registry_destroy(&reg);
         lrtmp2_buffer_destroy(out);
         return 0;
     }
 
     if (memcmp(reassembled, large_payload, 512) != 0) {
         printf("FAIL: reassembled data mismatch\n");
+        lrtmp2_chunk_registry_destroy(&reg);
         lrtmp2_buffer_destroy(out);
         return 0;
     }
 
+    lrtmp2_chunk_registry_destroy(&reg);
     lrtmp2_buffer_destroy(out);
     printf("PASS: chunk multi-fragment reassembly\n");
     return 1;
@@ -143,7 +156,6 @@ int test_chunk_main(void)
     printf("Running chunk tests...\n");
     if (test_chunk_write_read_basic()) passed++;
     if (test_chunk_multi_fragment()) passed++;
-    lrtmp2_chunk_streams_destroy();
     printf("Chunk tests: %d/2 passed\n", passed);
     return (passed >= 2) ? 0 : 1;
 }

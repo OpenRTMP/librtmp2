@@ -32,4 +32,8 @@ int lrtmp2_msg_write_set_chunk_size(lrtmp2_buffer_t *buf, uint32_t chunk_size);
 int lrtmp2_msg_decode(lrtmp2_conn_t *conn, const lrtmp2_chunk_message_t *chunk,
                        const uint8_t *payload, size_t payload_len);
 
+/* Decode an Aggregate message (type 0x16) into individual audio/video frames. */
+int lrtmp2_msg_decode_aggregate(lrtmp2_conn_t *conn, const lrtmp2_chunk_message_t *chunk,
+                                const uint8_t *payload, size_t payload_len);
+
 #endif

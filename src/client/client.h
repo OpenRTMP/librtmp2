@@ -22,6 +22,7 @@ typedef struct lrtmp2_client {
     lrtmp2_client_state_t state;
     lrtmp2_buffer_t *send_buffer;
     lrtmp2_buffer_t *recv_buffer;
+    lrtmp2_chunk_registry_t chunk_reg;  /* per-client chunk-stream state */
     uint32_t peer_chunk_size;
     uint32_t stream_id;
     char app[256];

@@ -265,8 +265,9 @@ int lrtmp2_server_process_connections(lrtmp2_server_t *server)
             uint8_t tmp_buf[4096];
             ssize_t n = recv(conn->client_fd, tmp_buf, sizeof(tmp_buf), MSG_DONTWAIT);
             if (n > 0) {
+                /* conn_recv already drives conn_process (and flushes responses)
+                 * internally; just flush any trailing queued bytes afterwards. */
                 lrtmp2_conn_recv(conn, tmp_buf, (size_t)n);
-                lrtmp2_conn_process(conn);
                 lrtmp2_conn_flush(conn);
             } else if (n == 0) {
                 /* Client disconnected */
@@ -281,7 +282,7 @@ int lrtmp2_server_process_connections(lrtmp2_server_t *server)
             }
         }
 
-        /* Remove dead connections from list (naturally freeded inside conn_destroy). */
+        /* Remove dead connections from list (freed inside conn_destroy). */
         if (conn->state >= LRTMP2_STATE_CLOSING && conn->client_fd < 0) {
             if (prev) prev->next = next; else server->connections = next;
             lrtmp2_conn_destroy(conn);

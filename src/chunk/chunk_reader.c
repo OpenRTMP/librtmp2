@@ -19,11 +19,12 @@
  * Returns number of payload bytes written into `out`, or negative error code.
  */
 int lrtmp2_chunk_read(lrtmp2_buffer_t *buf,
+                       lrtmp2_chunk_registry_t *registry,
                        lrtmp2_chunk_stream_t *stream,
                        lrtmp2_chunk_message_t *msg,
                        const uint8_t **out_payload, size_t *out_len)
 {
-    if (!buf || !msg || !out_payload || !out_len) {
+    if (!buf || !msg || !out_payload || !out_len || (!registry && !stream)) {
         return LRTMP2_ERR_INTERNAL;
     }
     *out_payload = NULL;
@@ -58,7 +59,7 @@ int lrtmp2_chunk_read(lrtmp2_buffer_t *buf,
     /* csid 2-63: 1-byte form, no extra read needed */
 
     /* Read chunk stream state — or use provided external state */
-    lrtmp2_chunk_stream_t *cs = stream ? stream : lrtmp2_chunk_stream_get(csid);
+    lrtmp2_chunk_stream_t *cs = stream ? stream : lrtmp2_chunk_stream_get(registry, csid);
     if (!cs) return LRTMP2_ERR_INTERNAL;
 
     /* --- Message header: depends on fmt --- */

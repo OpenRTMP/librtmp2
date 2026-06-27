@@ -10,7 +10,7 @@ CFLAGS += -Iinclude -Isrc
 ifdef DEBUG
   CFLAGS += -g -O0 -DDEBUG
 else
-  CFLAGS += -O2 -DNendif
+  CFLAGS += -O2 -DNDEBUG
 endif
 
 ifdef ASAN

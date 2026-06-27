@@ -49,7 +49,7 @@ lrtmp2_conn_t *lrtmp2_conn_create(lrtmp2_server_t *server, const lrtmp2_server_c
     }
 
     lrtmp2_handshake_server_init(&conn->handshake);
-    lrtmp2_chunk_streams_init();
+    lrtmp2_chunk_registry_init(&conn->chunk_reg);
 
     conn->recv_buffer = lrtmp2_buffer_create();
     if (!conn->recv_buffer) {
@@ -81,7 +81,7 @@ void lrtmp2_conn_destroy(lrtmp2_conn_t *conn)
     if (conn->send_buffer) lrtmp2_buffer_destroy(conn->send_buffer);
     lrtmp2_handshake_cleanup(&conn->handshake);
     pthread_mutex_destroy(&conn->send_mutex);
-    lrtmp2_chunk_streams_destroy();
+    lrtmp2_chunk_registry_destroy(&conn->chunk_reg);
     LRTMP2_LOG_DEBUG("Connection destroyed");
     LRTMP2_FREE(conn);
 }
@@ -208,7 +208,7 @@ int lrtmp2_conn_read_messages(lrtmp2_conn_t *conn)
     while (lrtmp2_buffer_available(conn->recv_buffer) > 0) {
         payload = NULL;
         payload_len = 0;
-        rc = lrtmp2_chunk_read(conn->recv_buffer, NULL, &msg, &payload, &payload_len);
+        rc = lrtmp2_chunk_read(conn->recv_buffer, &conn->chunk_reg, NULL, &msg, &payload, &payload_len);
 
         if (rc == 0) break;
         if (rc < 0) return rc;
