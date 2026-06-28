@@ -13,6 +13,7 @@ core_sources = [
   'src/core/alloc.c',
   'src/core/buffer.c',
   'src/core/bytes.c',
+  'src/core/net.c',
   'src/core/log.c',
   'src/core/errors.c',
   'src/core/lib.c',
@@ -121,6 +122,7 @@ if build_tests
     'tests/unit/test_control.c',
     'tests/unit/test_server.c',
     'tests/unit/test_message.c',
+    'tests/unit/test_net.c',
   ]
   test_exec = executable('test_librtmp2',
     test_sources,

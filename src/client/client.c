@@ -12,6 +12,12 @@
  * responses). So this file reads chunks directly via lrtmp2_chunk_read() and
  * does its own minimal message dispatch.
  */
+/* Expose POSIX/BSD socket APIs (getaddrinfo, ...) when built with a strict
+ * -std=c11: the meson build sets c_std=c11, under which glibc hides them unless
+ * a feature-test macro is requested first. Must precede all includes. */
+#ifndef _DEFAULT_SOURCE
+#define _DEFAULT_SOURCE 1
+#endif
 #include "client.h"
 #include "core/log.h"
 #include "core/alloc.h"
@@ -35,11 +41,13 @@
 #include <unistd.h>
 #include <stdio.h>
 #include <sys/select.h>
+#include <netdb.h>
 #define close_socket close
 #endif
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include "core/net.h"
 
 /* RTMP message type IDs (mirrors message.c) */
 #define RTMP_MSG_SET_CHUNK_SIZE       0x01
@@ -263,19 +271,18 @@ int lrtmp2_client_connect(lrtmp2_client_t *client, const char *url)
 {
     if (!client || !url) return LRTMP2_ERR_INTERNAL;
 
-    /* Parse URL: rtmp://host:port/app/stream_key */
-    char host[256];
-    int port = 1935;
-
+    /* Parse URL: rtmp://host:port/app/stream_key. host may be a hostname, an
+     * IPv4 literal, or a bracketed IPv6 literal (rtmp://[::1]:1935/app/key). */
+    char authority[256];
     const char *p = url;
     if (strncmp(p, "rtmp://", 7) == 0) p += 7;
 
     const char *slash = strchr(p, '/');
     if (slash) {
-        size_t host_len = (size_t)(slash - p);
-        if (host_len >= sizeof(host)) return LRTMP2_ERR_INTERNAL;
-        memcpy(host, p, host_len);
-        host[host_len] = '\0';
+        size_t auth_len = (size_t)(slash - p);
+        if (auth_len >= sizeof(authority)) return LRTMP2_ERR_INTERNAL;
+        memcpy(authority, p, auth_len);
+        authority[auth_len] = '\0';
 
         const char *app_start = slash + 1;
         const char *stream_slash = strchr(app_start, '/');
@@ -290,41 +297,53 @@ int lrtmp2_client_connect(lrtmp2_client_t *client, const char *url)
             client->stream_key[0] = '\0';
         }
     } else {
-        snprintf(host, sizeof(host), "%s", p);
+        if (strlen(p) >= sizeof(authority)) return LRTMP2_ERR_INTERNAL;
+        snprintf(authority, sizeof(authority), "%s", p);
         client->app[0] = '\0';
         client->stream_key[0] = '\0';
     }
 
-    char *colon = strrchr(host, ':');
-    if (colon) {
-        int parsed = parse_port(colon + 1);
-        if (parsed < 0) {
-            LRTMP2_LOG_ERROR("Invalid port in URL: %s", colon + 1);
-            return LRTMP2_ERR_INTERNAL;
-        }
-        port = parsed;
-        *colon = '\0';
+    char host[256];
+    char port[16];
+    if (lrtmp2_split_host_port(authority, host, sizeof(host), port, sizeof(port), "1935") != 0) {
+        LRTMP2_LOG_ERROR("Invalid host/port in URL: %s", authority);
+        return LRTMP2_ERR_INTERNAL;
+    }
+    if (parse_port(port) < 0) {
+        LRTMP2_LOG_ERROR("Invalid port in URL: %s", port);
+        return LRTMP2_ERR_INTERNAL;
     }
 
-    LRTMP2_LOG_INFO("Connecting to rtmp://%s:%d/%s/%s", host, port, client->app, client->stream_key);
+    LRTMP2_LOG_INFO("Connecting to rtmp://%s:%s/%s/%s", host, port, client->app, client->stream_key);
 
-    client->client_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (client->client_fd < 0) return LRTMP2_ERR_IO;
+    /* Resolve host (DNS name or numeric literal, IPv4 or IPv6) and connect to
+     * the first address that accepts. */
+    struct addrinfo hints;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
 
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons((uint16_t)port);
-
-    if (inet_pton(AF_INET, host, &addr.sin_addr) <= 0) {
-        close_socket(client->client_fd);
-        client->client_fd = -1;
+    struct addrinfo *res = NULL;
+    int gai = getaddrinfo(host, port, &hints, &res);
+    if (gai != 0) {
+        LRTMP2_LOG_ERROR("Cannot resolve '%s': %s", host, gai_strerror(gai));
         return LRTMP2_ERR_IO;
     }
 
-    if (connect(client->client_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        close_socket(client->client_fd);
-        client->client_fd = -1;
+    client->client_fd = -1;
+    for (struct addrinfo *rp = res; rp; rp = rp->ai_next) {
+        int fd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
+        if (fd < 0) continue;
+        if (connect(fd, rp->ai_addr, (socklen_t)rp->ai_addrlen) == 0) {
+            client->client_fd = fd;
+            break;
+        }
+        close_socket(fd);
+    }
+    freeaddrinfo(res);
+
+    if (client->client_fd < 0) {
+        LRTMP2_LOG_ERROR("Failed to connect to %s:%s: %s", host, port, strerror(errno));
         return LRTMP2_ERR_IO;
     }
 
@@ -362,7 +381,11 @@ int lrtmp2_client_connect(lrtmp2_client_t *client, const char *url)
     amf_buf.capacity = sizeof(amf_data);
 
     char tc_url[768];
-    snprintf(tc_url, sizeof(tc_url), "rtmp://%s:%d/%s", host, port, client->app);
+    if (strchr(host, ':')) {  /* IPv6 literal -> bracket it in the URL */
+        snprintf(tc_url, sizeof(tc_url), "rtmp://[%s]:%s/%s", host, port, client->app);
+    } else {
+        snprintf(tc_url, sizeof(tc_url), "rtmp://%s:%s/%s", host, port, client->app);
+    }
 
     rc = lrtmp2_cmd_build_connect(&amf_buf, client->app, tc_url, NULL, NULL, "FMLE/3.0", 0, 0);
     if (rc != LRTMP2_OK) return rc;
