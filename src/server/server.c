@@ -303,11 +303,37 @@ int lrtmp2_server_process_connections(lrtmp2_server_t *server)
 {
     if (!server) return LRTMP2_ERR_INTERNAL;
 
+    /* Phase 1 — snapshot the connections to service.
+     *
+     * We must NOT hold connections_mutex while running host callbacks: conn_recv
+     * drives on_frame/on_publish/on_play, and the teardown below fires on_close.
+     * A callback that re-enters a connections_mutex-taking API — e.g.
+     * lrtmp2_server_broadcast(), the intended way to relay frames to players —
+     * would self-deadlock on this non-recursive mutex. (accept's on_connect_cb is
+     * already invoked outside the lock for the same reason.) So we copy the
+     * current connection pointers under the lock, release it, then do all network
+     * I/O and callbacks unlocked, and finally reap under the lock again. */
     pthread_mutex_lock((pthread_mutex_t *)&server->connections_mutex);
-    lrtmp2_conn_t *conn = server->connections;
-    lrtmp2_conn_t *prev = NULL;
-    while (conn) {
-        lrtmp2_conn_t *next = conn->next;
+    size_t n_conns = 0;
+    for (lrtmp2_conn_t *c = server->connections; c; c = c->next) n_conns++;
+    lrtmp2_conn_t **snapshot = NULL;
+    if (n_conns > 0) {
+        snapshot = LRTMP2_MALLOC(n_conns * sizeof(*snapshot));
+        if (!snapshot) {
+            pthread_mutex_unlock((pthread_mutex_t *)&server->connections_mutex);
+            return LRTMP2_ERR_INTERNAL;
+        }
+        size_t i = 0;
+        for (lrtmp2_conn_t *c = server->connections; c && i < n_conns; c = c->next) {
+            snapshot[i++] = c;
+        }
+    }
+    pthread_mutex_unlock((pthread_mutex_t *)&server->connections_mutex);
+
+    /* Phase 2 — service each connection with the lock released. All host
+     * callbacks fire here and are free to call back into the server. */
+    for (size_t i = 0; i < n_conns; i++) {
+        lrtmp2_conn_t *conn = snapshot[i];
         if (conn->client_fd >= 0 && conn->state < LRTMP2_STATE_CLOSING) {
             /* Try to receive data (non-blocking) */
             uint8_t tmp_buf[4096];
@@ -331,18 +357,32 @@ int lrtmp2_server_process_connections(lrtmp2_server_t *server)
             }
         }
 
-        /* Tear down any connection that has entered CLOSING. Close the socket and
-         * fire on_close exactly once (gated on a still-open fd), then unlink and
-         * free. Doing the close here — rather than only on the n==0 path — avoids
-         * leaking the socket fd and the connection struct on the error path. */
-        if (conn->state >= LRTMP2_STATE_CLOSING) {
-            if (conn->client_fd >= 0) {
-                close_socket(conn->client_fd);
-                conn->client_fd = -1;
-                if (server->config->on_close_cb) {
-                    server->config->on_close_cb(conn, server->config->userdata);
-                }
+        /* Close the socket and fire on_close exactly once (gated on a still-open
+         * fd), still outside the lock. Closing here — rather than only on the
+         * n==0 path — avoids leaking the socket fd on the error path; the struct
+         * itself is unlinked and freed in phase 3. */
+        if (conn->state >= LRTMP2_STATE_CLOSING && conn->client_fd >= 0) {
+            close_socket(conn->client_fd);
+            conn->client_fd = -1;
+            if (server->config->on_close_cb) {
+                server->config->on_close_cb(conn, server->config->userdata);
             }
+        }
+    }
+
+    LRTMP2_FREE(snapshot);
+
+    /* Phase 3 — reap. Re-traverse the live list under the lock and unlink/destroy
+     * every connection that has reached CLOSING. Re-deriving the list here (rather
+     * than reusing the snapshot) keeps the unlink correct even if the list changed
+     * while unlocked, and avoids freeing through a stale snapshot pointer.
+     * conn_destroy fires no host callbacks, so it is safe under the lock. */
+    pthread_mutex_lock((pthread_mutex_t *)&server->connections_mutex);
+    lrtmp2_conn_t *conn = server->connections;
+    lrtmp2_conn_t *prev = NULL;
+    while (conn) {
+        lrtmp2_conn_t *next = conn->next;
+        if (conn->state >= LRTMP2_STATE_CLOSING) {
             if (prev) prev->next = next; else server->connections = next;
             lrtmp2_conn_destroy(conn);
         } else {

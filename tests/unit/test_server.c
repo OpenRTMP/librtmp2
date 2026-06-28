@@ -6,6 +6,8 @@
 #include "core/log.h"
 #include <stdio.h>
 #include <string.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
 int test_server_max_connections_enforced(void)
 {
@@ -155,13 +157,93 @@ int test_server_window_acknowledgement(void)
     return 1;
 }
 
+/* Regression: host callbacks must NOT run while the server holds
+ * connections_mutex. lrtmp2_server_process_connections used to hold the lock
+ * across the whole recv -> parse -> callback chain, so a callback that re-enters
+ * a connections_mutex-taking API (e.g. lrtmp2_server_broadcast(), the intended
+ * way to relay frames to players) would self-deadlock on the non-recursive
+ * mutex. We probe the property deterministically with pthread_mutex_trylock
+ * (which never blocks): under the bug it returns EBUSY because the calling
+ * thread already holds the lock; with the fix it succeeds. on_close is the
+ * easiest callback to drive — a closed socketpair peer makes recv() return EOF —
+ * and it travels the same lock-scope path as on_frame/on_publish/on_play. */
+static int g_lock_free_during_close = -1;
+
+static void reentrant_on_close(lrtmp2_conn_t *conn, void *userdata)
+{
+    (void)conn;
+    lrtmp2_server_t *server = (lrtmp2_server_t *)userdata;
+    int r = pthread_mutex_trylock((pthread_mutex_t *)&server->connections_mutex);
+    if (r == 0) {
+        g_lock_free_during_close = 1;
+        pthread_mutex_unlock((pthread_mutex_t *)&server->connections_mutex);
+    } else {
+        g_lock_free_during_close = 0;  /* lock still held -> a real API would deadlock */
+    }
+}
+
+int test_server_callbacks_not_under_lock(void)
+{
+    int sv[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) {
+        printf("FAIL: socketpair failed\n");
+        return 0;
+    }
+    close(sv[1]);  /* peer closed -> recv(sv[0]) returns 0 (EOF) -> CLOSING -> on_close */
+
+    lrtmp2_server_config_t config;
+    memset(&config, 0, sizeof(config));
+    config.chunk_size = 4096;
+    config.on_close_cb = reentrant_on_close;
+
+    lrtmp2_server_t *server = lrtmp2_server_create(&config);
+    if (!server) {
+        printf("FAIL: server_create returned NULL\n");
+        close(sv[0]);
+        return 0;
+    }
+    config.userdata = server;  /* config is stored by pointer, so this reaches the cb */
+
+    lrtmp2_conn_t *conn = lrtmp2_conn_create(server, &config);
+    if (!conn) {
+        printf("FAIL: conn_create failed\n");
+        close(sv[0]);
+        lrtmp2_server_destroy(server);
+        return 0;
+    }
+    conn->client_fd = sv[0];
+    conn->state = LRTMP2_STATE_CONNECTED;  /* past handshake so the recv path runs */
+    pthread_mutex_lock((pthread_mutex_t *)&server->connections_mutex);
+    conn->next = server->connections;
+    server->connections = conn;
+    pthread_mutex_unlock((pthread_mutex_t *)&server->connections_mutex);
+
+    /* Drives recv (EOF) -> on_close -> reap. trylock never blocks, so even a
+     * regression cannot hang the suite; it fails the assertion instead. */
+    lrtmp2_server_process_connections(server);
+
+    lrtmp2_server_destroy(server);
+
+    if (g_lock_free_during_close != 1) {
+        printf("FAIL: on_close ran with connections_mutex held (lock_free=%d) — "
+               "callback re-entry into the server would deadlock\n",
+               g_lock_free_during_close);
+        return 0;
+    }
+
+    printf("PASS: host callbacks run without connections_mutex held\n");
+    return 1;
+}
+
 int test_server_main(void)
 {
     int passed = 0;
+    int total = 4;
     printf("Running server tests...\n");
     if (test_server_max_connections_enforced()) passed++;
     if (test_server_partial_handshake()) passed++;
     if (test_server_window_acknowledgement()) passed++;
-    printf("Server tests: %d/3 passed\n", passed);
-    return (passed >= 3) ? 0 : 1;
+    if (test_server_callbacks_not_under_lock()) passed++;
+    printf("Server tests: %d/%d passed\n", passed, total);
+    return (passed >= total) ? 0 : 1;
 }
