@@ -21,7 +21,7 @@
 #include <stdint.h>
 #include <unistd.h>
 #include <sys/socket.h>
-#include <sys/select.h>
+#include <poll.h>
 
 #ifdef LRTMP2_HAVE_TLS
 #include <openssl/ssl.h>
@@ -70,6 +70,23 @@ static int set_blocking(int fd)
 }
 #endif
 
+/* Block until fd is readable (for_write=0) or writable (for_write=1). Uses
+ * poll() rather than select() so it is safe past FD_SETSIZE, and retries on
+ * EINTR. Returns 0 when the fd is ready, -1 on error. */
+static int wait_fd(int fd, int for_write)
+{
+    struct pollfd pfd;
+    pfd.fd = fd;
+    pfd.events = for_write ? POLLOUT : POLLIN;
+    for (;;) {
+        pfd.revents = 0;
+        int rc = poll(&pfd, 1, -1);
+        if (rc > 0) return 0;
+        if (rc < 0 && errno == EINTR) continue;
+        return -1;
+    }
+}
+
 /* ---------------- plaintext ---------------- */
 
 lrtmp2_transport_t *lrtmp2_transport_new_plain(int fd)
@@ -98,6 +115,13 @@ static int plain_send(lrtmp2_transport_t *t, const void *buf, size_t len)
         ssize_t n = send(t->fd, p + sent, len - sent, 0);
         if (n <= 0) {
             if (n < 0 && errno == EINTR) continue;
+            /* A non-blocking fd can report EAGAIN mid-write; wait for it to
+             * become writable and retry rather than failing the whole send,
+             * matching tls_send()'s behaviour. */
+            if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                if (wait_fd(t->fd, 1) != 0) return -1;
+                continue;
+            }
             return -1;
         }
         sent += (size_t)n;
@@ -172,13 +196,32 @@ void lrtmp2_tls_ctx_free(lrtmp2_tls_ctx_t *ctx)
     LRTMP2_FREE(ctx);
 }
 
+/* Seconds a single blocking TLS handshake may take before the socket times out.
+ * Bounds how long a stalled/slow peer can hold the (single-threaded) accept or
+ * connect path; a full non-blocking handshake state machine is left as a future
+ * improvement. */
+#define LRTMP2_TLS_HANDSHAKE_TIMEOUT_S 10
+
+static void set_socket_timeout(int fd, int seconds)
+{
+    struct timeval tv;
+    tv.tv_sec = seconds;
+    tv.tv_usec = 0;
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+}
+
 /* Drive a blocking TLS handshake on an otherwise non-blocking-capable fd. The
- * fd is switched to blocking for the duration so SSL_accept/SSL_connect run to
- * completion in one call, then flipped to non-blocking for steady state. */
+ * fd is switched to blocking (with a recv/send timeout so a stalled peer cannot
+ * block forever) for the duration so SSL_accept/SSL_connect run to completion
+ * in one call, then flipped back to non-blocking with the timeout cleared for
+ * steady state. */
 static int tls_handshake_blocking(SSL *ssl, int fd, int is_server)
 {
     if (set_blocking(fd) != 0) return -1;
+    set_socket_timeout(fd, LRTMP2_TLS_HANDSHAKE_TIMEOUT_S);
     int rc = is_server ? SSL_accept(ssl) : SSL_connect(ssl);
+    set_socket_timeout(fd, 0);  /* clear; steady state is non-blocking */
     if (rc != 1) {
         log_ssl_errors(is_server ? "SSL_accept" : "SSL_connect");
         return -1;
@@ -224,6 +267,16 @@ lrtmp2_transport_t *lrtmp2_transport_new_tls_client(int fd, const char *server_n
         return NULL;
     }
     SSL_CTX_set_min_proto_version(cctx, TLS1_2_VERSION);
+
+    /* Refuse a "verified" connection with no hostname to bind to: without a
+     * server name, CA-chain checks would pass for any host the CA ever signed.
+     * Callers that genuinely cannot supply a name must opt into insecure mode. */
+    if (!insecure && (!server_name || !*server_name)) {
+        LRTMP2_LOG_ERROR("TLS client: server_name is required for verification "
+                         "(set tls_insecure to skip)");
+        SSL_CTX_free(cctx);
+        return NULL;
+    }
 
     if (!insecure) {
         if (ca_file) {
@@ -293,8 +346,11 @@ static ssize_t tls_recv(lrtmp2_transport_t *t, void *buf, size_t len, int *again
         case SSL_ERROR_ZERO_RETURN:
             return 0;  /* clean TLS shutdown */
         case SSL_ERROR_WANT_READ:
+            if (again) *again = 1;  /* retry once readable */
+            errno = EAGAIN;
+            return -1;
         case SSL_ERROR_WANT_WRITE:
-            if (again) *again = 1;
+            if (again) *again = 2;  /* TLS wants the socket writable */
             errno = EAGAIN;
             return -1;
         case SSL_ERROR_SYSCALL:
@@ -304,18 +360,6 @@ static ssize_t tls_recv(lrtmp2_transport_t *t, void *buf, size_t len, int *again
             log_ssl_errors("SSL_read");
             return -1;
     }
-}
-
-/* Block until the fd is writable (or readable, for a renegotiation), used to
- * wait out WANT_WRITE/WANT_READ during a blocking send. */
-static int wait_fd(int fd, int for_write)
-{
-    fd_set fds;
-    FD_ZERO(&fds);
-    FD_SET(fd, &fds);
-    int rc = for_write ? select(fd + 1, NULL, &fds, NULL, NULL)
-                       : select(fd + 1, &fds, NULL, NULL, NULL);
-    return (rc > 0) ? 0 : -1;
 }
 
 static int tls_send(lrtmp2_transport_t *t, const void *buf, size_t len)

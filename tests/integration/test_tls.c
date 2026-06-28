@@ -34,11 +34,14 @@ int main(void) {
 #include <openssl/rsa.h>
 #include <openssl/x509.h>
 #include <openssl/pem.h>
+#include <openssl/x509v3.h>
 
 #define TEST_PORT 19371
 
-static const char *CERT_PATH = "/tmp/lrtmp2_test_cert.pem";
-static const char *KEY_PATH  = "/tmp/lrtmp2_test_key.pem";
+/* Unique temp paths so parallel runs don't race on shared filenames; filled in
+ * by make_temp_path() at startup. */
+static char CERT_PATH[64];
+static char KEY_PATH[64];
 
 static int g_frame_received = 0;
 static int g_publish_called = 0;
@@ -61,7 +64,18 @@ static int on_publish_cb(lrtmp2_conn_t *conn, const char *app, const char *strea
     return 0;
 }
 
-/* Generate a self-signed RSA certificate and write the cert/key PEM files. */
+/* Create a unique temp file path (and reserve it) via mkstemp. */
+static int make_temp_path(char *out, size_t out_sz, const char *tag) {
+    snprintf(out, out_sz, "/tmp/lrtmp2_%s_XXXXXX", tag);
+    int fd = mkstemp(out);
+    if (fd < 0) return -1;
+    close(fd);
+    return 0;
+}
+
+/* Generate a self-signed RSA certificate (with a SAN covering localhost and
+ * 127.0.0.1 so hostname verification can pass) and write the cert/key PEM
+ * files. */
 static int generate_self_signed(const char *cert_path, const char *key_path) {
     int ok = 0;
     EVP_PKEY *pkey = EVP_RSA_gen(2048);
@@ -79,6 +93,17 @@ static int generate_self_signed(const char *cert_path, const char *key_path) {
     X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC,
                                (const unsigned char *)"localhost", -1, -1, 0);
     X509_set_issuer_name(x509, name);  /* self-signed */
+
+    /* subjectAltName so the verified-path test (SSL_set1_host) succeeds. */
+    X509V3_CTX v3ctx;
+    X509V3_set_ctx_nodb(&v3ctx);
+    X509V3_set_ctx(&v3ctx, x509, x509, NULL, NULL, 0);
+    X509_EXTENSION *ext = X509V3_EXT_conf_nid(NULL, &v3ctx, NID_subject_alt_name,
+                                              "DNS:localhost,IP:127.0.0.1");
+    if (ext) {
+        X509_add_ext(x509, ext, -1);
+        X509_EXTENSION_free(ext);
+    }
 
     if (!X509_sign(x509, pkey, EVP_sha256())) goto done;
 
@@ -99,21 +124,31 @@ done:
     return ok ? 0 : -1;
 }
 
+/* Per-case client parameters: whether to verify the cert, which CA to trust,
+ * and the host to connect to (must match the cert SAN when verifying). */
+typedef struct {
+    int   insecure;
+    const char *ca_file;   /* NULL unless verifying */
+    const char *host;
+} client_params_t;
+
 static void *client_thread_fn(void *arg) {
-    (void)arg;
+    client_params_t *params = (client_params_t *)arg;
 
     lrtmp2_server_config_t config;
     memset(&config, 0, sizeof(config));
-    config.tls_insecure = 1;  /* accept the throwaway self-signed cert */
+    config.tls_insecure = params->insecure;
+    config.tls_ca_file = params->ca_file;
 
     lrtmp2_client_t *client = lrtmp2_client_create(&config);
     if (!client) return NULL;
 
-    char url[64];
-    snprintf(url, sizeof(url), "rtmps://127.0.0.1:%d/live/mystream", TEST_PORT);
+    char url[96];
+    snprintf(url, sizeof(url), "rtmps://%s:%d/live/mystream", params->host, TEST_PORT);
 
     if (lrtmp2_client_connect(client, url) != 0) {
-        fprintf(stderr, "client: rtmps connect failed\n");
+        fprintf(stderr, "client: rtmps connect failed (host=%s insecure=%d)\n",
+                params->host, params->insecure);
         lrtmp2_client_destroy(client);
         return NULL;
     }
@@ -146,9 +181,51 @@ static void *client_thread_fn(void *arg) {
     return NULL;
 }
 
+/* Run one publish round against `server` with the given client params; returns
+ * 1 on success (frame round-tripped), 0 otherwise. Resets the shared result
+ * globals first. */
+static int run_case(lrtmp2_server_t *server, const char *label, client_params_t *params) {
+    g_frame_received = 0;
+    g_publish_called = 0;
+    g_received_len = 0;
+
+    pthread_t client_thread;
+    pthread_create(&client_thread, NULL, client_thread_fn, params);
+
+    struct timespec start, now;
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    for (;;) {
+        /* A single poll drives both accept and per-connection servicing. */
+        lrtmp2_server_poll(server, 50);
+        if (g_frame_received) break;
+
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        double elapsed = (now.tv_sec - start.tv_sec) + (now.tv_nsec - start.tv_nsec) / 1e9;
+        if (elapsed > 8.0) break;
+        usleep(10 * 1000);
+    }
+
+    pthread_join(client_thread, NULL);
+
+    int ok = (g_publish_called && g_frame_received && g_received_len == 300 &&
+              memcmp(g_received_data, "\x17\x01\x00\x00\x00", 5) == 0);
+    if (ok) {
+        printf("PASS: %s — frame round-tripped over TLS (len=%zu)\n", label, g_received_len);
+    } else {
+        printf("FAIL: %s — publish_called=%d frame_received=%d len=%zu\n",
+               label, g_publish_called, g_frame_received, g_received_len);
+    }
+    return ok;
+}
+
 int main(void) {
     printf("=== librtmp2 integration: RTMPS (TLS) client <-> server ===\n\n");
 
+    if (make_temp_path(CERT_PATH, sizeof(CERT_PATH), "cert") != 0 ||
+        make_temp_path(KEY_PATH, sizeof(KEY_PATH), "key") != 0) {
+        printf("FAIL: could not create temp cert/key paths\n");
+        return 1;
+    }
     if (generate_self_signed(CERT_PATH, KEY_PATH) != 0) {
         printf("FAIL: could not generate self-signed certificate\n");
         return 1;
@@ -175,43 +252,19 @@ int main(void) {
         return 1;
     }
 
-    pthread_t client_thread;
-    pthread_create(&client_thread, NULL, client_thread_fn, NULL);
+    /* Case 1: insecure (skip verification), connecting by IP. */
+    client_params_t insecure_case = { .insecure = 1, .ca_file = NULL, .host = "127.0.0.1" };
+    int ok_insecure = run_case(server, "insecure RTMPS", &insecure_case);
 
-    struct timespec start, now;
-    clock_gettime(CLOCK_MONOTONIC, &start);
-    int accepted = 0;
-    for (;;) {
-        if (!accepted) {
-            if (lrtmp2_server_poll(server, 50) == LRTMP2_OK) accepted = 1;
-        } else {
-            lrtmp2_server_process_connections(server);
-        }
-        if (g_frame_received) break;
-
-        clock_gettime(CLOCK_MONOTONIC, &now);
-        double elapsed = (now.tv_sec - start.tv_sec) + (now.tv_nsec - start.tv_nsec) / 1e9;
-        if (elapsed > 8.0) { printf("FAIL: timed out waiting for frame over TLS\n"); break; }
-        usleep(10 * 1000);
-    }
-
-    pthread_join(client_thread, NULL);
-
-    int success = (g_publish_called && g_frame_received &&
-                   g_received_len == 300 &&
-                   memcmp(g_received_data, "\x17\x01\x00\x00\x00", 5) == 0);
-    if (success) {
-        printf("PASS: RTMPS client published and frame round-tripped over TLS (len=%zu)\n",
-               g_received_len);
-    } else {
-        printf("FAIL: publish_called=%d frame_received=%d len=%zu\n",
-               g_publish_called, g_frame_received, g_received_len);
-    }
+    /* Case 2: verified — trust the self-signed cert via tls_ca_file and connect
+     * by the SAN hostname so hostname + chain verification both run. */
+    client_params_t verified_case = { .insecure = 0, .ca_file = CERT_PATH, .host = "localhost" };
+    int ok_verified = run_case(server, "verified RTMPS (tls_ca_file + hostname)", &verified_case);
 
     lrtmp2_server_destroy(server);
     unlink(CERT_PATH);
     unlink(KEY_PATH);
-    return success ? 0 : 1;
+    return (ok_insecure && ok_verified) ? 0 : 1;
 }
 
 #endif /* LRTMP2_HAVE_TLS */

@@ -149,6 +149,20 @@ if build_tests
     include_directories : include_directories('src'),
   )
   test('all', test_exec)
+
+  # RTMPS end-to-end integration test — only meaningful with TLS compiled in, so
+  # it mirrors the Make `run_tls` target and keeps both build systems exercising
+  # the same feature surface.
+  if openssl_dep.found()
+    threads_dep = dependency('threads')
+    tls_it_exec = executable('test_tls_integration',
+      'tests/integration/test_tls.c',
+      dependencies : [librtmp2_dep, threads_dep],
+      c_args : lrtmp2_c_args,
+      include_directories : include_directories('src'),
+    )
+    test('rtmps_integration', tls_it_exec, timeout : 60)
+  endif
 endif
 
 # Examples (optional)

@@ -59,9 +59,12 @@ lrtmp2_transport_t *lrtmp2_transport_new_tls_client(int fd, const char *server_n
 /* ---- I/O ---- */
 
 /* Non-blocking receive. Returns the number of bytes read (>0), 0 on a clean
- * peer shutdown, or -1 on error. On -1, *again is set to 1 when the failure was
- * merely "no data yet" (EAGAIN / TLS WANT_READ) and the caller should retry
- * later; 0 means a fatal error. `again` may be NULL. */
+ * peer shutdown, or -1 on error. On -1, *again indicates a transient
+ * would-block the caller should retry after waiting for the right readiness:
+ *   1 = wait for the socket to become readable (EAGAIN / TLS WANT_READ)
+ *   2 = wait for the socket to become writable (TLS WANT_WRITE during a read)
+ *   0 = fatal error.
+ * `again` may be NULL. */
 ssize_t lrtmp2_transport_recv(lrtmp2_transport_t *t, void *buf, size_t len, int *again);
 
 /* Blocking send of the whole buffer. Returns 0 on success, -1 on fatal error.

@@ -406,13 +406,18 @@ int lrtmp2_server_process_connections(lrtmp2_server_t *server)
     for (size_t i = 0; i < n_conns; i++) {
         lrtmp2_conn_t *conn = snapshot[i];
         if (conn->client_fd >= 0 && conn->state < LRTMP2_STATE_CLOSING) {
-            /* Drain everything currently readable. A single recv() is not enough
-             * for TLS: SSL_read can leave a further record already decrypted in
-             * the SSL buffer that poll() will never wake us for, so we loop until
-             * the transport reports "would block" (again). Plaintext behaves the
-             * same way and simply stops once the socket buffer is empty. */
+            /* Drain currently readable data. A single recv() is not enough for
+             * TLS: SSL_read can leave a further record already decrypted in the
+             * SSL buffer that poll() will never wake us for, so we loop until the
+             * transport reports "would block" (again). Plaintext behaves the same
+             * way and simply stops once the socket buffer is empty.
+             *
+             * The loop is bounded per poll iteration so one constantly-readable
+             * peer cannot monopolise the single-threaded server and starve other
+             * connections; whatever is left is picked up on the next poll(). */
+            enum { MAX_DRAIN_READS = 64 };
             uint8_t tmp_buf[4096];
-            for (;;) {
+            for (int reads = 0; reads < MAX_DRAIN_READS; reads++) {
                 int again = 0;
                 ssize_t n = lrtmp2_transport_recv(conn->transport, tmp_buf,
                                                   sizeof(tmp_buf), &again);

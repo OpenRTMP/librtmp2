@@ -15,6 +15,8 @@ jobs:
         cc: [gcc, clang]
     steps:
     - uses: actions/checkout@v7
+      with:
+        persist-credentials: false
 
     - name: Install dependencies
       run: sudo apt-get update && sudo apt-get install -y meson ninja-build libssl-dev
@@ -54,6 +56,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v7
+      with:
+        persist-credentials: false
 
     - name: Install dependencies
       run: sudo apt-get update && sudo apt-get install -y meson ninja-build libssl-dev

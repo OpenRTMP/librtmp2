@@ -40,7 +40,7 @@
 #else
 #include <unistd.h>
 #include <stdio.h>
-#include <sys/select.h>
+#include <poll.h>
 #include <netdb.h>
 #define close_socket close
 #endif
@@ -118,8 +118,11 @@ static int client_flush(lrtmp2_client_t *client)
 
 /* Blocking recv of whatever is available; appends to recv_buffer. The transport
  * exposes non-blocking recv semantics (so plaintext and TLS share one path), so
- * when it reports "would block" we wait on the socket with select() to preserve
- * the caller's blocking expectations. */
+ * when it reports "would block" we wait on the socket to preserve the caller's
+ * blocking expectations. We use poll() (not select(), which is undefined past
+ * FD_SETSIZE in fd-heavy hosts) and wait on both readability and writability:
+ * a TLS read can need the socket to become writable (WANT_WRITE), which a
+ * read-only wait would never satisfy. */
 static int client_recv_more(lrtmp2_client_t *client)
 {
     uint8_t tmp[4096];
@@ -134,10 +137,13 @@ static int client_recv_more(lrtmp2_client_t *client)
             return LRTMP2_ERR_IO;
         }
         if (again || errno == EAGAIN || errno == EWOULDBLOCK) {
-            fd_set rfds;
-            FD_ZERO(&rfds);
-            FD_SET(client->client_fd, &rfds);
-            int rc = select(client->client_fd + 1, &rfds, NULL, NULL, NULL);
+            struct pollfd pfd;
+            pfd.fd = client->client_fd;
+            /* again==2 means the transport (TLS) needs the socket writable;
+             * otherwise wait for it to become readable. */
+            pfd.events = (again == 2) ? POLLOUT : POLLIN;
+            pfd.revents = 0;
+            int rc = poll(&pfd, 1, -1);
             if (rc < 0) {
                 if (errno == EINTR) continue;
                 return LRTMP2_ERR_IO;
@@ -284,6 +290,17 @@ static int parse_port(const char *s)
 int lrtmp2_client_connect(lrtmp2_client_t *client, const char *url)
 {
     if (!client || !url) return LRTMP2_ERR_INTERNAL;
+
+    /* Tear down any prior connection so reconnecting with the same client object
+     * does not leak the previous transport/socket. */
+    if (client->transport) {
+        lrtmp2_transport_free(client->transport);
+        client->transport = NULL;
+    }
+    if (client->client_fd >= 0) {
+        close_socket(client->client_fd);
+        client->client_fd = -1;
+    }
 
     /* Parse URL: rtmp://host:port/app/stream_key (or rtmps:// for TLS). host may
      * be a hostname, an IPv4 literal, or a bracketed IPv6 literal
@@ -583,15 +600,14 @@ int lrtmp2_client_poll(lrtmp2_client_t *client, int timeout_ms)
     if (!client) return LRTMP2_ERR_INTERNAL;
     if (client->state != LRTMP2_CLIENT_PLAYING) return LRTMP2_ERR_PROTOCOL;
 
-    struct timeval tv;
-    tv.tv_sec = timeout_ms / 1000;
-    tv.tv_usec = (timeout_ms % 1000) * 1000;
-    fd_set rfds;
-    FD_ZERO(&rfds);
-    FD_SET(client->client_fd, &rfds);
-
+    /* poll() rather than select() so a large client_fd (past FD_SETSIZE) in an
+     * fd-heavy host cannot corrupt the stack. */
     if (lrtmp2_buffer_available(client->recv_buffer) == 0) {
-        int rc = select(client->client_fd + 1, &rfds, NULL, NULL, &tv);
+        struct pollfd pfd;
+        pfd.fd = client->client_fd;
+        pfd.events = POLLIN;
+        pfd.revents = 0;
+        int rc = poll(&pfd, 1, timeout_ms);
         if (rc < 0) {
             if (errno == EINTR) return LRTMP2_OK;
             return LRTMP2_ERR_IO;
