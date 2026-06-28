@@ -120,6 +120,29 @@ void lrtmp2_chunk_registry_destroy(lrtmp2_chunk_registry_t *reg)
     reg->initialized = 0;
 }
 
+int lrtmp2_chunk_registry_check_reassembly_budget(lrtmp2_chunk_registry_t *reg,
+                                                   const lrtmp2_chunk_stream_t *cs,
+                                                   size_t additional)
+{
+    if (!reg || !cs || additional == 0) return LRTMP2_OK;
+
+    size_t total = 0;
+    for (size_t i = 0; i < reg->count; i++) {
+        lrtmp2_chunk_stream_t *s = reg->streams[i];
+        if (!s || !s->in_use || !s->reassembly_buf) continue;
+        total += s->reassembly_buf->size;
+    }
+
+    /* `reassembly_buf->size` already includes bytes staged for `cs`; only the
+     * net growth `additional` needs to fit under the cap. */
+    if (total + additional > LRTMP2_MAX_REASSEMBLY_BYTES_PER_CONN) {
+        LRTMP2_LOG_WARN("Per-connection reassembly cap (%zu bytes) exceeded",
+                        (size_t)LRTMP2_MAX_REASSEMBLY_BYTES_PER_CONN);
+        return LRTMP2_ERR_CHUNK;
+    }
+    return LRTMP2_OK;
+}
+
 void lrtmp2_chunk_stream_reset(lrtmp2_chunk_registry_t *reg, lrtmp2_chunk_stream_t *stream)
 {
     if (!stream) return;
