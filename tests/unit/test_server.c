@@ -169,7 +169,7 @@ int test_server_window_acknowledgement(void)
  * and it travels the same lock-scope path as on_frame/on_publish/on_play. */
 static int g_lock_free_during_close = -1;
 
-static int reentrant_on_close(lrtmp2_conn_t *conn, void *userdata)
+static void reentrant_on_close(lrtmp2_conn_t *conn, void *userdata)
 {
     (void)conn;
     lrtmp2_server_t *server = (lrtmp2_server_t *)userdata;
@@ -180,7 +180,6 @@ static int reentrant_on_close(lrtmp2_conn_t *conn, void *userdata)
     } else {
         g_lock_free_during_close = 0;  /* lock still held -> a real API would deadlock */
     }
-    return 0;
 }
 
 int test_server_callbacks_not_under_lock(void)
