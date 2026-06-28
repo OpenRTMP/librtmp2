@@ -3,6 +3,7 @@
 
 #include "session/conn.h"
 #include "session/stream.h"
+#include "core/transport.h"
 #include "librtmp2/types.h"
 
 /* Forward declarations for server struct members */
@@ -16,6 +17,7 @@ typedef struct lrtmp2_server {
     lrtmp2_stream_t         *streams;
     pthread_mutex_t        connections_mutex;
     pthread_mutex_t        streams_mutex;
+    lrtmp2_tls_ctx_t      *tls_ctx;  /* non-NULL when TLS termination is enabled */
 } lrtmp2_server_t;
 
 lrtmp2_server_t *lrtmp2_server_create(const lrtmp2_server_config_t *config); /* config is stored by pointer */

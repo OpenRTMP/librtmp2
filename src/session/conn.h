@@ -5,6 +5,7 @@
 #include "librtmp2/librtmp2.h"
 #include "handshake/handshake.h"
 #include "chunk/chunk_state.h"
+#include "core/transport.h"
 #include <stdint.h>
 #include <pthread.h>
 
@@ -37,6 +38,9 @@ struct lrtmp2_conn {
                                                    * (RTMP ack sequence number) */
     uint32_t                   bytes_at_last_ack; /* bytes_received at last ack sent */
     int                        client_fd;
+    lrtmp2_transport_t        *transport;  /* wraps client_fd; plaintext or TLS.
+                                            * NULL until the socket is attached
+                                            * (e.g. unit tests with no socket). */
     char                       app[256];
     uint32_t                   next_stream_id;
     lrtmp2_stream_t           *current_stream;

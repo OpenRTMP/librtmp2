@@ -145,6 +145,41 @@ make install
 
 Build artifacts: `librtmp2.so`, `librtmp2.a`, `librtmp2.dll`, `librtmp2.lib`, `librtmp2.pc`
 
+### TLS / RTMPS
+
+`rtmps://` (RTMP over TLS) is supported via OpenSSL and is **built in by
+default**. To produce a zero-dependency, plaintext-only library, disable it:
+
+```bash
+make TLS=0            # Makefile
+meson setup build -Dtls=disabled   # Meson
+```
+
+A single transport abstraction (`src/core/transport.{h,c}`) sits under the raw
+send/recv path, so plaintext RTMP and TLS share one code path through the
+chunk/handshake/session layers.
+
+**Server (TLS termination)** — set `tls_enabled` and point at a PEM cert chain
+and private key in `lrtmp2_server_config`:
+
+```c
+lrtmp2_server_config_t cfg = {0};
+cfg.tls_enabled   = 1;
+cfg.tls_cert_file = "/etc/ssl/fullchain.pem";
+cfg.tls_key_file  = "/etc/ssl/privkey.pem";
+```
+
+When `tls_enabled` is 0 (the default) the server speaks plaintext RTMP exactly
+as before.
+
+**Client** — an `rtmps://` URL automatically negotiates TLS (default port 443,
+SNI + certificate verification against the system trust store). Override the CA
+bundle with `tls_ca_file`, or skip verification for self-signed test certs with
+`tls_insecure = 1`.
+
+Call `lrtmp2_tls_supported()` at runtime to check whether the loaded library was
+built with TLS.
+
 ---
 
 ## Repository Structure

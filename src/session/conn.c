@@ -121,6 +121,7 @@ void lrtmp2_conn_destroy(lrtmp2_conn_t *conn)
     /* Streams created via createStream() are tracked in the server-wide list;
      * free them here, otherwise they leak for the server's lifetime. */
     if (conn->server) lrtmp2_stream_remove_owned_by_conn(conn->server, conn);
+    if (conn->transport) lrtmp2_transport_free(conn->transport);
     if (conn->recv_buffer) lrtmp2_buffer_destroy(conn->recv_buffer);
     if (conn->send_buffer) lrtmp2_buffer_destroy(conn->send_buffer);
     lrtmp2_handshake_cleanup(&conn->handshake);
@@ -293,6 +294,15 @@ int lrtmp2_conn_send_raw(lrtmp2_conn_t *conn, const uint8_t *data, size_t len)
 {
     if (!conn || !data || len == 0) return LRTMP2_ERR_INTERNAL;
     if (conn->client_fd < 0) return LRTMP2_OK;  /* no socket, silently skip */
+
+    /* Route through the transport so plaintext and TLS share one send path. The
+     * transport is created when the socket is attached (server accept); if a
+     * caller set client_fd directly without a transport (older test paths), fall
+     * back to a plain send on the bare fd. */
+    if (conn->transport) {
+        return (lrtmp2_transport_send(conn->transport, data, len) == 0)
+                   ? LRTMP2_OK : LRTMP2_ERR_IO;
+    }
 
     size_t sent = 0;
     while (sent < len) {

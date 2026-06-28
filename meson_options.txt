@@ -1,2 +1,3 @@
 option('tests', type : 'boolean', value : true, description : 'Build unit tests')
 option('examples', type : 'boolean', value : true, description : 'Build example programs')
+option('tls', type : 'feature', value : 'enabled', description : 'TLS/RTMPS support via OpenSSL (default on; set to disabled for a zero-dependency build)')

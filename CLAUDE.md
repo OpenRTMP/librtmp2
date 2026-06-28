@@ -27,7 +27,13 @@ make tests/integration/run_ingest         # server ingest test
 make tests/integration/run_client         # client publish test
 make tests/integration/run_ertmp_v1       # E-RTMP v1 server test
 make tests/integration/run_ertmp_v2       # E-RTMP v2 server test
+make tests/integration/run_tls            # RTMPS (TLS) end-to-end test
 ```
+
+**TLS / RTMPS** is compiled in by default (OpenSSL). Build a zero-dependency,
+plaintext-only library with `make TLS=0` (Makefile) or `meson -Dtls=disabled`.
+The transport abstraction lives in `src/core/transport.{h,c}`; plaintext and TLS
+share one send/recv path so the layers above never branch on the wire type.
 
 **Meson (for CI / subproject embedding):**
 ```bash

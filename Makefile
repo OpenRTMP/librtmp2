@@ -7,6 +7,16 @@ CFLAGS_EXTRA ?=
 CFLAGS = -Wall -Wextra -Wpedantic -Wshadow -Wstrict-prototypes
 CFLAGS += -Iinclude -Isrc
 
+# TLS / RTMPS support (OpenSSL). On by default; build with `make TLS=0` to drop
+# the OpenSSL dependency and produce a plaintext-only library.
+TLS ?= 1
+ifeq ($(TLS),1)
+  OPENSSL_CFLAGS ?= $(shell pkg-config --cflags openssl 2>/dev/null)
+  OPENSSL_LIBS   ?= $(shell pkg-config --libs openssl 2>/dev/null || echo -lssl -lcrypto)
+  CFLAGS  += -DLRTMP2_HAVE_TLS $(OPENSSL_CFLAGS)
+  LDFLAGS += $(OPENSSL_LIBS)
+endif
+
 ifdef DEBUG
   CFLAGS += -g -O0 -DDEBUG
 else
@@ -115,5 +125,9 @@ $(ERTMP_INTEGRATION_BIN): $(OBJS) tests/integration/test_server_ertmp_v1.c
 $(ERTMP_V2_INTEGRATION_BIN): $(OBJS) tests/integration/test_server_ertmp_v2.c
 	$(CC) $(CFLAGS) -o $@ tests/integration/test_server_ertmp_v2.c $(OBJS) $(LDFLAGS) -lm -lpthread
 
+TLS_INTEGRATION_BIN = tests/integration/run_tls
+$(TLS_INTEGRATION_BIN): $(OBJS) tests/integration/test_tls.c
+	$(CC) $(CFLAGS) -o $@ tests/integration/test_tls.c $(OBJS) $(LDFLAGS) -lm -lpthread
+
 clean:
-	rm -f $(OBJS) $(TEST_OBJS) $(TARGETS) $(TEST_BIN) $(INTEGRATION_BIN) $(CLIENT_INTEGRATION_BIN) $(ERTMP_INTEGRATION_BIN) $(ERTMP_V2_INTEGRATION_BIN) examples/**/*.o tests/integration/*.o
+	rm -f $(OBJS) $(TEST_OBJS) $(TARGETS) $(TEST_BIN) $(INTEGRATION_BIN) $(CLIENT_INTEGRATION_BIN) $(ERTMP_INTEGRATION_BIN) $(ERTMP_V2_INTEGRATION_BIN) $(TLS_INTEGRATION_BIN) examples/**/*.o tests/integration/*.o

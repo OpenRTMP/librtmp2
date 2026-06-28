@@ -4,6 +4,7 @@
 #include "handshake/handshake.h"
 #include "session/conn.h"
 #include "core/buffer.h"
+#include "core/transport.h"
 #include "librtmp2/types.h"
 
 typedef enum {
@@ -18,6 +19,7 @@ typedef enum {
 
 typedef struct lrtmp2_client {
     int client_fd;
+    lrtmp2_transport_t *transport;  /* wraps client_fd; plaintext or TLS (rtmps://) */
     lrtmp2_handshake_t handshake;
     lrtmp2_client_state_t state;
     lrtmp2_buffer_t *send_buffer;
