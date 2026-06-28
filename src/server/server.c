@@ -242,9 +242,13 @@ int lrtmp2_server_poll(lrtmp2_server_t *server, int timeout_ms)
         /* inet_ntop writes into a caller-supplied buffer (unlike inet_ntoa's
          * shared static buffer), so it is safe if the server is ever driven
          * from multiple threads. */
-        char client_ip[INET_ADDRSTRLEN] = "?";
+        char client_ip[INET_ADDRSTRLEN];
         if (client_fd != INVALID_SOCKET) {
-            inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, sizeof(client_ip));
+            if (!inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, sizeof(client_ip))) {
+                snprintf(client_ip, sizeof(client_ip), "unknown");
+            }
+        } else {
+            client_ip[0] = '\0';
         }
         if (client_fd == INVALID_SOCKET) {
             LRTMP2_LOG_WARN("Accept failed: %s", strerror(errno));
