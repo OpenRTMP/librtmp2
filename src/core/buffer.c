@@ -23,19 +23,28 @@ lrtmp2_buffer_t *lrtmp2_buffer_create(void)
     buf->size = 0;
     buf->capacity = BUFFER_INITIAL_SIZE;
     buf->read_pos = 0;
+    buf->owned = 1;
     return buf;
 }
 
 void lrtmp2_buffer_destroy(lrtmp2_buffer_t *buf)
 {
     if (!buf) return;
-    LRTMP2_FREE(buf->data);
+    if (buf->owned) {
+        LRTMP2_FREE(buf->data);
+    }
     LRTMP2_FREE(buf);
 }
 
 static void buffer_compact(lrtmp2_buffer_t *buf)
 {
     if (!buf || buf->read_pos == 0) return;
+
+    if (buf->read_pos >= buf->size) {
+        buf->size = 0;
+        buf->read_pos = 0;
+        return;
+    }
 
     size_t avail = buf->size - buf->read_pos;
     if (avail > 0) {
@@ -48,6 +57,12 @@ static void buffer_compact(lrtmp2_buffer_t *buf)
 static int buffer_ensure_capacity(lrtmp2_buffer_t *buf, size_t needed)
 {
     if (needed <= buf->capacity) return LRTMP2_OK;
+
+    /* Stack/static view buffers (owned=0) must not be grown via realloc —
+     * their data pointer is not from the heap allocator. */
+    if (!buf->owned) {
+        return LRTMP2_ERR_INTERNAL;
+    }
 
     if (needed > LRTMP2_BUFFER_MAX_SIZE) {
         return LRTMP2_ERR_INTERNAL;

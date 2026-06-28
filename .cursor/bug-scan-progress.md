@@ -1,19 +1,30 @@
 # Bug scan progress
 
-Last scanned: full pass (2026-06-27)
+Last scanned: core (2026-06-28)
 
 ## Modules
 
 - [x] core — Memory, logging, errors, buffer
-- [x] handshake — C0/C1/C2 ↔ S0/S1/S2
-- [x] chunk — Chunk reader/writer/state
-- [x] message — Message reassembly, control, commands
-- [x] amf — AMF0 + AMF3
-- [x] flv — Audio/video/script tags
-- [x] ertmp — E-RTMP v1/v2 extensions
-- [x] session — State machine, publish/play flows
-- [x] server — Server listener
-- [x] client — Outbound client
+- [ ] handshake — C0/C1/C2 ↔ S0/S1/S2
+- [ ] chunk — Chunk reader/writer/state
+- [ ] message — Message reassembly, control, commands
+- [ ] amf — AMF0 + AMF3
+- [ ] flv — Audio/video/script tags
+- [ ] ertmp — E-RTMP v1/v2 extensions
+- [ ] session — State machine, publish/play flows
+- [ ] server — Server listener
+- [ ] client — Outbound client
+
+## Findings (2026-06-28 core pass)
+
+- buffer.c: `lrtmp2_buffer_write()` called `realloc()` on any buffer whose
+  `capacity` was exceeded. External view buffers (stack/static storage with
+  `memset` + `.data`/`.capacity` set, used throughout session/client for AMF
+  encoding) are not heap-owned; growth past capacity invoked `realloc()` on a
+  stack pointer → heap corruption / crash (e.g. long `description` in
+  `lrtmp2_conn_send_onstatus`). Added `owned` flag set by `buffer_create`;
+  non-owned buffers now return `LRTMP2_ERR_INTERNAL` instead of reallocating.
+  Also hardened `buffer_compact()` when `read_pos >= size`.
 
 ## Findings (2026-06-27 full pass)
 
