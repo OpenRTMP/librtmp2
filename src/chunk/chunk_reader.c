@@ -108,6 +108,14 @@ int lrtmp2_chunk_read(lrtmp2_buffer_t *buf,
             break;
 
         case 1:
+            /* fmt=1 starts a new message on this csid (same stream id as the
+             * previous message, but fresh length/type/timestamp). Discard any
+             * partial reassembly from an interrupted fmt=0 message — otherwise
+             * a peer can splice bodies or shrink msg_length mid-flight. */
+            cs->reassembly_bytes_read = 0;
+            if (cs->reassembly_buf) {
+                lrtmp2_buffer_reset(cs->reassembly_buf);
+            }
             /* 7 bytes: delta_timestamp(3) + msg_length(3) + msg_type(1) */
             {
                 uint8_t ts_bytes[3], len_bytes[3];
@@ -146,6 +154,14 @@ int lrtmp2_chunk_read(lrtmp2_buffer_t *buf,
             msg_type_id = cs->type0_msg_type_id;
             msg_stream_id = cs->type0_msg_stream_id;
             timestamp += cs->type0_timestamp;
+            /* fmt=2 starts a new message on this csid, same as fmt=0/1 — only
+             * fmt=3 continues a message in progress. Discard any partial
+             * reassembly so a fmt=2 header can't splice onto an interrupted
+             * fmt=0/1 body (same class of bug as the fmt=1 case above). */
+            cs->reassembly_bytes_read = 0;
+            if (cs->reassembly_buf) {
+                lrtmp2_buffer_reset(cs->reassembly_buf);
+            }
             break;
 
         case 3:
@@ -206,6 +222,10 @@ int lrtmp2_chunk_read(lrtmp2_buffer_t *buf,
     }
 
     if (to_read > 0) {
+        if (registry &&
+            lrtmp2_chunk_registry_check_reassembly_budget(registry, cs, to_read) != LRTMP2_OK) {
+            return LRTMP2_ERR_CHUNK;
+        }
         uint8_t tmp[4096];
         size_t off = 0;
         while (off < to_read) {

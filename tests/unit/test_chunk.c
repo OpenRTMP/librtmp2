@@ -204,8 +204,8 @@ int test_chunk_registry_grow(void)
 
 int test_chunk_reject_msg_length_shrink(void)
 {
-    /* A peer must not be able to shrink msg_length below bytes already
-     * reassembled for the current message on the same csid. */
+    /* Within a single fmt=0 message (continued via fmt=3), msg_length is fixed.
+     * A fmt=1 header starts a new message and must not splice prior bytes. */
     lrtmp2_chunk_registry_t reg;
     memset(&reg, 0, sizeof(reg));
     lrtmp2_chunk_registry_init(&reg);
@@ -223,7 +223,7 @@ int test_chunk_reject_msg_length_shrink(void)
 
     uint8_t c2[8 + 128];
     c2[0] = 0x43; /* fmt=1 */
-    c2[4] = 0x00; c2[5] = 0x00; c2[6] = 0x0A; /* msg_length=10 */
+    c2[4] = 0x00; c2[5] = 0x00; c2[6] = 0x0A; /* msg_length=10 — new message */
     c2[7] = 0x14;
     memset(c2 + 8, 'B', 128);
     lrtmp2_buffer_write(buf, c2, sizeof(c2));
@@ -242,9 +242,15 @@ int test_chunk_reject_msg_length_shrink(void)
     }
 
     rc = lrtmp2_chunk_read(buf, &reg, cs, &rm, &rp, &rl);
-    if (rc != LRTMP2_ERR_CHUNK || rm.is_complete) {
-        printf("FAIL: expected LRTMP2_ERR_CHUNK on msg_length shrink, got %d complete=%d\n",
-               rc, rm.is_complete);
+    if (rc <= 0 || !rm.is_complete || rm.msg_length != 10 || rl != 10) {
+        printf("FAIL: fmt=1 should start a fresh 10-byte message, got rc=%d complete=%d len=%zu\n",
+               rc, rm.is_complete, rl);
+        lrtmp2_chunk_registry_destroy(&reg);
+        lrtmp2_buffer_destroy(buf);
+        return 0;
+    }
+    if (rp[0] != 'B') {
+        printf("FAIL: fmt=1 payload splice: first byte '%c', expected 'B'\n", rp[0]);
         lrtmp2_chunk_registry_destroy(&reg);
         lrtmp2_buffer_destroy(buf);
         return 0;
@@ -252,7 +258,7 @@ int test_chunk_reject_msg_length_shrink(void)
 
     lrtmp2_chunk_registry_destroy(&reg);
     lrtmp2_buffer_destroy(buf);
-    printf("PASS: chunk rejects msg_length shrink mid-reassembly\n");
+    printf("PASS: fmt=1 starts fresh message instead of splicing partial data\n");
     return 1;
 }
 
@@ -384,6 +390,175 @@ fail:
     return 0;
 }
 
+int test_chunk_fmt1_resets_partial_reassembly(void)
+{
+    /* fmt=1 must start a fresh message: a partial fmt=0 body must not be
+     * spliced into a later fmt=1 message on the same csid. */
+    lrtmp2_chunk_registry_t reg;
+    memset(&reg, 0, sizeof(reg));
+    lrtmp2_chunk_registry_init(&reg);
+    lrtmp2_chunk_stream_t *cs = lrtmp2_chunk_stream_get(&reg, 5);
+    cs->chunk_size = 64;
+
+    lrtmp2_buffer_t *buf = lrtmp2_buffer_create();
+
+    uint8_t c1[12 + 64];
+    memset(c1, 0, sizeof(c1));
+    c1[0] = 0x05;
+    c1[4] = 0x01; c1[5] = 0x00; /* len=256 */
+    c1[7] = 0x14;
+    memset(c1 + 12, 0xFF, 64);
+    lrtmp2_buffer_write(buf, c1, sizeof(c1));
+
+    uint8_t c2[8 + 64];
+    memset(c2, 0, sizeof(c2));
+    c2[0] = 0x45;
+    c2[4] = 0x00; c2[5] = 0x00; c2[6] = 0x40; /* len=64 */
+    c2[7] = 0x09;
+    memset(c2 + 8, 0xAA, 64);
+    lrtmp2_buffer_write(buf, c2, sizeof(c2));
+
+    buf->read_pos = 0;
+    lrtmp2_chunk_message_t rm;
+    const uint8_t *rp = NULL;
+    size_t rl = 0;
+    lrtmp2_chunk_read(buf, &reg, cs, &rm, &rp, &rl);
+    int rc = lrtmp2_chunk_read(buf, &reg, cs, &rm, &rp, &rl);
+    if (rc <= 0 || !rm.is_complete || rm.msg_type_id != 0x09 || rl != 64) {
+        printf("FAIL: fmt=1 splice read rc=%d complete=%d type=0x%02x len=%zu\n",
+               rc, rm.is_complete, rm.msg_type_id, rl);
+        goto fail;
+    }
+    if (rp[0] != 0xAA) {
+        printf("FAIL: fmt=1 did not reset reassembly (first byte 0x%02x, expected 0xAA)\n", rp[0]);
+        goto fail;
+    }
+
+    lrtmp2_chunk_registry_destroy(&reg);
+    lrtmp2_buffer_destroy(buf);
+    printf("PASS: fmt=1 resets partial reassembly on new message\n");
+    return 1;
+fail:
+    lrtmp2_chunk_registry_destroy(&reg);
+    lrtmp2_buffer_destroy(buf);
+    return 0;
+}
+
+int test_chunk_fmt2_resets_partial_reassembly(void)
+{
+    /* Same splice hazard as fmt=1, but via fmt=2: it inherits msg_length/type
+     * from the previous message, yet still starts a NEW message per spec
+     * (only fmt=3 continues one in progress). A partial fmt=0 body must not
+     * be spliced into the following fmt=2 message's payload. */
+    lrtmp2_chunk_registry_t reg;
+    memset(&reg, 0, sizeof(reg));
+    lrtmp2_chunk_registry_init(&reg);
+    lrtmp2_chunk_stream_t *cs = lrtmp2_chunk_stream_get(&reg, 7);
+    cs->chunk_size = 64;
+
+    lrtmp2_buffer_t *buf = lrtmp2_buffer_create();
+
+    /* fmt=0: msg_length=256, type=0x09 — send only 64 of 256 bytes (partial). */
+    uint8_t c1[12 + 64];
+    memset(c1, 0, sizeof(c1));
+    c1[0] = 0x07;
+    c1[4] = 0x00; c1[5] = 0x01; c1[6] = 0x00; /* len=256 */
+    c1[7] = 0x09;
+    memset(c1 + 12, 0xFF, 64);
+    lrtmp2_buffer_write(buf, c1, sizeof(c1));
+
+    /* fmt=2: only a 3-byte timestamp delta header; msg_length/type/stream_id
+     * are inherited from the previous message (still 65536/0x09 — fmt=2
+     * cannot declare its own length), so this 64-byte chunk leaves the new
+     * message incomplete. What matters is that its 0xAA payload landed in a
+     * freshly reset buffer rather than being appended after the old 0xFF
+     * bytes from the interrupted fmt=0 message. */
+    uint8_t c2[4 + 64];
+    memset(c2, 0, sizeof(c2));
+    c2[0] = 0x87; /* fmt=2, csid=7 */
+    memset(c2 + 4, 0xAA, 64);
+    lrtmp2_buffer_write(buf, c2, sizeof(c2));
+
+    buf->read_pos = 0;
+    lrtmp2_chunk_message_t rm;
+    const uint8_t *rp = NULL;
+    size_t rl = 0;
+    lrtmp2_chunk_read(buf, &reg, cs, &rm, &rp, &rl);
+    int rc = lrtmp2_chunk_read(buf, &reg, cs, &rm, &rp, &rl);
+    if (rc <= 0 || rm.is_complete || cs->reassembly_bytes_read != 64) {
+        printf("FAIL: fmt=2 splice read rc=%d complete=%d read=%u\n",
+               rc, rm.is_complete, cs->reassembly_bytes_read);
+        goto fail;
+    }
+    if (!cs->reassembly_buf || cs->reassembly_buf->data[0] != 0xAA) {
+        printf("FAIL: fmt=2 did not reset reassembly (first byte 0x%02x, expected 0xAA)\n",
+               cs->reassembly_buf ? cs->reassembly_buf->data[0] : 0);
+        goto fail;
+    }
+
+    lrtmp2_chunk_registry_destroy(&reg);
+    lrtmp2_buffer_destroy(buf);
+    printf("PASS: fmt=2 resets partial reassembly on new message\n");
+    return 1;
+fail:
+    lrtmp2_chunk_registry_destroy(&reg);
+    lrtmp2_buffer_destroy(buf);
+    return 0;
+}
+
+int test_chunk_reassembly_budget_enforced(void)
+{
+    lrtmp2_chunk_registry_t reg;
+    memset(&reg, 0, sizeof(reg));
+    lrtmp2_chunk_registry_init(&reg);
+
+    enum { CHUNK_PAYLOAD = 1024 * 1024 };
+    int rejected = 0;
+
+    for (uint32_t csid = 2; csid < 2 + 64; csid++) {
+        lrtmp2_chunk_stream_t *cs = lrtmp2_chunk_stream_get(&reg, csid);
+        if (!cs) break;
+        cs->chunk_size = CHUNK_PAYLOAD;
+
+        lrtmp2_buffer_t *buf = lrtmp2_buffer_create();
+        uint8_t pkt[12 + CHUNK_PAYLOAD];
+        memset(pkt, 0, sizeof(pkt));
+        pkt[0] = (uint8_t)csid;
+        pkt[4] = (CHUNK_PAYLOAD >> 16) & 0xFF;
+        pkt[5] = (CHUNK_PAYLOAD >> 8) & 0xFF;
+        pkt[6] = CHUNK_PAYLOAD & 0xFF;
+        pkt[7] = 0x09;
+        memset(pkt + 12, 'Z', CHUNK_PAYLOAD);
+        lrtmp2_buffer_write(buf, pkt, sizeof(pkt));
+
+        buf->read_pos = 0;
+        lrtmp2_chunk_message_t rm;
+        const uint8_t *rp = NULL;
+        size_t rl = 0;
+        int rc = lrtmp2_chunk_read(buf, &reg, cs, &rm, &rp, &rl);
+        lrtmp2_buffer_destroy(buf);
+        if (rc == LRTMP2_ERR_CHUNK) {
+            rejected = 1;
+            break;
+        }
+        if (rc <= 0) {
+            printf("FAIL: unexpected rc=%d at csid %u\n", rc, csid);
+            lrtmp2_chunk_registry_destroy(&reg);
+            return 0;
+        }
+    }
+
+    if (!rejected) {
+        printf("FAIL: reassembly budget never tripped\n");
+        lrtmp2_chunk_registry_destroy(&reg);
+        return 0;
+    }
+
+    lrtmp2_chunk_registry_destroy(&reg);
+    printf("PASS: per-connection reassembly budget enforced\n");
+    return 1;
+}
+
 int test_chunk_main(void)
 {
     int passed = 0;
@@ -394,6 +569,9 @@ int test_chunk_main(void)
     if (test_chunk_reject_msg_length_shrink()) passed++;
     if (test_chunk_fmt2_partial_no_ts_drift()) passed++;
     if (test_chunk_fmt3_extended_timestamp()) passed++;
-    printf("Chunk tests: %d/6 passed\n", passed);
-    return (passed >= 6) ? 0 : 1;
+    if (test_chunk_fmt1_resets_partial_reassembly()) passed++;
+    if (test_chunk_fmt2_resets_partial_reassembly()) passed++;
+    if (test_chunk_reassembly_budget_enforced()) passed++;
+    printf("Chunk tests: %d/9 passed\n", passed);
+    return (passed >= 9) ? 0 : 1;
 }
