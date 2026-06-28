@@ -98,6 +98,32 @@ int test_buffer_compact_after_read(void)
     return 1;
 }
 
+int test_buffer_external_no_realloc(void)
+{
+    uint8_t storage[16];
+    memset(storage, 0, sizeof(storage));
+
+    lrtmp2_buffer_t buf;
+    memset(&buf, 0, sizeof(buf));
+    buf.data = storage;
+    buf.capacity = sizeof(storage);
+    buf.owned = 0;
+
+    uint8_t block[16];
+    memset(block, 0xAB, sizeof(block));
+    if (lrtmp2_buffer_write(&buf, block, sizeof(block)) != 0) {
+        printf("FAIL: initial external write failed\n");
+        return 0;
+    }
+    if (lrtmp2_buffer_write(&buf, block, 1) != LRTMP2_ERR_INTERNAL) {
+        printf("FAIL: external buffer grew past capacity instead of error\n");
+        return 0;
+    }
+
+    printf("PASS: external buffer rejects growth past capacity\n");
+    return 1;
+}
+
 int test_buffer_main(void)
 {
     int passed = 0;
@@ -105,7 +131,8 @@ int test_buffer_main(void)
     if (test_buffer_basic()) passed++;
     if (test_buffer_ensure_capacity()) passed++;
     if (test_buffer_compact_after_read()) passed++;
+    if (test_buffer_external_no_realloc()) passed++;
 
     printf("Buffer tests: %d passed\n", passed);
-    return (passed == 3) ? 0 : 1;
+    return (passed == 4) ? 0 : 1;
 }

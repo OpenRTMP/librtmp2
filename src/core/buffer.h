@@ -13,6 +13,7 @@ typedef struct {
     size_t   size;       /* bytes written */
     size_t   capacity;   /* allocated */
     size_t   read_pos;   /* read cursor */
+    unsigned owned : 1;  /* 1 if data was heap-allocated by lrtmp2_buffer_create */
 } lrtmp2_buffer_t;
 
 lrtmp2_buffer_t *lrtmp2_buffer_create(void);
