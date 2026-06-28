@@ -13,6 +13,12 @@
  * RTMP csids range up to 65599, but real clients use a small handful. */
 #define LRTMP2_MAX_CHUNK_STREAMS 4096
 
+/* Total bytes held across all in-flight per-csid reassembly buffers on one
+ * connection. Without this, a peer can open up to LRTMP2_MAX_CHUNK_STREAMS
+ * parallel partial messages (each up to the 24-bit msg_length ceiling) and
+ * exhaust host memory from a single TCP session. */
+#define LRTMP2_MAX_REASSEMBLY_BYTES_PER_CONN (32 * 1024 * 1024)
+
 typedef struct {
     uint32_t csid;
     uint32_t chunk_size;        /* peer's chunk size (SetChunkSize) */
@@ -47,6 +53,12 @@ typedef struct {
     uint32_t default_chunk_size;
     int initialized;
 } lrtmp2_chunk_registry_t;
+
+/* Return LRTMP2_OK if `cs` may grow its reassembly buffer by `additional`
+ * bytes without exceeding the per-connection reassembly budget. */
+int lrtmp2_chunk_registry_check_reassembly_budget(lrtmp2_chunk_registry_t *reg,
+                                                   const lrtmp2_chunk_stream_t *cs,
+                                                   size_t additional);
 
 typedef struct {
     uint32_t timestamp;
