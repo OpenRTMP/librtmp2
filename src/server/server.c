@@ -4,6 +4,12 @@
  * Listens on a TCP port, accepts connections, and feeds data to connection handlers.
  * Uses a simple poll/select model for single-threaded operation.
  */
+/* Expose POSIX/BSD socket APIs (getaddrinfo, MSG_DONTWAIT, ...) when built with
+ * a strict -std=c11: the meson build sets c_std=c11, under which glibc hides
+ * them unless a feature-test macro is requested first. Must precede all includes. */
+#ifndef _DEFAULT_SOURCE
+#define _DEFAULT_SOURCE 1
+#endif
 #include "server.h"
 #include "session/conn.h"
 #include "session/state_machine.h"
@@ -25,6 +31,7 @@ typedef int socklen_t;
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <netdb.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -32,6 +39,8 @@ typedef int socklen_t;
 #define INVALID_SOCKET -1
 #define SOCKET_ERROR -1
 #endif
+
+#include "core/net.h"
 
 #include <stdio.h>
 
@@ -123,55 +132,61 @@ int lrtmp2_server_listen(lrtmp2_server_t *server, const char *bind_addr)
 {
     if (!server || !bind_addr) return LRTMP2_ERR_INTERNAL;
 
-    /* Parse bind address (format: "host:port") */
+    /* Parse "host:port" / "[v6]:port" / bare host. An empty host (e.g. ":1935"
+     * or just a port) means "wildcard" — bind every local interface. */
     char host[256];
-    int port = 1935;  /* default RTMP port */
+    char port[16];
+    if (lrtmp2_split_host_port(bind_addr, host, sizeof(host), port, sizeof(port), "1935") != 0) {
+        LRTMP2_LOG_ERROR("Invalid bind address: %s", bind_addr);
+        return LRTMP2_ERR_INTERNAL;
+    }
+    if (parse_port(port) < 0) {
+        LRTMP2_LOG_ERROR("Invalid port in bind address: %s", port);
+        return LRTMP2_ERR_INTERNAL;
+    }
 
-    const char *colon = strrchr(bind_addr, ':');
-    if (colon) {
-        size_t host_len = (size_t)(colon - bind_addr);
-        if (host_len >= sizeof(host)) return LRTMP2_ERR_INTERNAL;
-        memcpy(host, bind_addr, host_len);
-        host[host_len] = '\0';
-        port = parse_port(colon + 1);
-        if (port < 0) {
-            LRTMP2_LOG_ERROR("Invalid port in bind address: %s", colon + 1);
-            return LRTMP2_ERR_INTERNAL;
+    /* Resolve with getaddrinfo so hostnames, IPv4 and IPv6 all work. AI_PASSIVE
+     * yields a wildcard address when no host is given. A numeric "0.0.0.0"
+     * selects the IPv4 wildcard; "::" (or an empty host, picking the first
+     * result) selects IPv6 with V6ONLY disabled below, so a single socket
+     * accepts both families. */
+    struct addrinfo hints;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_flags = AI_PASSIVE;
+
+    const char *node = (host[0] != '\0') ? host : NULL;
+    struct addrinfo *res = NULL;
+    int gai = getaddrinfo(node, port, &hints, &res);
+    if (gai != 0) {
+        LRTMP2_LOG_ERROR("Cannot resolve bind address '%s': %s", bind_addr, gai_strerror(gai));
+        return LRTMP2_ERR_IO;
+    }
+
+    server->server_fd = INVALID_SOCKET;
+    for (struct addrinfo *rp = res; rp; rp = rp->ai_next) {
+        int fd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
+        if (fd == INVALID_SOCKET) continue;
+
+        int opt = 1;
+        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, (const char *)&opt, sizeof(opt));
+#ifdef IPV6_V6ONLY
+        if (rp->ai_family == AF_INET6) {
+            int off = 0;  /* let the IPv6 socket also accept IPv4-mapped clients */
+            setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, (const char *)&off, sizeof(off));
         }
-    } else {
-        snprintf(host, sizeof(host), "%s", bind_addr);
+#endif
+        if (bind(fd, rp->ai_addr, (socklen_t)rp->ai_addrlen) == 0) {
+            server->server_fd = fd;
+            break;
+        }
+        close_socket(fd);
     }
+    freeaddrinfo(res);
 
-    /* Create socket */
-    server->server_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (server->server_fd == INVALID_SOCKET) {
-        LRTMP2_LOG_ERROR("Failed to create socket: %s", strerror(errno));
-        return LRTMP2_ERR_IO;
-    }
-
-    /* Allow address reuse */
-    int opt = 1;
-    setsockopt(server->server_fd, SOL_SOCKET, SO_REUSEADDR, (const char *)&opt, sizeof(opt));
-
-    /* Bind */
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons((uint16_t)port);
-
-    if (strcmp(host, "0.0.0.0") == 0) {
-        addr.sin_addr.s_addr = INADDR_ANY;
-    } else if (inet_pton(AF_INET, host, &addr.sin_addr) <= 0) {
-        LRTMP2_LOG_ERROR("Invalid bind address: %s", host);
-        close_socket(server->server_fd);
-        server->server_fd = INVALID_SOCKET;
-        return LRTMP2_ERR_IO;
-    }
-
-    if (bind(server->server_fd, (struct sockaddr *)&addr, sizeof(addr)) == SOCKET_ERROR) {
-        LRTMP2_LOG_ERROR("Failed to bind: %s", strerror(errno));
-        close_socket(server->server_fd);
-        server->server_fd = INVALID_SOCKET;
+        LRTMP2_LOG_ERROR("Failed to bind %s: %s", bind_addr, strerror(errno));
         return LRTMP2_ERR_IO;
     }
 
@@ -184,7 +199,7 @@ int lrtmp2_server_listen(lrtmp2_server_t *server, const char *bind_addr)
     }
 
     server->running = 1;
-    LRTMP2_LOG_INFO("Server listening on %s:%d", host, port);
+    LRTMP2_LOG_INFO("Server listening on %s:%s", node ? node : "*", port);
     return LRTMP2_OK;
 }
 
@@ -236,31 +251,39 @@ int lrtmp2_server_poll(lrtmp2_server_t *server, int timeout_ms)
 
     /* Accept a new connection if the listen socket is ready. */
     if (listen_ready) {
-        struct sockaddr_in client_addr;
+        struct sockaddr_storage client_addr;
         socklen_t addr_len = sizeof(client_addr);
         int client_fd = accept(server->server_fd, (struct sockaddr *)&client_addr, &addr_len);
-        /* inet_ntop writes into a caller-supplied buffer (unlike inet_ntoa's
-         * shared static buffer), so it is safe if the server is ever driven
-         * from multiple threads. */
-        char client_ip[INET_ADDRSTRLEN];
+        /* Format the peer as host:port for logging, IPv4 or IPv6. getnameinfo
+         * writes into caller-supplied buffers (thread-safe) and handles both
+         * families; IPv6 peers are bracketed, e.g. "[2001:db8::1]:54321". */
+        char client_ep[INET6_ADDRSTRLEN + 16];
         if (client_fd != INVALID_SOCKET) {
-            if (!inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, sizeof(client_ip))) {
-                snprintf(client_ip, sizeof(client_ip), "unknown");
+            char hbuf[INET6_ADDRSTRLEN];
+            char sbuf[8];
+            if (getnameinfo((struct sockaddr *)&client_addr, addr_len,
+                            hbuf, sizeof(hbuf), sbuf, sizeof(sbuf),
+                            NI_NUMERICHOST | NI_NUMERICSERV) == 0) {
+                if (client_addr.ss_family == AF_INET6) {
+                    snprintf(client_ep, sizeof(client_ep), "[%s]:%s", hbuf, sbuf);
+                } else {
+                    snprintf(client_ep, sizeof(client_ep), "%s:%s", hbuf, sbuf);
+                }
+            } else {
+                snprintf(client_ep, sizeof(client_ep), "unknown");
             }
         } else {
-            client_ip[0] = '\0';
+            client_ep[0] = '\0';
         }
         if (client_fd == INVALID_SOCKET) {
             LRTMP2_LOG_WARN("Accept failed: %s", strerror(errno));
         } else if (server->config->max_connections > 0 &&
                    server_count_active_connections(server) >= server->config->max_connections) {
-            LRTMP2_LOG_WARN("Rejecting connection from %s:%d: max_connections=%d reached",
-                             client_ip, ntohs(client_addr.sin_port),
-                             server->config->max_connections);
+            LRTMP2_LOG_WARN("Rejecting connection from %s: max_connections=%d reached",
+                             client_ep, server->config->max_connections);
             close_socket(client_fd);
         } else {
-            LRTMP2_LOG_INFO("New connection from %s:%d",
-                             client_ip, ntohs(client_addr.sin_port));
+            LRTMP2_LOG_INFO("New connection from %s", client_ep);
             lrtmp2_conn_t *conn = lrtmp2_conn_create((lrtmp2_server_t *)server, server->config);
             if (!conn) {
                 LRTMP2_LOG_ERROR("Failed to create connection context");
