@@ -422,6 +422,15 @@ int lrtmp2_transport_is_tls(const lrtmp2_transport_t *t)
     return t ? t->is_tls : 0;
 }
 
+int lrtmp2_transport_pending(const lrtmp2_transport_t *t)
+{
+    if (!t) return 0;
+#ifdef LRTMP2_HAVE_TLS
+    if (t->is_tls && t->ssl) return SSL_pending(t->ssl);
+#endif
+    return 0;
+}
+
 void lrtmp2_transport_free(lrtmp2_transport_t *t)
 {
     if (!t) return;

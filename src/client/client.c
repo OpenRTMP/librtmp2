@@ -292,7 +292,9 @@ int lrtmp2_client_connect(lrtmp2_client_t *client, const char *url)
     if (!client || !url) return LRTMP2_ERR_INTERNAL;
 
     /* Tear down any prior connection so reconnecting with the same client object
-     * does not leak the previous transport/socket. */
+     * does not leak the previous transport/socket. Reset the state too, so a
+     * later failure here leaves a consistently disconnected client rather than
+     * one that still looks connected. */
     if (client->transport) {
         lrtmp2_transport_free(client->transport);
         client->transport = NULL;
@@ -301,6 +303,7 @@ int lrtmp2_client_connect(lrtmp2_client_t *client, const char *url)
         close_socket(client->client_fd);
         client->client_fd = -1;
     }
+    client->state = LRTMP2_CLIENT_DISCONNECTED;
 
     /* Parse URL: rtmp://host:port/app/stream_key (or rtmps:// for TLS). host may
      * be a hostname, an IPv4 literal, or a bracketed IPv6 literal
@@ -601,8 +604,11 @@ int lrtmp2_client_poll(lrtmp2_client_t *client, int timeout_ms)
     if (client->state != LRTMP2_CLIENT_PLAYING) return LRTMP2_ERR_PROTOCOL;
 
     /* poll() rather than select() so a large client_fd (past FD_SETSIZE) in an
-     * fd-heavy host cannot corrupt the stack. */
-    if (lrtmp2_buffer_available(client->recv_buffer) == 0) {
+     * fd-heavy host cannot corrupt the stack. Skip the wait when the transport
+     * already holds decrypted-but-unread TLS data (SSL_pending): that data will
+     * never make the raw socket readable, so polling on it could stall. */
+    if (lrtmp2_buffer_available(client->recv_buffer) == 0 &&
+        lrtmp2_transport_pending(client->transport) == 0) {
         struct pollfd pfd;
         pfd.fd = client->client_fd;
         pfd.events = POLLIN;

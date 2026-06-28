@@ -75,6 +75,13 @@ int lrtmp2_transport_send(lrtmp2_transport_t *t, const void *buf, size_t len);
 int  lrtmp2_transport_fd(const lrtmp2_transport_t *t);
 int  lrtmp2_transport_is_tls(const lrtmp2_transport_t *t);
 
+/* Number of bytes already decrypted and buffered inside the transport, ready to
+ * be returned by recv() without the socket becoming readable. For TLS this is
+ * SSL_pending(); for plaintext it is always 0. Callers that wait on the socket
+ * (poll/select) should drain this first, otherwise buffered TLS data can sit
+ * unserviced until more network bytes happen to arrive. */
+int  lrtmp2_transport_pending(const lrtmp2_transport_t *t);
+
 /* Tear down TLS state (sends close_notify when applicable) and free the
  * transport. Does NOT close the fd. */
 void lrtmp2_transport_free(lrtmp2_transport_t *t);
