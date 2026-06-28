@@ -15,9 +15,11 @@ jobs:
         cc: [gcc, clang]
     steps:
     - uses: actions/checkout@v7
+      with:
+        persist-credentials: false
 
     - name: Install dependencies
-      run: sudo apt-get update && sudo apt-get install -y meson ninja-build
+      run: sudo apt-get update && sudo apt-get install -y meson ninja-build libssl-dev
 
     - name: Compile (release, sanity)
       run: make release
@@ -39,14 +41,26 @@ jobs:
       env:
         CC: ${{ matrix.cc }}
 
+    - name: Build & test zero-dependency (TLS=0)
+      run: make clean && make DEBUG=1 TLS=0 test
+      env:
+        CC: ${{ matrix.cc }}
+
+    - name: RTMPS integration test (TLS)
+      run: make clean && make DEBUG=1 tests/integration/run_tls && ./tests/integration/run_tls
+      env:
+        CC: ${{ matrix.cc }}
+
   unit-tests-meson:
     name: unit tests (meson)
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v7
+      with:
+        persist-credentials: false
 
     - name: Install dependencies
-      run: sudo apt-get update && sudo apt-get install -y meson ninja-build
+      run: sudo apt-get update && sudo apt-get install -y meson ninja-build libssl-dev
 
     - name: Meson setup
       run: meson setup builddir -Dtests=true
@@ -56,3 +70,9 @@ jobs:
 
     - name: Run unit tests
       run: meson test -C builddir
+
+    - name: Meson build & test without TLS
+      run: |
+        meson setup builddir-notls -Dtests=true -Dtls=disabled
+        meson compile -C builddir-notls
+        meson test -C builddir-notls

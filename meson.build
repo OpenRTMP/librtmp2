@@ -8,12 +8,24 @@ project('librtmp2', 'c',
 
 cc = meson.get_compiler('c')
 
+# TLS / RTMPS (OpenSSL). Enabled by default; configure with -Dtls=disabled to
+# drop the dependency and build a plaintext-only library.
+tls_opt = get_option('tls')
+openssl_dep = dependency('openssl', required : tls_opt)
+lrtmp2_deps = []
+lrtmp2_c_args = []
+if openssl_dep.found()
+  lrtmp2_deps += openssl_dep
+  lrtmp2_c_args += '-DLRTMP2_HAVE_TLS'
+endif
+
 # Source files
 core_sources = [
   'src/core/alloc.c',
   'src/core/buffer.c',
   'src/core/bytes.c',
   'src/core/net.c',
+  'src/core/transport.c',
   'src/core/log.c',
   'src/core/errors.c',
   'src/core/lib.c',
@@ -82,6 +94,8 @@ all_sources = (core_sources + handshake_sources + chunk_sources +
 librtmp2_shared = shared_library('librtmp2',
   all_sources,
   include_directories : include_directories('include', 'src'),
+  c_args : lrtmp2_c_args,
+  dependencies : lrtmp2_deps,
   version : meson.project_version(),
   soversion : '0',
   install : true,
@@ -90,6 +104,8 @@ librtmp2_shared = shared_library('librtmp2',
 librtmp2_static = static_library('librtmp2',
   all_sources,
   include_directories : include_directories('include', 'src'),
+  c_args : lrtmp2_c_args,
+  dependencies : lrtmp2_deps,
   install : true,
 )
 
@@ -97,6 +113,7 @@ librtmp2_static = static_library('librtmp2',
 librtmp2_dep = declare_dependency(
   link_with : librtmp2_static,
   include_directories : include_directories('include', 'src'),
+  dependencies : lrtmp2_deps,
 )
 
 # pkg-config
@@ -123,13 +140,29 @@ if build_tests
     'tests/unit/test_server.c',
     'tests/unit/test_message.c',
     'tests/unit/test_net.c',
+    'tests/unit/test_transport.c',
   ]
   test_exec = executable('test_librtmp2',
     test_sources,
     dependencies : librtmp2_dep,
+    c_args : lrtmp2_c_args,
     include_directories : include_directories('src'),
   )
   test('all', test_exec)
+
+  # RTMPS end-to-end integration test — only meaningful with TLS compiled in, so
+  # it mirrors the Make `run_tls` target and keeps both build systems exercising
+  # the same feature surface.
+  if openssl_dep.found()
+    threads_dep = dependency('threads')
+    tls_it_exec = executable('test_tls_integration',
+      'tests/integration/test_tls.c',
+      dependencies : [librtmp2_dep, threads_dep],
+      c_args : lrtmp2_c_args,
+      include_directories : include_directories('src'),
+    )
+    test('rtmps_integration', tls_it_exec, timeout : 60)
+  endif
 endif
 
 # Examples (optional)

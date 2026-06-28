@@ -69,11 +69,28 @@ lrtmp2_server_t *lrtmp2_server_create(const lrtmp2_server_config_t *config)
     server->streams = NULL;
     server->connections = NULL;
     server->server_fd = INVALID_SOCKET;
+    server->tls_ctx = NULL;
     pthread_mutex_init(&server->streams_mutex, NULL);
     pthread_mutex_init(&server->connections_mutex, NULL);
 
-    LRTMP2_LOG_INFO("Server created (max_connections=%d, chunk_size=%d)",
-                     config->max_connections, config->chunk_size);
+    /* When TLS termination is requested, build the shared server context up
+     * front so a bad cert/key (or a TLS-less build) fails fast at create time
+     * rather than on the first accepted connection. */
+    if (config->tls_enabled) {
+        server->tls_ctx = lrtmp2_tls_ctx_new_server(config->tls_cert_file,
+                                                    config->tls_key_file);
+        if (!server->tls_ctx) {
+            LRTMP2_LOG_ERROR("Server TLS enabled but context could not be created");
+            pthread_mutex_destroy(&server->streams_mutex);
+            pthread_mutex_destroy(&server->connections_mutex);
+            LRTMP2_FREE(server);
+            return NULL;
+        }
+    }
+
+    LRTMP2_LOG_INFO("Server created (max_connections=%d, chunk_size=%d, tls=%s)",
+                     config->max_connections, config->chunk_size,
+                     server->tls_ctx ? "on" : "off");
     return server;
 }
 
@@ -107,6 +124,10 @@ void lrtmp2_server_destroy(lrtmp2_server_t *server)
 
     pthread_mutex_destroy(&server->streams_mutex);
     pthread_mutex_destroy(&server->connections_mutex);
+
+    if (server->tls_ctx) {
+        lrtmp2_tls_ctx_free(server->tls_ctx);
+    }
 
     if (server->server_fd != INVALID_SOCKET) {
         close_socket(server->server_fd);
@@ -288,8 +309,35 @@ int lrtmp2_server_poll(lrtmp2_server_t *server, int timeout_ms)
             if (!conn) {
                 LRTMP2_LOG_ERROR("Failed to create connection context");
                 close_socket(client_fd);
+                return LRTMP2_OK;
+            }
+
+            /* Attach the transport: a TLS session (terminating RTMPS) when the
+             * server has a TLS context, otherwise plaintext. The TLS handshake
+             * runs here, before the RTMP handshake bytes are read. A failed TLS
+             * handshake drops the connection. */
+            lrtmp2_transport_t *transport;
+            if (server->tls_ctx) {
+                transport = lrtmp2_transport_new_tls_server(server->tls_ctx, client_fd);
+                if (!transport) {
+                    LRTMP2_LOG_WARN("Dropping %s: TLS handshake failed", client_ep);
+                    lrtmp2_conn_destroy(conn);
+                    close_socket(client_fd);
+                    return LRTMP2_OK;
+                }
             } else {
+                transport = lrtmp2_transport_new_plain(client_fd);
+                if (!transport) {
+                    LRTMP2_LOG_ERROR("Failed to create transport");
+                    lrtmp2_conn_destroy(conn);
+                    close_socket(client_fd);
+                    return LRTMP2_OK;
+                }
+            }
+
+            {
                 conn->client_fd = client_fd;
+                conn->transport = transport;
                 pthread_mutex_lock((pthread_mutex_t *)&server->connections_mutex);
                 conn->next = server->connections;
                 server->connections = conn;
@@ -358,33 +406,58 @@ int lrtmp2_server_process_connections(lrtmp2_server_t *server)
     for (size_t i = 0; i < n_conns; i++) {
         lrtmp2_conn_t *conn = snapshot[i];
         if (conn->client_fd >= 0 && conn->state < LRTMP2_STATE_CLOSING) {
-            /* Try to receive data (non-blocking) */
+            /* Drain currently readable data. A single recv() is not enough for
+             * TLS: SSL_read can leave a further record already decrypted in the
+             * SSL buffer that poll() will never wake us for, so we loop until the
+             * transport reports "would block" (again). Plaintext behaves the same
+             * way and simply stops once the socket buffer is empty.
+             *
+             * The loop is bounded per poll iteration so one constantly-readable
+             * peer cannot monopolise the single-threaded server and starve other
+             * connections; whatever is left is picked up on the next poll(). */
+            enum { MAX_DRAIN_READS = 64 };
             uint8_t tmp_buf[4096];
-            ssize_t n = recv(conn->client_fd, tmp_buf, sizeof(tmp_buf), MSG_DONTWAIT);
-            if (n > 0) {
-                /* conn_recv already drives conn_process (and flushes responses)
-                 * internally; just flush any trailing queued bytes afterwards.
-                 * A negative return means malformed/oversized input — tear the
-                 * connection down rather than spinning on un-parseable bytes. */
-                if (lrtmp2_conn_recv(conn, tmp_buf, (size_t)n) == LRTMP2_OK) {
-                    lrtmp2_conn_flush(conn);
-                } else {
+            for (int reads = 0; reads < MAX_DRAIN_READS; reads++) {
+                int again = 0;
+                ssize_t n = lrtmp2_transport_recv(conn->transport, tmp_buf,
+                                                  sizeof(tmp_buf), &again);
+                if (n > 0) {
+                    /* conn_recv already drives conn_process (and flushes
+                     * responses) internally; just flush any trailing queued
+                     * bytes afterwards. A negative return means malformed/
+                     * oversized input — tear the connection down rather than
+                     * spinning on un-parseable bytes. */
+                    if (lrtmp2_conn_recv(conn, tmp_buf, (size_t)n) == LRTMP2_OK) {
+                        lrtmp2_conn_flush(conn);
+                    } else {
+                        conn->state = LRTMP2_STATE_CLOSING;
+                        break;
+                    }
+                    /* keep draining until the transport would block */
+                } else if (n == 0) {
+                    /* Client disconnected gracefully */
                     conn->state = LRTMP2_STATE_CLOSING;
+                    break;
+                } else {
+                    /* n < 0: stop on would-block, tear down on a real error. */
+                    if (!again && errno != EAGAIN && errno != EWOULDBLOCK) {
+                        conn->state = LRTMP2_STATE_CLOSING;
+                    }
+                    break;
                 }
-            } else if (n == 0) {
-                /* Client disconnected gracefully */
-                conn->state = LRTMP2_STATE_CLOSING;
-            } else if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
-                /* Real socket error */
-                conn->state = LRTMP2_STATE_CLOSING;
             }
         }
 
         /* Close the socket and fire on_close exactly once (gated on a still-open
          * fd), still outside the lock. Closing here — rather than only on the
          * n==0 path — avoids leaking the socket fd on the error path; the struct
-         * itself is unlinked and freed in phase 3. */
+         * itself is unlinked and freed in phase 3. Free the transport first so
+         * any TLS close_notify goes out before the fd is closed. */
         if (conn->state >= LRTMP2_STATE_CLOSING && conn->client_fd >= 0) {
+            if (conn->transport) {
+                lrtmp2_transport_free(conn->transport);
+                conn->transport = NULL;
+            }
             close_socket(conn->client_fd);
             conn->client_fd = -1;
             if (server->config->on_close_cb) {

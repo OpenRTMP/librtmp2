@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- TLS / RTMPS support via OpenSSL, built in by default (disable with
+  `make TLS=0` / `meson -Dtls=disabled` for a zero-dependency build)
+- Transport abstraction (`src/core/transport.{h,c}`) under the raw send/recv
+  path so plaintext RTMP and TLS share a single code path
+- Server-side TLS termination via `tls_enabled` / `tls_cert_file` /
+  `tls_key_file` in `lrtmp2_server_config`
+- Client-side `rtmps://` connect with SNI and certificate verification
+  (`tls_ca_file`, `tls_insecure` to tune verification)
+- `lrtmp2_tls_supported()` runtime capability check
+- Transport unit tests and an end-to-end RTMPS integration test
+
 ## [0.1.0] - 2026-06-27
 
 ### Added

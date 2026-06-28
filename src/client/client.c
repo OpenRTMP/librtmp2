@@ -40,7 +40,7 @@
 #else
 #include <unistd.h>
 #include <stdio.h>
-#include <sys/select.h>
+#include <poll.h>
 #include <netdb.h>
 #define close_socket close
 #endif
@@ -83,6 +83,11 @@ lrtmp2_client_t *lrtmp2_client_create(const lrtmp2_server_config_t *config)
 void lrtmp2_client_destroy(lrtmp2_client_t *client)
 {
     if (!client) return;
+    if (client->transport) {
+        /* Frees TLS state (sends close_notify) but not the fd. */
+        lrtmp2_transport_free(client->transport);
+        client->transport = NULL;
+    }
     if (client->client_fd >= 0) {
         close_socket(client->client_fd);
     }
@@ -97,17 +102,9 @@ void lrtmp2_client_destroy(lrtmp2_client_t *client)
 
 static int client_send_raw(lrtmp2_client_t *client, const uint8_t *data, size_t len)
 {
-    if (client->client_fd < 0) return LRTMP2_ERR_INTERNAL;
-    size_t sent = 0;
-    while (sent < len) {
-        ssize_t n = send(client->client_fd, data + sent, len - sent, 0);
-        if (n <= 0) {
-            if (n < 0 && errno == EINTR) continue;
-            return LRTMP2_ERR_IO;
-        }
-        sent += (size_t)n;
-    }
-    return LRTMP2_OK;
+    if (client->client_fd < 0 || !client->transport) return LRTMP2_ERR_INTERNAL;
+    return (lrtmp2_transport_send(client->transport, data, len) == 0)
+               ? LRTMP2_OK : LRTMP2_ERR_IO;
 }
 
 static int client_flush(lrtmp2_client_t *client)
@@ -119,20 +116,43 @@ static int client_flush(lrtmp2_client_t *client)
     return rc;
 }
 
-/* Blocking recv of whatever is available; appends to recv_buffer. */
+/* Blocking recv of whatever is available; appends to recv_buffer. The transport
+ * exposes non-blocking recv semantics (so plaintext and TLS share one path), so
+ * when it reports "would block" we wait on the socket to preserve the caller's
+ * blocking expectations. We use poll() (not select(), which is undefined past
+ * FD_SETSIZE in fd-heavy hosts) and wait on both readability and writability:
+ * a TLS read can need the socket to become writable (WANT_WRITE), which a
+ * read-only wait would never satisfy. */
 static int client_recv_more(lrtmp2_client_t *client)
 {
     uint8_t tmp[4096];
-    ssize_t n = recv(client->client_fd, tmp, sizeof(tmp), 0);
-    if (n > 0) {
-        return lrtmp2_buffer_write(client->recv_buffer, tmp, (size_t)n);
-    }
-    if (n == 0) {
-        LRTMP2_LOG_WARN("Peer closed connection");
+    for (;;) {
+        int again = 0;
+        ssize_t n = lrtmp2_transport_recv(client->transport, tmp, sizeof(tmp), &again);
+        if (n > 0) {
+            return lrtmp2_buffer_write(client->recv_buffer, tmp, (size_t)n);
+        }
+        if (n == 0) {
+            LRTMP2_LOG_WARN("Peer closed connection");
+            return LRTMP2_ERR_IO;
+        }
+        if (again || errno == EAGAIN || errno == EWOULDBLOCK) {
+            struct pollfd pfd;
+            pfd.fd = client->client_fd;
+            /* again==2 means the transport (TLS) needs the socket writable;
+             * otherwise wait for it to become readable. */
+            pfd.events = (again == 2) ? POLLOUT : POLLIN;
+            pfd.revents = 0;
+            int rc = poll(&pfd, 1, -1);
+            if (rc < 0) {
+                if (errno == EINTR) continue;
+                return LRTMP2_ERR_IO;
+            }
+            continue;
+        }
+        if (errno == EINTR) continue;
         return LRTMP2_ERR_IO;
     }
-    if (errno == EINTR) return LRTMP2_OK;
-    return LRTMP2_ERR_IO;
 }
 
 /* Repeatedly call a buffer-based handshake step until it succeeds (blocking
@@ -271,11 +291,40 @@ int lrtmp2_client_connect(lrtmp2_client_t *client, const char *url)
 {
     if (!client || !url) return LRTMP2_ERR_INTERNAL;
 
-    /* Parse URL: rtmp://host:port/app/stream_key. host may be a hostname, an
-     * IPv4 literal, or a bracketed IPv6 literal (rtmp://[::1]:1935/app/key). */
+    /* Tear down any prior connection so reconnecting with the same client object
+     * does not leak the previous transport/socket. Reset the state too, so a
+     * later failure here leaves a consistently disconnected client rather than
+     * one that still looks connected. */
+    if (client->transport) {
+        lrtmp2_transport_free(client->transport);
+        client->transport = NULL;
+    }
+    if (client->client_fd >= 0) {
+        close_socket(client->client_fd);
+        client->client_fd = -1;
+    }
+    client->state = LRTMP2_CLIENT_DISCONNECTED;
+
+    /* Parse URL: rtmp://host:port/app/stream_key (or rtmps:// for TLS). host may
+     * be a hostname, an IPv4 literal, or a bracketed IPv6 literal
+     * (rtmp://[::1]:1935/app/key). rtmps:// defaults to port 443. */
     char authority[256];
     const char *p = url;
-    if (strncmp(p, "rtmp://", 7) == 0) p += 7;
+    int use_tls = 0;
+    const char *def_port = "1935";
+    const char *scheme = "rtmp";
+    if (strncmp(p, "rtmps://", 8) == 0) {
+        p += 8;
+        use_tls = 1;
+        def_port = "443";
+        scheme = "rtmps";
+        if (!lrtmp2_tls_available()) {
+            LRTMP2_LOG_ERROR("rtmps:// requested but librtmp2 was built without TLS support");
+            return LRTMP2_ERR_INTERNAL;
+        }
+    } else if (strncmp(p, "rtmp://", 7) == 0) {
+        p += 7;
+    }
 
     const char *slash = strchr(p, '/');
     if (slash) {
@@ -305,7 +354,7 @@ int lrtmp2_client_connect(lrtmp2_client_t *client, const char *url)
 
     char host[256];
     char port[16];
-    if (lrtmp2_split_host_port(authority, host, sizeof(host), port, sizeof(port), "1935") != 0) {
+    if (lrtmp2_split_host_port(authority, host, sizeof(host), port, sizeof(port), def_port) != 0) {
         LRTMP2_LOG_ERROR("Invalid host/port in URL: %s", authority);
         return LRTMP2_ERR_INTERNAL;
     }
@@ -314,7 +363,7 @@ int lrtmp2_client_connect(lrtmp2_client_t *client, const char *url)
         return LRTMP2_ERR_INTERNAL;
     }
 
-    LRTMP2_LOG_INFO("Connecting to rtmp://%s:%s/%s/%s", host, port, client->app, client->stream_key);
+    LRTMP2_LOG_INFO("Connecting to %s://%s:%s/%s/%s", scheme, host, port, client->app, client->stream_key);
 
     /* Resolve host (DNS name or numeric literal, IPv4 or IPv6) and connect to
      * the first address that accepts. */
@@ -345,6 +394,29 @@ int lrtmp2_client_connect(lrtmp2_client_t *client, const char *url)
     if (client->client_fd < 0) {
         LRTMP2_LOG_ERROR("Failed to connect to %s:%s: %s", host, port, strerror(errno));
         return LRTMP2_ERR_IO;
+    }
+
+    /* Wrap the socket in a transport before any RTMP bytes flow. For rtmps://
+     * this runs the TLS handshake (SNI + cert verification) up front; the rest
+     * of the RTMP handshake and command flow is transport-agnostic from here. */
+    const char *ca_file = client->config ? client->config->tls_ca_file : NULL;
+    int insecure = client->config ? client->config->tls_insecure : 0;
+    if (use_tls) {
+        client->transport = lrtmp2_transport_new_tls_client(client->client_fd, host,
+                                                            ca_file, insecure);
+        if (!client->transport) {
+            LRTMP2_LOG_ERROR("TLS handshake to %s:%s failed", host, port);
+            close_socket(client->client_fd);
+            client->client_fd = -1;
+            return LRTMP2_ERR_IO;
+        }
+    } else {
+        client->transport = lrtmp2_transport_new_plain(client->client_fd);
+        if (!client->transport) {
+            close_socket(client->client_fd);
+            client->client_fd = -1;
+            return LRTMP2_ERR_INTERNAL;
+        }
     }
 
     client->state = LRTMP2_CLIENT_HANDSHAKING;
@@ -382,9 +454,9 @@ int lrtmp2_client_connect(lrtmp2_client_t *client, const char *url)
 
     char tc_url[768];
     if (strchr(host, ':')) {  /* IPv6 literal -> bracket it in the URL */
-        snprintf(tc_url, sizeof(tc_url), "rtmp://[%s]:%s/%s", host, port, client->app);
+        snprintf(tc_url, sizeof(tc_url), "%s://[%s]:%s/%s", scheme, host, port, client->app);
     } else {
-        snprintf(tc_url, sizeof(tc_url), "rtmp://%s:%s/%s", host, port, client->app);
+        snprintf(tc_url, sizeof(tc_url), "%s://%s:%s/%s", scheme, host, port, client->app);
     }
 
     rc = lrtmp2_cmd_build_connect(&amf_buf, client->app, tc_url, NULL, NULL, "FMLE/3.0", 0, 0);
@@ -531,15 +603,17 @@ int lrtmp2_client_poll(lrtmp2_client_t *client, int timeout_ms)
     if (!client) return LRTMP2_ERR_INTERNAL;
     if (client->state != LRTMP2_CLIENT_PLAYING) return LRTMP2_ERR_PROTOCOL;
 
-    struct timeval tv;
-    tv.tv_sec = timeout_ms / 1000;
-    tv.tv_usec = (timeout_ms % 1000) * 1000;
-    fd_set rfds;
-    FD_ZERO(&rfds);
-    FD_SET(client->client_fd, &rfds);
-
-    if (lrtmp2_buffer_available(client->recv_buffer) == 0) {
-        int rc = select(client->client_fd + 1, &rfds, NULL, NULL, &tv);
+    /* poll() rather than select() so a large client_fd (past FD_SETSIZE) in an
+     * fd-heavy host cannot corrupt the stack. Skip the wait when the transport
+     * already holds decrypted-but-unread TLS data (SSL_pending): that data will
+     * never make the raw socket readable, so polling on it could stall. */
+    if (lrtmp2_buffer_available(client->recv_buffer) == 0 &&
+        lrtmp2_transport_pending(client->transport) == 0) {
+        struct pollfd pfd;
+        pfd.fd = client->client_fd;
+        pfd.events = POLLIN;
+        pfd.revents = 0;
+        int rc = poll(&pfd, 1, timeout_ms);
         if (rc < 0) {
             if (errno == EINTR) return LRTMP2_OK;
             return LRTMP2_ERR_IO;

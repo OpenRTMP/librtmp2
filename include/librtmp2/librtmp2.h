@@ -28,7 +28,28 @@ struct lrtmp2_server_config {
     lrtmp2_on_close_cb     on_close_cb;
     int (*on_send_data)(struct lrtmp2_conn *conn, const uint8_t *data, size_t len, void *userdata);
     void *userdata;
+
+    /* ---- TLS / RTMPS (optional) ----
+     *
+     * Server side: set tls_enabled = 1 and provide PEM cert-chain and private
+     * key files to terminate TLS on every accepted connection (rtmps://). When
+     * tls_enabled = 0 (default), the server speaks plaintext RTMP exactly as
+     * before. If the library was built without TLS support, enabling this makes
+     * lrtmp2_server_listen() fail.
+     *
+     * Client side: rtmps:// URLs trigger TLS automatically; these fields tune
+     * verification. tls_ca_file overrides the system trust store (NULL = system
+     * default) and tls_insecure = 1 skips certificate/hostname verification
+     * (test/self-signed use only). */
+    int         tls_enabled;       /* server: terminate TLS on accepted conns */
+    const char *tls_cert_file;     /* server: PEM certificate chain file */
+    const char *tls_key_file;      /* server: PEM private key file */
+    const char *tls_ca_file;       /* client: CA bundle for verification (or NULL) */
+    int         tls_insecure;      /* client: skip certificate verification */
 };
+
+/* Returns 1 if librtmp2 was built with TLS (RTMPS) support, 0 otherwise. */
+int lrtmp2_tls_supported(void);
 
 lrtmp2_server_t *lrtmp2_server_create(const lrtmp2_server_config_t *config);
 void             lrtmp2_server_destroy(lrtmp2_server_t *server);
