@@ -2,10 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+> ⚠️ **Alpha software.** `librtmp2` is in active early development. It has **no
+> fixed, stable release version yet** — everything below is pre-release (alpha)
+> and the API/ABI may change at any time without notice. Pin to a specific git
+> commit if you depend on it.
 
-## [Unreleased]
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
+While in alpha the project stays on `0.x`; semantic-versioning guarantees only
+begin at `1.0.0`.
+
+## [Unreleased] — alpha
 
 ### Added
 - TLS / RTMPS support via OpenSSL, built in by default (disable with
@@ -18,11 +24,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`tls_ca_file`, `tls_insecure` to tune verification)
 - `lrtmp2_tls_supported()` runtime capability check
 - Transport unit tests and an end-to-end RTMPS integration test
-
-## [0.1.0] - 2026-06-27
-
-### Added
-- Initial release of librtmp2
 - Legacy RTMP protocol support (handshake, chunk, message, AMF0)
 - Enhanced RTMP v1 support (ExVideo/ExAudio headers, FourCC registry, HDR/colorInfo)
 - Enhanced RTMP v2 support (capsEx, reconnect, multitrack, ModEx)
@@ -49,11 +50,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Protocol mapping documents for legacy, E-RTMP v1, and E-RTMP v2
 - Example programs (`minimal_server`, `minimal_client`, `dump_frames`)
 
-## [Unreleased]
-
 ### Planned
 - OBS → librtmp2 interop verification
 - SRS → librtmp2 interop verification
 - HaishinKit interop verification
 - Automated ABI compliance checks in CI
 - `CONTRIBUTING.md` guidelines
+- First tagged pre-release once the API settles
