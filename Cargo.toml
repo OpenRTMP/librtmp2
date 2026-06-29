@@ -17,7 +17,7 @@ tls = ["openssl"]
 
 [dependencies]
 libc = "0.2"
-thiserror = "1"
+thiserror = "2"
 openssl = { version = "0.10.70", optional = true }
 parking_lot = "0.12"
 
