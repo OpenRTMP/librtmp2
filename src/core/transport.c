@@ -11,6 +11,7 @@
 #endif
 
 #include "core/transport.h"
+#include "core/transport_handshake.h"
 #include "core/alloc.h"
 #include "core/log.h"
 

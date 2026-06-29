@@ -15,6 +15,7 @@
 #include "session/state_machine.h"
 #include "core/log.h"
 #include "core/alloc.h"
+#include "core/transport_handshake.h"
 #include <string.h>
 #include <stdlib.h>
 #include <errno.h>
@@ -345,13 +346,18 @@ int lrtmp2_server_poll(lrtmp2_server_t *server, int timeout_ms)
             {
                 conn->client_fd = client_fd;
                 conn->transport = transport;
+                /* on_connect_cb is NOT invoked here. For RTMPS the TLS handshake
+                 * has not run yet (it advances incrementally in
+                 * lrtmp2_server_process_connections() below); firing the host
+                 * callback before the peer is authenticated/encrypted would let a
+                 * slow or failing TLS peer reach application code that expects a
+                 * usable connection. lrtmp2_server_process_connections() fires it
+                 * once, right after any pending handshake completes (immediately,
+                 * for plaintext). */
                 pthread_mutex_lock((pthread_mutex_t *)&server->connections_mutex);
                 conn->next = server->connections;
                 server->connections = conn;
                 pthread_mutex_unlock((pthread_mutex_t *)&server->connections_mutex);
-                if (server->config->on_connect_cb) {
-                    server->config->on_connect_cb(conn, server->config->userdata);
-                }
             }
         }
     }
@@ -427,6 +433,16 @@ int lrtmp2_server_process_connections(lrtmp2_server_t *server)
                 }
             }
 
+            /* Fire on_connect_cb exactly once, now that the connection is usable:
+             * immediately for plaintext (handshake_pending() is always false), or
+             * right after the TLS handshake above has just completed. */
+            if (!conn->connect_cb_fired) {
+                conn->connect_cb_fired = 1;
+                if (server->config->on_connect_cb) {
+                    server->config->on_connect_cb(conn, server->config->userdata);
+                }
+            }
+
             /* Drain currently readable data. A single recv() is not enough for
              * TLS: SSL_read can leave a further record already decrypted in the
              * SSL buffer that poll() will never wake us for, so we loop until the
@@ -481,7 +497,10 @@ int lrtmp2_server_process_connections(lrtmp2_server_t *server)
             }
             close_socket(conn->client_fd);
             conn->client_fd = -1;
-            if (server->config->on_close_cb) {
+            /* Only pair with on_connect_cb: a connection that failed/timed out
+             * mid-TLS-handshake never got a connect callback (see deferral
+             * above), so it must not get a close callback either. */
+            if (conn->connect_cb_fired && server->config->on_close_cb) {
                 server->config->on_close_cb(conn, server->config->userdata);
             }
         }
