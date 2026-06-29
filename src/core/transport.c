@@ -22,6 +22,7 @@
 #include <unistd.h>
 #include <sys/socket.h>
 #include <poll.h>
+#include <time.h>
 
 #ifdef LRTMP2_HAVE_TLS
 #include <openssl/ssl.h>
@@ -34,6 +35,9 @@ struct lrtmp2_transport {
     int  is_tls;
 #ifdef LRTMP2_HAVE_TLS
     SSL *ssl;  /* NULL for plaintext */
+    /* Server accept path: 1 = SSL_accept pending, 0 = complete or N/A, -1 = failed */
+    int  tls_hs_state;
+    time_t tls_hs_started;
 #endif
 };
 
@@ -247,15 +251,63 @@ lrtmp2_transport_t *lrtmp2_transport_new_tls_server(lrtmp2_tls_ctx_t *ctx, int f
     }
     SSL_set_fd(t->ssl, fd);
 
-    if (tls_handshake_blocking(t->ssl, fd, 1) != 0) {
-        LRTMP2_LOG_WARN("TLS server handshake failed");
+    /* Defer SSL_accept to the server's poll loop so a slow peer cannot block
+     * service to all other connections during accept(). */
+    if (set_nonblocking(fd) != 0) {
         SSL_free(t->ssl);
         LRTMP2_FREE(t);
         return NULL;
     }
-
-    LRTMP2_LOG_INFO("TLS server handshake complete (%s)", SSL_get_version(t->ssl));
+    t->tls_hs_state = 1;
+    t->tls_hs_started = time(NULL);
     return t;
+}
+
+int lrtmp2_transport_tls_handshake_pending(const lrtmp2_transport_t *t)
+{
+#ifdef LRTMP2_HAVE_TLS
+    return t && t->is_tls && t->ssl && t->tls_hs_state == 1;
+#else
+    (void)t;
+    return 0;
+#endif
+}
+
+int lrtmp2_transport_tls_handshake_advance(lrtmp2_transport_t *t)
+{
+#ifdef LRTMP2_HAVE_TLS
+    if (!t || !t->is_tls || !t->ssl) return -1;
+    if (t->tls_hs_state == 0) return 1;
+    if (t->tls_hs_state < 0) return -1;
+
+    if (t->tls_hs_started != 0 &&
+        (time_t)(time(NULL) - t->tls_hs_started) >= LRTMP2_TLS_HANDSHAKE_TIMEOUT_S) {
+        LRTMP2_LOG_WARN("TLS server handshake timed out after %d s",
+                        LRTMP2_TLS_HANDSHAKE_TIMEOUT_S);
+        t->tls_hs_state = -1;
+        return -1;
+    }
+
+    ERR_clear_error();
+    int rc = SSL_accept(t->ssl);
+    if (rc == 1) {
+        t->tls_hs_state = 0;
+        LRTMP2_LOG_INFO("TLS server handshake complete (%s)", SSL_get_version(t->ssl));
+        return 1;
+    }
+
+    int err = SSL_get_error(t->ssl, rc);
+    if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
+        return 0;
+    }
+
+    log_ssl_errors("SSL_accept");
+    t->tls_hs_state = -1;
+    return -1;
+#else
+    (void)t;
+    return -1;
+#endif
 }
 
 lrtmp2_transport_t *lrtmp2_transport_new_tls_client(int fd, const char *server_name,
@@ -337,6 +389,11 @@ lrtmp2_transport_t *lrtmp2_transport_new_tls_client(int fd, const char *server_n
 
 static ssize_t tls_recv(lrtmp2_transport_t *t, void *buf, size_t len, int *again)
 {
+    if (t->tls_hs_state == 1) {
+        if (again) *again = 1;
+        errno = EAGAIN;
+        return -1;
+    }
     ERR_clear_error();
     int n = SSL_read(t->ssl, buf, (int)(len > INT_MAX ? INT_MAX : len));
     if (n > 0) return n;
@@ -458,6 +515,16 @@ lrtmp2_transport_t *lrtmp2_transport_new_tls_server(lrtmp2_tls_ctx_t *ctx, int f
 {
     (void)ctx; (void)fd;
     return NULL;
+}
+int lrtmp2_transport_tls_handshake_pending(const lrtmp2_transport_t *t)
+{
+    (void)t;
+    return 0;
+}
+int lrtmp2_transport_tls_handshake_advance(lrtmp2_transport_t *t)
+{
+    (void)t;
+    return -1;
 }
 lrtmp2_transport_t *lrtmp2_transport_new_tls_client(int fd, const char *server_name,
                                                     const char *ca_file, int insecure)

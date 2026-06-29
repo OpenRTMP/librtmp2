@@ -43,10 +43,18 @@ lrtmp2_transport_t *lrtmp2_transport_new_plain(int fd);
 lrtmp2_tls_ctx_t *lrtmp2_tls_ctx_new_server(const char *cert_file, const char *key_file);
 void              lrtmp2_tls_ctx_free(lrtmp2_tls_ctx_t *ctx);
 
-/* Wrap an accepted fd in a server-side TLS session and run the TLS handshake to
- * completion (blocking). Returns NULL if TLS is unavailable or the handshake
- * fails. On success the fd is left in non-blocking mode for steady-state I/O. */
+/* Wrap an accepted fd in a server-side TLS session. The TLS handshake is NOT
+ * completed here — call lrtmp2_transport_tls_handshake_advance() from the
+ * server's poll loop until it returns 1. Returns NULL if TLS is unavailable or
+ * SSL setup fails. The fd is left in non-blocking mode. */
 lrtmp2_transport_t *lrtmp2_transport_new_tls_server(lrtmp2_tls_ctx_t *ctx, int fd);
+
+/* 1 if a server-side TLS transport is still waiting on SSL_accept. */
+int lrtmp2_transport_tls_handshake_pending(const lrtmp2_transport_t *t);
+
+/* Drive one non-blocking SSL_accept step. Returns 1 when complete, 0 when more
+ * I/O is needed (retry after poll), -1 on failure or handshake timeout. */
+int lrtmp2_transport_tls_handshake_advance(lrtmp2_transport_t *t);
 
 /* Wrap a connected client fd in a TLS session and run the client handshake
  * (blocking). `server_name` is used for SNI and, unless `insecure` is set,

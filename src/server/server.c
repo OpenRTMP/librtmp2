@@ -313,14 +313,14 @@ int lrtmp2_server_poll(lrtmp2_server_t *server, int timeout_ms)
             }
 
             /* Attach the transport: a TLS session (terminating RTMPS) when the
-             * server has a TLS context, otherwise plaintext. The TLS handshake
-             * runs here, before the RTMP handshake bytes are read. A failed TLS
-             * handshake drops the connection. */
+             * server has a TLS context, otherwise plaintext. For RTMPS the TLS
+             * handshake is completed incrementally in process_connections() so
+             * a slow peer cannot block the whole poll loop. */
             lrtmp2_transport_t *transport;
             if (server->tls_ctx) {
                 transport = lrtmp2_transport_new_tls_server(server->tls_ctx, client_fd);
                 if (!transport) {
-                    LRTMP2_LOG_WARN("Dropping %s: TLS handshake failed", client_ep);
+                    LRTMP2_LOG_WARN("Dropping %s: TLS transport setup failed", client_ep);
                     lrtmp2_conn_destroy(conn);
                     close_socket(client_fd);
                     return LRTMP2_OK;
@@ -406,6 +406,20 @@ int lrtmp2_server_process_connections(lrtmp2_server_t *server)
     for (size_t i = 0; i < n_conns; i++) {
         lrtmp2_conn_t *conn = snapshot[i];
         if (conn->client_fd >= 0 && conn->state < LRTMP2_STATE_CLOSING) {
+            /* Complete a pending server-side TLS handshake before reading RTMP
+             * bytes. One step per poll keeps a slow peer from starving others. */
+            if (conn->transport &&
+                lrtmp2_transport_tls_handshake_pending(conn->transport)) {
+                int hs = lrtmp2_transport_tls_handshake_advance(conn->transport);
+                if (hs < 0) {
+                    conn->state = LRTMP2_STATE_CLOSING;
+                    continue;
+                }
+                if (hs == 0) {
+                    continue;
+                }
+            }
+
             /* Drain currently readable data. A single recv() is not enough for
              * TLS: SSL_read can leave a further record already decrypted in the
              * SSL buffer that poll() will never wake us for, so we loop until the

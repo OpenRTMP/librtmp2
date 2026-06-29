@@ -96,14 +96,22 @@ static void deliver_video_frame(lrtmp2_conn_t *conn, uint32_t timestamp,
  * sub-tags are delivered as individual frames; other tag types are skipped.
  * Timestamps in an aggregate are relative to the first tag, offset by the
  * aggregate message timestamp. */
+#define LRTMP2_MAX_AGGREGATE_SUBTAGS 4096
+
 int lrtmp2_msg_decode_aggregate(lrtmp2_conn_t *conn, const lrtmp2_chunk_message_t *chunk,
                                 const uint8_t *payload, size_t payload_len)
 {
     size_t pos = 0;
     int have_base = 0;
     uint32_t base_ts = 0;
+    unsigned subtags = 0;
 
     while (pos + 11 <= payload_len) {
+        if (++subtags > LRTMP2_MAX_AGGREGATE_SUBTAGS) {
+            LRTMP2_LOG_WARN("Aggregate sub-tag count exceeds cap (%u)",
+                            LRTMP2_MAX_AGGREGATE_SUBTAGS);
+            return LRTMP2_ERR_PROTOCOL;
+        }
         uint8_t tag_type = payload[pos];
         uint32_t data_size = ((uint32_t)payload[pos + 1] << 16) |
                              ((uint32_t)payload[pos + 2] << 8) |

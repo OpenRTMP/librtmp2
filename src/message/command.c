@@ -13,6 +13,11 @@
 #include <stdlib.h>
 #include "librtmp2/types.h"
 
+/* Maximum key/value pairs accepted in a connect command object. A hostile peer
+ * can otherwise send a multi-megabyte object with tens of thousands of simple
+ * entries and burn CPU in the parse loop. */
+#define LRTMP2_MAX_CONNECT_OBJECT_KEYS 256
+
 /* lrtmf2_amf0_read_number() reads a raw 8-byte double without consuming
  * a type marker, so callers must strip the AMF0_NUMBER marker themselves. */
 static int amf0_read_number_value(lrtmp2_buffer_t *buf, double *val)
@@ -222,7 +227,13 @@ int lrtmp2_cmd_read_connect(lrtmp2_buffer_t *buf, lrtmp2_connect_info_t *info)
 
     /* Parse key-value pairs */
     char key[256];
+    unsigned keys = 0;
     while (!lrtmf2_amf0_is_object_end(buf)) {
+        if (++keys > LRTMP2_MAX_CONNECT_OBJECT_KEYS) {
+            LRTMP2_LOG_WARN("connect object key count exceeds cap (%u)",
+                            LRTMP2_MAX_CONNECT_OBJECT_KEYS);
+            return LRTMP2_ERR_AMF;
+        }
         size_t key_len;
         if (lrtmf2_amf0_read_object_key(buf, key, sizeof(key), &key_len) != LRTMP2_OK) {
             return LRTMP2_ERR_AMF;
