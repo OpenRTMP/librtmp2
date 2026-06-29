@@ -31,7 +31,7 @@ jobs:
       - name: Determine baseline ref
         id: baseline
         run: |
-          PREV_TAG=$(git tag --list 'v*' --sort=-version:refname | head -1 2>/dev/null || echo "")
+          PREV_TAG=$(git tag --list 'v*' --sort=-version:refname | grep -vx "${GITHUB_REF#refs/tags/}" | head -1 2>/dev/null || echo "")
           if [ -z "$PREV_TAG" ]; then
             echo "No previous release tag found. Skipping semver comparison."
             echo "skip=true" >> "$GITHUB_OUTPUT"

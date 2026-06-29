@@ -83,6 +83,10 @@ jobs:
           mkdir -p "$DIST_DIR/lib"
           cp target/release/liblibrtmp2.so "$DIST_DIR/lib/" 2>/dev/null || true
           cp target/release/liblibrtmp2.a "$DIST_DIR/lib/" 2>/dev/null || true
+          if [ -z "$(ls -A "$DIST_DIR/lib")" ]; then
+            echo "::error::No built library artifacts found in target/release/"
+            exit 1
+          fi
           cp README.md LICENSE Cargo.toml "$DIST_DIR/"
 
       - name: Create binary tarball
