@@ -1,11 +1,11 @@
 # Bug scan progress
 
-Last scanned: core (2026-06-28)
+Last scanned: handshake (2026-06-29)
 
 ## Modules
 
 - [x] core — Memory, logging, errors, buffer
-- [ ] handshake — C0/C1/C2 ↔ S0/S1/S2
+- [x] handshake — C0/C1/C2 ↔ S0/S1/S2
 - [ ] chunk — Chunk reader/writer/state
 - [ ] message — Message reassembly, control, commands
 - [ ] amf — AMF0 + AMF3
@@ -14,6 +14,19 @@ Last scanned: core (2026-06-28)
 - [ ] session — State machine, publish/play flows
 - [ ] server — Server listener
 - [ ] client — Outbound client
+
+## Findings (2026-06-29 handshake pass)
+
+- client.c: `lrtmp2_client_connect()` tore down transport/socket on reconnect
+  but left `recv_buffer` and handshake state from the prior attempt. A second
+  `connect()` on the same client object could consume stale S0/S1/S2 bytes and
+  complete a handshake against the wrong peer data. Reset recv/send buffers and
+  re-init handshake at the start of every connect.
+- handshake.c: `hs->out` was heap-allocated via `LRTMP2_MALLOC` but left
+  `owned=0`, so `lrtmp2_buffer_write()` would refuse growth (latent footgun).
+  Set `owned=1` on malloc; check `buffer_write` return codes; allocate the
+  output buffer in `client_read_s1` when C2 is queued before `generate_c0c1`
+  ran (unit-test order and robustness).
 
 ## Findings (2026-06-28 core pass)
 

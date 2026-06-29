@@ -58,6 +58,7 @@ void lrtmp2_handshake_cleanup(lrtmp2_handshake_t *hs)
     hs->out.size = 0;
     hs->out.capacity = 0;
     hs->out.read_pos = 0;
+    hs->out.owned = 0;
 }
 
 /* --- Server-side handshake --- */
@@ -125,11 +126,14 @@ int lrtmp2_handshake_server_read_c1(lrtmp2_handshake_t *hs, lrtmp2_buffer_t *buf
         hs->out.data = LRTMP2_MALLOC(2 * HANDSHAKE_SIZE);
         if (!hs->out.data) return LRTMP2_ERR_INTERNAL;
         hs->out.capacity = 2 * HANDSHAKE_SIZE;
+        hs->out.owned = 1;
     }
     hs->out.size = 0;
     hs->out.read_pos = 0;
-    lrtmp2_buffer_write(&hs->out, s1, HANDSHAKE_SIZE);
-    lrtmp2_buffer_write(&hs->out, s2, HANDSHAKE_SIZE);
+    if (lrtmp2_buffer_write(&hs->out, s1, HANDSHAKE_SIZE) != LRTMP2_OK)
+        return LRTMP2_ERR_INTERNAL;
+    if (lrtmp2_buffer_write(&hs->out, s2, HANDSHAKE_SIZE) != LRTMP2_OK)
+        return LRTMP2_ERR_INTERNAL;
 
     hs->state = LRTMP2_HS_SERVER_WAIT_C2;
     LRTMP2_LOG_DEBUG("Got C1 (peer_time=%u), queued S1+S2", hs->peer_time);
@@ -172,6 +176,7 @@ int lrtmp2_handshake_client_generate_c0c1(lrtmp2_handshake_t *hs)
         hs->out.data = LRTMP2_MALLOC(1 + 2 * HANDSHAKE_SIZE);
         if (!hs->out.data) return LRTMP2_ERR_INTERNAL;
         hs->out.capacity = 1 + 2 * HANDSHAKE_SIZE;
+        hs->out.owned = 1;
     }
 
     hs->out.data[0] = RTMP_VERSION;
@@ -227,6 +232,13 @@ int lrtmp2_handshake_client_read_s1(lrtmp2_handshake_t *hs, lrtmp2_buffer_t *buf
 
     /* C2 echoes the server's S1 verbatim (timestamp + random), with only the
      * time2 field (bytes 4-7) set to our read time, per the simple handshake. */
+    if (!hs->out.data) {
+        hs->out.data = LRTMP2_MALLOC(1 + 2 * HANDSHAKE_SIZE);
+        if (!hs->out.data) return LRTMP2_ERR_INTERNAL;
+        hs->out.capacity = 1 + 2 * HANDSHAKE_SIZE;
+        hs->out.owned = 1;
+    }
+
     uint8_t c2[HANDSHAKE_SIZE];
     memcpy(c2, s1, HANDSHAKE_SIZE);
     uint32_t c2_time2 = lrtmp2_hton32(get_time());
@@ -234,7 +246,8 @@ int lrtmp2_handshake_client_read_s1(lrtmp2_handshake_t *hs, lrtmp2_buffer_t *buf
 
     hs->out.size = 0;
     hs->out.read_pos = 0;
-    lrtmp2_buffer_write(&hs->out, c2, HANDSHAKE_SIZE);
+    if (lrtmp2_buffer_write(&hs->out, c2, HANDSHAKE_SIZE) != LRTMP2_OK)
+        return LRTMP2_ERR_INTERNAL;
 
     hs->state = LRTMP2_HS_CLIENT_WAIT_S2;
     LRTMP2_LOG_DEBUG("Got S1 (server_time=%u), queued C2", hs->peer_time);
