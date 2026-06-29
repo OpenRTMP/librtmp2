@@ -20,6 +20,9 @@ use crate::types::*;
 /// Handshake payload size (mirrors `handshake::HANDSHAKE_SIZE`, which is private).
 const HANDSHAKE_SIZE: usize = 1536;
 
+/// Max time to wait for the peer to send more data before giving up.
+const RECV_POLL_TIMEOUT_MS: i32 = 10_000;
+
 /// Client connection states.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
@@ -79,7 +82,10 @@ impl Client {
         let transport = Transport::new_plain(fd);
 
         self.state = ClientState::Handshaking;
-        self.do_handshake(&transport)?;
+        if let Err(e) = self.do_handshake(&transport) {
+            unsafe { libc::close(fd) };
+            return Err(e);
+        }
 
         self.client_fd = fd;
         self.transport = Some(transport);
@@ -113,7 +119,7 @@ impl Client {
         let mut amf = Buffer::with_capacity(256);
         command::build_publish(&mut amf, &self.stream_key, &self.app)?;
         self.send_command_msg(self.stream_id, amf.as_slice())?;
-        let _ = self.wait_for_command("onStatus");
+        self.wait_for_command("onStatus")?;
         self.state = ClientState::Publishing;
         Ok(())
     }
@@ -126,7 +132,7 @@ impl Client {
         let mut amf = Buffer::with_capacity(256);
         command::build_play(&mut amf, &self.stream_key)?;
         self.send_command_msg(self.stream_id, amf.as_slice())?;
-        let _ = self.wait_for_command("onStatus");
+        self.wait_for_command("onStatus")?;
         self.state = ClientState::Playing;
         Ok(())
     }
@@ -335,7 +341,10 @@ impl Client {
                 return Err(ErrorCode::Io);
             } else if again != 0 {
                 let mut pfd = libc::pollfd { fd: transport.fd(), events: libc::POLLIN, revents: 0 };
-                unsafe { libc::poll(&mut pfd, 1, -1); }
+                let rc = unsafe { libc::poll(&mut pfd, 1, RECV_POLL_TIMEOUT_MS) };
+                if rc == 0 {
+                    return Err(ErrorCode::Timeout);
+                }
             } else {
                 return Err(ErrorCode::Io);
             }
@@ -356,7 +365,10 @@ fn read_exact(transport: &Transport, n: usize) -> Result<Vec<u8>> {
             return Err(ErrorCode::Io);
         } else if again != 0 {
             let mut pfd = libc::pollfd { fd: transport.fd(), events: libc::POLLIN, revents: 0 };
-            unsafe { libc::poll(&mut pfd, 1, -1); }
+            let rc = unsafe { libc::poll(&mut pfd, 1, RECV_POLL_TIMEOUT_MS) };
+            if rc == 0 {
+                return Err(ErrorCode::Timeout);
+            }
         } else {
             return Err(ErrorCode::Io);
         }
@@ -380,6 +392,10 @@ fn parse_rtmp_url(url: &str) -> Result<(String, u16, String, String)> {
     let mut parts = path.splitn(2, '/');
     let app = parts.next().unwrap_or("").to_string();
     let stream_key = parts.next().unwrap_or("").to_string();
+
+    if app.is_empty() || stream_key.is_empty() {
+        return Err(ErrorCode::Internal);
+    }
 
     Ok((host, port, app, stream_key))
 }

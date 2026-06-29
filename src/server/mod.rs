@@ -52,6 +52,14 @@ impl Server {
 
     /// Start listening on the given address ("host:port", default port 1935).
     pub fn listen(&mut self, bind_addr: &str) -> Result<()> {
+        // accept_new_connections() only ever wraps incoming sockets as
+        // plaintext; there is no TLS handshake wired into the accept path.
+        // Refuse to start rather than silently serving TLS-configured
+        // connections as plaintext.
+        if self.tls_ctx.is_some() {
+            return Err(ErrorCode::Unsupported);
+        }
+
         let mut host = String::new();
         let mut port = String::new();
         net::split_host_port(bind_addr, &mut host, &mut port, "1935")?;
@@ -95,6 +103,11 @@ impl Server {
             return;
         };
         loop {
+            if self.config.max_connections > 0
+                && self.connections.len() >= self.config.max_connections as usize
+            {
+                break;
+            }
             match listener.accept() {
                 Ok((stream, _addr)) => {
                     let _ = stream.set_nonblocking(true);
