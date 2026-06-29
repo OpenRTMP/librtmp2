@@ -56,6 +56,12 @@ int lrtmp2_transport_tls_handshake_pending(const lrtmp2_transport_t *t);
  * I/O is needed (retry after poll), -1 on failure or handshake timeout. */
 int lrtmp2_transport_tls_handshake_advance(lrtmp2_transport_t *t);
 
+/* 1 if the last SSL_accept step returned WANT_WRITE, meaning the poll loop
+ * must watch the fd for writability (not just readability) to make progress
+ * on the next handshake_advance() call. Only meaningful while
+ * tls_handshake_pending() is true. */
+int lrtmp2_transport_tls_handshake_wants_write(const lrtmp2_transport_t *t);
+
 /* Wrap a connected client fd in a TLS session and run the client handshake
  * (blocking). `server_name` is used for SNI and, unless `insecure` is set,
  * certificate hostname verification. `ca_file` overrides the trust store

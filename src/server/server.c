@@ -252,7 +252,14 @@ int lrtmp2_server_poll(lrtmp2_server_t *server, int timeout_ms)
     for (lrtmp2_conn_t *c = server->connections; c && nfds < cap; c = c->next) {
         if (c->client_fd >= 0 && c->state < LRTMP2_STATE_CLOSING) {
             pfds[nfds].fd = c->client_fd;
+            /* A pending TLS handshake can leave SSL_accept() wanting to write
+             * (e.g. a multi-record certificate chain) rather than read. POLLIN
+             * alone would then never wake us, stalling the handshake until its
+             * timeout instead of completing as soon as the socket is ready. */
             pfds[nfds].events = POLLIN;
+            if (c->transport && lrtmp2_transport_tls_handshake_wants_write(c->transport)) {
+                pfds[nfds].events |= POLLOUT;
+            }
             pfds[nfds].revents = 0;
             nfds++;
         }

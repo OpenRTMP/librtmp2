@@ -38,6 +38,9 @@ struct lrtmp2_transport {
     /* Server accept path: 1 = SSL_accept pending, 0 = complete or N/A, -1 = failed */
     int  tls_hs_state;
     time_t tls_hs_started;
+    /* 1 if the last SSL_accept step reported WANT_WRITE rather than WANT_READ;
+     * tells the poll loop which readiness to wait for next. */
+    int  tls_hs_want_write;
 #endif
 };
 
@@ -298,6 +301,7 @@ int lrtmp2_transport_tls_handshake_advance(lrtmp2_transport_t *t)
 
     int err = SSL_get_error(t->ssl, rc);
     if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
+        t->tls_hs_want_write = (err == SSL_ERROR_WANT_WRITE);
         return 0;
     }
 
@@ -307,6 +311,16 @@ int lrtmp2_transport_tls_handshake_advance(lrtmp2_transport_t *t)
 #else
     (void)t;
     return -1;
+#endif
+}
+
+int lrtmp2_transport_tls_handshake_wants_write(const lrtmp2_transport_t *t)
+{
+#ifdef LRTMP2_HAVE_TLS
+    return t && t->is_tls && t->ssl && t->tls_hs_state == 1 && t->tls_hs_want_write;
+#else
+    (void)t;
+    return 0;
 #endif
 }
 
@@ -421,6 +435,14 @@ static ssize_t tls_recv(lrtmp2_transport_t *t, void *buf, size_t len, int *again
 
 static int tls_send(lrtmp2_transport_t *t, const void *buf, size_t len)
 {
+    if (t->tls_hs_state == 1) {
+        /* Handshake still pending: SSL_write before SSL_accept completes would
+         * either fail or block waiting on handshake I/O. Callers only reach
+         * here if they skip the handshake-pending check; fail fast instead of
+         * blocking the single-threaded server loop. */
+        errno = EAGAIN;
+        return -1;
+    }
     const char *p = buf;
     size_t sent = 0;
     while (sent < len) {
@@ -525,6 +547,11 @@ int lrtmp2_transport_tls_handshake_advance(lrtmp2_transport_t *t)
 {
     (void)t;
     return -1;
+}
+int lrtmp2_transport_tls_handshake_wants_write(const lrtmp2_transport_t *t)
+{
+    (void)t;
+    return 0;
 }
 lrtmp2_transport_t *lrtmp2_transport_new_tls_client(int fd, const char *server_name,
                                                     const char *ca_file, int insecure)
