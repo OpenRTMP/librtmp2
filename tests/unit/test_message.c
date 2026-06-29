@@ -6,6 +6,8 @@
 #include "amf/amf.h"
 #include "core/buffer.h"
 #include "session/conn.h"
+#include "session/stream.h"
+#include "server/server.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -131,14 +133,179 @@ static int test_connect_object_key_cap(void)
     return 1;
 }
 
+static int frame_cb_hit_count;
+
+static int count_frame_cb(lrtmp2_conn_t *conn, const lrtmp2_frame_t *frame, void *userdata)
+{
+    (void)conn; (void)frame; (void)userdata;
+    frame_cb_hit_count++;
+    return 0;
+}
+
+/* A peer that sends AUDIO/VIDEO/AGGREGATE messages without ever issuing
+ * createStream/publish has no current_stream; on_frame_cb must not fire. */
+static int test_frame_requires_published_stream(void)
+{
+    lrtmp2_conn_t *conn = lrtmp2_conn_create(NULL, NULL);
+    if (!conn) {
+        printf("FAIL: could not create conn\n");
+        return 0;
+    }
+    frame_cb_hit_count = 0;
+    conn->on_frame_cb = count_frame_cb;
+
+    uint8_t audio_payload[4] = { 0xAF, 0x01, 0x00, 0x00 };
+    lrtmp2_chunk_message_t chunk;
+    memset(&chunk, 0, sizeof(chunk));
+    chunk.msg_type_id = 0x08; /* RTMP_MSG_AUDIO */
+
+    int rc = lrtmp2_msg_decode(conn, &chunk, audio_payload, sizeof(audio_payload));
+    lrtmp2_conn_destroy(conn);
+
+    if (rc != LRTMP2_OK) {
+        printf("FAIL: audio message without stream rejected (rc=%d)\n", rc);
+        return 0;
+    }
+    if (frame_cb_hit_count != 0) {
+        printf("FAIL: on_frame_cb fired (%d times) without a published stream\n",
+               frame_cb_hit_count);
+        return 0;
+    }
+    printf("PASS: frame delivery requires a published stream\n");
+    return 1;
+}
+
+/* CodeRabbit (PR #21 review): current_stream is set at createStream time,
+ * before publish. A peer that calls createStream but never publish must
+ * still not get frames delivered — gating on current_stream alone (without
+ * checking is_publishing) would let this slip through. */
+static int test_frame_requires_publish_not_just_create_stream(void)
+{
+    /* lrtmp2_stream_create() links the stream into the server-wide list
+     * (conn->server->streams), so this needs a real server-backed conn
+     * rather than the standalone lrtmp2_conn_create(NULL, NULL) used above. */
+    lrtmp2_server_config_t config;
+    memset(&config, 0, sizeof(config));
+    config.max_connections = 1;
+    config.chunk_size = 4096;
+
+    lrtmp2_server_t *server = lrtmp2_server_create(&config);
+    if (!server) {
+        printf("FAIL: could not create server\n");
+        return 0;
+    }
+
+    lrtmp2_conn_t *conn = lrtmp2_conn_create(server, &config);
+    if (!conn) {
+        printf("FAIL: could not create conn\n");
+        lrtmp2_server_destroy(server);
+        return 0;
+    }
+    frame_cb_hit_count = 0;
+    conn->on_frame_cb = count_frame_cb;
+
+    conn->current_stream = lrtmp2_stream_create(conn, 1);
+    if (!conn->current_stream) {
+        printf("FAIL: could not create stream\n");
+        lrtmp2_conn_destroy(conn);
+        lrtmp2_server_destroy(server);
+        return 0;
+    }
+
+    uint8_t audio_payload[4] = { 0xAF, 0x01, 0x00, 0x00 };
+    lrtmp2_chunk_message_t chunk;
+    memset(&chunk, 0, sizeof(chunk));
+    chunk.msg_type_id = 0x08; /* RTMP_MSG_AUDIO */
+
+    int rc = lrtmp2_msg_decode(conn, &chunk, audio_payload, sizeof(audio_payload));
+    lrtmp2_conn_destroy(conn);
+    lrtmp2_server_destroy(server);
+
+    if (rc != LRTMP2_OK) {
+        printf("FAIL: audio message with created-but-unpublished stream rejected (rc=%d)\n", rc);
+        return 0;
+    }
+    if (frame_cb_hit_count != 0) {
+        printf("FAIL: on_frame_cb fired (%d times) for a stream that called createStream but not publish\n",
+               frame_cb_hit_count);
+        return 0;
+    }
+    printf("PASS: frame delivery requires publish, not just createStream\n");
+    return 1;
+}
+
+/* CodeRabbit (PR #21 review): the prior createStream-but-not-published test
+ * only drove the raw RTMP_MSG_AUDIO path through lrtmp2_msg_decode(); the
+ * sibling lrtmp2_msg_decode_aggregate() path has its own is_publishing check
+ * and needs its own regression so a future regression there isn't masked. */
+static int test_aggregate_requires_publish_not_just_create_stream(void)
+{
+    lrtmp2_server_config_t config;
+    memset(&config, 0, sizeof(config));
+    config.max_connections = 1;
+    config.chunk_size = 4096;
+
+    lrtmp2_server_t *server = lrtmp2_server_create(&config);
+    if (!server) {
+        printf("FAIL: could not create server\n");
+        return 0;
+    }
+
+    lrtmp2_conn_t *conn = lrtmp2_conn_create(server, &config);
+    if (!conn) {
+        printf("FAIL: could not create conn\n");
+        lrtmp2_server_destroy(server);
+        return 0;
+    }
+    frame_cb_hit_count = 0;
+    conn->on_frame_cb = count_frame_cb;
+
+    conn->current_stream = lrtmp2_stream_create(conn, 1);
+    if (!conn->current_stream) {
+        printf("FAIL: could not create stream\n");
+        lrtmp2_conn_destroy(conn);
+        lrtmp2_server_destroy(server);
+        return 0;
+    }
+
+    /* One audio sub-tag: type(1) + data_size(3) + timestamp(4) = 11-byte
+     * header, zero-length body, 4-byte PreviousTagSize trailer. */
+    uint8_t payload[15];
+    memset(payload, 0, sizeof(payload));
+    payload[0] = 0x08; /* audio */
+
+    lrtmp2_chunk_message_t chunk;
+    memset(&chunk, 0, sizeof(chunk));
+    chunk.msg_type_id = RTMP_MSG_AGGREGATE;
+
+    int rc = lrtmp2_msg_decode_aggregate(conn, &chunk, payload, sizeof(payload));
+    lrtmp2_conn_destroy(conn);
+    lrtmp2_server_destroy(server);
+
+    if (rc != LRTMP2_OK) {
+        printf("FAIL: aggregate with created-but-unpublished stream rejected (rc=%d)\n", rc);
+        return 0;
+    }
+    if (frame_cb_hit_count != 0) {
+        printf("FAIL: on_frame_cb fired (%d times) from aggregate sub-tag for a stream "
+               "that called createStream but not publish\n", frame_cb_hit_count);
+        return 0;
+    }
+    printf("PASS: aggregate frame delivery requires publish, not just createStream\n");
+    return 1;
+}
+
 int test_message_main(void)
 {
     int passed = 0;
-    int total = 3;
+    int total = 6;
     printf("Running message dispatch tests...\n");
     if (test_zero_length_message_not_rejected()) passed++;
     if (test_aggregate_subtag_cap()) passed++;
     if (test_connect_object_key_cap()) passed++;
+    if (test_frame_requires_published_stream()) passed++;
+    if (test_frame_requires_publish_not_just_create_stream()) passed++;
+    if (test_aggregate_requires_publish_not_just_create_stream()) passed++;
     printf("Message tests: %d/%d passed\n", passed, total);
     return (passed >= total) ? 0 : 1;
 }
