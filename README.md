@@ -1,11 +1,11 @@
 # librtmp2
 
-A modern, open-source **C library** for Legacy RTMP and Enhanced RTMP v1/v2.  
-`librtmp2` is a reusable protocol foundation — not a media server.
+A modern, open-source **Rust library** for Legacy RTMP and Enhanced RTMP v1/v2.  
+`librtmp2` is a complete 1:1 Rust port of the original C `librtmp2` — a reusable protocol foundation, not a media server.
 
-[![License](https://img.shields.io/github/license/AlexanderWagnerDev/librtmp2)](LICENSE)
-[![Status](https://img.shields.io/badge/status-alpha-orange)]()
-[![Language](https://img.shields.io/badge/language-C-blue)]()
+[![License](https://img.shields.io/github/license/OpenRTMP/librtmp2)](LICENSE)
+![Status](https://img.shields.io/badge/status-alpha-orange)
+![Language](https://img.shields.io/badge/language-Rust-orange)
 
 ---
 
@@ -19,7 +19,8 @@ It is designed to be embedded into custom servers, clients, relay tools, OBS/FFm
 - A complete Legacy RTMP implementation (handshake, chunk streams, message reassembly, commands, control messages)
 - E-RTMP v1 support: ExVideoTagHeader, FourCC codecs (`hvc1`, `av01`, `vp09`), HDR metadata
 - E-RTMP v2 support: capability negotiation (`capsEx`, `videoFourCcInfoMap`), reconnect, multitrack, ModEx
-- A stable C API with FFI compatibility for C++, Rust, Go, Python, PHP, and others
+- An idiomatic Rust API plus an `extern "C"` FFI layer for use from C, Go, Python, PHP, and others
+- RTMPS (RTMP over TLS) via the optional `tls` Cargo feature (OpenSSL), enabled by default
 
 **What it is not:**
 - Not an HTTP server or web UI
@@ -64,30 +65,77 @@ TCP_ACCEPTED
 
 ---
 
-## Public API (Concept)
+## Build
 
-### Core Types
+```bash
+# Debug build
+cargo build
 
-```c
-typedef struct lrtmp2_server  lrtmp2_server_t;
-typedef struct lrtmp2_client  lrtmp2_client_t;
-typedef struct lrtmp2_conn    lrtmp2_conn_t;
-typedef struct lrtmp2_stream  lrtmp2_stream_t;
-typedef struct lrtmp2_frame   lrtmp2_frame_t;
-typedef struct lrtmp2_error   lrtmp2_error_t;
+# Release build
+cargo build --release
+
+# Run tests
+cargo test
+
+# Build without TLS (no OpenSSL dependency)
+cargo build --no-default-features
 ```
 
-### Server / Client
+The crate uses `crate-type = ["cdylib", "staticlib", "lib"]` and produces:
+- `librtmp2.so` / `librtmp2.dll` — cdylib for FFI consumers
+- `librtmp2.a` / `librtmp2.lib` — staticlib for FFI consumers
+- Rust `lib` — for direct Cargo dependency
+
+### TLS / RTMPS
+
+RTMPS (RTMP over TLS) is supported via OpenSSL and is **enabled by default** via the `tls` Cargo feature. To produce a zero-dependency, plaintext-only build:
+
+```bash
+cargo build --no-default-features
+```
+
+Call `lrtmp2_tls_supported()` at runtime to check whether the library was built with TLS.
+
+---
+
+## Using as a Rust Crate
+
+Add to your `Cargo.toml`:
+
+```toml
+[dependencies]
+librtmp2 = { path = "../librtmp2" }
+
+# Without TLS:
+librtmp2 = { path = "../librtmp2", default-features = false }
+```
+
+---
+
+## Using via the `extern "C"` FFI
+
+The crate also builds as a `cdylib`/`staticlib` and exposes a stable `extern "C"` API for use from C, Go, Python, PHP, and others. See `src/lib.rs` for the full FFI surface.
+
+### Server
 
 ```c
 lrtmp2_server_t *lrtmp2_server_create(const lrtmp2_server_config_t *config);
 void             lrtmp2_server_destroy(lrtmp2_server_t *server);
 int              lrtmp2_server_listen(lrtmp2_server_t *server, const char *bind_addr);
 int              lrtmp2_server_poll(lrtmp2_server_t *server, int timeout_ms);
+void             lrtmp2_server_stop(lrtmp2_server_t *server);
+```
 
+### Client
+
+```c
 lrtmp2_client_t *lrtmp2_client_create(const lrtmp2_client_config_t *config);
 void             lrtmp2_client_destroy(lrtmp2_client_t *client);
 int              lrtmp2_client_connect(lrtmp2_client_t *client, const char *url);
+int              lrtmp2_client_publish(lrtmp2_client_t *client, const char *stream_key);
+int              lrtmp2_client_play(lrtmp2_client_t *client, const char *stream_key);
+int              lrtmp2_client_send_frame(lrtmp2_client_t *client, const lrtmp2_frame_t *frame);
+int              lrtmp2_client_poll(lrtmp2_client_t *client, int timeout_ms);
 ```
 
 ### Callbacks
@@ -102,119 +150,39 @@ typedef void (*lrtmp2_on_close_cb)  (lrtmp2_conn_t *conn, void *userdata);
 
 ---
 
-## Error Codes
-
-```c
-typedef enum {
-    LRTMP2_OK = 0,
-    LRTMP2_ERR_IO,
-    LRTMP2_ERR_TIMEOUT,
-    LRTMP2_ERR_PROTOCOL,
-    LRTMP2_ERR_HANDSHAKE,
-    LRTMP2_ERR_CHUNK,
-    LRTMP2_ERR_AMF,
-    LRTMP2_ERR_UNSUPPORTED,
-    LRTMP2_ERR_AUTH,
-    LRTMP2_ERR_INTERNAL
-} lrtmp2_error_code_t;
-```
-
----
-
-## Build
-
-```bash
-# Debug build
-make debug
-
-# Release build
-make release
-
-# Run tests
-make test
-
-# AddressSanitizer
-make asan
-
-# Fuzzing targets
-make fuzz
-
-# Install
-make install
-```
-
-Build artifacts: `librtmp2.so`, `librtmp2.a`, `librtmp2.dll`, `librtmp2.lib`, `librtmp2.pc`
-
-### TLS / RTMPS
-
-`rtmps://` (RTMP over TLS) is supported via OpenSSL and is **built in by
-default**. To produce a zero-dependency, plaintext-only library, disable it:
-
-```bash
-make TLS=0            # Makefile
-meson setup build -Dtls=disabled   # Meson
-```
-
-A single transport abstraction (`src/core/transport.{h,c}`) sits under the raw
-send/recv path, so plaintext RTMP and TLS share one code path through the
-chunk/handshake/session layers.
-
-**Server (TLS termination)** — set `tls_enabled` and point at a PEM cert chain
-and private key in `lrtmp2_server_config`:
-
-```c
-lrtmp2_server_config_t cfg = {0};
-cfg.tls_enabled   = 1;
-cfg.tls_cert_file = "/etc/ssl/fullchain.pem";
-cfg.tls_key_file  = "/etc/ssl/privkey.pem";
-```
-
-When `tls_enabled` is 0 (the default) the server speaks plaintext RTMP exactly
-as before.
-
-**Client** — an `rtmps://` URL automatically negotiates TLS (default port 443,
-SNI + certificate verification against the system trust store). Override the CA
-bundle with `tls_ca_file`, or skip verification for self-signed test certs with
-`tls_insecure = 1`.
-
-Call `lrtmp2_tls_supported()` at runtime to check whether the loaded library was
-built with TLS.
-
----
-
 ## Repository Structure
 
 ```text
 librtmp2/
-├── include/librtmp2/       Public headers
 ├── src/
-│   ├── core/               Memory, logging, errors
-│   ├── handshake/          C0/C1/C2 ↔ S0/S1/S2
-│   ├── chunk/              Chunk reader/writer/state
-│   ├── message/            Message reassembly, control, commands
-│   ├── amf/                AMF0 + AMF3
-│   ├── flv/                Audio/video/script tags
-│   ├── ertmp/              E-RTMP v1/v2 extensions
-│   ├── session/            State machine, publish/play flows
-│   ├── server/             Server listener
-│   └── client/             Outbound client
+│   ├── lib.rs              Rust API + extern "C" FFI layer
+│   ├── alloc.rs            Custom allocator hook
+│   ├── amf.rs              AMF0 + AMF3 encoding/decoding
+│   ├── buffer.rs           Growable byte buffers
+│   ├── bytes.rs            Big-endian byte helpers
+│   ├── chunk.rs            Chunk reader/writer/state (per-csid)
+│   ├── client.rs           Outbound client: connect → publish/play
+│   ├── ertmp.rs            E-RTMP v1/v2 extensions
+│   ├── flv.rs              FLV audio/video/script tag parsing
+│   ├── handshake.rs        C0/C1/C2 ↔ S0/S1/S2
+│   ├── log.rs              Logging
+│   ├── message.rs          Message reassembly, control, commands
+│   ├── net.rs              Network helpers
+│   ├── server.rs           Listening socket, accept loop, per-connection poll
+│   ├── session.rs          Connection state machine, stream bookkeeping
+│   ├── transport.rs        TLS/plaintext transport abstraction
+│   └── types.rs            Shared types
 ├── tests/
-│   ├── unit/
-│   ├── integration/
-│   └── fuzz/
-├── examples/
-│   ├── minimal_server/
-│   └── minimal_client/
-├── docs/
-└── concept/                Project concept documents
+│   ├── interop/
+│   └── server_client_loopback.rs
+├── build.rs
+├── Cargo.toml
+└── docs/
 ```
 
 ---
 
 ## Roadmap
-
-The first public release is `0.1.0` and ships the complete feature set below in
-one go, rather than staging it across separate `0.x` releases.
 
 | Feature | Status |
 |---------|--------|
@@ -224,23 +192,12 @@ one go, rather than staging it across separate `0.x` releases.
 | E-RTMP v1 send | Implemented |
 | E-RTMP v2 capability layer | Implemented |
 | Multitrack / reconnect / ModEx | Implemented |
-
-See [`docs/roadmap.md`](docs/roadmap.md) for full status and open items.
-
----
-
-## Concept Documents
-
-Detailed design documents are located in [`concept/`](concept/):
-
-- [`concept/librtmp2-core.md`](concept/librtmp2-core.md) — Core library architecture, API design, protocol modules, security rules
+| RTMPS (TLS) | Implemented |
+| End-to-end test suites | In progress |
+| Performance benchmarks | Planned |
 
 ---
-
-## Changelog
-
-See [CHANGELOG.md](CHANGELOG.md) for release notes.
 
 ## License
 
-To be determined. See [LICENSE](LICENSE) once added.
+MIT — see [LICENSE](LICENSE)
