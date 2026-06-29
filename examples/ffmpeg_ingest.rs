@@ -86,6 +86,7 @@ fn main() -> ExitCode {
     let audio = AUDIO_FRAMES.load(Ordering::SeqCst);
     let bytes = TOTAL_BYTES.load(Ordering::SeqCst);
     let max_frame = MAX_FRAME.load(Ordering::SeqCst);
+    success |= video >= min_frames && audio >= min_frames;
     println!("[interop] video={video} audio={audio} bytes={bytes} max_frame={max_frame}");
 
     if !success {

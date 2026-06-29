@@ -43,34 +43,46 @@ fn server_client_publish_over_real_sockets() {
     server.listen("127.0.0.1:19661").unwrap();
     server.on_frame_cb = Some(on_frame);
 
-    let client_thread = thread::spawn(|| {
+    let (setup_tx, setup_rx) = std::sync::mpsc::channel();
+    let client_thread = thread::spawn(move || {
         let mut client = Client::new();
-        client.connect("rtmp://127.0.0.1:19661/live/stream1").unwrap();
-        client.publish().unwrap();
+        let result = (|| -> std::result::Result<(), librtmp2::types::ErrorCode> {
+            client.connect("rtmp://127.0.0.1:19661/live/stream1")?;
+            client.publish()?;
 
-        let data = [SENT_FRAME_BYTE; SENT_FRAME_LEN];
-        let frame = Frame {
-            frame_type: FrameType::Video,
-            timestamp: 0,
-            composition_time: 0,
-            size: data.len() as u32,
-            data: data.as_ptr(),
-            audio_codec: AudioCodec::default(),
-            audio_sample_rate: 0,
-            audio_channels: 0,
-            audio_bit_depth: 0,
-            audio_fourcc: FourCc::default(),
-            video_codec: VideoCodec::H264,
-            video_fourcc: FourCc::default(),
-            video_frame_type: 1,
-            is_metadata: 0,
-        };
-        client.send_frame(&frame).unwrap();
+            let data = [SENT_FRAME_BYTE; SENT_FRAME_LEN];
+            let frame = Frame {
+                frame_type: FrameType::Video,
+                timestamp: 0,
+                composition_time: 0,
+                size: data.len() as u32,
+                data: data.as_ptr(),
+                audio_codec: AudioCodec::default(),
+                audio_sample_rate: 0,
+                audio_channels: 0,
+                audio_bit_depth: 0,
+                audio_fourcc: FourCc::default(),
+                video_codec: VideoCodec::H264,
+                video_fourcc: FourCc::default(),
+                video_frame_type: 1,
+                is_metadata: 0,
+            };
+            client.send_frame(&frame)?;
+            Ok(())
+        })();
+        let _ = setup_tx.send(result.is_ok());
+        result.unwrap();
         thread::sleep(Duration::from_millis(200));
     });
 
     let deadline = Instant::now() + Duration::from_secs(5);
-    while FRAMES_RECEIVED.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
+    loop {
+        if let Ok(setup_ok) = setup_rx.try_recv() {
+            assert!(setup_ok, "client setup failed");
+        }
+        if FRAMES_RECEIVED.load(Ordering::SeqCst) > 0 || Instant::now() >= deadline {
+            break;
+        }
         server.poll(20).unwrap();
     }
 

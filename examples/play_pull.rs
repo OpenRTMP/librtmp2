@@ -72,6 +72,7 @@ fn main() -> ExitCode {
     let video = VIDEO_FRAMES.load(Ordering::SeqCst);
     let audio = AUDIO_FRAMES.load(Ordering::SeqCst);
     let bytes = TOTAL_BYTES.load(Ordering::SeqCst);
+    success |= video > 0 && audio > 0;
     println!("[interop-play] video={video} audio={audio} bytes={bytes}");
 
     if success {
