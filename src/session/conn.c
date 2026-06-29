@@ -448,7 +448,10 @@ int lrtmp2_conn_handle_command(lrtmp2_conn_t *conn, const uint8_t *payload, size
          * out-of-order control commands from a peer are tolerated rather than
          * fatal. The (void) marks the ignore as intentional. */
         (void)lrtmp2_conn_transition(conn, LRTMP2_STATE_APP_CONNECTED);
-        lrtmp2_conn_send_connect_response(conn, info.transaction_id);
+        {
+            int rc = lrtmp2_conn_send_connect_response(conn, info.transaction_id);
+            if (rc != LRTMP2_OK) return rc;
+        }
         LRTMP2_LOG_INFO("connect: app=%s", conn->app);
         if (conn->on_connect_cb) {
             conn->on_connect_cb(conn, conn->userdata);
@@ -463,14 +466,16 @@ int lrtmp2_conn_handle_command(lrtmp2_conn_t *conn, const uint8_t *payload, size
         if (conn->next_stream_id >= LRTMP2_MAX_STREAMS_PER_CONN) {
             LRTMP2_LOG_WARN("createStream rejected: per-connection stream cap (%d) reached",
                             LRTMP2_MAX_STREAMS_PER_CONN);
-            lrtmp2_conn_send_onstatus(conn, 0, "error", "NetStream.Failed",
+            int rc = lrtmp2_conn_send_onstatus(conn, 0, "error", "NetStream.Failed",
                                       "Too many streams");
+            if (rc != LRTMP2_OK) return rc;
         } else {
             conn->next_stream_id++;
             uint32_t stream_id = conn->next_stream_id;
             conn->current_stream = lrtmp2_stream_create(conn, stream_id);
             (void)lrtmp2_conn_transition(conn, LRTMP2_STATE_STREAM_CREATED);  /* advisory; see connect handler */
-            lrtmp2_conn_send_create_stream_response(conn, txn, stream_id);
+            int rc = lrtmp2_conn_send_create_stream_response(conn, txn, stream_id);
+            if (rc != LRTMP2_OK) return rc;
             LRTMP2_LOG_INFO("createStream: stream_id=%u", stream_id);
         }
     } else if (strcmp(name, "publish") == 0) {
@@ -487,13 +492,15 @@ int lrtmp2_conn_handle_command(lrtmp2_conn_t *conn, const uint8_t *payload, size
             /* publish without a prior createStream: reject rather than fake a
              * PUBLISHING state with no backing stream object. */
             LRTMP2_LOG_WARN("publish rejected: no stream created");
-            lrtmp2_conn_send_onstatus(conn, 0, "error", "NetStream.Publish.BadConnection",
+            int rc = lrtmp2_conn_send_onstatus(conn, 0, "error", "NetStream.Publish.BadConnection",
                                       "No stream created");
+            if (rc != LRTMP2_OK) return rc;
         } else {
             lrtmp2_publish_begin(conn->current_stream, stream_name);
             (void)lrtmp2_conn_transition(conn, LRTMP2_STATE_PUBLISHING);  /* advisory; see connect handler */
-            lrtmp2_conn_send_onstatus(conn, conn->current_stream->stream_id, "status",
+            int rc = lrtmp2_conn_send_onstatus(conn, conn->current_stream->stream_id, "status",
                                       "NetStream.Publish.Start", "Publishing");
+            if (rc != LRTMP2_OK) return rc;
             LRTMP2_LOG_INFO("publish: stream=%s", stream_name);
             if (conn->on_publish_cb) {
                 conn->on_publish_cb(conn, conn->app, stream_name, conn->userdata);
@@ -510,14 +517,16 @@ int lrtmp2_conn_handle_command(lrtmp2_conn_t *conn, const uint8_t *payload, size
             /* play without a prior createStream: reject rather than fake a
              * PLAYING state with no backing stream object. */
             LRTMP2_LOG_WARN("play rejected: no stream created");
-            lrtmp2_conn_send_onstatus(conn, 0, "error", "NetStream.Play.BadConnection",
+            int rc = lrtmp2_conn_send_onstatus(conn, 0, "error", "NetStream.Play.BadConnection",
                                       "No stream created");
+            if (rc != LRTMP2_OK) return rc;
         } else {
             lrtmp2_play_begin(conn, stream_name);
             conn->current_stream->is_playing = 1;
             (void)lrtmp2_conn_transition(conn, LRTMP2_STATE_PLAYING);  /* advisory; see connect handler */
-            lrtmp2_conn_send_onstatus(conn, conn->current_stream->stream_id, "status",
+            int rc = lrtmp2_conn_send_onstatus(conn, conn->current_stream->stream_id, "status",
                                       "NetStream.Play.Start", "Playing");
+            if (rc != LRTMP2_OK) return rc;
             LRTMP2_LOG_INFO("play: stream=%s", stream_name);
             if (conn->on_play_cb) {
                 conn->on_play_cb(conn, conn->app, stream_name, conn->userdata);
