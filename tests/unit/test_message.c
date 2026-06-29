@@ -67,6 +67,11 @@ static int test_aggregate_subtag_cap(void)
     }
 
     lrtmp2_conn_t *conn = lrtmp2_conn_create(NULL, NULL);
+    if (!conn) {
+        printf("FAIL: could not create conn\n");
+        free(payload);
+        return 0;
+    }
     lrtmp2_chunk_message_t chunk;
     memset(&chunk, 0, sizeof(chunk));
     chunk.msg_type_id = RTMP_MSG_AGGREGATE;
@@ -92,6 +97,10 @@ static void amf_write_u16(lrtmp2_buffer_t *buf, uint16_t v)
 static int test_connect_object_key_cap(void)
 {
     lrtmp2_buffer_t *buf = lrtmp2_buffer_create();
+    if (!buf) {
+        printf("FAIL: could not create buffer\n");
+        return 0;
+    }
     lrtmf2_amf0_write_string(buf, "connect");
     lrtmf2_amf0_write_number(buf, 1.0);
     uint8_t obj = AMF0_OBJECT;
