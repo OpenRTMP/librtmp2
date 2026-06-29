@@ -7,6 +7,7 @@
 #include "message/control.h"
 #include "message/command.h"
 #include "session/conn.h"
+#include "session/stream.h"
 #include "core/log.h"
 #include "ertmp/ertmp.h"
 #include <string.h>
@@ -130,9 +131,10 @@ int lrtmp2_msg_decode_aggregate(lrtmp2_conn_t *conn, const lrtmp2_chunk_message_
         if (!have_base) { base_ts = ts; have_base = 1; }
         uint32_t out_ts = chunk->timestamp + (ts - base_ts);
 
-        if (tag_type == 0x08 && conn->current_stream) {
+        int is_publishing = conn->current_stream && conn->current_stream->is_publishing;
+        if (tag_type == 0x08 && is_publishing) {
             deliver_audio_frame(conn, out_ts, payload + body, data_size);
-        } else if (tag_type == 0x09 && conn->current_stream) {
+        } else if (tag_type == 0x09 && is_publishing) {
             deliver_video_frame(conn, out_ts, payload + body, data_size);
         } else {
             LRTMP2_LOG_DEBUG("Aggregate: skipping sub-tag type %u", tag_type);
@@ -234,15 +236,16 @@ int lrtmp2_msg_decode(lrtmp2_conn_t *conn, const lrtmp2_chunk_message_t *chunk,
         case RTMP_MSG_AUDIO:
             /* frame.data/size keep the full message payload (including the
              * codec/FLV header); parsed fields expose the metadata. Only
-             * deliver once a stream has actually been published/created, so a
-             * peer that skips createStream/publish can't trigger on_frame_cb. */
-            if (conn->current_stream) {
+             * deliver once the stream has actually started publishing (not
+             * merely created via createStream), so a peer that skips publish
+             * can't trigger on_frame_cb. */
+            if (conn->current_stream && conn->current_stream->is_publishing) {
                 deliver_audio_frame(conn, chunk->timestamp, payload, payload_len);
             }
             break;
 
         case RTMP_MSG_VIDEO:
-            if (conn->current_stream) {
+            if (conn->current_stream && conn->current_stream->is_publishing) {
                 deliver_video_frame(conn, chunk->timestamp, payload, payload_len);
             }
             break;
