@@ -234,6 +234,7 @@ static void test_exaudio(void) {
     ASSERT(hdr.is_ex_header == 0, "legacy AAC (long) → is_ex_header=0");
     ASSERT(hdr.audio_codec == LRTMP2_AUDIO_AAC, "legacy AAC (long) → codec=AAC");
     ASSERT(hdr.sample_rate == 3, "legacy AAC (long) → sample_rate=3 (44k)");
+    ASSERT(hdr.sample_size == 1, "legacy AAC (long) → sample_size=1 (16bit)");
     ASSERT(hdr.channels == 1, "legacy AAC (long) → channels=1 (stereo)");
     ASSERT(hdr.aac_packet_type == 1, "legacy AAC (long) → aac_packet_type=1 (raw)");
     ASSERT(hdr.header_size == 2, "legacy AAC (long) → header_size=2");
