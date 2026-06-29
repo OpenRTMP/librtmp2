@@ -133,12 +133,63 @@ cleanup_client:
     return rc;
 }
 
+int test_handshake_server_s2_echo(void)
+{
+    lrtmp2_buffer_t *buf = lrtmp2_buffer_create();
+    lrtmp2_handshake_t hs;
+    uint8_t c0[1] = {0x03};
+    uint8_t c1[1536];
+    int rc = 1;
+
+    for (int i = 0; i < 1536; i++) c1[i] = (uint8_t)(i * 7 + 3);
+
+    lrtmp2_buffer_write(buf, c0, 1);
+    lrtmp2_buffer_write(buf, c1, 1536);
+
+    lrtmp2_handshake_server_init(&hs);
+    if (lrtmp2_handshake_server_read_c0(&hs, buf) != LRTMP2_OK) {
+        printf("FAIL: S2 echo test read C0\n");
+        rc = 0;
+        goto cleanup_echo;
+    }
+    if (lrtmp2_handshake_server_read_c1(&hs, buf) != LRTMP2_OK) {
+        printf("FAIL: S2 echo test read C1\n");
+        rc = 0;
+        goto cleanup_echo;
+    }
+
+    /* hs->out = S1 || S2; S2 must echo C1 bytes 0-3 and 8..1535 verbatim. */
+    if (hs.out.size != (size_t)(2 * 1536)) {
+        printf("FAIL: S2 echo test out size %zu\n", hs.out.size);
+        rc = 0;
+        goto cleanup_echo;
+    }
+    const uint8_t *s2 = hs.out.data + 1536;
+    if (memcmp(s2, c1, 4) != 0) {
+        printf("FAIL: S2 time field does not echo C1\n");
+        rc = 0;
+        goto cleanup_echo;
+    }
+    if (memcmp(s2 + 8, c1 + 8, 1536 - 8) != 0) {
+        printf("FAIL: S2 random block does not echo C1\n");
+        rc = 0;
+        goto cleanup_echo;
+    }
+    printf("PASS: server S2 echoes C1 random block\n");
+
+cleanup_echo:
+    lrtmp2_handshake_cleanup(&hs);
+    lrtmp2_buffer_destroy(buf);
+    return rc;
+}
+
 int test_handshake_main(void)
 {
     int passed = 0;
     printf("Running handshake tests...\n");
     if (test_handshake_server()) passed++;
     if (test_handshake_client()) passed++;
-    printf("Handshake tests: %d/2 passed\n", passed);
-    return (passed >= 2) ? 0 : 1;
+    if (test_handshake_server_s2_echo()) passed++;
+    printf("Handshake tests: %d/3 passed\n", passed);
+    return (passed >= 3) ? 0 : 1;
 }

@@ -303,6 +303,12 @@ int lrtmp2_client_connect(lrtmp2_client_t *client, const char *url)
         close_socket(client->client_fd);
         client->client_fd = -1;
     }
+    /* Drop any bytes left from a prior handshake/session so a reconnect does
+     * not feed stale S0/S1/S2 (or post-handshake chunks) into the new one. */
+    if (client->recv_buffer) lrtmp2_buffer_reset(client->recv_buffer);
+    if (client->send_buffer) lrtmp2_buffer_reset(client->send_buffer);
+    lrtmp2_handshake_cleanup(&client->handshake);
+    lrtmp2_handshake_client_init(&client->handshake);
     client->state = LRTMP2_CLIENT_DISCONNECTED;
 
     /* Parse URL: rtmp://host:port/app/stream_key (or rtmps:// for TLS). host may

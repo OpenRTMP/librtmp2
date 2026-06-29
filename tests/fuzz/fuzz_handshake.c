@@ -22,6 +22,7 @@ int fuzz_handshake(const uint8_t *data, size_t size) {
     lrtmp2_handshake_server_read_c1(&hs, buf);
     lrtmp2_handshake_server_read_c2(&hs, buf);
 
+    lrtmp2_handshake_cleanup(&hs);
     lrtmp2_buffer_destroy(buf);
     return 0;
 }
