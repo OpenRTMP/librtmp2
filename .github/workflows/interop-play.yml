@@ -1,9 +1,9 @@
-# Disabled after the C->Rust port: this runs tests/interop/play_interop.sh,
-# which drove the deleted C binaries and no longer exists. Re-enable once
-# there is a Rust-native interop harness in its place.
 name: Interop (play / pull)
 
 on:
+  push:
+    branches: [main]
+  pull_request:
   workflow_dispatch:
 
 jobs:
@@ -11,6 +11,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v7
+
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
 
     - name: Install ffmpeg
       run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
@@ -22,7 +25,5 @@ jobs:
           | tar xz -C "$RUNNER_TEMP" mediamtx
         echo "MEDIAMTX=$RUNNER_TEMP/mediamtx" >> "$GITHUB_ENV"
 
-    - name: Interop — play (pull) from real server (ASan/UBSan)
+    - name: Interop — play (pull) from real server
       run: ./tests/interop/play_interop.sh
-      env:
-        SAN: "1"

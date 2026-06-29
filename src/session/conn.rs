@@ -251,7 +251,7 @@ impl Conn {
                         let mut frame = Frame {
                             frame_type: FrameType::Audio,
                             timestamp: msg.timestamp,
-                            ..unsafe { std::mem::zeroed() }
+                            ..Default::default()
                         };
                         frame.data = payload.as_ptr();
                         frame.size = payload.len() as u32;
@@ -266,7 +266,7 @@ impl Conn {
                         let mut frame = Frame {
                             frame_type: FrameType::Video,
                             timestamp: msg.timestamp,
-                            ..unsafe { std::mem::zeroed() }
+                            ..Default::default()
                         };
                         frame.data = payload.as_ptr();
                         frame.size = payload.len() as u32;
@@ -371,11 +371,19 @@ impl Conn {
         let cs = self.chunk_size.to_be_bytes();
         self.send_control(0x01, &cs)?;
 
-        // AMF0 _result
+        // AMF0 _result: name, txn, properties object, information object.
         let mut amf_buf = Buffer::with_capacity(512);
         crate::amf::amf0::write_string(&mut amf_buf, "_result")?;
         crate::amf::amf0::write_number(&mut amf_buf, transaction_id)?;
         crate::amf::amf0::write_null(&mut amf_buf)?;
+        crate::amf::amf0::write_object_begin(&mut amf_buf)?;
+        crate::amf::amf0::write_object_key(&mut amf_buf, "level")?;
+        crate::amf::amf0::write_string(&mut amf_buf, "status")?;
+        crate::amf::amf0::write_object_key(&mut amf_buf, "code")?;
+        crate::amf::amf0::write_string(&mut amf_buf, "NetConnection.Connect.Success")?;
+        crate::amf::amf0::write_object_key(&mut amf_buf, "description")?;
+        crate::amf::amf0::write_string(&mut amf_buf, "Connection succeeded.")?;
+        crate::amf::amf0::write_object_end(&mut amf_buf)?;
 
         self.send_command(0, amf_buf.as_slice())
     }
@@ -452,5 +460,13 @@ impl Conn {
 impl Default for Conn {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl Drop for Conn {
+    fn drop(&mut self) {
+        if self.client_fd >= 0 {
+            unsafe { libc::close(self.client_fd); }
+        }
     }
 }

@@ -2,8 +2,10 @@
 //!
 //! Mirrors `src/server/server.h` and `src/server/server.c`.
 
-use std::sync::Mutex;
+use std::net::TcpListener;
+use std::os::unix::io::{AsRawFd, IntoRawFd};
 
+use crate::net;
 use crate::session::conn::Conn;
 use crate::transport::{Transport, TlsCtx};
 use crate::types::*;
@@ -15,6 +17,9 @@ pub struct Server {
     pub server_fd: i32,
     pub connections: Vec<Conn>,
     pub tls_ctx: Option<TlsCtx>,
+    /// Fired for every audio/video frame on every connection.
+    pub on_frame_cb: Option<fn(&Frame)>,
+    listener: Option<TcpListener>,
 }
 
 impl Server {
@@ -40,34 +45,107 @@ impl Server {
             server_fd: -1,
             connections: Vec::new(),
             tls_ctx,
+            on_frame_cb: None,
+            listener: None,
         })
     }
 
-    /// Start listening on the given address.
-    pub fn listen(&mut self, _bind_addr: &str) -> Result<()> {
-        // In a full implementation, this would bind a TCP socket
-        // For now, this is a stub that marks the server as running
+    /// Start listening on the given address ("host:port", default port 1935).
+    pub fn listen(&mut self, bind_addr: &str) -> Result<()> {
+        let mut host = String::new();
+        let mut port = String::new();
+        net::split_host_port(bind_addr, &mut host, &mut port, "1935")?;
+        let addr = if host.is_empty() {
+            format!("0.0.0.0:{port}")
+        } else {
+            format!("{host}:{port}")
+        };
+
+        let listener = TcpListener::bind(&addr).map_err(|_| ErrorCode::Io)?;
+        listener.set_nonblocking(true).map_err(|_| ErrorCode::Io)?;
+
+        self.server_fd = listener.as_raw_fd();
+        self.listener = Some(listener);
         self.running = true;
         Ok(())
     }
 
     /// Poll for events (non-blocking).
-    pub fn poll(&mut self, _timeout_ms: i32) -> Result<()> {
+    pub fn poll(&mut self, timeout_ms: i32) -> Result<()> {
         if !self.running {
             return Err(ErrorCode::Internal);
         }
-        // Process connections
-        self.process_connections()
+        self.accept_new_connections();
+        self.process_connections()?;
+        if timeout_ms > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(timeout_ms as u64));
+        }
+        Ok(())
     }
 
     /// Stop the server.
     pub fn stop(&mut self) {
         self.running = false;
+        self.listener = None;
     }
 
-    /// Process all active connections.
+    /// Accept any pending inbound connections (non-blocking).
+    fn accept_new_connections(&mut self) {
+        let Some(listener) = self.listener.as_ref() else {
+            return;
+        };
+        loop {
+            match listener.accept() {
+                Ok((stream, _addr)) => {
+                    let _ = stream.set_nonblocking(true);
+                    let fd = stream.into_raw_fd();
+                    let mut conn = Conn::new();
+                    conn.client_fd = fd;
+                    conn.transport = Some(Transport::new_plain(fd));
+                    conn.on_frame_cb = self.on_frame_cb;
+                    self.connections.push(conn);
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(_) => break,
+            }
+        }
+    }
+
+    /// Process all active connections: drain readable bytes, drive the
+    /// protocol state machine, flush pending writes, and reap closed peers.
     pub fn process_connections(&mut self) -> Result<()> {
-        // In a full implementation, this would recv/process/flush each connection
+        let mut buf = [0u8; 65536];
+        let mut closed = Vec::new();
+
+        for (i, conn) in self.connections.iter_mut().enumerate() {
+            loop {
+                let Some(transport) = conn.transport.as_ref() else {
+                    closed.push(i);
+                    break;
+                };
+                let mut again = 0i32;
+                let n = transport.recv(&mut buf, &mut again);
+                if n > 0 {
+                    if conn.recv(&buf[..n as usize]).is_err() {
+                        closed.push(i);
+                        break;
+                    }
+                } else if n == 0 {
+                    closed.push(i);
+                    break;
+                } else if again != 0 {
+                    break;
+                } else {
+                    closed.push(i);
+                    break;
+                }
+            }
+            let _ = conn.flush();
+        }
+
+        for i in closed.into_iter().rev() {
+            self.connections.remove(i);
+        }
         Ok(())
     }
 }

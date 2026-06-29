@@ -1,13 +1,12 @@
-# Disabled after the C->Rust port: the verify/package jobs below build via
-# `make`/meson and check ABI against the deleted C .so, none of which exists
-# anymore. Re-enable (with a `cargo build --release` + `cargo package`
-# based rewrite) before cutting the next tagged release.
 name: Release
 
 # Builds and packages tagged releases. Push a tag like `v0.1.0` (or run
 # manually) to produce source + prebuilt library tarballs and a GitHub Release.
 
 on:
+  push:
+    tags:
+      - 'v*'
   workflow_dispatch:
     inputs:
       tag:
@@ -27,21 +26,21 @@ jobs:
           fetch-depth: 0
 
       - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y meson ninja-build abigail-tools libabigail-dev abi-compliance-checker
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
 
-      - name: Build (release)
-        run: make release
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build (release, all features)
+        run: cargo build --release --all-features --verbose
 
       - name: Run unit tests
-        run: make test
+        run: cargo test --all-features --verbose
 
-      - name: Run unit tests (ASan)
-        run: make clean && make DEBUG=1 ASAN=1 test
-
-      - name: ABI compliance check
-        run: ./scripts/abi-baseline.sh compare HEAD
+      - name: Run unit tests (no default features)
+        run: cargo test --no-default-features --verbose
 
   package:
     name: build & package
@@ -51,7 +50,12 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y meson ninja-build
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
 
       - name: Resolve version
         id: ver
@@ -61,21 +65,25 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "tag=$REF" >> "$GITHUB_OUTPUT"
 
-      - name: Check version matches version.h
+      - name: Check tag matches Cargo.toml version
         run: |
-          HDR_VERSION=$(grep -oP 'LRTMP2_VERSION_STRING\s+"\K[0-9]+\.[0-9]+\.[0-9]+' include/librtmp2/version.h)
-          echo "tag version: ${{ steps.ver.outputs.version }}, header version: $HDR_VERSION"
-          if [ "${{ steps.ver.outputs.version }}" != "$HDR_VERSION" ]; then
-            echo "::error::Tag version (${{ steps.ver.outputs.version }}) does not match LRTMP2_VERSION_STRING ($HDR_VERSION) in include/librtmp2/version.h"
+          CARGO_VERSION=$(grep -m1 '^version' Cargo.toml | grep -oP '"\K[0-9]+\.[0-9]+\.[0-9]+')
+          echo "tag version: ${{ steps.ver.outputs.version }}, Cargo.toml version: $CARGO_VERSION"
+          if [ "${{ steps.ver.outputs.version }}" != "$CARGO_VERSION" ]; then
+            echo "::error::Tag version (${{ steps.ver.outputs.version }}) does not match version in Cargo.toml ($CARGO_VERSION)"
             exit 1
           fi
 
       - name: Build release libraries
-        run: make release
+        run: cargo build --release --all-features --verbose
 
-      - name: Stage install tree
+      - name: Stage dist tree
         run: |
-          make install PREFIX="$PWD/dist/librtmp2-${{ steps.ver.outputs.version }}"
+          DIST_DIR="dist/librtmp2-${{ steps.ver.outputs.version }}"
+          mkdir -p "$DIST_DIR/lib"
+          cp target/release/liblibrtmp2.so "$DIST_DIR/lib/" 2>/dev/null || true
+          cp target/release/liblibrtmp2.a "$DIST_DIR/lib/" 2>/dev/null || true
+          cp README.md LICENSE Cargo.toml "$DIST_DIR/"
 
       - name: Create binary tarball
         run: |
