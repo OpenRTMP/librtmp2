@@ -43,7 +43,17 @@ printf 'paths:\n  all_others:\n' > "$MTX_CFG"
 MTX_RTMPADDRESS=":$PORT" MTX_HLS=no MTX_WEBRTC=no MTX_RTSP=no MTX_SRT=no \
     "$MEDIAMTX" "$MTX_CFG" >/tmp/mediamtx.log 2>&1 &
 MTX=$!
-sleep 2
+
+# Wait for mediamtx's RTMP port to actually accept connections instead of a
+# fixed sleep, which is either too short (flaky) or too long (slow) depending
+# on machine load.
+for _ in $(seq 1 50); do
+    if (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null; then
+        exec 3>&-
+        break
+    fi
+    sleep 0.2
+done
 
 echo "== publishing looping test stream with ffmpeg =="
 timeout 40 ffmpeg -hide_banner -loglevel error -re -stream_loop -1 \

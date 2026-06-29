@@ -54,6 +54,10 @@ trap - EXIT
 echo "== ingest server log =="
 cat /tmp/interop_server.log
 
+if [ "$FF_RC" -ne 0 ]; then
+    echo "INTEROP FAILED (ffmpeg publish exit=$FF_RC)"
+    exit 1
+fi
 if [ "$SRV_RC" -ne 0 ]; then
     echo "INTEROP FAILED (ingest server exit=$SRV_RC)"
     exit 1
