@@ -476,30 +476,42 @@ int lrtmp2_conn_handle_command(lrtmp2_conn_t *conn, const uint8_t *payload, size
         memset(stream_name, 0, sizeof(stream_name));
         memset(publish_type, 0, sizeof(publish_type));
         lrtmp2_cmd_read_publish(&buf, stream_name, sizeof(stream_name), publish_type, sizeof(publish_type));
-        if (conn->current_stream) {
+        if (!conn->current_stream) {
+            /* publish without a prior createStream: reject rather than fake a
+             * PUBLISHING state with no backing stream object. */
+            LRTMP2_LOG_WARN("publish rejected: no stream created");
+            lrtmp2_conn_send_onstatus(conn, 0, "error", "NetStream.Publish.BadConnection",
+                                      "No stream created");
+        } else {
             lrtmp2_publish_begin(conn->current_stream, stream_name);
-        }
-        (void)lrtmp2_conn_transition(conn, LRTMP2_STATE_PUBLISHING);  /* advisory; see connect handler */
-        uint32_t stream_id = conn->current_stream ? conn->current_stream->stream_id : 0;
-        lrtmp2_conn_send_onstatus(conn, stream_id, "status", "NetStream.Publish.Start", "Publishing");
-        LRTMP2_LOG_INFO("publish: stream=%s", stream_name);
-        if (conn->on_publish_cb) {
-            conn->on_publish_cb(conn, conn->app, stream_name, conn->userdata);
+            (void)lrtmp2_conn_transition(conn, LRTMP2_STATE_PUBLISHING);  /* advisory; see connect handler */
+            lrtmp2_conn_send_onstatus(conn, conn->current_stream->stream_id, "status",
+                                      "NetStream.Publish.Start", "Publishing");
+            LRTMP2_LOG_INFO("publish: stream=%s", stream_name);
+            if (conn->on_publish_cb) {
+                conn->on_publish_cb(conn, conn->app, stream_name, conn->userdata);
+            }
         }
     } else if (strcmp(name, "play") == 0) {
         char stream_name[256];
         memset(stream_name, 0, sizeof(stream_name));
         lrtmp2_cmd_read_play(&buf, stream_name, sizeof(stream_name));
-        if (conn->current_stream) {
+        if (!conn->current_stream) {
+            /* play without a prior createStream: reject rather than fake a
+             * PLAYING state with no backing stream object. */
+            LRTMP2_LOG_WARN("play rejected: no stream created");
+            lrtmp2_conn_send_onstatus(conn, 0, "error", "NetStream.Play.BadConnection",
+                                      "No stream created");
+        } else {
             lrtmp2_play_begin(conn, stream_name);
             conn->current_stream->is_playing = 1;
-        }
-        (void)lrtmp2_conn_transition(conn, LRTMP2_STATE_PLAYING);  /* advisory; see connect handler */
-        uint32_t stream_id = conn->current_stream ? conn->current_stream->stream_id : 0;
-        lrtmp2_conn_send_onstatus(conn, stream_id, "status", "NetStream.Play.Start", "Playing");
-        LRTMP2_LOG_INFO("play: stream=%s", stream_name);
-        if (conn->on_play_cb) {
-            conn->on_play_cb(conn, conn->app, stream_name, conn->userdata);
+            (void)lrtmp2_conn_transition(conn, LRTMP2_STATE_PLAYING);  /* advisory; see connect handler */
+            lrtmp2_conn_send_onstatus(conn, conn->current_stream->stream_id, "status",
+                                      "NetStream.Play.Start", "Playing");
+            LRTMP2_LOG_INFO("play: stream=%s", stream_name);
+            if (conn->on_play_cb) {
+                conn->on_play_cb(conn, conn->app, stream_name, conn->userdata);
+            }
         }
     } else if (strcmp(name, "FCPublish") == 0 || strcmp(name, "FCUnpublish") == 0 ||
                strcmp(name, "releaseStream") == 0 || strcmp(name, "deleteStream") == 0) {

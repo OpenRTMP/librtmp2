@@ -130,9 +130,9 @@ int lrtmp2_msg_decode_aggregate(lrtmp2_conn_t *conn, const lrtmp2_chunk_message_
         if (!have_base) { base_ts = ts; have_base = 1; }
         uint32_t out_ts = chunk->timestamp + (ts - base_ts);
 
-        if (tag_type == 0x08) {
+        if (tag_type == 0x08 && conn->current_stream) {
             deliver_audio_frame(conn, out_ts, payload + body, data_size);
-        } else if (tag_type == 0x09) {
+        } else if (tag_type == 0x09 && conn->current_stream) {
             deliver_video_frame(conn, out_ts, payload + body, data_size);
         } else {
             LRTMP2_LOG_DEBUG("Aggregate: skipping sub-tag type %u", tag_type);
@@ -233,12 +233,18 @@ int lrtmp2_msg_decode(lrtmp2_conn_t *conn, const lrtmp2_chunk_message_t *chunk,
 
         case RTMP_MSG_AUDIO:
             /* frame.data/size keep the full message payload (including the
-             * codec/FLV header); parsed fields expose the metadata. */
-            deliver_audio_frame(conn, chunk->timestamp, payload, payload_len);
+             * codec/FLV header); parsed fields expose the metadata. Only
+             * deliver once a stream has actually been published/created, so a
+             * peer that skips createStream/publish can't trigger on_frame_cb. */
+            if (conn->current_stream) {
+                deliver_audio_frame(conn, chunk->timestamp, payload, payload_len);
+            }
             break;
 
         case RTMP_MSG_VIDEO:
-            deliver_video_frame(conn, chunk->timestamp, payload, payload_len);
+            if (conn->current_stream) {
+                deliver_video_frame(conn, chunk->timestamp, payload, payload_len);
+            }
             break;
 
         case RTMP_MSG_AMF0_COMMAND:
