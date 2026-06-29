@@ -11,6 +11,7 @@ use crate::chunk::state::ChunkRegistry;
 use crate::chunk::writer::chunk_write;
 use crate::handshake::{self, Handshake};
 use crate::message::command;
+use crate::message::control;
 use crate::message::message as msg_dispatch;
 use crate::net;
 use crate::transport::Transport;
@@ -199,7 +200,16 @@ impl Client {
             let mut payload_len = 0;
             match chunk_read(&mut self.recv_buffer, &mut self.chunk_reg, None, &mut msg, &mut payload_ptr, &mut payload_len) {
                 Ok(1) if msg.is_complete => {
-                    if msg.msg_type_id == msg_dispatch::RTMP_MSG_AUDIO || msg.msg_type_id == msg_dispatch::RTMP_MSG_VIDEO {
+                    if msg.msg_type_id == msg_dispatch::RTMP_MSG_SET_CHUNK_SIZE {
+                        let payload = if payload_ptr.is_null() || payload_len == 0 {
+                            &[][..]
+                        } else {
+                            unsafe { std::slice::from_raw_parts(payload_ptr, payload_len) }
+                        };
+                        if let Ok(cs) = control::read_set_chunk_size(payload) {
+                            self.chunk_reg.set_all_chunk_size(cs);
+                        }
+                    } else if msg.msg_type_id == msg_dispatch::RTMP_MSG_AUDIO || msg.msg_type_id == msg_dispatch::RTMP_MSG_VIDEO {
                         if let Some(ref cb) = self.on_frame_cb {
                             let payload = if payload_ptr.is_null() || payload_len == 0 {
                                 &[][..]
@@ -303,6 +313,12 @@ impl Client {
                     } else {
                         unsafe { std::slice::from_raw_parts(payload_ptr, payload_len) }.to_vec()
                     };
+                    if msg.msg_type_id == msg_dispatch::RTMP_MSG_SET_CHUNK_SIZE {
+                        if let Ok(cs) = control::read_set_chunk_size(&payload) {
+                            self.chunk_reg.set_all_chunk_size(cs);
+                        }
+                        continue;
+                    }
                     return Ok((msg, payload));
                 }
                 Ok(_) => {}
