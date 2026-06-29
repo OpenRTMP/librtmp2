@@ -1,10 +1,10 @@
+# Disabled after the C->Rust port: this runs tests/interop/play_interop.sh,
+# which drove the deleted C binaries and no longer exists. Re-enable once
+# there is a Rust-native interop harness in its place.
 name: Interop (play / pull)
 
 on:
-  push:
-    branches: [ main, develop ]
-  pull_request:
-    branches: [ main, develop ]
+  workflow_dispatch:
 
 jobs:
   interop-play:

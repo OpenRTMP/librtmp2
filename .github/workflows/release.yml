@@ -1,12 +1,13 @@
+# Disabled after the C->Rust port: the verify/package jobs below build via
+# `make`/meson and check ABI against the deleted C .so, none of which exists
+# anymore. Re-enable (with a `cargo build --release` + `cargo package`
+# based rewrite) before cutting the next tagged release.
 name: Release
 
 # Builds and packages tagged releases. Push a tag like `v0.1.0` (or run
 # manually) to produce source + prebuilt library tarballs and a GitHub Release.
 
 on:
-  push:
-    tags:
-      - 'v*'
   workflow_dispatch:
     inputs:
       tag:
