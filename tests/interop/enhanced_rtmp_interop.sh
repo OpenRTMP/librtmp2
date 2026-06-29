@@ -35,7 +35,9 @@ run_one() {
     local label="$1" enc="$2" extra="$3" port="$4"
     local addr="127.0.0.1:${port}"
     echo "== [$label] ingest server on $addr =="
-    "$BIN" "$addr" 40 1 0 >"/tmp/eR_${label}.log" 2>&1 &
+    local log
+    log="$(mktemp "/tmp/eR_${label}.XXXXXX.log")"
+    "$BIN" "$addr" 40 1 0 >"$log" 2>&1 &
     local srv=$!
     sleep 1
     echo "== [$label] publishing with ffmpeg ($enc) =="
@@ -63,7 +65,7 @@ run_one() {
     fi
 
     wait "$srv"; local rc=$?
-    echo "== [$label] ingest log =="; cat "/tmp/eR_${label}.log"
+    echo "== [$label] ingest log =="; cat "$log"
     if [ "$rc" -ne 0 ]; then
         echo "[$label] ENHANCED-RTMP INTEROP FAILED (ingest exit=$rc)"
         return 1

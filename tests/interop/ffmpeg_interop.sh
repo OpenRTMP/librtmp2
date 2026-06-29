@@ -23,9 +23,10 @@ cargo build --example "$BIN_NAME" --all-features
 BIN="$(find target -type f -name "$BIN_NAME" -path '*/examples/*' | head -n1)"
 
 echo "== starting ingest server on $ADDR =="
+LOG="$(mktemp /tmp/interop_server.XXXXXX.log)"
 # Require several frames and at least one >=8 KiB frame, so a video keyframe
 # that spans multiple chunks exercises multi-chunk reassembly.
-"$BIN" "$ADDR" 25 5 8192 >/tmp/interop_server.log 2>&1 &
+"$BIN" "$ADDR" 25 5 8192 >"$LOG" 2>&1 &
 SRV=$!
 
 cleanup() { kill "$SRV" 2>/dev/null || true; wait "$SRV" 2>/dev/null || true; }
@@ -61,7 +62,7 @@ SRV_RC=$?
 trap - EXIT
 
 echo "== ingest server log =="
-cat /tmp/interop_server.log
+cat "$LOG"
 
 if [ "$SRV_RC" -ne 0 ]; then
     echo "INTEROP FAILED (ingest server exit=$SRV_RC)"
