@@ -1,9 +1,9 @@
-# Disabled after the C->Rust port: these steps run shell scripts under
-# tests/interop/ that drove the deleted C binaries and no longer exist.
-# Re-enable once there is a Rust-native interop harness in their place.
 name: Interop (ffmpeg publish)
 
 on:
+  push:
+    branches: [main]
+  pull_request:
   workflow_dispatch:
 
 jobs:
@@ -12,15 +12,14 @@ jobs:
     steps:
     - uses: actions/checkout@v7
 
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+
     - name: Install ffmpeg
       run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
 
-    - name: Interop — publish from real ffmpeg (ASan/UBSan)
+    - name: Interop — publish from real ffmpeg
       run: ./tests/interop/ffmpeg_interop.sh
-      env:
-        SAN: "1"
 
-    - name: Interop — Enhanced-RTMP (HEVC + AV1 FourCC) ingest (ASan/UBSan)
+    - name: Interop — Enhanced-RTMP (HEVC + AV1 FourCC) ingest
       run: ./tests/interop/enhanced_rtmp_interop.sh
-      env:
-        SAN: "1"

@@ -201,6 +201,27 @@ pub struct Frame {
     pub is_metadata: u8,
 }
 
+impl Default for Frame {
+    fn default() -> Self {
+        Self {
+            frame_type: FrameType::Audio,
+            timestamp: 0,
+            composition_time: 0,
+            size: 0,
+            data: std::ptr::null(),
+            audio_codec: AudioCodec::default(),
+            audio_sample_rate: 0,
+            audio_channels: 0,
+            audio_bit_depth: 0,
+            audio_fourcc: FourCc::default(),
+            video_codec: VideoCodec::default(),
+            video_fourcc: FourCc::default(),
+            video_frame_type: 0,
+            is_metadata: 0,
+        }
+    }
+}
+
 /* ── Error info ── */
 
 /// Error information struct.
