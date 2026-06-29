@@ -28,10 +28,18 @@ int lrtmp2_ertmp_exaudio_parse(const uint8_t *data, size_t len,
 
     uint8_t b0 = data[0];
     /* Per E-RTMP v1, IsExHeader=1 indicates enhanced layout with FourCC.
-     * However, legacy AAC (SoundFormat=10) also has bit 7 set.
-     * We distinguish: if IsExHeader would be set AND we have >=5 bytes,
-     * it's enhanced. Otherwise it's legacy. */
-    hdr->is_ex_header = ((b0 & 0x80) && len >= 5) ? 1 : 0;
+     * However, legacy SoundFormat values 8-15 (incl. AAC=10) also have bit 7
+     * set, since legacy SoundFormat occupies the full top nibble. A length
+     * check alone can't disambiguate: ordinary AAC frames are always >=5
+     * bytes. Instead, only treat it as enhanced if bytes 1-4 spell a FourCC
+     * this library actually recognizes as an audio codec; legacy
+     * AACPacketType/payload bytes essentially never collide with one.
+     */
+    lrtmp2_audio_codec_t fourcc_codec = LRTMP2_AUDIO_AAC;
+    hdr->is_ex_header = ((b0 & 0x80) && len >= 5 &&
+                          lrtmp2_fourcc_to_audio_codec((const char *)&data[1],
+                                                        &fourcc_codec) == LRTMP2_OK)
+                            ? 1 : 0;
 
     if (!hdr->is_ex_header) {
         /* Legacy layout: SoundFormat | SoundRate | SoundSize | SoundType */
@@ -51,16 +59,10 @@ int lrtmp2_ertmp_exaudio_parse(const uint8_t *data, size_t len,
     /* Enhanced layout: IsExHeader=1, AudioFrameType, AudioPacketType, FourCC */
     hdr->packet_type = b0 & 0x0F;
 
-    if (len < 5) return LRTMP2_ERR_IO;
     memcpy(hdr->fourcc, &data[1], 4);
     hdr->fourcc[4] = '\0';
     hdr->header_size = 5;
-
-    /* Resolve codec from FourCC — fallback to AAC if unknown */
-    lrtmp2_audio_codec_t codec = LRTMP2_AUDIO_AAC;
-    int rc = lrtmp2_fourcc_to_audio_codec(hdr->fourcc, &codec);
-    (void)rc;
-    hdr->audio_codec = codec;
+    hdr->audio_codec = fourcc_codec;
 
     return LRTMP2_OK;
 }

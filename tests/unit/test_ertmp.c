@@ -218,6 +218,26 @@ static void test_exaudio(void) {
     uint8_t ambig[] = { 0x8F }; /* bit7=1, but only 1 byte */
     rc = lrtmp2_ertmp_exaudio_parse(ambig, sizeof(ambig), &hdr);
     ASSERT(rc == LRTMP2_OK, "ambiguous short → fallback legacy");
+
+    /* Regression: ordinary legacy AAC raw frame, len >= 5. SoundFormat=10
+     * sets bit 7 (0xA0-0xAF) and real AAC payloads are virtually always
+     * >=5 bytes, so a naive "bit7 + len>=5" check would misclassify this
+     * as an enhanced FourCC header. Bytes[1..4] don't spell a known
+     * audio FourCC, so it must still resolve to legacy AAC. */
+    uint8_t legacy_aac_long[] = {
+        0xAF,                   /* SoundFormat=10(AAC), 44k, 16bit, stereo */
+        0x01,                   /* AACPacketType=1 (raw) */
+        0x12, 0x34, 0x56, 0x78  /* raw AAC payload bytes */
+    };
+    rc = lrtmp2_ertmp_exaudio_parse(legacy_aac_long, sizeof(legacy_aac_long), &hdr);
+    ASSERT(rc == LRTMP2_OK, "legacy AAC (long) parse");
+    ASSERT(hdr.is_ex_header == 0, "legacy AAC (long) → is_ex_header=0");
+    ASSERT(hdr.audio_codec == LRTMP2_AUDIO_AAC, "legacy AAC (long) → codec=AAC");
+    ASSERT(hdr.sample_rate == 3, "legacy AAC (long) → sample_rate=3 (44k)");
+    ASSERT(hdr.sample_size == 1, "legacy AAC (long) → sample_size=1 (16bit)");
+    ASSERT(hdr.channels == 1, "legacy AAC (long) → channels=1 (stereo)");
+    ASSERT(hdr.aac_packet_type == 1, "legacy AAC (long) → aac_packet_type=1 (raw)");
+    ASSERT(hdr.header_size == 2, "legacy AAC (long) → header_size=2");
 }
 
 /* ── HDR colorInfo tests ──────────────────────────────────────────── */
