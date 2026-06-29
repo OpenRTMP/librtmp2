@@ -478,7 +478,11 @@ int lrtmp2_conn_handle_command(lrtmp2_conn_t *conn, const uint8_t *payload, size
         char publish_type[64];
         memset(stream_name, 0, sizeof(stream_name));
         memset(publish_type, 0, sizeof(publish_type));
-        lrtmp2_cmd_read_publish(&buf, stream_name, sizeof(stream_name), publish_type, sizeof(publish_type));
+        if (lrtmp2_cmd_read_publish(&buf, stream_name, sizeof(stream_name),
+                                     publish_type, sizeof(publish_type)) != LRTMP2_OK) {
+            LRTMP2_LOG_WARN("publish: malformed command, dropping");
+            return LRTMP2_ERR_AMF;
+        }
         if (!conn->current_stream) {
             /* publish without a prior createStream: reject rather than fake a
              * PUBLISHING state with no backing stream object. */
@@ -498,7 +502,10 @@ int lrtmp2_conn_handle_command(lrtmp2_conn_t *conn, const uint8_t *payload, size
     } else if (strcmp(name, "play") == 0) {
         char stream_name[256];
         memset(stream_name, 0, sizeof(stream_name));
-        lrtmp2_cmd_read_play(&buf, stream_name, sizeof(stream_name));
+        if (lrtmp2_cmd_read_play(&buf, stream_name, sizeof(stream_name)) != LRTMP2_OK) {
+            LRTMP2_LOG_WARN("play: malformed command, dropping");
+            return LRTMP2_ERR_AMF;
+        }
         if (!conn->current_stream) {
             /* play without a prior createStream: reject rather than fake a
              * PLAYING state with no backing stream object. */
