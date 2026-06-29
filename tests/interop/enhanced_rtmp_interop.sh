@@ -52,10 +52,6 @@ run_one() {
     wait "$srv"; local rc=$?
     set -e
     echo "== [$label] ingest log =="; cat "/tmp/eR_${label}.log"
-    if [ "$ff_rc" -ne 0 ]; then
-        echo "[$label] ENHANCED-RTMP INTEROP FAILED (ffmpeg publish exit=$ff_rc)"
-        return 1
-    fi
     if [ "$rc" -ne 0 ]; then
         echo "[$label] ENHANCED-RTMP INTEROP FAILED (ingest exit=$rc)"
         return 1

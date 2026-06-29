@@ -81,12 +81,13 @@ jobs:
         run: |
           DIST_DIR="dist/librtmp2-${{ steps.ver.outputs.version }}"
           mkdir -p "$DIST_DIR/lib"
-          cp target/release/liblibrtmp2.so "$DIST_DIR/lib/" 2>/dev/null || true
-          cp target/release/liblibrtmp2.a "$DIST_DIR/lib/" 2>/dev/null || true
-          if [ -z "$(ls -A "$DIST_DIR/lib")" ]; then
-            echo "::error::No built library artifacts found in target/release/"
-            exit 1
-          fi
+          for artifact in liblibrtmp2.so liblibrtmp2.a; do
+            test -f "target/release/$artifact" || {
+              echo "::error::Missing target/release/$artifact"
+              exit 1
+            }
+            cp "target/release/$artifact" "$DIST_DIR/lib/"
+          done
           cp README.md LICENSE Cargo.toml "$DIST_DIR/"
 
       - name: Create binary tarball

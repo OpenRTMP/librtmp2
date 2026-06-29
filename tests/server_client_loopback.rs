@@ -13,9 +13,15 @@ use librtmp2::types::*;
 
 static FRAMES_RECEIVED: AtomicUsize = AtomicUsize::new(0);
 
+const SENT_FRAME_BYTE: u8 = 0xAB;
+const SENT_FRAME_LEN: usize = 32;
+
 fn on_frame(frame: &Frame) {
-    if frame.size > 0 {
-        FRAMES_RECEIVED.fetch_add(1, Ordering::SeqCst);
+    if frame.size as usize == SENT_FRAME_LEN && !frame.data.is_null() {
+        let payload = unsafe { std::slice::from_raw_parts(frame.data, frame.size as usize) };
+        if payload.iter().all(|&b| b == SENT_FRAME_BYTE) {
+            FRAMES_RECEIVED.fetch_add(1, Ordering::SeqCst);
+        }
     }
 }
 
@@ -42,7 +48,7 @@ fn server_client_publish_over_real_sockets() {
         client.connect("rtmp://127.0.0.1:19661/live/stream1").unwrap();
         client.publish().unwrap();
 
-        let data = [0xABu8; 32];
+        let data = [SENT_FRAME_BYTE; SENT_FRAME_LEN];
         let frame = Frame {
             frame_type: FrameType::Video,
             timestamp: 0,
