@@ -44,6 +44,11 @@ struct lrtmp2_conn {
     char                       app[256];
     uint32_t                   next_stream_id;
     lrtmp2_stream_t           *current_stream;
+    int                        connect_cb_fired;  /* on_connect_cb is deferred until
+                                                   * any pending TLS handshake completes,
+                                                   * so it fires once per connection from
+                                                   * lrtmp2_server_process_connections()
+                                                   * rather than at accept() time. */
     /* Callbacks */
     lrtmp2_on_connect_cb      on_connect_cb;
     lrtmp2_on_publish_cb     on_publish_cb;
