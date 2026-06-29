@@ -1,11 +1,9 @@
+# Disabled after the C->Rust port: this workflow dumps ABI from a C .so
+# built via `make`, which no longer exists. Re-enable once there is a
+# Rust-native ABI/semver check (e.g. cargo-semver-checks) in its place.
 name: ABI Compliance Check
 
 on:
-  pull_request:
-    branches: [ main, develop ]
-  push:
-    tags:
-      - 'v*'
   workflow_dispatch:
 
 jobs:

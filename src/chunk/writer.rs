@@ -3,7 +3,6 @@
 //! Mirrors `src/chunk/chunk_writer.h`, `src/chunk/chunk_write.h`, and `src/chunk/chunk_writer.c`.
 
 use crate::buffer::Buffer;
-use crate::bytes::hton32;
 use crate::types::Result;
 use crate::types::ErrorCode;
 use crate::chunk::reader::ChunkMessage;
@@ -55,8 +54,7 @@ pub fn chunk_write(
     ]).map_err(|_| ErrorCode::Internal)?;
 
     if ts >= 0xFFFFFF {
-        let net_ts = hton32(ts);
-        out.write(&net_ts.to_be_bytes()).map_err(|_| ErrorCode::Internal)?;
+        out.write(&ts.to_be_bytes()).map_err(|_| ErrorCode::Internal)?;
     }
 
     // --- Payload: fragment across multiple chunks ---
@@ -71,8 +69,7 @@ pub fn chunk_write(
             let chdr = basic_header(csid, 3);
             out.write(&chdr).map_err(|_| ErrorCode::Internal)?;
             if ts >= 0xFFFFFF {
-                let net_ts = hton32(ts);
-                out.write(&net_ts.to_be_bytes()).map_err(|_| ErrorCode::Internal)?;
+                out.write(&ts.to_be_bytes()).map_err(|_| ErrorCode::Internal)?;
             }
         }
     }
@@ -87,8 +84,7 @@ pub fn chunk_write_extended_timestamp(out: &mut Buffer, timestamp: u32) -> Resul
     out.write(&[hdr]).map_err(|_| ErrorCode::Internal)?;
 
     // 4 bytes extended timestamp
-    let net_ts = hton32(timestamp);
-    out.write(&net_ts.to_be_bytes()).map_err(|_| ErrorCode::Internal)?;
+    out.write(&timestamp.to_be_bytes()).map_err(|_| ErrorCode::Internal)?;
 
     Ok(())
 }
@@ -113,4 +109,104 @@ fn hton24(buf: &mut [u8; 3], val: u32) {
     buf[0] = ((val >> 16) & 0xFF) as u8;
     buf[1] = ((val >> 8) & 0xFF) as u8;
     buf[2] = (val & 0xFF) as u8;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::chunk::state::ChunkRegistry;
+    use crate::chunk::reader::chunk_read;
+
+    #[test]
+    fn single_chunk_round_trips_through_reader() {
+        let payload = b"hello rtmp";
+        let msg = ChunkMessage {
+            csid: 3,
+            fmt: 0,
+            timestamp: 1234,
+            msg_length: payload.len() as u32,
+            msg_type_id: 0x14,
+            msg_stream_id: 1,
+            is_complete: false,
+        };
+
+        let mut wire = Buffer::new();
+        chunk_write(&mut wire, &msg, payload, payload.len(), 128).unwrap();
+
+        let mut reg = ChunkRegistry::new();
+        let mut out_msg = ChunkMessage::default();
+        let mut ptr = std::ptr::null();
+        let mut len = 0usize;
+        let rc = chunk_read(&mut wire, &mut reg, None, &mut out_msg, &mut ptr, &mut len).unwrap();
+
+        assert_eq!(rc, 1);
+        assert!(out_msg.is_complete);
+        assert_eq!(out_msg.csid, 3);
+        assert_eq!(out_msg.timestamp, 1234);
+        assert_eq!(out_msg.msg_type_id, 0x14);
+        assert_eq!(out_msg.msg_stream_id, 1);
+        let received = unsafe { std::slice::from_raw_parts(ptr, len) };
+        assert_eq!(received, payload);
+    }
+
+    #[test]
+    fn fragmented_chunks_round_trip_through_reader() {
+        let payload = vec![0xAB_u8; 300];
+        let msg = ChunkMessage {
+            csid: 4,
+            fmt: 0,
+            timestamp: 0,
+            msg_length: payload.len() as u32,
+            msg_type_id: 0x09,
+            msg_stream_id: 1,
+            is_complete: false,
+        };
+
+        let mut wire = Buffer::new();
+        chunk_write(&mut wire, &msg, &payload, payload.len(), 128).unwrap();
+
+        let mut reg = ChunkRegistry::new();
+        let mut out_msg = ChunkMessage::default();
+        let mut ptr = std::ptr::null();
+        let mut len = 0usize;
+        // chunk_write fragments the payload across multiple 128-byte
+        // chunks; chunk_read consumes one chunk per call, so drive it
+        // until the reassembled message is complete.
+        let mut rc;
+        loop {
+            rc = chunk_read(&mut wire, &mut reg, None, &mut out_msg, &mut ptr, &mut len).unwrap();
+            if rc == 1 || (rc == 0 && wire.available() == 0) {
+                break;
+            }
+        }
+
+        assert_eq!(rc, 1);
+        let received = unsafe { std::slice::from_raw_parts(ptr, len) };
+        assert_eq!(received, payload.as_slice());
+    }
+
+    #[test]
+    fn extended_timestamp_round_trips_big_endian() {
+        let payload = b"x";
+        let msg = ChunkMessage {
+            csid: 5,
+            fmt: 0,
+            timestamp: 0x0100_0000,
+            msg_length: payload.len() as u32,
+            msg_type_id: 0x09,
+            msg_stream_id: 1,
+            is_complete: false,
+        };
+
+        let mut wire = Buffer::new();
+        chunk_write(&mut wire, &msg, payload, payload.len(), 128).unwrap();
+
+        let mut reg = ChunkRegistry::new();
+        let mut out_msg = ChunkMessage::default();
+        let mut ptr = std::ptr::null();
+        let mut len = 0usize;
+        chunk_read(&mut wire, &mut reg, None, &mut out_msg, &mut ptr, &mut len).unwrap();
+
+        assert_eq!(out_msg.timestamp, 0x0100_0000);
+    }
 }

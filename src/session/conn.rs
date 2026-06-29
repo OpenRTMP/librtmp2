@@ -150,7 +150,6 @@ impl Conn {
             | ConnState::Playing
             | ConnState::CapsNegotiated => self.read_messages(),
             ConnState::Closing | ConnState::Closed => 0,
-            _ => -1,
         }
     }
 
@@ -230,7 +229,7 @@ impl Conn {
                             unsafe { std::slice::from_raw_parts(payload_ptr, payload_len) }
                         };
                         let _ = self.handle_message(&msg, payload_slice);
-                        self.flush();
+                        let _ = self.flush();
                     }
                 }
                 Ok(_) => break,

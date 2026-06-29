@@ -48,3 +48,45 @@ pub fn ntoh16(buf: &[u8]) -> u16 {
 pub fn hton16(val: u16) -> u16 {
     val.to_be()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn byteswap_round_trips() {
+        assert_eq!(byteswap16(byteswap16(0x1234)), 0x1234);
+        assert_eq!(byteswap32(byteswap32(0x1234_5678)), 0x1234_5678);
+        assert_eq!(byteswap64(byteswap64(0x1234_5678_9ABC_DEF0)), 0x1234_5678_9ABC_DEF0);
+    }
+
+    #[test]
+    fn ntoh24_reads_big_endian_24_bit() {
+        assert_eq!(ntoh24(&[0x01, 0x02, 0x03]), 0x0001_0203);
+    }
+
+    #[test]
+    fn hton24_writes_big_endian_24_bit() {
+        let mut buf = [0u8; 3];
+        hton24(&mut buf, 0x0001_0203);
+        assert_eq!(buf, [0x01, 0x02, 0x03]);
+    }
+
+    #[test]
+    fn ntoh32_reads_big_endian_32_bit() {
+        assert_eq!(ntoh32(&[0xDE, 0xAD, 0xBE, 0xEF]), 0xDEAD_BEEF);
+    }
+
+    #[test]
+    fn ntoh16_reads_big_endian_16_bit() {
+        assert_eq!(ntoh16(&[0x12, 0x34]), 0x1234);
+    }
+
+    #[test]
+    fn hton32_then_to_ne_bytes_matches_ntoh32() {
+        // hton32 already performs the host->network swap; writing its
+        // result with to_ne_bytes (not to_be_bytes) yields the correct
+        // wire bytes. Mixing the two would double-swap.
+        assert_eq!(ntoh32(&hton32(0xDEAD_BEEF).to_ne_bytes()), 0xDEAD_BEEF);
+    }
+}
