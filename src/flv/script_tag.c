@@ -60,7 +60,8 @@ int lrtmp2_script_tag_parse(const uint8_t *data, size_t len, lrtmp2_script_tag_t
                     return LRTMP2_ERR_AMF;
             }
             uint8_t end[3];
-            lrtmp2_buffer_read(&buf, end, 3);
+            if (lrtmp2_buffer_read(&buf, end, 3) != LRTMP2_OK)
+                return LRTMP2_ERR_AMF;
         }
     }
 
