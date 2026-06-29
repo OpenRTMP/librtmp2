@@ -65,6 +65,8 @@ impl Server {
         net::split_host_port(bind_addr, &mut host, &mut port, "1935")?;
         let addr = if host.is_empty() {
             format!("0.0.0.0:{port}")
+        } else if host.contains(':') {
+            format!("[{host}]:{port}")
         } else {
             format!("{host}:{port}")
         };
@@ -153,7 +155,9 @@ impl Server {
                     break;
                 }
             }
-            let _ = conn.flush();
+            if conn.flush().is_err() {
+                closed.push(i);
+            }
         }
 
         for i in closed.into_iter().rev() {
