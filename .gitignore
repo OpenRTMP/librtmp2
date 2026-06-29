@@ -1,4 +1,9 @@
-# Build artifacts
+# Rust build artifacts
+/target/
+Cargo.lock
+*.rlib
+
+# C build artifacts (legacy)
 *.o
 *.a
 *.so
@@ -11,8 +16,12 @@ install-abi-*/
 # Test binaries
 **/run_tests
 **/run_*
-!**/test_*.c
 
 # Editor
 *.swp
 *~
+
+# IDE
+.idea/
+.vscode/
+

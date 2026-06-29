@@ -1,0 +1,457 @@
+//! Connection management
+//!
+//! Mirrors `src/session/conn.h` and `src/session/conn.c`.
+
+use std::sync::Mutex;
+
+use crate::buffer::Buffer;
+use crate::chunk::reader::{ChunkMessage, chunk_read};
+use crate::chunk::state::ChunkRegistry;
+use crate::chunk::writer::chunk_write;
+use crate::handshake::{self, Handshake, HandshakeState};
+use crate::message::command;
+use crate::message::message as msg_dispatch;
+use crate::session::state_machine;
+use crate::session::stream::Stream;
+use crate::transport::Transport;
+use crate::types::*;
+
+/// Maximum streams per connection
+pub const MAX_STREAMS_PER_CONN: u32 = 16;
+
+/// Server window ack size
+const SERVER_WINDOW_ACK_SIZE: u32 = 2_500_000;
+/// Server peer bandwidth
+const SERVER_PEER_BANDWIDTH: u32 = 2_500_000;
+/// Peer bandwidth limit type (dynamic)
+const PEER_BANDWIDTH_DYNAMIC: u8 = 2;
+
+/// Connection object.
+pub struct Conn {
+    pub state: ConnState,
+    pub handshake: Handshake,
+    pub recv_buffer: Buffer,
+    pub send_buffer: Buffer,
+    pub chunk_reg: ChunkRegistry,
+    pub chunk_size: u32,
+    pub window_ack_size: u32,
+    pub bytes_received: u32,
+    pub bytes_at_last_ack: u32,
+    pub client_fd: i32,
+    pub transport: Option<Transport>,
+    pub app: String,
+    pub next_stream_id: u32,
+    pub current_stream: Option<Box<Stream>>,
+    pub connect_cb_fired: bool,
+    pub send_mutex: Mutex<()>,
+    // Callbacks
+    pub on_frame_cb: Option<fn(&Frame)>,
+}
+
+impl Conn {
+    /// Create a new connection.
+    pub fn new() -> Self {
+        let mut chunk_reg = ChunkRegistry::new();
+        chunk_reg.init();
+
+        Self {
+            state: ConnState::TcpAccepted,
+            handshake: Handshake::default(),
+            recv_buffer: Buffer::new(),
+            send_buffer: Buffer::new(),
+            chunk_reg,
+            chunk_size: 128,
+            window_ack_size: 0,
+            bytes_received: 0,
+            bytes_at_last_ack: 0,
+            client_fd: -1,
+            transport: None,
+            app: String::new(),
+            next_stream_id: 0,
+            current_stream: None,
+            connect_cb_fired: false,
+            send_mutex: Mutex::new(()),
+            on_frame_cb: None,
+        }
+    }
+
+    /// Get the file descriptor.
+    pub fn get_fd(&self) -> i32 {
+        self.client_fd
+    }
+
+    /// Feed received data into the connection.
+    pub fn recv(&mut self, data: &[u8]) -> Result<()> {
+        self.recv_buffer.write(data).map_err(|_| ErrorCode::Internal)?;
+        self.bytes_received = self.bytes_received.wrapping_add(data.len() as u32);
+
+        let mut max_iter = 65536;
+        let mut no_progress = 0;
+
+        while max_iter > 0 {
+            max_iter -= 1;
+            let avail = self.recv_buffer.available();
+            if avail == 0 && self.state != ConnState::Handshake {
+                break;
+            }
+            let before = avail;
+            let rc = self.process();
+            if rc < 0 {
+                return Err(match rc {
+                    -1 => ErrorCode::Io,
+                    -2 => ErrorCode::Timeout,
+                    -3 => ErrorCode::Protocol,
+                    -4 => ErrorCode::Handshake,
+                    -5 => ErrorCode::Chunk,
+                    -6 => ErrorCode::Amf,
+                    -7 => ErrorCode::Unsupported,
+                    -8 => ErrorCode::Auth,
+                    -9 => ErrorCode::Internal,
+                    _ => ErrorCode::Internal,
+                });
+            }
+            if rc == 0 {
+                let after = self.recv_buffer.available();
+                if after == before {
+                    no_progress += 1;
+                    if no_progress > 3 {
+                        break;
+                    }
+                } else {
+                    no_progress = 0;
+                }
+                if after == 0 && self.state < ConnState::Closing {
+                    break;
+                }
+            } else {
+                no_progress = 0;
+            }
+        }
+
+        // Send acknowledgement if window exceeded
+        if self.window_ack_size > 0
+            && (self.bytes_received - self.bytes_at_last_ack) >= self.window_ack_size
+        {
+            self.send_acknowledgement(self.bytes_received)?;
+            self.bytes_at_last_ack = self.bytes_received;
+        }
+
+        Ok(())
+    }
+
+    /// Process one step of the connection state machine.
+    pub fn process(&mut self) -> i32 {
+        match self.state {
+            ConnState::TcpAccepted | ConnState::Handshake => self.do_handshake(),
+            ConnState::Connected
+            | ConnState::AppConnected
+            | ConnState::StreamCreated
+            | ConnState::Publishing
+            | ConnState::Playing
+            | ConnState::CapsNegotiated => self.read_messages(),
+            ConnState::Closing | ConnState::Closed => 0,
+            _ => -1,
+        }
+    }
+
+    /// Perform the RTMP handshake.
+    pub fn do_handshake(&mut self) -> i32 {
+        match self.handshake.state {
+            HandshakeState::ServerWaitC0 => {
+                handshake::server_init(&mut self.handshake);
+                match handshake::server_read_c0(&mut self.handshake, &mut self.recv_buffer) {
+                    Ok(()) => {
+                        self.state = ConnState::Handshake;
+                        self.do_handshake_recurse()
+                    }
+                    Err(ErrorCode::Io) => 0,
+                    Err(e) => e as i32,
+                }
+            }
+            HandshakeState::ServerWaitC1 => self.do_handshake_recurse(),
+            HandshakeState::ServerWaitC2 => {
+                match handshake::server_read_c2(&mut self.handshake, &mut self.recv_buffer) {
+                    Ok(()) => {
+                        self.state = ConnState::Connected;
+                        1
+                    }
+                    Err(ErrorCode::Io) => 0,
+                    Err(e) => e as i32,
+                }
+            }
+            HandshakeState::Done => {
+                self.state = ConnState::Connected;
+                1
+            }
+            _ => -1,
+        }
+    }
+
+    fn do_handshake_recurse(&mut self) -> i32 {
+        match handshake::server_read_c1(&mut self.handshake, &mut self.recv_buffer) {
+            Ok(()) => {
+                // Send S0+S1+S2
+                if self.client_fd >= 0 {
+                    let s0 = [0x03u8];
+                    let _ = self.send_raw(&s0);
+                    let out_data = self.handshake.out.peek().to_vec();
+                    let _ = self.send_raw(&out_data);
+                }
+                self.handshake.out.reset();
+                1
+            }
+            Err(ErrorCode::Io) => 0,
+            Err(e) => e as i32,
+        }
+    }
+
+    /// Read and dispatch messages.
+    pub fn read_messages(&mut self) -> i32 {
+        loop {
+            let mut msg = ChunkMessage::default();
+            let mut payload_ptr: *const u8 = std::ptr::null();
+            let mut payload_len = 0;
+
+            match chunk_read(
+                &mut self.recv_buffer,
+                &mut self.chunk_reg,
+                None,
+                &mut msg,
+                &mut payload_ptr,
+                &mut payload_len,
+            ) {
+                Ok(0) => break,
+                Ok(1) => {
+                    if msg.is_complete {
+                        // Dispatch message
+                        let payload_slice = if payload_ptr.is_null() || payload_len == 0 {
+                            &[]
+                        } else {
+                            unsafe { std::slice::from_raw_parts(payload_ptr, payload_len) }
+                        };
+                        let _ = self.handle_message(&msg, payload_slice);
+                        self.flush();
+                    }
+                }
+                Ok(_) => break,
+                Err(_) => return -1,
+            }
+        }
+        1
+    }
+
+    /// Handle a reassembled message.
+    fn handle_message(&mut self, msg: &ChunkMessage, payload: &[u8]) -> Result<()> {
+        match msg.msg_type_id {
+            msg_dispatch::RTMP_MSG_AMF0_COMMAND => {
+                self.handle_command(payload)
+            }
+            msg_dispatch::RTMP_MSG_AUDIO => {
+                if self.current_stream.as_ref().map(|s| s.is_publishing).unwrap_or(false) {
+                    if let Some(ref cb) = self.on_frame_cb {
+                        let mut frame = Frame {
+                            frame_type: FrameType::Audio,
+                            timestamp: msg.timestamp,
+                            ..unsafe { std::mem::zeroed() }
+                        };
+                        frame.data = payload.as_ptr();
+                        frame.size = payload.len() as u32;
+                        cb(&frame);
+                    }
+                }
+                Ok(())
+            }
+            msg_dispatch::RTMP_MSG_VIDEO => {
+                if self.current_stream.as_ref().map(|s| s.is_publishing).unwrap_or(false) {
+                    if let Some(ref cb) = self.on_frame_cb {
+                        let mut frame = Frame {
+                            frame_type: FrameType::Video,
+                            timestamp: msg.timestamp,
+                            ..unsafe { std::mem::zeroed() }
+                        };
+                        frame.data = payload.as_ptr();
+                        frame.size = payload.len() as u32;
+                        cb(&frame);
+                    }
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Handle an AMF0 command message.
+    pub fn handle_command(&mut self, payload: &[u8]) -> Result<()> {
+        let mut buf = Buffer::from_slice(payload);
+
+        let mut name_buf = [0u8; 64];
+        if command::peek_name(&mut buf, &mut name_buf).is_err() {
+            return Ok(());
+        }
+
+        let name = std::str::from_utf8(&name_buf)
+            .unwrap_or("")
+            .trim_end_matches('\0');
+
+        match name {
+            "connect" => {
+                let mut info = ConnectInfo::default();
+                command::read_connect(&mut buf, &mut info)?;
+                let app_len = info.app.iter().position(|&b| b == 0).unwrap_or(0);
+                self.app = std::str::from_utf8(&info.app[..app_len])
+                    .unwrap_or("")
+                    .to_string();
+                let _ = state_machine::conn_transition(&mut self.state, ConnState::AppConnected);
+                self.send_connect_response(info.transaction_id)?;
+                // Fire on_connect callback
+            }
+            "createStream" => {
+                let txn = command::read_create_stream(&mut buf)?;
+                if self.next_stream_id >= MAX_STREAMS_PER_CONN {
+                    self.send_onstatus(0, "error", "NetStream.Failed", "Too many streams")?;
+                } else {
+                    self.next_stream_id += 1;
+                    let stream_id = self.next_stream_id;
+                    self.current_stream = Some(Box::new(Stream::new(stream_id)));
+                    let _ = state_machine::conn_transition(&mut self.state, ConnState::StreamCreated);
+                    self.send_create_stream_response(txn, stream_id)?;
+                }
+            }
+            "publish" => {
+                let mut stream_name = [0u8; 256];
+                let mut publish_type = [0u8; 64];
+                command::read_publish(&mut buf, &mut stream_name, &mut publish_type)?;
+                if self.current_stream.is_none() {
+                    self.send_onstatus(0, "error", "NetStream.Publish.BadConnection", "No stream created")?;
+                } else {
+                    if let Some(ref mut stream) = self.current_stream {
+                        stream.is_publishing = true;
+                    }
+                    let _ = state_machine::conn_transition(&mut self.state, ConnState::Publishing);
+                    let sid = self.current_stream.as_ref().map(|s| s.stream_id).unwrap_or(0);
+                    self.send_onstatus(sid, "status", "NetStream.Publish.Start", "Publishing")?;
+                }
+            }
+            "play" => {
+                let mut stream_name = [0u8; 256];
+                command::read_play(&mut buf, &mut stream_name)?;
+                if self.current_stream.is_none() {
+                    self.send_onstatus(0, "error", "NetStream.Play.BadConnection", "No stream created")?;
+                } else {
+                    if let Some(ref mut stream) = self.current_stream {
+                        stream.is_playing = true;
+                    }
+                    let _ = state_machine::conn_transition(&mut self.state, ConnState::Playing);
+                    let sid = self.current_stream.as_ref().map(|s| s.stream_id).unwrap_or(0);
+                    self.send_onstatus(sid, "status", "NetStream.Play.Start", "Playing")?;
+                }
+            }
+            "FCPublish" | "FCUnpublish" | "releaseStream" | "deleteStream" => {
+                // Ignored
+            }
+            _ => {}
+        }
+
+        Ok(())
+    }
+
+    /// Send a connect response.
+    pub fn send_connect_response(&mut self, transaction_id: f64) -> Result<()> {
+        // WindowAckSize
+        let win = SERVER_WINDOW_ACK_SIZE.to_be_bytes();
+        self.send_control(0x05, &win)?;
+
+        // SetPeerBandwidth
+        let mut bw = [0u8; 5];
+        let bw_val = SERVER_PEER_BANDWIDTH.to_be_bytes();
+        bw[..4].copy_from_slice(&bw_val);
+        bw[4] = PEER_BANDWIDTH_DYNAMIC;
+        self.send_control(0x06, &bw)?;
+
+        // SetChunkSize
+        let cs = self.chunk_size.to_be_bytes();
+        self.send_control(0x01, &cs)?;
+
+        // AMF0 _result
+        let mut amf_buf = Buffer::with_capacity(512);
+        crate::amf::amf0::write_string(&mut amf_buf, "_result")?;
+        crate::amf::amf0::write_number(&mut amf_buf, transaction_id)?;
+        crate::amf::amf0::write_null(&mut amf_buf)?;
+
+        self.send_command(0, amf_buf.as_slice())
+    }
+
+    /// Send a createStream response.
+    pub fn send_create_stream_response(&mut self, transaction_id: f64, stream_id: u32) -> Result<()> {
+        let mut amf_buf = Buffer::with_capacity(256);
+        command::build_create_stream_result(&mut amf_buf, transaction_id, stream_id as f64)?;
+        self.send_command(0, amf_buf.as_slice())
+    }
+
+    /// Send an onStatus command.
+    pub fn send_onstatus(&mut self, stream_id: u32, level: &str, code: &str, description: &str) -> Result<()> {
+        let mut amf_buf = Buffer::with_capacity(512);
+        command::build_onstatus(&mut amf_buf, level, code, description)?;
+        self.send_command(stream_id, amf_buf.as_slice())
+    }
+
+    /// Send raw bytes over the socket.
+    pub fn send_raw(&mut self, data: &[u8]) -> Result<()> {
+        if self.client_fd < 0 {
+            return Ok(());
+        }
+        if let Some(ref transport) = self.transport {
+            transport.send(data)
+        } else {
+            // Direct send
+            use std::io::Write;
+            // This is a simplification; in production you'd use the transport
+            Ok(())
+        }
+    }
+
+    /// Flush the send buffer.
+    pub fn flush(&mut self) -> Result<()> {
+        if self.client_fd < 0 || self.send_buffer.available() == 0 {
+            return Ok(());
+        }
+        let data = self.send_buffer.peek().to_vec();
+        self.send_raw(&data)?;
+        self.send_buffer.reset();
+        Ok(())
+    }
+
+    // ── Internal helpers ──
+
+    fn send_control(&mut self, ty: u8, data: &[u8]) -> Result<()> {
+        let mut msg = ChunkMessage::default();
+        msg.csid = 2;
+        msg.fmt = 0;
+        msg.msg_length = data.len() as u32;
+        msg.msg_type_id = ty;
+        msg.msg_stream_id = 0;
+        chunk_write(&mut self.send_buffer, &msg, data, data.len(), self.chunk_size as usize)
+    }
+
+    fn send_command(&mut self, msg_stream_id: u32, amf_data: &[u8]) -> Result<()> {
+        let mut cmd_msg = ChunkMessage::default();
+        cmd_msg.csid = 3;
+        cmd_msg.fmt = 0;
+        cmd_msg.timestamp = 0;
+        cmd_msg.msg_length = amf_data.len() as u32;
+        cmd_msg.msg_type_id = 0x14; // AMF0_COMMAND
+        cmd_msg.msg_stream_id = msg_stream_id;
+        chunk_write(&mut self.send_buffer, &cmd_msg, amf_data, amf_data.len(), self.chunk_size as usize)
+    }
+
+    fn send_acknowledgement(&mut self, seq: u32) -> Result<()> {
+        let b = seq.to_be_bytes();
+        self.send_control(0x03, &b)
+    }
+}
+
+impl Default for Conn {
+    fn default() -> Self {
+        Self::new()
+    }
+}
