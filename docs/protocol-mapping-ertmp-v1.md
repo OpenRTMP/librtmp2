@@ -36,7 +36,7 @@ human-readable name lookups.
 
 | Spec element | Implementation |
 |--------------|----------------|
-| `IsExHeader` detection (bit7 set + len ≥ 5 distinguishes enhanced from legacy AAC) | `src/ertmp/exaudio.c` |
+| `IsExHeader` detection (bit7 set + len ≥ 5 + recognized FourCC distinguishes enhanced from legacy SoundFormat 8-15, incl. AAC) | `src/ertmp/exaudio.c` |
 | Audio FourCC | `src/ertmp/exaudio.c` + `src/ertmp/fourcc.c` |
 | Wiring into the audio frame path | `src/message/message.c` (uses `lrtmp2_ertmp_exaudio_parse()` for legacy + enhanced) |
 
