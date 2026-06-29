@@ -55,142 +55,154 @@ static int amf0_read_string_trunc(lrtmp2_buffer_t *buf, char *out, size_t out_si
     return LRTMP2_OK;
 }
 
-/* --- Encoder --- */
+/* --- Encoder ---
+ *
+ * Every write below targets a small fixed-size stack buffer wrapped as an
+ * "unowned" lrtmp2_buffer_t (see callers in conn.c): once it fills up,
+ * buffer_ensure_capacity() refuses to grow it and the individual write call
+ * fails *silently* unless its return value is checked. Without the CHK()
+ * checks, an oversized field (e.g. a long flashVer/description) would make
+ * the rest of the command vanish and the peer would receive a truncated,
+ * misframed AMF command with no indication anything went wrong. CHK() makes
+ * that an explicit build failure instead. */
+#define CHK(expr) do { int _rc = (expr); if (_rc != LRTMP2_OK) return _rc; } while (0)
 
 int lrtmp2_cmd_build_connect(lrtmp2_buffer_t *buf, const char *app, const char *tcUrl,
                               const char *pageUrl, const char *swfUrl,
                               const char *flashVer, int audioCodecs, int videoCodecs)
 {
     /* Command name: "connect" */
-    lrtmf2_amf0_write_string(buf, "connect");
+    CHK(lrtmf2_amf0_write_string(buf, "connect"));
 
     /* Transaction ID: 1.0 for connect */
-    lrtmf2_amf0_write_number(buf, 1.0);
+    CHK(lrtmf2_amf0_write_number(buf, 1.0));
 
     /* Command object */
-    lrtmf2_amf0_write_object_begin(buf);
+    CHK(lrtmf2_amf0_write_object_begin(buf));
 
-    lrtmf2_amf0_write_object_key(buf, "app");
-    lrtmf2_amf0_write_string(buf, app);
+    CHK(lrtmf2_amf0_write_object_key(buf, "app"));
+    CHK(lrtmf2_amf0_write_string(buf, app));
 
-    lrtmf2_amf0_write_object_key(buf, "type");
-    lrtmf2_amf0_write_string(buf, "nonprivate");
+    CHK(lrtmf2_amf0_write_object_key(buf, "type"));
+    CHK(lrtmf2_amf0_write_string(buf, "nonprivate"));
 
     if (tcUrl) {
-        lrtmf2_amf0_write_object_key(buf, "tcUrl");
-        lrtmf2_amf0_write_string(buf, tcUrl);
+        CHK(lrtmf2_amf0_write_object_key(buf, "tcUrl"));
+        CHK(lrtmf2_amf0_write_string(buf, tcUrl));
     }
     if (pageUrl) {
-        lrtmf2_amf0_write_object_key(buf, "pageUrl");
-        lrtmf2_amf0_write_string(buf, pageUrl);
+        CHK(lrtmf2_amf0_write_object_key(buf, "pageUrl"));
+        CHK(lrtmf2_amf0_write_string(buf, pageUrl));
     }
     if (swfUrl) {
-        lrtmf2_amf0_write_object_key(buf, "swfUrl");
-        lrtmf2_amf0_write_string(buf, swfUrl);
+        CHK(lrtmf2_amf0_write_object_key(buf, "swfUrl"));
+        CHK(lrtmf2_amf0_write_string(buf, swfUrl));
     }
     if (flashVer) {
-        lrtmf2_amf0_write_object_key(buf, "flashVer");
-        lrtmf2_amf0_write_string(buf, flashVer);
+        CHK(lrtmf2_amf0_write_object_key(buf, "flashVer"));
+        CHK(lrtmf2_amf0_write_string(buf, flashVer));
     }
 
-    lrtmf2_amf0_write_object_key(buf, "audioCodecs");
-    lrtmf2_amf0_write_number(buf, (double)audioCodecs);
+    CHK(lrtmf2_amf0_write_object_key(buf, "audioCodecs"));
+    CHK(lrtmf2_amf0_write_number(buf, (double)audioCodecs));
 
-    lrtmf2_amf0_write_object_key(buf, "videoCodecs");
-    lrtmf2_amf0_write_number(buf, (double)videoCodecs);
+    CHK(lrtmf2_amf0_write_object_key(buf, "videoCodecs"));
+    CHK(lrtmf2_amf0_write_number(buf, (double)videoCodecs));
 
-    lrtmf2_amf0_write_object_end(buf);
+    CHK(lrtmf2_amf0_write_object_end(buf));
 
     return LRTMP2_OK;
 }
 
 int lrtmp2_cmd_build_release_stream(lrtmp2_buffer_t *buf, const char *stream_name)
 {
-    lrtmf2_amf0_write_string(buf, "releaseStream");
-    lrtmf2_amf0_write_number(buf, 2.0);
-    lrtmf2_amf0_write_null(buf);
-    lrtmf2_amf0_write_string(buf, stream_name);
+    CHK(lrtmf2_amf0_write_string(buf, "releaseStream"));
+    CHK(lrtmf2_amf0_write_number(buf, 2.0));
+    CHK(lrtmf2_amf0_write_null(buf));
+    CHK(lrtmf2_amf0_write_string(buf, stream_name));
     return LRTMP2_OK;
 }
 
 int lrtmp2_cmd_build_create_stream(lrtmp2_buffer_t *buf, double transaction_id)
 {
-    lrtmf2_amf0_write_string(buf, "createStream");
-    lrtmf2_amf0_write_number(buf, transaction_id);
-    lrtmf2_amf0_write_null(buf);
+    CHK(lrtmf2_amf0_write_string(buf, "createStream"));
+    CHK(lrtmf2_amf0_write_number(buf, transaction_id));
+    CHK(lrtmf2_amf0_write_null(buf));
     return LRTMP2_OK;
 }
 
 int lrtmp2_cmd_build_publish(lrtmp2_buffer_t *buf, const char *stream_name, const char *app)
 {
-    lrtmf2_amf0_write_string(buf, "publish");
-    lrtmf2_amf0_write_number(buf, 0.0);
-    lrtmf2_amf0_write_null(buf);
-    lrtmf2_amf0_write_string(buf, stream_name);
-    lrtmf2_amf0_write_string(buf, app);
+    CHK(lrtmf2_amf0_write_string(buf, "publish"));
+    CHK(lrtmf2_amf0_write_number(buf, 0.0));
+    CHK(lrtmf2_amf0_write_null(buf));
+    CHK(lrtmf2_amf0_write_string(buf, stream_name));
+    CHK(lrtmf2_amf0_write_string(buf, app));
     return LRTMP2_OK;
 }
 
 int lrtmp2_cmd_build_play(lrtmp2_buffer_t *buf, const char *stream_name)
 {
-    lrtmf2_amf0_write_string(buf, "play");
-    lrtmf2_amf0_write_number(buf, 0.0);
-    lrtmf2_amf0_write_null(buf);
-    lrtmf2_amf0_write_string(buf, stream_name);
+    CHK(lrtmf2_amf0_write_string(buf, "play"));
+    CHK(lrtmf2_amf0_write_number(buf, 0.0));
+    CHK(lrtmf2_amf0_write_null(buf));
+    CHK(lrtmf2_amf0_write_string(buf, stream_name));
     return LRTMP2_OK;
 }
 
 int lrtmp2_cmd_build_fcpublish(lrtmp2_buffer_t *buf, const char *stream_name)
 {
-    lrtmf2_amf0_write_string(buf, "FCPublish");
-    lrtmf2_amf0_write_number(buf, 0.0);
-    lrtmf2_amf0_write_null(buf);
-    lrtmf2_amf0_write_string(buf, stream_name);
+    CHK(lrtmf2_amf0_write_string(buf, "FCPublish"));
+    CHK(lrtmf2_amf0_write_number(buf, 0.0));
+    CHK(lrtmf2_amf0_write_null(buf));
+    CHK(lrtmf2_amf0_write_string(buf, stream_name));
     return LRTMP2_OK;
 }
 
 int lrtmp2_cmd_build_fcunpublish(lrtmp2_buffer_t *buf, const char *stream_name)
 {
-    lrtmf2_amf0_write_string(buf, "FCUnpublish");
-    lrtmf2_amf0_write_number(buf, 0.0);
-    lrtmf2_amf0_write_null(buf);
-    lrtmf2_amf0_write_string(buf, stream_name);
+    CHK(lrtmf2_amf0_write_string(buf, "FCUnpublish"));
+    CHK(lrtmf2_amf0_write_number(buf, 0.0));
+    CHK(lrtmf2_amf0_write_null(buf));
+    CHK(lrtmf2_amf0_write_string(buf, stream_name));
     return LRTMP2_OK;
 }
 
 int lrtmp2_cmd_build_deletestream(lrtmp2_buffer_t *buf, double transaction_id, uint32_t stream_id)
 {
-    lrtmf2_amf0_write_string(buf, "deleteStream");
-    lrtmf2_amf0_write_number(buf, transaction_id);
-    lrtmf2_amf0_write_null(buf);
-    lrtmf2_amf0_write_number(buf, (double)stream_id);
+    CHK(lrtmf2_amf0_write_string(buf, "deleteStream"));
+    CHK(lrtmf2_amf0_write_number(buf, transaction_id));
+    CHK(lrtmf2_amf0_write_null(buf));
+    CHK(lrtmf2_amf0_write_number(buf, (double)stream_id));
     return LRTMP2_OK;
 }
 
 int lrtmp2_cmd_build_create_stream_result(lrtmp2_buffer_t *buf, double transaction_id, double stream_id)
 {
-    lrtmf2_amf0_write_string(buf, "_result");
-    lrtmf2_amf0_write_number(buf, transaction_id);
-    lrtmf2_amf0_write_null(buf);
-    lrtmf2_amf0_write_number(buf, stream_id);
+    CHK(lrtmf2_amf0_write_string(buf, "_result"));
+    CHK(lrtmf2_amf0_write_number(buf, transaction_id));
+    CHK(lrtmf2_amf0_write_null(buf));
+    CHK(lrtmf2_amf0_write_number(buf, stream_id));
     return LRTMP2_OK;
 }
 
 int lrtmp2_cmd_build_onstatus(lrtmp2_buffer_t *buf, const char *level, const char *code, const char *description)
 {
-    lrtmf2_amf0_write_string(buf, "onStatus");
-    lrtmf2_amf0_write_number(buf, 0.0);
-    lrtmf2_amf0_write_null(buf);
-    lrtmf2_amf0_write_object_begin(buf);
-    lrtmf2_amf0_write_object_key(buf, "level");
-    lrtmf2_amf0_write_string(buf, level);
-    lrtmf2_amf0_write_object_key(buf, "code");
-    lrtmf2_amf0_write_string(buf, code);
-    lrtmf2_amf0_write_object_key(buf, "description");
-    lrtmf2_amf0_write_string(buf, description);
-    lrtmf2_amf0_write_object_end(buf);
+    CHK(lrtmf2_amf0_write_string(buf, "onStatus"));
+    CHK(lrtmf2_amf0_write_number(buf, 0.0));
+    CHK(lrtmf2_amf0_write_null(buf));
+    CHK(lrtmf2_amf0_write_object_begin(buf));
+    CHK(lrtmf2_amf0_write_object_key(buf, "level"));
+    CHK(lrtmf2_amf0_write_string(buf, level));
+    CHK(lrtmf2_amf0_write_object_key(buf, "code"));
+    CHK(lrtmf2_amf0_write_string(buf, code));
+    CHK(lrtmf2_amf0_write_object_key(buf, "description"));
+    CHK(lrtmf2_amf0_write_string(buf, description));
+    CHK(lrtmf2_amf0_write_object_end(buf));
     return LRTMP2_OK;
 }
+
+#undef CHK
 
 /* --- Decoder --- */
 
@@ -340,11 +352,12 @@ int lrtmp2_cmd_read_publish(lrtmp2_buffer_t *buf, char *stream_name, size_t max_
     double txn;
     amf0_read_number_value(buf, &txn);
 
-    /* Read null */
-    amf0_type_t type;
-    lrtmf2_amf0_read_type(buf, &type);
-    if (type == AMF0_NULL) {
-        /* skip */
+    /* Command object: typically null, but skip whatever is there. A bare
+     * read_type() here would only consume the 1-byte marker and leave the
+     * rest of a non-null value (object/number/...) unconsumed, desyncing
+     * every field read after it. */
+    if (lrtmf2_amf0_skip_value(buf) != LRTMP2_OK) {
+        return LRTMP2_ERR_AMF;
     }
 
     /* Read stream name */
@@ -374,9 +387,11 @@ int lrtmp2_cmd_read_play(lrtmp2_buffer_t *buf, char *stream_name, size_t max_nam
     double txn;
     amf0_read_number_value(buf, &txn);
 
-    /* Skip null */
-    amf0_type_t type;
-    lrtmf2_amf0_read_type(buf, &type);
+    /* Command object: typically null, but skip whatever is there (see
+     * lrtmp2_cmd_read_publish for why a bare read_type() is insufficient). */
+    if (lrtmf2_amf0_skip_value(buf) != LRTMP2_OK) {
+        return LRTMP2_ERR_AMF;
+    }
 
     /* Read stream name */
     return lrtmf2_amf0_read_string(buf, stream_name, max_name, &len);

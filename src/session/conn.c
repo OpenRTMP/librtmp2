@@ -379,9 +379,10 @@ int lrtmp2_conn_send_connect_response(lrtmp2_conn_t *conn, double transaction_id
     amf_buf.data = amf_data;
     amf_buf.capacity = sizeof(amf_data);
 
-    lrtmf2_amf0_write_string(&amf_buf, "_result");
-    lrtmf2_amf0_write_number(&amf_buf, transaction_id);
-    lrtmf2_amf0_write_null(&amf_buf);
+    int rc = lrtmf2_amf0_write_string(&amf_buf, "_result");
+    if (rc == LRTMP2_OK) rc = lrtmf2_amf0_write_number(&amf_buf, transaction_id);
+    if (rc == LRTMP2_OK) rc = lrtmf2_amf0_write_null(&amf_buf);
+    if (rc != LRTMP2_OK) return rc;
 
     return lrtmp2_conn_send_command(conn, 0, amf_buf.data, amf_buf.size);
 }
@@ -396,7 +397,8 @@ int lrtmp2_conn_send_create_stream_response(lrtmp2_conn_t *conn, double transact
     amf_buf.data = amf_data;
     amf_buf.capacity = sizeof(amf_data);
 
-    lrtmp2_cmd_build_create_stream_result(&amf_buf, transaction_id, (double)stream_id);
+    int rc = lrtmp2_cmd_build_create_stream_result(&amf_buf, transaction_id, (double)stream_id);
+    if (rc != LRTMP2_OK) return rc;
 
     return lrtmp2_conn_send_command(conn, 0, amf_buf.data, amf_buf.size);
 }
@@ -412,7 +414,8 @@ int lrtmp2_conn_send_onstatus(lrtmp2_conn_t *conn, uint32_t stream_id, const cha
     amf_buf.data = amf_data;
     amf_buf.capacity = sizeof(amf_data);
 
-    lrtmp2_cmd_build_onstatus(&amf_buf, level, code, description);
+    int rc = lrtmp2_cmd_build_onstatus(&amf_buf, level, code, description);
+    if (rc != LRTMP2_OK) return rc;
 
     return lrtmp2_conn_send_command(conn, stream_id, amf_buf.data, amf_buf.size);
 }
