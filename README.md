@@ -88,7 +88,7 @@ The crate uses `crate-type = ["cdylib", "staticlib", "lib"]` and produces:
 
 ### TLS / RTMPS
 
-RTMPS (RTMP over TLS) is supported via OpenSSL and is **enabled by default** via the `tls` Cargo feature. To produce a zero-dependency, plaintext-only build:
+RTMPS (RTMP over TLS) is supported via OpenSSL and is **enabled by default** via the `tls` Cargo feature. To produce a plaintext-only build without the optional TLS/OpenSSL dependency:
 
 ```bash
 cargo build --no-default-features
@@ -105,8 +105,12 @@ Add to your `Cargo.toml`:
 ```toml
 [dependencies]
 librtmp2 = { path = "../librtmp2" }
+```
 
-# Without TLS:
+Without TLS:
+
+```toml
+[dependencies]
 librtmp2 = { path = "../librtmp2", default-features = false }
 ```
 
@@ -129,23 +133,24 @@ void             lrtmp2_server_stop(lrtmp2_server_t *server);
 ### Client
 
 ```c
-lrtmp2_client_t *lrtmp2_client_create(const lrtmp2_client_config_t *config);
+lrtmp2_client_t *lrtmp2_client_create(const lrtmp2_server_config_t *config);
 void             lrtmp2_client_destroy(lrtmp2_client_t *client);
 int              lrtmp2_client_connect(lrtmp2_client_t *client, const char *url);
-int              lrtmp2_client_publish(lrtmp2_client_t *client, const char *stream_key);
-int              lrtmp2_client_play(lrtmp2_client_t *client, const char *stream_key);
+int              lrtmp2_client_publish(lrtmp2_client_t *client);
+int              lrtmp2_client_play(lrtmp2_client_t *client);
 int              lrtmp2_client_send_frame(lrtmp2_client_t *client, const lrtmp2_frame_t *frame);
 int              lrtmp2_client_poll(lrtmp2_client_t *client, int timeout_ms);
 ```
 
-### Callbacks
+### Utilities
 
 ```c
-typedef int  (*lrtmp2_on_connect_cb)(lrtmp2_conn_t *conn, void *userdata);
-typedef int  (*lrtmp2_on_publish_cb)(lrtmp2_conn_t *conn, const char *app, const char *stream_key, void *userdata);
-typedef int  (*lrtmp2_on_play_cb)   (lrtmp2_conn_t *conn, const char *app, const char *stream_key, void *userdata);
-typedef int  (*lrtmp2_on_frame_cb)  (lrtmp2_conn_t *conn, const lrtmp2_frame_t *frame, void *userdata);
-typedef void (*lrtmp2_on_close_cb)  (lrtmp2_conn_t *conn, void *userdata);
+int          lrtmp2_tls_supported(void);
+const char  *lrtmp2_version_string(void);
+int          lrtmp2_version_major(void);
+int          lrtmp2_version_minor(void);
+int          lrtmp2_version_patch(void);
+const char  *lrtmp2_error_string(int code);
 ```
 
 ---
