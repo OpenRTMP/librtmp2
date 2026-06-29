@@ -38,16 +38,23 @@ trap cleanup EXIT
 echo "== starting mediamtx RTMP server on :$PORT =="
 # Minimal config: accept any publish/read path (catch-all).
 MTX_CFG="$(mktemp /tmp/mediamtx.XXXXXX.yml)"
+MTX_LOG="$(mktemp /tmp/mediamtx.XXXXXX.log)"
 printf 'paths:\n  all_others:\n' > "$MTX_CFG"
 # Only RTMP is needed; disable the other listeners so they can't fail to bind.
 MTX_RTMPADDRESS=":$PORT" MTX_HLS=no MTX_WEBRTC=no MTX_RTSP=no MTX_SRT=no \
-    "$MEDIAMTX" "$MTX_CFG" >/tmp/mediamtx.log 2>&1 &
+    "$MEDIAMTX" "$MTX_CFG" >"$MTX_LOG" 2>&1 &
 MTX=$!
 
 # Wait for mediamtx's RTMP port to actually accept connections instead of a
 # fixed sleep, which is either too short (flaky) or too long (slow) depending
-# on machine load.
+# on machine load. Also bail out early if mediamtx exits during startup
+# instead of waiting out the full poll loop.
 for _ in $(seq 1 50); do
+    if ! kill -0 "$MTX" 2>/dev/null; then
+        echo "mediamtx exited during startup"
+        cat "$MTX_LOG" || true
+        exit 1
+    fi
     if (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null; then
         exec 3>&-
         break
@@ -61,7 +68,7 @@ timeout 40 ffmpeg -hide_banner -loglevel error -re -stream_loop -1 \
     -f lavfi -i "sine=frequency=1000" \
     -c:v libx264 -preset ultrafast -pix_fmt yuv420p -g 20 \
     -c:a aac -b:a 64k \
-    -f flv "$URL" >/tmp/play_publish.log 2>&1 &
+    -f flv "$URL" >"$(mktemp /tmp/play_publish.XXXXXX.log)" 2>&1 &
 PUB=$!
 
 # Give the publisher a moment to register the stream.
@@ -74,7 +81,7 @@ RC=$?
 set -e
 
 echo "== mediamtx log (tail) =="
-tail -n 8 /tmp/mediamtx.log || true
+tail -n 8 "$MTX_LOG" || true
 
 if [ "$RC" -ne 0 ]; then
     echo "PLAY INTEROP FAILED (play client exit=$RC)"

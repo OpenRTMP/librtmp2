@@ -46,6 +46,15 @@ FF_RC=$?
 set -e
 echo "ffmpeg exit=$FF_RC"
 
+# A non-zero ffmpeg exit is expected when the ingest server is satisfied and
+# disconnects before ffmpeg finishes its full duration (it sees "Connection
+# reset by peer"). Only treat it as a real failure if the server is still
+# running, i.e. ffmpeg died before the server ever got enough data.
+if [ "$FF_RC" -ne 0 ] && kill -0 "$SRV" 2>/dev/null; then
+    echo "INTEROP FAILED (ffmpeg publish exit=$FF_RC, ingest server still running)"
+    exit 1
+fi
+
 # Wait for the ingest server to finish (it exits 0 on success).
 wait "$SRV"
 SRV_RC=$?

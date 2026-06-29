@@ -48,9 +48,21 @@ run_one() {
         -c:a aac -b:a 64k \
         -f flv "rtmp://${addr}/live/test"
     local ff_rc=$?
-    echo "[$label] ffmpeg exit=$ff_rc"
-    wait "$srv"; local rc=$?
     set -e
+    echo "[$label] ffmpeg exit=$ff_rc"
+
+    # A non-zero ffmpeg exit is expected when the ingest server is satisfied
+    # and disconnects before ffmpeg finishes (it sees "Connection reset by
+    # peer"). Only treat it as a real failure if the server is still running,
+    # i.e. ffmpeg died before the server ever got enough data.
+    if [ "$ff_rc" -ne 0 ] && kill -0 "$srv" 2>/dev/null; then
+        echo "[$label] ENHANCED-RTMP INTEROP FAILED (ffmpeg publish exit=$ff_rc, ingest server still running)"
+        kill "$srv" 2>/dev/null || true
+        wait "$srv" 2>/dev/null || true
+        return 1
+    fi
+
+    wait "$srv"; local rc=$?
     echo "== [$label] ingest log =="; cat "/tmp/eR_${label}.log"
     if [ "$rc" -ne 0 ]; then
         echo "[$label] ENHANCED-RTMP INTEROP FAILED (ingest exit=$rc)"
