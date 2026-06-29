@@ -20,8 +20,9 @@ pub const RTMP_MSG_AUDIO: u8 = 0x08;
 pub const RTMP_MSG_VIDEO: u8 = 0x09;
 pub const RTMP_MSG_AMF3_DATA: u8 = 0x0F;
 pub const RTMP_MSG_AMF3_SHARED_OBJECT: u8 = 0x10;
-pub const RTMP_MSG_AMF0_COMMAND: u8 = 0x14;
+pub const RTMP_MSG_AMF3_COMMAND: u8 = 0x11;
 pub const RTMP_MSG_AMF0_DATA: u8 = 0x12;
+pub const RTMP_MSG_AMF0_COMMAND: u8 = 0x14;
 pub const RTMP_MSG_AGGREGATE: u8 = 0x16;
 
 const MAX_AGGREGATE_SUBTAGS: usize = 4096;
@@ -246,4 +247,113 @@ pub fn decode(conn: &mut dyn Connection, chunk: &ChunkMessage, payload: &[u8]) -
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct MockConn {
+        handled_commands: Vec<Vec<u8>>,
+        window_ack_size: Option<u32>,
+        reset_csid: Option<u32>,
+        chunk_size: Option<u32>,
+    }
+
+    impl MockConn {
+        fn new() -> Self {
+            Self {
+                handled_commands: Vec::new(),
+                window_ack_size: None,
+                reset_csid: None,
+                chunk_size: None,
+            }
+        }
+    }
+
+    impl Connection for MockConn {
+        fn get_frame_callback(&self) -> Option<fn(&Frame)> {
+            None
+        }
+        fn get_current_stream(&self) -> Option<&dyn Stream> {
+            None
+        }
+        fn handle_command(&mut self, payload: &[u8]) -> Result<()> {
+            self.handled_commands.push(payload.to_vec());
+            Ok(())
+        }
+        fn set_window_ack_size(&mut self, size: u32) {
+            self.window_ack_size = Some(size);
+        }
+        fn reset_chunk_stream(&mut self, csid: u32) {
+            self.reset_csid = Some(csid);
+        }
+        fn set_all_chunk_size(&mut self, chunk_size: u32) {
+            self.chunk_size = Some(chunk_size);
+        }
+    }
+
+    fn chunk_msg(msg_type_id: u8) -> ChunkMessage {
+        ChunkMessage {
+            csid: 3,
+            fmt: 0,
+            timestamp: 0,
+            msg_length: 0,
+            msg_type_id,
+            msg_stream_id: 0,
+            is_complete: true,
+        }
+    }
+
+    #[test]
+    fn amf0_command_is_dispatched_to_handle_command() {
+        let mut conn = MockConn::new();
+        let chunk = chunk_msg(RTMP_MSG_AMF0_COMMAND);
+        decode(&mut conn, &chunk, b"connect-payload").unwrap();
+        assert_eq!(conn.handled_commands, vec![b"connect-payload".to_vec()]);
+    }
+
+    #[test]
+    fn amf3_command_is_dispatched_to_handle_command() {
+        let mut conn = MockConn::new();
+        let chunk = chunk_msg(RTMP_MSG_AMF3_COMMAND);
+        // AMF3 command messages are prefixed with a 1-byte marker (0x00) that
+        // must be stripped before the AMF0-encoded body is handed off.
+        let mut payload = vec![0x00];
+        payload.extend_from_slice(b"invoke-payload");
+        decode(&mut conn, &chunk, &payload).unwrap();
+        assert_eq!(conn.handled_commands, vec![b"invoke-payload".to_vec()]);
+    }
+
+    #[test]
+    fn set_chunk_size_updates_connection() {
+        let mut conn = MockConn::new();
+        let chunk = chunk_msg(RTMP_MSG_SET_CHUNK_SIZE);
+        decode(&mut conn, &chunk, &4096u32.to_be_bytes()).unwrap();
+        assert_eq!(conn.chunk_size, Some(4096));
+    }
+
+    #[test]
+    fn window_ack_size_updates_connection() {
+        let mut conn = MockConn::new();
+        let chunk = chunk_msg(RTMP_MSG_WINDOW_ACK_SIZE);
+        decode(&mut conn, &chunk, &2_500_000u32.to_be_bytes()).unwrap();
+        assert_eq!(conn.window_ack_size, Some(2_500_000));
+    }
+
+    #[test]
+    fn abort_message_resets_chunk_stream() {
+        let mut conn = MockConn::new();
+        let chunk = chunk_msg(RTMP_MSG_ABORT_MESSAGE);
+        decode(&mut conn, &chunk, &7u32.to_be_bytes()).unwrap();
+        assert_eq!(conn.reset_csid, Some(7));
+    }
+
+    #[test]
+    fn unknown_message_type_is_ignored() {
+        let mut conn = MockConn::new();
+        let chunk = chunk_msg(0xFE);
+        assert!(decode(&mut conn, &chunk, b"whatever").is_ok());
+        assert!(conn.handled_commands.is_empty());
+    }
 }

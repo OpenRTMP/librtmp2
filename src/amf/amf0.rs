@@ -3,7 +3,6 @@
 //! Mirrors `src/amf/amf.h` and `src/amf/amf0.c`.
 
 use crate::buffer::Buffer;
-use crate::bytes::byteswap16;
 use crate::types::Result;
 use crate::types::ErrorCode;
 
@@ -117,8 +116,7 @@ pub fn write_string(buf: &mut Buffer, s: &str) -> Result<()> {
         return Err(ErrorCode::Amf);
     }
     buf.write(&[Amf0Type::String as u8]).map_err(|_| ErrorCode::Internal)?;
-    let net_len = byteswap16(len as u16);
-    buf.write(&net_len.to_be_bytes()).map_err(|_| ErrorCode::Internal)?;
+    buf.write(&(len as u16).to_be_bytes()).map_err(|_| ErrorCode::Internal)?;
     buf.write(s.as_bytes()).map_err(|_| ErrorCode::Internal)?;
     Ok(())
 }
@@ -130,8 +128,7 @@ pub fn write_long_string(buf: &mut Buffer, s: &str) -> Result<()> {
         return Err(ErrorCode::Amf);
     }
     buf.write(&[Amf0Type::LongString as u8]).map_err(|_| ErrorCode::Internal)?;
-    let net_len = (len as u32).to_be();
-    buf.write(&net_len.to_be_bytes()).map_err(|_| ErrorCode::Internal)?;
+    buf.write(&(len as u32).to_be_bytes()).map_err(|_| ErrorCode::Internal)?;
     buf.write(s.as_bytes()).map_err(|_| ErrorCode::Internal)?;
     Ok(())
 }
@@ -154,8 +151,7 @@ pub fn write_object_key(buf: &mut Buffer, key: &str) -> Result<()> {
     if len > u16::MAX as usize {
         return Err(ErrorCode::Amf);
     }
-    let net_len = byteswap16(len as u16);
-    buf.write(&net_len.to_be_bytes()).map_err(|_| ErrorCode::Internal)?;
+    buf.write(&(len as u16).to_be_bytes()).map_err(|_| ErrorCode::Internal)?;
     buf.write(key.as_bytes()).map_err(|_| ErrorCode::Internal)?;
     Ok(())
 }
@@ -163,8 +159,7 @@ pub fn write_object_key(buf: &mut Buffer, key: &str) -> Result<()> {
 /// Write the beginning of an AMF0 ECMA array (4-byte count).
 pub fn write_ecma_array_begin(buf: &mut Buffer, count: u32) -> Result<()> {
     buf.write(&[Amf0Type::EcmaArray as u8]).map_err(|_| ErrorCode::Internal)?;
-    let net_count = count.to_be();
-    buf.write(&net_count.to_be_bytes()).map_err(|_| ErrorCode::Internal)?;
+    buf.write(&count.to_be_bytes()).map_err(|_| ErrorCode::Internal)?;
     Ok(())
 }
 
@@ -321,4 +316,84 @@ fn skip_value_depth(buf: &mut Buffer, depth: i32) -> Result<()> {
 /// Skip an AMF0 value.
 pub fn skip_value(buf: &mut Buffer) -> Result<()> {
     skip_value_depth(buf, 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn string_wire_format_is_big_endian() {
+        let mut buf = Buffer::new();
+        write_string(&mut buf, "abc").unwrap();
+        // marker(1) + len(2, big-endian) + bytes
+        assert_eq!(buf.peek(), &[0x02, 0x00, 0x03, b'a', b'b', b'c']);
+    }
+
+    #[test]
+    fn number_round_trips() {
+        let mut buf = Buffer::new();
+        write_number(&mut buf, 42.5).unwrap();
+        assert_eq!(read_type(&mut buf).unwrap(), Amf0Type::Number);
+        assert_eq!(read_number(&mut buf).unwrap(), 42.5);
+    }
+
+    #[test]
+    fn boolean_round_trips() {
+        let mut buf = Buffer::new();
+        write_boolean(&mut buf, true).unwrap();
+        assert_eq!(read_type(&mut buf).unwrap(), Amf0Type::Boolean);
+        assert!(read_boolean(&mut buf).unwrap());
+    }
+
+    #[test]
+    fn string_round_trips_through_read_string() {
+        let mut buf = Buffer::new();
+        write_string(&mut buf, "hello").unwrap();
+        let mut out = [0u8; 16];
+        let len = read_string(&mut buf, &mut out).unwrap();
+        assert_eq!(&out[..len], b"hello");
+    }
+
+    #[test]
+    fn long_string_wire_format_is_big_endian() {
+        let mut buf = Buffer::new();
+        write_long_string(&mut buf, "x").unwrap();
+        assert_eq!(buf.peek(), &[0x0C, 0x00, 0x00, 0x00, 0x01, b'x']);
+    }
+
+    #[test]
+    fn object_key_wire_format_is_big_endian() {
+        let mut buf = Buffer::new();
+        write_object_key(&mut buf, "k").unwrap();
+        assert_eq!(buf.peek(), &[0x00, 0x01, b'k']);
+    }
+
+    #[test]
+    fn ecma_array_begin_wire_format_is_big_endian() {
+        let mut buf = Buffer::new();
+        write_ecma_array_begin(&mut buf, 2).unwrap();
+        assert_eq!(buf.peek(), &[0x08, 0x00, 0x00, 0x00, 0x02]);
+    }
+
+    #[test]
+    fn skip_value_skips_nested_object() {
+        let mut buf = Buffer::new();
+        write_object_begin(&mut buf).unwrap();
+        write_object_key(&mut buf, "a").unwrap();
+        write_number(&mut buf, 1.0).unwrap();
+        write_object_end(&mut buf).unwrap();
+        write_number(&mut buf, 2.0).unwrap();
+
+        skip_value(&mut buf).unwrap();
+        assert_eq!(read_type(&mut buf).unwrap(), Amf0Type::Number);
+        assert_eq!(read_number(&mut buf).unwrap(), 2.0);
+    }
+
+    #[test]
+    fn is_object_end_detects_marker() {
+        let mut buf = Buffer::new();
+        write_object_end(&mut buf).unwrap();
+        assert!(is_object_end(&mut buf));
+    }
 }

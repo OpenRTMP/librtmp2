@@ -209,3 +209,60 @@ impl Clone for Buffer {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn write_then_read_round_trips() {
+        let mut buf = Buffer::new();
+        buf.write(b"hello world").unwrap();
+        assert_eq!(buf.available(), 11);
+        let mut out = [0u8; 5];
+        buf.read(&mut out).unwrap();
+        assert_eq!(&out, b"hello");
+        assert_eq!(buf.available(), 6);
+        assert_eq!(buf.peek(), b" world");
+    }
+
+    #[test]
+    fn read_past_available_errors() {
+        let mut buf = Buffer::new();
+        buf.write(b"ab").unwrap();
+        let mut out = [0u8; 3];
+        assert!(buf.read(&mut out).is_err());
+    }
+
+    #[test]
+    fn drain_skips_unread_bytes() {
+        let mut buf = Buffer::new();
+        buf.write(b"abcdef").unwrap();
+        buf.drain(3);
+        assert_eq!(buf.peek(), b"def");
+    }
+
+    #[test]
+    fn grows_past_initial_capacity() {
+        let mut buf = Buffer::new();
+        let chunk = vec![0xAB_u8; BUFFER_INITIAL_SIZE * 3];
+        buf.write(&chunk).unwrap();
+        assert_eq!(buf.available(), chunk.len());
+        assert_eq!(buf.peek(), chunk.as_slice());
+    }
+
+    #[test]
+    fn reset_clears_buffer() {
+        let mut buf = Buffer::new();
+        buf.write(b"data").unwrap();
+        buf.reset();
+        assert_eq!(buf.available(), 0);
+        assert_eq!(buf.peek(), b"");
+    }
+
+    #[test]
+    fn write_over_max_size_errors() {
+        let mut buf = Buffer::new();
+        assert!(buf.write(&vec![0u8; BUFFER_MAX_SIZE + 1]).is_err());
+    }
+}

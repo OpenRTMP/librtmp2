@@ -3,7 +3,7 @@
 //! Mirrors `src/message/control.h` and `src/message/control.c`.
 
 use crate::buffer::Buffer;
-use crate::bytes::{byteswap16, hton32, ntoh32};
+use crate::bytes::ntoh32;
 use crate::types::Result;
 use crate::types::ErrorCode;
 
@@ -32,70 +32,58 @@ const MAX_CHUNK_SIZE: u32 = 0xFFFFFF;
 /// Write a SetChunkSize control message.
 pub fn write_set_chunk_size(buf: &mut Buffer, chunk_size: u32) -> Result<()> {
     buf.write(&[CTRL_SET_CHUNK_SIZE]).map_err(|_| ErrorCode::Internal)?;
-    let net = hton32(chunk_size);
-    buf.write(&net.to_be_bytes()).map_err(|_| ErrorCode::Internal)?;
+    buf.write(&chunk_size.to_be_bytes()).map_err(|_| ErrorCode::Internal)?;
     Ok(())
 }
 
 /// Write an AbortMessage control message.
 pub fn write_abort_message(buf: &mut Buffer, csid: u32) -> Result<()> {
     buf.write(&[CTRL_ABORT_MESSAGE]).map_err(|_| ErrorCode::Internal)?;
-    let net = hton32(csid);
-    buf.write(&net.to_be_bytes()).map_err(|_| ErrorCode::Internal)?;
+    buf.write(&csid.to_be_bytes()).map_err(|_| ErrorCode::Internal)?;
     Ok(())
 }
 
 /// Write an Acknowledgement control message.
 pub fn write_acknowledgement(buf: &mut Buffer, sequence_number: u32) -> Result<()> {
     buf.write(&[CTRL_ACKNOWLEDGEMENT]).map_err(|_| ErrorCode::Internal)?;
-    let net = hton32(sequence_number);
-    buf.write(&net.to_be_bytes()).map_err(|_| ErrorCode::Internal)?;
+    buf.write(&sequence_number.to_be_bytes()).map_err(|_| ErrorCode::Internal)?;
     Ok(())
 }
 
 /// Write a WindowAckSize control message.
 pub fn write_window_ack_size(buf: &mut Buffer, window_size: u32) -> Result<()> {
     buf.write(&[CTRL_WINDOW_ACK_SIZE]).map_err(|_| ErrorCode::Internal)?;
-    let net = hton32(window_size);
-    buf.write(&net.to_be_bytes()).map_err(|_| ErrorCode::Internal)?;
+    buf.write(&window_size.to_be_bytes()).map_err(|_| ErrorCode::Internal)?;
     Ok(())
 }
 
 /// Write a SetPeerBandwidth control message.
 pub fn write_set_peer_bandwidth(buf: &mut Buffer, window_size: u32, limit_type: u8) -> Result<()> {
     buf.write(&[CTRL_SET_PEER_BANDWIDTH]).map_err(|_| ErrorCode::Internal)?;
-    let net = hton32(window_size);
-    buf.write(&net.to_be_bytes()).map_err(|_| ErrorCode::Internal)?;
+    buf.write(&window_size.to_be_bytes()).map_err(|_| ErrorCode::Internal)?;
     buf.write(&[limit_type]).map_err(|_| ErrorCode::Internal)?;
     Ok(())
 }
 
 /// Write a User Control Stream Begin event.
 pub fn write_user_control_stream_begin(buf: &mut Buffer, stream_id: u32) -> Result<()> {
-    let evt = byteswap16(UCTRL_STREAM_BEGIN);
-    buf.write(&evt.to_be_bytes()).map_err(|_| ErrorCode::Internal)?;
-    let net = hton32(stream_id);
-    buf.write(&net.to_be_bytes()).map_err(|_| ErrorCode::Internal)?;
+    buf.write(&UCTRL_STREAM_BEGIN.to_be_bytes()).map_err(|_| ErrorCode::Internal)?;
+    buf.write(&stream_id.to_be_bytes()).map_err(|_| ErrorCode::Internal)?;
     Ok(())
 }
 
 /// Write a User Control Stream EOF event.
 pub fn write_user_control_stream_eof(buf: &mut Buffer, stream_id: u32) -> Result<()> {
-    let evt = byteswap16(UCTRL_STREAM_EOF);
-    buf.write(&evt.to_be_bytes()).map_err(|_| ErrorCode::Internal)?;
-    let net = hton32(stream_id);
-    buf.write(&net.to_be_bytes()).map_err(|_| ErrorCode::Internal)?;
+    buf.write(&UCTRL_STREAM_EOF.to_be_bytes()).map_err(|_| ErrorCode::Internal)?;
+    buf.write(&stream_id.to_be_bytes()).map_err(|_| ErrorCode::Internal)?;
     Ok(())
 }
 
 /// Write a User Control SetBufferLength event.
 pub fn write_user_control_set_buffer_length(buf: &mut Buffer, stream_id: u32, ms: u32) -> Result<()> {
-    let evt = byteswap16(UCTRL_SET_BUFFER_LENGTH);
-    buf.write(&evt.to_be_bytes()).map_err(|_| ErrorCode::Internal)?;
-    let net_sid = hton32(stream_id);
-    buf.write(&net_sid.to_be_bytes()).map_err(|_| ErrorCode::Internal)?;
-    let net_ms = hton32(ms);
-    buf.write(&net_ms.to_be_bytes()).map_err(|_| ErrorCode::Internal)?;
+    buf.write(&UCTRL_SET_BUFFER_LENGTH.to_be_bytes()).map_err(|_| ErrorCode::Internal)?;
+    buf.write(&stream_id.to_be_bytes()).map_err(|_| ErrorCode::Internal)?;
+    buf.write(&ms.to_be_bytes()).map_err(|_| ErrorCode::Internal)?;
     Ok(())
 }
 
@@ -140,4 +128,59 @@ pub fn read_user_control(data: &[u8], param2: bool) -> Result<(u16, u32, Option<
         None
     };
     Ok((event_type, param1, p2))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn set_chunk_size_round_trips_and_is_big_endian() {
+        let mut buf = Buffer::new();
+        write_set_chunk_size(&mut buf, 4096).unwrap();
+        assert_eq!(buf.peek(), &[CTRL_SET_CHUNK_SIZE, 0x00, 0x00, 0x10, 0x00]);
+        assert_eq!(read_set_chunk_size(&buf.peek()[1..]).unwrap(), 4096);
+    }
+
+    #[test]
+    fn set_chunk_size_rejects_out_of_range() {
+        assert!(read_set_chunk_size(&[0, 0, 0, 0]).is_err());
+        assert!(read_set_chunk_size(&[0xFF, 0xFF, 0xFF, 0xFF]).is_err());
+    }
+
+    #[test]
+    fn window_ack_size_round_trips() {
+        let mut buf = Buffer::new();
+        write_window_ack_size(&mut buf, 2_500_000).unwrap();
+        assert_eq!(read_window_ack_size(&buf.peek()[1..]).unwrap(), 2_500_000);
+    }
+
+    #[test]
+    fn set_peer_bandwidth_round_trips() {
+        let mut buf = Buffer::new();
+        write_set_peer_bandwidth(&mut buf, 2_500_000, 2).unwrap();
+        let (window, limit_type) = read_set_peer_bandwidth(&buf.peek()[1..]).unwrap();
+        assert_eq!(window, 2_500_000);
+        assert_eq!(limit_type, 2);
+    }
+
+    #[test]
+    fn user_control_stream_begin_wire_format_is_big_endian() {
+        let mut buf = Buffer::new();
+        write_user_control_stream_begin(&mut buf, 1).unwrap();
+        assert_eq!(buf.peek(), &[0x00, 0x00, 0x00, 0x00, 0x00, 0x01]);
+        let (event_type, stream_id, _) = read_user_control(buf.peek(), false).unwrap();
+        assert_eq!(event_type, UCTRL_STREAM_BEGIN);
+        assert_eq!(stream_id, 1);
+    }
+
+    #[test]
+    fn user_control_set_buffer_length_round_trips_both_params() {
+        let mut buf = Buffer::new();
+        write_user_control_set_buffer_length(&mut buf, 1, 3000).unwrap();
+        let (event_type, stream_id, ms) = read_user_control(buf.peek(), true).unwrap();
+        assert_eq!(event_type, UCTRL_SET_BUFFER_LENGTH);
+        assert_eq!(stream_id, 1);
+        assert_eq!(ms, Some(3000));
+    }
 }

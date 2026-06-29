@@ -3,7 +3,7 @@
 //! Mirrors `src/handshake/handshake.h` and `src/handshake/handshake.c`.
 
 use crate::buffer::Buffer;
-use crate::bytes::{hton32, ntoh32};
+use crate::bytes::ntoh32;
 use crate::types::Result;
 use crate::types::ErrorCode;
 
@@ -135,14 +135,13 @@ pub fn server_read_c1(hs: &mut Handshake, buf: &mut Buffer) -> Result<()> {
     // Build S1
     let mut s1 = vec![0u8; HANDSHAKE_SIZE];
     let server_time = get_time();
-    let net_time = hton32(server_time);
-    s1[..4].copy_from_slice(&net_time.to_be_bytes());
+    s1[..4].copy_from_slice(&server_time.to_be_bytes());
     // bytes 4-7 = 0
     fill_random(&mut s1[8..]);
 
     // S2 echoes C1 with time2 replaced
     let mut s2 = c1.clone();
-    s2[..4].copy_from_slice(&net_time.to_be_bytes());
+    s2[..4].copy_from_slice(&server_time.to_be_bytes());
 
     hs.out.reset();
     hs.out.write(&s1).map_err(|_| ErrorCode::Internal)?;
@@ -178,11 +177,10 @@ pub fn client_init(hs: &mut Handshake) {
 pub fn client_generate_c0c1(hs: &mut Handshake) -> Result<()> {
     let client_time = get_time();
     hs.peer_time = client_time;
-    let net_time = hton32(client_time);
 
     let mut c0c1 = vec![0u8; 1 + HANDSHAKE_SIZE];
     c0c1[0] = RTMP_VERSION;
-    c0c1[1..5].copy_from_slice(&net_time.to_be_bytes());
+    c0c1[1..5].copy_from_slice(&client_time.to_be_bytes());
     // bytes 5-8 = 0
     fill_random(&mut c0c1[9..]);
 
@@ -219,8 +217,7 @@ pub fn client_read_s1(hs: &mut Handshake, buf: &mut Buffer) -> Result<()> {
 
     // C2 echoes S1 with time2 replaced
     let mut c2 = s1.clone();
-    let c2_time2 = hton32(get_time());
-    c2[..4].copy_from_slice(&c2_time2.to_be_bytes());
+    c2[..4].copy_from_slice(&get_time().to_be_bytes());
 
     hs.out.reset();
     hs.out.write(&c2).map_err(|_| ErrorCode::Internal)?;
@@ -244,4 +241,78 @@ pub fn client_read_s2(hs: &mut Handshake, buf: &mut Buffer) -> Result<()> {
 // Fix the s1 building in server_read_c1
 fn ntoh24(buf: &[u8]) -> u32 {
     ((buf[0] as u32) << 16) | ((buf[1] as u32) << 8) | (buf[2] as u32)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn full_client_server_handshake_completes() {
+        let mut client = Handshake::default();
+        let mut server = Handshake::default();
+        client_init(&mut client);
+        server_init(&mut server);
+
+        // Client sends C0+C1
+        client_generate_c0c1(&mut client).unwrap();
+        let c0c1 = client.out.peek().to_vec();
+        client.out.reset();
+
+        // Server reads C0+C1, generates S0+S1+S2
+        let mut server_in = Buffer::new();
+        server_in.write(&c0c1).unwrap();
+        server_read_c0(&mut server, &mut server_in).unwrap();
+        server_read_c1(&mut server, &mut server_in).unwrap();
+        let s1s2 = server.out.peek().to_vec();
+
+        assert_eq!(server.state, HandshakeState::ServerWaitC2);
+        assert_eq!(s1s2.len(), HANDSHAKE_SIZE * 2);
+
+        // Client reads S0 (we only sent S1+S2 above; prepend version byte)
+        let mut s0s1s2 = vec![RTMP_VERSION];
+        s0s1s2.extend_from_slice(&s1s2);
+        let mut client_in = Buffer::new();
+        client_in.write(&s0s1s2).unwrap();
+        client_read_s0(&mut client, &mut client_in).unwrap();
+        client_read_s1(&mut client, &mut client_in).unwrap();
+        let c2 = client.out.peek().to_vec();
+        assert_eq!(client.state, HandshakeState::ClientWaitS2);
+
+        // Server reads C2
+        let mut server_in2 = Buffer::new();
+        server_in2.write(&c2).unwrap();
+        server_read_c2(&mut server, &mut server_in2).unwrap();
+        assert!(server.is_complete());
+
+        // Client reads S2 (echo of C1, any 1536 bytes)
+        let mut client_in2 = Buffer::new();
+        client_in2.write(&vec![0u8; HANDSHAKE_SIZE]).unwrap();
+        client_read_s2(&mut client, &mut client_in2).unwrap();
+        assert!(client.is_complete());
+    }
+
+    #[test]
+    fn server_read_c0_rejects_wrong_version() {
+        let mut hs = Handshake::default();
+        let mut buf = Buffer::new();
+        buf.write(&[0x99]).unwrap();
+        assert!(server_read_c0(&mut hs, &mut buf).is_err());
+    }
+
+    #[test]
+    fn s1_time_field_matches_wall_clock_in_big_endian() {
+        let mut hs = Handshake::default();
+        server_init(&mut hs);
+        let c1 = vec![0u8; HANDSHAKE_SIZE];
+        let mut buf = Buffer::new();
+        buf.write(&c1).unwrap();
+        let before = get_time();
+        server_read_c1(&mut hs, &mut buf).unwrap();
+        let after = get_time();
+
+        let s1 = &hs.out.peek()[..HANDSHAKE_SIZE];
+        let time_from_s1 = u32::from_be_bytes([s1[0], s1[1], s1[2], s1[3]]);
+        assert!(time_from_s1 >= before && time_from_s1 <= after);
+    }
 }

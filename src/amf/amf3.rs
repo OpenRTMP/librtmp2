@@ -178,3 +178,58 @@ pub fn write_string(buf: &mut Buffer, s: &str) -> Result<()> {
     buf.write(s.as_bytes()).map_err(|_| ErrorCode::Internal)?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn integer_round_trips_small_value() {
+        let mut buf = Buffer::new();
+        write_integer(&mut buf, 5).unwrap();
+        assert_eq!(read_type(&mut buf).unwrap(), AMF3_INTEGER);
+        assert_eq!(read_integer(&mut buf).unwrap(), 5);
+    }
+
+    #[test]
+    fn integer_round_trips_multi_byte_u29() {
+        let mut buf = Buffer::new();
+        write_integer(&mut buf, 1_000_000).unwrap();
+        assert_eq!(read_type(&mut buf).unwrap(), AMF3_INTEGER);
+        assert_eq!(read_integer(&mut buf).unwrap(), 1_000_000);
+    }
+
+    #[test]
+    fn double_round_trips() {
+        let mut buf = Buffer::new();
+        write_double(&mut buf, 3.5).unwrap();
+        assert_eq!(read_type(&mut buf).unwrap(), AMF3_DOUBLE);
+        assert_eq!(read_double(&mut buf).unwrap(), 3.5);
+    }
+
+    #[test]
+    fn boolean_round_trips() {
+        let mut buf = Buffer::new();
+        buf.write(&[AMF3_TRUE]).unwrap();
+        assert!(read_boolean(&mut buf).unwrap());
+        let mut buf = Buffer::new();
+        buf.write(&[AMF3_FALSE]).unwrap();
+        assert!(!read_boolean(&mut buf).unwrap());
+    }
+
+    #[test]
+    fn string_round_trips() {
+        let mut buf = Buffer::new();
+        write_string(&mut buf, "abc").unwrap();
+        let mut out = [0u8; 16];
+        let len = read_string(&mut buf, &mut out).unwrap();
+        assert_eq!(&out[..len], b"abc");
+    }
+
+    #[test]
+    fn null_round_trips() {
+        let mut buf = Buffer::new();
+        write_null(&mut buf).unwrap();
+        assert!(read_null(&mut buf).is_ok());
+    }
+}
