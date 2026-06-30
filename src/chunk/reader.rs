@@ -78,6 +78,12 @@ pub fn chunk_read(
         return Ok(0);
     }
 
+    // Compressed headers (fmt 1/2/3) inherit fields from prior stream state.
+    // A compressed chunk on an unknown CSID is a protocol error.
+    if fmt != 0 && reg.get(csid).is_none() {
+        return Err(ErrorCode::Chunk);
+    }
+
     // Peek at the 3-byte timestamp field (for fmt 0/1/2) to decide ext_ts
     // without consuming anything.
     let ext_ts_from_header = if fmt <= 2 {
@@ -94,7 +100,9 @@ pub fn chunk_read(
     // timestamp whenever the original message had ts >= 0xFFFFFF.  Inherit
     // the flag from the stream's stored state.
     let ext_ts_from_stream = if fmt == 3 {
-        reg.get(csid).map(|s| s.type0_ext_ts).unwrap_or(false)
+        reg.get(csid)
+            .map(|s| s.type0_ext_ts)
+            .ok_or(ErrorCode::Chunk)?
     } else {
         false
     };
@@ -117,7 +125,10 @@ pub fn chunk_read(
                 | ((peek[off + 1] as u32) << 8)
                 | (peek[off + 2] as u32)
         }
-        _ => reg.get(csid).map(|s| s.type0_msg_length).unwrap_or(0),
+        _ => reg
+            .get(csid)
+            .map(|s| s.type0_msg_length)
+            .ok_or(ErrorCode::Chunk)?,
     };
 
     let (chunk_sz_for_avail, reassembly_read_for_avail) = reg
@@ -206,9 +217,11 @@ pub fn chunk_read(
             stream.type0_timestamp = final_timestamp;
             stream.type0_msg_length = msg_length;
             stream.type0_msg_type_id = msg_type_id;
+            stream.type0_ext_ts = ext_ts;
         }
         2 => {
             stream.type0_timestamp = final_timestamp;
+            stream.type0_ext_ts = ext_ts;
         }
         _ => {}
     }
