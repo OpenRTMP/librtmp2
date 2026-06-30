@@ -1,12 +1,12 @@
 # Bug scan progress
 
-Last scanned: handshake (2026-06-29)
+Last scanned: chunk (2026-06-30)
 
 ## Modules
 
 - [x] core — Memory, logging, errors, buffer
 - [x] handshake — C0/C1/C2 ↔ S0/S1/S2
-- [ ] chunk — Chunk reader/writer/state
+- [x] chunk — Chunk reader/writer/state
 - [ ] message — Message reassembly, control, commands
 - [ ] amf — AMF0 + AMF3
 - [ ] flv — Audio/video/script tags
@@ -14,6 +14,21 @@ Last scanned: handshake (2026-06-29)
 - [ ] session — State machine, publish/play flows
 - [ ] server — Server listener
 - [ ] client — Outbound client
+
+## Findings (2026-06-30 chunk pass)
+
+- reader.rs: extended-timestamp check used the initial `available` byte count instead
+  of `buf.available()` after consuming headers. A partial read with only the
+  message header present passed the stale check and returned `Io` error, tearing
+  down the connection instead of waiting for more data (`Ok(0)`).
+- reader.rs: fmt=3 continuation chunks never consumed the 4-byte extended
+  timestamp that `chunk_write` emits when `timestamp >= 0xFFFFFF`. Fragmented
+  large-timestamp messages were mis-parsed (payload shifted by 4 bytes).
+- reader.rs: fmt=0/fmt=1 did not reset partial reassembly state. A new message
+  on the same csid after an incomplete prior message could false-complete with
+  corrupted payload (stale `reassembly_bytes_read` vs new `msg_length`).
+- reader.rs: `can_grow_reassembly` / `MAX_REASSEMBLY_BYTES_PER_CONN` was never
+  enforced during reassembly; added per-chunk growth check before writing.
 
 ## Findings (2026-06-29 handshake pass)
 
