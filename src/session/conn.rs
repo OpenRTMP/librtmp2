@@ -282,24 +282,29 @@ impl Conn {
                         .as_ref()
                         .map(|s| s.name.clone())
                         .unwrap_or_default();
-                    let owned = payload.to_vec();
-                    if let Some(ref cb) = self.on_frame_cb {
+                    // Push first so the payload lives in stable heap storage
+                    // owned by pending_relay before we hand a raw pointer to
+                    // the FFI callback. Moving a Vec doesn't move its heap
+                    // buffer, so the pointer remains valid for the connection
+                    // lifetime (or until pending_relay is drained).
+                    self.pending_relay.push(RelayFrame {
+                        frame_type: FrameType::Audio,
+                        timestamp: msg.timestamp,
+                        payload: payload.to_vec(),
+                        app: self.app.clone(),
+                        stream_name,
+                    });
+                    if let Some(cb) = self.on_frame_cb {
+                        let relay = self.pending_relay.last().unwrap();
                         let mut frame = Frame {
                             frame_type: FrameType::Audio,
                             timestamp: msg.timestamp,
                             ..Default::default()
                         };
-                        frame.data = owned.as_ptr();
-                        frame.size = owned.len() as u32;
+                        frame.data = relay.payload.as_ptr();
+                        frame.size = relay.payload.len() as u32;
                         cb(&frame);
                     }
-                    self.pending_relay.push(RelayFrame {
-                        frame_type: FrameType::Audio,
-                        timestamp: msg.timestamp,
-                        payload: owned,
-                        app: self.app.clone(),
-                        stream_name,
-                    });
                 }
                 Ok(())
             }
@@ -315,24 +320,24 @@ impl Conn {
                         .as_ref()
                         .map(|s| s.name.clone())
                         .unwrap_or_default();
-                    let owned = payload.to_vec();
-                    if let Some(ref cb) = self.on_frame_cb {
+                    self.pending_relay.push(RelayFrame {
+                        frame_type: FrameType::Video,
+                        timestamp: msg.timestamp,
+                        payload: payload.to_vec(),
+                        app: self.app.clone(),
+                        stream_name,
+                    });
+                    if let Some(cb) = self.on_frame_cb {
+                        let relay = self.pending_relay.last().unwrap();
                         let mut frame = Frame {
                             frame_type: FrameType::Video,
                             timestamp: msg.timestamp,
                             ..Default::default()
                         };
-                        frame.data = owned.as_ptr();
-                        frame.size = owned.len() as u32;
+                        frame.data = relay.payload.as_ptr();
+                        frame.size = relay.payload.len() as u32;
                         cb(&frame);
                     }
-                    self.pending_relay.push(RelayFrame {
-                        frame_type: FrameType::Video,
-                        timestamp: msg.timestamp,
-                        payload: owned,
-                        app: self.app.clone(),
-                        stream_name,
-                    });
                 }
                 Ok(())
             }

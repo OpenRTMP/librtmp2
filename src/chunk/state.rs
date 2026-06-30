@@ -97,13 +97,22 @@ impl ChunkRegistry {
 
     /// Get or create a chunk stream for the given csid.
     pub fn get_or_create(&mut self, csid: u32) -> Result<&mut ChunkStream> {
-        // Check if we need to grow
+        // Check if this csid is already open.
         let idx = self.streams.iter().position(|s| s.csid == csid && s.in_use);
         if let Some(i) = idx {
             return Ok(&mut self.streams[i]);
         }
 
-        // Find a free slot or add a new one
+        // Reuse a free slot before growing the vec; this prevents the stream
+        // count from monotonically climbing to MAX_CHUNK_STREAMS on connections
+        // that open and close many streams across their lifetime.
+        if let Some(i) = self.streams.iter().position(|s| !s.in_use) {
+            self.streams[i].csid = csid;
+            self.streams[i].in_use = true;
+            self.streams[i].reset(self.default_chunk_size);
+            return Ok(&mut self.streams[i]);
+        }
+
         if self.streams.len() >= MAX_CHUNK_STREAMS {
             return Err(ErrorCode::Chunk);
         }

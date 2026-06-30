@@ -8,38 +8,33 @@
 use crate::types::ErrorCode;
 use crate::types::Result;
 
+#[cfg(feature = "tls")]
+use openssl::ssl::{SslAcceptor, SslFiletype, SslMethod};
+#[cfg(feature = "tls")]
+use std::sync::Arc;
+
 /// Transport wraps a connected socket fd and presents a single send/recv API.
 pub struct Transport {
     /// underlying socket file descriptor
     fd: i32,
     /// whether TLS is enabled
     is_tls: bool,
-    /// TLS handshake state (server-side)
-    #[cfg(feature = "tls")]
-    tls_hs_state: i8,
-    #[cfg(feature = "tls")]
-    tls_hs_want_write: bool,
 }
 
-/// Server-side TLS context: holds the certificate/key shared across connections.
+/// Server-side TLS context: holds the validated SSL acceptor shared across connections.
+///
+/// `new_server` validates the certificate and private key at construction time
+/// so configuration errors surface immediately rather than at first connection.
+/// The actual per-connection TLS I/O is performed by `Transport::wrap_tls_server`.
 pub struct TlsCtx {
     #[cfg(feature = "tls")]
-    cert_file: String,
-    #[cfg(feature = "tls")]
-    key_file: String,
+    pub(crate) acceptor: Arc<SslAcceptor>,
 }
 
 impl Transport {
     /// Wrap a connected fd as a plaintext transport.
     pub fn new_plain(fd: i32) -> Self {
-        Self {
-            fd,
-            is_tls: false,
-            #[cfg(feature = "tls")]
-            tls_hs_state: 0,
-            #[cfg(feature = "tls")]
-            tls_hs_want_write: false,
-        }
+        Self { fd, is_tls: false }
     }
 
     /// Get the underlying file descriptor.
@@ -138,15 +133,28 @@ impl Transport {
 
 impl TlsCtx {
     /// Build a server TLS context from PEM cert-chain and private-key files.
+    ///
+    /// Validates the certificate and private key immediately; returns an error
+    /// if the files cannot be read, are malformed, or the key doesn't match the
+    /// certificate. This surfaces misconfiguration at startup rather than at the
+    /// first incoming connection.
     #[cfg(feature = "tls")]
     pub fn new_server(cert_file: &str, key_file: &str) -> Result<Self> {
+        let mut builder =
+            SslAcceptor::mozilla_intermediate(SslMethod::tls()).map_err(|_| ErrorCode::Internal)?;
+        builder
+            .set_certificate_chain_file(cert_file)
+            .map_err(|_| ErrorCode::Internal)?;
+        builder
+            .set_private_key_file(key_file, SslFiletype::PEM)
+            .map_err(|_| ErrorCode::Internal)?;
+        builder.check_private_key().map_err(|_| ErrorCode::Internal)?;
         Ok(Self {
-            cert_file: cert_file.to_string(),
-            key_file: key_file.to_string(),
+            acceptor: Arc::new(builder.build()),
         })
     }
 
-    /// Build a server TLS context (no-op without TLS feature).
+    /// TLS is not available in this build.
     #[cfg(not(feature = "tls"))]
     pub fn new_server(_cert_file: &str, _key_file: &str) -> Result<Self> {
         Err(ErrorCode::Unsupported)

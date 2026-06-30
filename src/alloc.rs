@@ -3,8 +3,6 @@
 //! Mirrors `src/core/alloc.h` and `src/core/alloc.c`.
 //! Provides pluggable allocation functions with standard defaults.
 
-use std::alloc::{self, Layout};
-use std::ffi::c_void;
 
 /// Allocator function type.
 pub type AllocFn = fn(size: usize, userdata: *mut u8) -> *mut u8;
@@ -22,29 +20,19 @@ fn std_alloc(size: usize, _ud: *mut u8) -> *mut u8 {
     if size == 0 {
         return std::ptr::null_mut();
     }
-    unsafe {
-        let layout = Layout::from_size_align(size, 1).unwrap_or_else(|_| std::process::abort());
-        alloc::alloc(layout) as *mut u8
-    }
+    unsafe { libc::malloc(size) as *mut u8 }
 }
 
 fn std_realloc(ptr: *mut u8, size: usize, _ud: *mut u8) -> *mut u8 {
-    unsafe {
-        if ptr.is_null() {
-            return std_alloc(size, _ud);
-        }
-        // We don't know the original layout; use size=1 alignment as default
-        let old_layout = Layout::from_size_align(1, 1).unwrap_or_else(|_| std::process::abort());
-        alloc::realloc(ptr as *mut u8, old_layout, size) as *mut u8
+    if ptr.is_null() {
+        return std_alloc(size, _ud);
     }
+    unsafe { libc::realloc(ptr as *mut libc::c_void, size) as *mut u8 }
 }
 
 fn std_free(ptr: *mut u8, _ud: *mut u8) {
     if !ptr.is_null() {
-        unsafe {
-            let layout = Layout::from_size_align(1, 1).unwrap_or_else(|_| std::process::abort());
-            alloc::dealloc(ptr, layout);
-        }
+        unsafe { libc::free(ptr as *mut libc::c_void) }
     }
 }
 

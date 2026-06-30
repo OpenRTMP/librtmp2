@@ -42,20 +42,21 @@ pub fn modex_parse(modex: &mut Modex, data: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// Write a ModEx extension. Returns bytes written.
+/// Write a ModEx extension. Returns bytes written, or 0 if the buffer is too small.
 pub fn modex_write(modex: &Modex, buf: &mut [u8]) -> usize {
-    if buf.is_empty() {
-        return 0;
-    }
-
-    buf[0] = MODEX_MARKER | modex.modex_type as u8;
-
     match modex.modex_type {
-        ModexType::Nop => 1,
+        ModexType::Nop => {
+            if buf.is_empty() {
+                return 0;
+            }
+            buf[0] = MODEX_MARKER | ModexType::Nop as u8;
+            1
+        }
         ModexType::Timestamp => {
             if buf.len() < 9 {
                 return 0;
             }
+            buf[0] = MODEX_MARKER | ModexType::Timestamp as u8;
             let mut tmp = modex.offset;
             for i in (0..8).rev() {
                 buf[1 + i] = (tmp & 0xFF) as u8;
