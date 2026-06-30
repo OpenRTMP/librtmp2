@@ -39,7 +39,10 @@ fn on_frame(frame: &Frame) {
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().collect();
-    let url = args.get(1).cloned().unwrap_or_else(|| "rtmp://127.0.0.1:1935/live/test".to_string());
+    let url = args
+        .get(1)
+        .cloned()
+        .unwrap_or_else(|| "rtmp://127.0.0.1:1935/live/test".to_string());
     let timeout_s: u64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(25);
 
     let mut client = Client::new();

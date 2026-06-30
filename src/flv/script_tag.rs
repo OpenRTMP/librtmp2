@@ -2,9 +2,9 @@
 //!
 //! Mirrors `src/flv/script_tag.h` and `src/flv/script_tag.c`.
 
-use crate::buffer::Buffer;
-use crate::types::{ScriptTag, Result, ErrorCode};
 use crate::amf::amf0;
+use crate::buffer::Buffer;
+use crate::types::{ErrorCode, Result, ScriptTag};
 
 /// Parse an FLV script tag.
 pub fn parse(data: &[u8], tag: &mut ScriptTag) -> Result<()> {

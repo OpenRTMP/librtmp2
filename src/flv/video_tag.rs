@@ -2,7 +2,7 @@
 //!
 //! Mirrors `src/flv/video_tag.h` and `src/flv/video_tag.c`.
 
-use crate::types::{VideoTag, VideoCodec, Result, ErrorCode};
+use crate::types::{ErrorCode, Result, VideoCodec, VideoTag};
 
 /// Parse an FLV video tag.
 ///
@@ -33,7 +33,8 @@ pub fn parse(data: &[u8], tag: &mut VideoTag) -> Result<()> {
 
     if data.len() >= 5 && tag.codec == VideoCodec::H264 {
         tag.avc_packet_type = data[1];
-        tag.composition_time = ((data[2] as u32) << 16) | ((data[3] as u32) << 8) | (data[4] as u32);
+        tag.composition_time =
+            ((data[2] as u32) << 16) | ((data[3] as u32) << 8) | (data[4] as u32);
     }
 
     tag.data = data.as_ptr();

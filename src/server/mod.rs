@@ -7,7 +7,7 @@ use std::os::unix::io::{AsRawFd, IntoRawFd};
 
 use crate::net;
 use crate::session::conn::Conn;
-use crate::transport::{Transport, TlsCtx};
+use crate::transport::{TlsCtx, Transport};
 use crate::types::*;
 
 /// Server object.

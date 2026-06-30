@@ -42,7 +42,10 @@ fn on_frame(frame: &Frame) {
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().collect();
-    let bind_addr = args.get(1).cloned().unwrap_or_else(|| "127.0.0.1:11935".to_string());
+    let bind_addr = args
+        .get(1)
+        .cloned()
+        .unwrap_or_else(|| "127.0.0.1:11935".to_string());
     let timeout_s: u64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(25);
     let min_frames: i64 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(1);
     let min_large: usize = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(0);
@@ -90,7 +93,9 @@ fn main() -> ExitCode {
     println!("[interop] video={video} audio={audio} bytes={bytes} max_frame={max_frame}");
 
     if !success {
-        eprintln!("[interop] FAIL: timed out (video={video} audio={audio}, need {min_frames} each)");
+        eprintln!(
+            "[interop] FAIL: timed out (video={video} audio={audio}, need {min_frames} each)"
+        );
         return ExitCode::from(2);
     }
     if min_large > 0 && max_frame < min_large {

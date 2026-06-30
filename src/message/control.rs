@@ -4,8 +4,8 @@
 
 use crate::buffer::Buffer;
 use crate::bytes::ntoh32;
-use crate::types::Result;
 use crate::types::ErrorCode;
+use crate::types::Result;
 
 /* Control message types */
 pub const CTRL_SET_CHUNK_SIZE: u8 = 0x01;
@@ -31,59 +31,80 @@ const MAX_CHUNK_SIZE: u32 = 0xFFFFFF;
 
 /// Write a SetChunkSize control message.
 pub fn write_set_chunk_size(buf: &mut Buffer, chunk_size: u32) -> Result<()> {
-    buf.write(&[CTRL_SET_CHUNK_SIZE]).map_err(|_| ErrorCode::Internal)?;
-    buf.write(&chunk_size.to_be_bytes()).map_err(|_| ErrorCode::Internal)?;
+    buf.write(&[CTRL_SET_CHUNK_SIZE])
+        .map_err(|_| ErrorCode::Internal)?;
+    buf.write(&chunk_size.to_be_bytes())
+        .map_err(|_| ErrorCode::Internal)?;
     Ok(())
 }
 
 /// Write an AbortMessage control message.
 pub fn write_abort_message(buf: &mut Buffer, csid: u32) -> Result<()> {
-    buf.write(&[CTRL_ABORT_MESSAGE]).map_err(|_| ErrorCode::Internal)?;
-    buf.write(&csid.to_be_bytes()).map_err(|_| ErrorCode::Internal)?;
+    buf.write(&[CTRL_ABORT_MESSAGE])
+        .map_err(|_| ErrorCode::Internal)?;
+    buf.write(&csid.to_be_bytes())
+        .map_err(|_| ErrorCode::Internal)?;
     Ok(())
 }
 
 /// Write an Acknowledgement control message.
 pub fn write_acknowledgement(buf: &mut Buffer, sequence_number: u32) -> Result<()> {
-    buf.write(&[CTRL_ACKNOWLEDGEMENT]).map_err(|_| ErrorCode::Internal)?;
-    buf.write(&sequence_number.to_be_bytes()).map_err(|_| ErrorCode::Internal)?;
+    buf.write(&[CTRL_ACKNOWLEDGEMENT])
+        .map_err(|_| ErrorCode::Internal)?;
+    buf.write(&sequence_number.to_be_bytes())
+        .map_err(|_| ErrorCode::Internal)?;
     Ok(())
 }
 
 /// Write a WindowAckSize control message.
 pub fn write_window_ack_size(buf: &mut Buffer, window_size: u32) -> Result<()> {
-    buf.write(&[CTRL_WINDOW_ACK_SIZE]).map_err(|_| ErrorCode::Internal)?;
-    buf.write(&window_size.to_be_bytes()).map_err(|_| ErrorCode::Internal)?;
+    buf.write(&[CTRL_WINDOW_ACK_SIZE])
+        .map_err(|_| ErrorCode::Internal)?;
+    buf.write(&window_size.to_be_bytes())
+        .map_err(|_| ErrorCode::Internal)?;
     Ok(())
 }
 
 /// Write a SetPeerBandwidth control message.
 pub fn write_set_peer_bandwidth(buf: &mut Buffer, window_size: u32, limit_type: u8) -> Result<()> {
-    buf.write(&[CTRL_SET_PEER_BANDWIDTH]).map_err(|_| ErrorCode::Internal)?;
-    buf.write(&window_size.to_be_bytes()).map_err(|_| ErrorCode::Internal)?;
+    buf.write(&[CTRL_SET_PEER_BANDWIDTH])
+        .map_err(|_| ErrorCode::Internal)?;
+    buf.write(&window_size.to_be_bytes())
+        .map_err(|_| ErrorCode::Internal)?;
     buf.write(&[limit_type]).map_err(|_| ErrorCode::Internal)?;
     Ok(())
 }
 
 /// Write a User Control Stream Begin event.
 pub fn write_user_control_stream_begin(buf: &mut Buffer, stream_id: u32) -> Result<()> {
-    buf.write(&UCTRL_STREAM_BEGIN.to_be_bytes()).map_err(|_| ErrorCode::Internal)?;
-    buf.write(&stream_id.to_be_bytes()).map_err(|_| ErrorCode::Internal)?;
+    buf.write(&UCTRL_STREAM_BEGIN.to_be_bytes())
+        .map_err(|_| ErrorCode::Internal)?;
+    buf.write(&stream_id.to_be_bytes())
+        .map_err(|_| ErrorCode::Internal)?;
     Ok(())
 }
 
 /// Write a User Control Stream EOF event.
 pub fn write_user_control_stream_eof(buf: &mut Buffer, stream_id: u32) -> Result<()> {
-    buf.write(&UCTRL_STREAM_EOF.to_be_bytes()).map_err(|_| ErrorCode::Internal)?;
-    buf.write(&stream_id.to_be_bytes()).map_err(|_| ErrorCode::Internal)?;
+    buf.write(&UCTRL_STREAM_EOF.to_be_bytes())
+        .map_err(|_| ErrorCode::Internal)?;
+    buf.write(&stream_id.to_be_bytes())
+        .map_err(|_| ErrorCode::Internal)?;
     Ok(())
 }
 
 /// Write a User Control SetBufferLength event.
-pub fn write_user_control_set_buffer_length(buf: &mut Buffer, stream_id: u32, ms: u32) -> Result<()> {
-    buf.write(&UCTRL_SET_BUFFER_LENGTH.to_be_bytes()).map_err(|_| ErrorCode::Internal)?;
-    buf.write(&stream_id.to_be_bytes()).map_err(|_| ErrorCode::Internal)?;
-    buf.write(&ms.to_be_bytes()).map_err(|_| ErrorCode::Internal)?;
+pub fn write_user_control_set_buffer_length(
+    buf: &mut Buffer,
+    stream_id: u32,
+    ms: u32,
+) -> Result<()> {
+    buf.write(&UCTRL_SET_BUFFER_LENGTH.to_be_bytes())
+        .map_err(|_| ErrorCode::Internal)?;
+    buf.write(&stream_id.to_be_bytes())
+        .map_err(|_| ErrorCode::Internal)?;
+    buf.write(&ms.to_be_bytes())
+        .map_err(|_| ErrorCode::Internal)?;
     Ok(())
 }
 

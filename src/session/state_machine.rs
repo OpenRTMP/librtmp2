@@ -2,7 +2,7 @@
 //!
 //! Mirrors `src/session/state_machine.h` and `src/session/state_machine.c`.
 
-use crate::types::{ConnState, Result, ErrorCode};
+use crate::types::{ConnState, ErrorCode, Result};
 
 static STATE_NAMES: &[&str] = &[
     "TCP_ACCEPTED",
@@ -28,5 +28,8 @@ pub fn conn_transition(current: &mut ConnState, new_state: ConnState) -> Result<
 
 /// Get the string name of a connection state.
 pub fn conn_state_str(state: ConnState) -> &'static str {
-    STATE_NAMES.get(state as usize).copied().unwrap_or("UNKNOWN")
+    STATE_NAMES
+        .get(state as usize)
+        .copied()
+        .unwrap_or("UNKNOWN")
 }

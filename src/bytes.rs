@@ -57,7 +57,10 @@ mod tests {
     fn byteswap_round_trips() {
         assert_eq!(byteswap16(byteswap16(0x1234)), 0x1234);
         assert_eq!(byteswap32(byteswap32(0x1234_5678)), 0x1234_5678);
-        assert_eq!(byteswap64(byteswap64(0x1234_5678_9ABC_DEF0)), 0x1234_5678_9ABC_DEF0);
+        assert_eq!(
+            byteswap64(byteswap64(0x1234_5678_9ABC_DEF0)),
+            0x1234_5678_9ABC_DEF0
+        );
     }
 
     #[test]

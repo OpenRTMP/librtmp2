@@ -103,10 +103,7 @@ pub unsafe extern "C" fn lrtmp2_server_listen(
 
 /// Poll for events (FFI-compatible).
 #[no_mangle]
-pub unsafe extern "C" fn lrtmp2_server_poll(
-    server: *mut server::Server,
-    timeout_ms: i32,
-) -> i32 {
+pub unsafe extern "C" fn lrtmp2_server_poll(server: *mut server::Server, timeout_ms: i32) -> i32 {
     if server.is_null() {
         return ErrorCode::Internal as i32;
     }
@@ -142,10 +139,7 @@ pub unsafe extern "C" fn lrtmp2_client_destroy(c: *mut client::Client) {
 
 /// Connect (FFI-compatible).
 #[no_mangle]
-pub unsafe extern "C" fn lrtmp2_client_connect(
-    c: *mut client::Client,
-    url: *const u8,
-) -> i32 {
+pub unsafe extern "C" fn lrtmp2_client_connect(c: *mut client::Client, url: *const u8) -> i32 {
     if c.is_null() || url.is_null() {
         return ErrorCode::Internal as i32;
     }
@@ -217,7 +211,11 @@ pub unsafe extern "C" fn lrtmp2_conn_get_fd(_conn: *const session::Conn) -> i32 
 /// Check TLS support (FFI-compatible).
 #[no_mangle]
 pub extern "C" fn lrtmp2_tls_supported() -> i32 {
-    if tls_supported() { 1 } else { 0 }
+    if tls_supported() {
+        1
+    } else {
+        0
+    }
 }
 
 /// Get version string (FFI-compatible).

@@ -3,8 +3,8 @@
 //! Mirrors `src/amf/amf3.h` and `src/amf/amf3.c`.
 
 use crate::buffer::Buffer;
-use crate::types::Result;
 use crate::types::ErrorCode;
+use crate::types::Result;
 
 /* AMF3 type markers */
 const AMF3_UNDEFINED: u8 = 0x00;
@@ -151,7 +151,8 @@ pub fn write_null(buf: &mut Buffer) -> Result<()> {
 
 /// Write an AMF3 integer (U29).
 pub fn write_integer(buf: &mut Buffer, val: u32) -> Result<()> {
-    buf.write(&[AMF3_INTEGER]).map_err(|_| ErrorCode::Internal)?;
+    buf.write(&[AMF3_INTEGER])
+        .map_err(|_| ErrorCode::Internal)?;
     write_u29(buf, val)
 }
 

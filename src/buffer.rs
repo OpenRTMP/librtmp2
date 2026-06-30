@@ -2,8 +2,8 @@
 //!
 //! Mirrors `src/core/buffer.h` and `src/core/buffer.c`.
 
-use crate::types::Result;
 use crate::types::ErrorCode;
+use crate::types::Result;
 
 /// Maximum buffer size: 64 MB
 pub const BUFFER_MAX_SIZE: usize = 64 * 1024 * 1024;

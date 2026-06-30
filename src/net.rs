@@ -2,8 +2,8 @@
 //!
 //! Mirrors `src/core/net.h` and `src/core/net.c`.
 
-use crate::types::Result;
 use crate::types::ErrorCode;
+use crate::types::Result;
 
 /// Split a "host:port" authority into separate host and port strings.
 ///

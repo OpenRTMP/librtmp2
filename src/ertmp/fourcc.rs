@@ -2,7 +2,7 @@
 //!
 //! Mirrors `src/ertmp/fourcc.c`.
 
-use crate::types::{VideoCodec, AudioCodec, Result, ErrorCode};
+use crate::types::{AudioCodec, ErrorCode, Result, VideoCodec};
 
 /* ── Video FourCC table ── */
 
@@ -13,10 +13,26 @@ struct VideoFourCcEntry {
 }
 
 static VIDEO_FOURCCS: &[VideoFourCcEntry] = &[
-    VideoFourCcEntry { fourcc: *b"avc1", codec: VideoCodec::H264, name: "H.264/AVC" },
-    VideoFourCcEntry { fourcc: *b"hvc1", codec: VideoCodec::H265, name: "H.265/HEVC" },
-    VideoFourCcEntry { fourcc: *b"av01", codec: VideoCodec::Av1, name: "AV1" },
-    VideoFourCcEntry { fourcc: *b"vp09", codec: VideoCodec::Vp6, name: "VP9" },
+    VideoFourCcEntry {
+        fourcc: *b"avc1",
+        codec: VideoCodec::H264,
+        name: "H.264/AVC",
+    },
+    VideoFourCcEntry {
+        fourcc: *b"hvc1",
+        codec: VideoCodec::H265,
+        name: "H.265/HEVC",
+    },
+    VideoFourCcEntry {
+        fourcc: *b"av01",
+        codec: VideoCodec::Av1,
+        name: "AV1",
+    },
+    VideoFourCcEntry {
+        fourcc: *b"vp09",
+        codec: VideoCodec::Vp6,
+        name: "VP9",
+    },
 ];
 
 /* ── Audio FourCC table ── */
@@ -28,10 +44,26 @@ struct AudioFourCcEntry {
 }
 
 static AUDIO_FOURCCS: &[AudioFourCcEntry] = &[
-    AudioFourCcEntry { fourcc: *b"Opus", codec: AudioCodec::Opus, name: "Opus" },
-    AudioFourCcEntry { fourcc: *b"mp4a", codec: AudioCodec::Aac, name: "AAC" },
-    AudioFourCcEntry { fourcc: *b"mp3 ", codec: AudioCodec::Mp3, name: "MP3" },
-    AudioFourCcEntry { fourcc: *b"ec-3", codec: AudioCodec::G711A, name: "Dolby Digital Plus" },
+    AudioFourCcEntry {
+        fourcc: *b"Opus",
+        codec: AudioCodec::Opus,
+        name: "Opus",
+    },
+    AudioFourCcEntry {
+        fourcc: *b"mp4a",
+        codec: AudioCodec::Aac,
+        name: "AAC",
+    },
+    AudioFourCcEntry {
+        fourcc: *b"mp3 ",
+        codec: AudioCodec::Mp3,
+        name: "MP3",
+    },
+    AudioFourCcEntry {
+        fourcc: *b"ec-3",
+        codec: AudioCodec::G711A,
+        name: "Dolby Digital Plus",
+    },
 ];
 
 /// Convert a FourCC string to a video codec.

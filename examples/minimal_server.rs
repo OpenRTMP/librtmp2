@@ -16,7 +16,10 @@ fn on_frame(frame: &Frame) {
         FrameType::Video => "video",
         _ => "other",
     };
-    println!("frame: type={kind} timestamp={} size={}", frame.timestamp, frame.size);
+    println!(
+        "frame: type={kind} timestamp={} size={}",
+        frame.timestamp, frame.size
+    );
 }
 
 extern "C" fn handle_sigint(_sig: i32) {
@@ -24,7 +27,9 @@ extern "C" fn handle_sigint(_sig: i32) {
 }
 
 fn main() {
-    let bind_addr = env::args().nth(1).unwrap_or_else(|| "0.0.0.0:1935".to_string());
+    let bind_addr = env::args()
+        .nth(1)
+        .unwrap_or_else(|| "0.0.0.0:1935".to_string());
 
     let config = ServerConfig {
         max_connections: 16,
@@ -42,8 +47,14 @@ fn main() {
     println!("listening on {bind_addr}");
 
     unsafe {
-        libc::signal(libc::SIGINT, handle_sigint as *const () as libc::sighandler_t);
-        libc::signal(libc::SIGTERM, handle_sigint as *const () as libc::sighandler_t);
+        libc::signal(
+            libc::SIGINT,
+            handle_sigint as *const () as libc::sighandler_t,
+        );
+        libc::signal(
+            libc::SIGTERM,
+            handle_sigint as *const () as libc::sighandler_t,
+        );
     }
 
     while RUNNING.load(Ordering::SeqCst) {

@@ -2,7 +2,7 @@
 //!
 //! Mirrors `src/ertmp/reconnect.c`.
 
-use crate::types::{Reconnect, Result, ErrorCode};
+use crate::types::{ErrorCode, Reconnect, Result};
 
 /// Parse a reconnect request.
 pub fn reconnect_parse(rc: &mut Reconnect, data: &[u8]) -> Result<()> {

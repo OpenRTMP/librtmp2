@@ -2,8 +2,8 @@
 //!
 //! Mirrors `src/ertmp/exaudio.c`.
 
-use crate::types::{AudioHeader, Result, ErrorCode};
 use super::fourcc;
+use crate::types::{AudioHeader, ErrorCode, Result};
 
 /// Parse an Enhanced RTMP v1 audio tag header.
 pub fn exaudio_parse(data: &[u8], hdr: &mut AudioHeader) -> Result<()> {
@@ -14,9 +14,8 @@ pub fn exaudio_parse(data: &[u8], hdr: &mut AudioHeader) -> Result<()> {
     let b0 = data[0];
 
     // Disambiguate legacy SoundFormat from IsExHeader
-    let is_ex = (b0 & 0x80 != 0)
-        && data.len() >= 5
-        && fourcc::fourcc_to_audio_codec(&data[1..5]).is_ok();
+    let is_ex =
+        (b0 & 0x80 != 0) && data.len() >= 5 && fourcc::fourcc_to_audio_codec(&data[1..5]).is_ok();
 
     hdr.is_ex_header = if is_ex { 1 } else { 0 };
 
@@ -53,7 +52,8 @@ pub fn exaudio_parse(data: &[u8], hdr: &mut AudioHeader) -> Result<()> {
     hdr.packet_type = b0 & 0x0F;
     hdr.fourcc[..4].copy_from_slice(&data[1..5]);
     hdr.header_size = 5;
-    hdr.audio_codec = fourcc::fourcc_to_audio_codec(&data[1..5]).unwrap_or(crate::types::AudioCodec::Aac);
+    hdr.audio_codec =
+        fourcc::fourcc_to_audio_codec(&data[1..5]).unwrap_or(crate::types::AudioCodec::Aac);
 
     Ok(())
 }

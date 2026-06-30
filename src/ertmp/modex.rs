@@ -2,7 +2,7 @@
 //!
 //! Mirrors `src/ertmp/modex.c`.
 
-use crate::types::{Modex, ModexType, Result, ErrorCode};
+use crate::types::{ErrorCode, Modex, ModexType, Result};
 
 const MODEX_MARKER: u8 = 0x80;
 

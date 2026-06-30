@@ -2,7 +2,7 @@
 //!
 //! Mirrors `src/ertmp/connect_caps.c`.
 
-use crate::types::{FourCcList, CapsExit, VideoFourCcInfoMap, Result, ErrorCode};
+use crate::types::{CapsExit, ErrorCode, FourCcList, Result, VideoFourCcInfoMap};
 
 /* ── fourCcList ── */
 
@@ -84,14 +84,12 @@ pub fn caps_exit_parse(caps: &mut CapsExit, data: &[u8]) -> Result<()> {
         return Err(ErrorCode::Io);
     }
     caps.version = 1;
-    caps.video_codec_32 = ((data[0] as u32) << 24
-        | (data[1] as u32) << 16
-        | (data[2] as u32) << 8
-        | data[3] as u32) as i32;
-    caps.audio_codec_32 = ((data[4] as u32) << 24
-        | (data[5] as u32) << 16
-        | (data[6] as u32) << 8
-        | data[7] as u32) as i32;
+    caps.video_codec_32 =
+        ((data[0] as u32) << 24 | (data[1] as u32) << 16 | (data[2] as u32) << 8 | data[3] as u32)
+            as i32;
+    caps.audio_codec_32 =
+        ((data[4] as u32) << 24 | (data[5] as u32) << 16 | (data[6] as u32) << 8 | data[7] as u32)
+            as i32;
     Ok(())
 }
 

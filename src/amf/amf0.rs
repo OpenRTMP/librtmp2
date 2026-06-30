@@ -3,8 +3,8 @@
 //! Mirrors `src/amf/amf.h` and `src/amf/amf0.c`.
 
 use crate::buffer::Buffer;
-use crate::types::Result;
 use crate::types::ErrorCode;
+use crate::types::Result;
 
 /* AMF0 type markers */
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,7 +80,8 @@ fn read_double(buf: &mut Buffer) -> Result<f64> {
 
 /// Write an AMF0 number (double, 8 bytes big-endian).
 pub fn write_number(buf: &mut Buffer, value: f64) -> Result<()> {
-    buf.write(&[Amf0Type::Number as u8]).map_err(|_| ErrorCode::Internal)?;
+    buf.write(&[Amf0Type::Number as u8])
+        .map_err(|_| ErrorCode::Internal)?;
     let bits = value.to_bits();
     let mut b = [0u8; 8];
     for i in 0..8 {
@@ -92,20 +93,24 @@ pub fn write_number(buf: &mut Buffer, value: f64) -> Result<()> {
 
 /// Write an AMF0 boolean.
 pub fn write_boolean(buf: &mut Buffer, value: bool) -> Result<()> {
-    buf.write(&[Amf0Type::Boolean as u8]).map_err(|_| ErrorCode::Internal)?;
-    buf.write(&[if value { 1 } else { 0 }]).map_err(|_| ErrorCode::Internal)?;
+    buf.write(&[Amf0Type::Boolean as u8])
+        .map_err(|_| ErrorCode::Internal)?;
+    buf.write(&[if value { 1 } else { 0 }])
+        .map_err(|_| ErrorCode::Internal)?;
     Ok(())
 }
 
 /// Write an AMF0 null.
 pub fn write_null(buf: &mut Buffer) -> Result<()> {
-    buf.write(&[Amf0Type::Null as u8]).map_err(|_| ErrorCode::Internal)?;
+    buf.write(&[Amf0Type::Null as u8])
+        .map_err(|_| ErrorCode::Internal)?;
     Ok(())
 }
 
 /// Write an AMF0 undefined.
 pub fn write_undefined(buf: &mut Buffer) -> Result<()> {
-    buf.write(&[Amf0Type::Undefined as u8]).map_err(|_| ErrorCode::Internal)?;
+    buf.write(&[Amf0Type::Undefined as u8])
+        .map_err(|_| ErrorCode::Internal)?;
     Ok(())
 }
 
@@ -115,8 +120,10 @@ pub fn write_string(buf: &mut Buffer, s: &str) -> Result<()> {
     if len > u16::MAX as usize {
         return Err(ErrorCode::Amf);
     }
-    buf.write(&[Amf0Type::String as u8]).map_err(|_| ErrorCode::Internal)?;
-    buf.write(&(len as u16).to_be_bytes()).map_err(|_| ErrorCode::Internal)?;
+    buf.write(&[Amf0Type::String as u8])
+        .map_err(|_| ErrorCode::Internal)?;
+    buf.write(&(len as u16).to_be_bytes())
+        .map_err(|_| ErrorCode::Internal)?;
     buf.write(s.as_bytes()).map_err(|_| ErrorCode::Internal)?;
     Ok(())
 }
@@ -127,21 +134,25 @@ pub fn write_long_string(buf: &mut Buffer, s: &str) -> Result<()> {
     if len > u32::MAX as usize {
         return Err(ErrorCode::Amf);
     }
-    buf.write(&[Amf0Type::LongString as u8]).map_err(|_| ErrorCode::Internal)?;
-    buf.write(&(len as u32).to_be_bytes()).map_err(|_| ErrorCode::Internal)?;
+    buf.write(&[Amf0Type::LongString as u8])
+        .map_err(|_| ErrorCode::Internal)?;
+    buf.write(&(len as u32).to_be_bytes())
+        .map_err(|_| ErrorCode::Internal)?;
     buf.write(s.as_bytes()).map_err(|_| ErrorCode::Internal)?;
     Ok(())
 }
 
 /// Write the beginning of an AMF0 object.
 pub fn write_object_begin(buf: &mut Buffer) -> Result<()> {
-    buf.write(&[Amf0Type::Object as u8]).map_err(|_| ErrorCode::Internal)?;
+    buf.write(&[Amf0Type::Object as u8])
+        .map_err(|_| ErrorCode::Internal)?;
     Ok(())
 }
 
 /// Write the end of an AMF0 object (0x00 0x00 0x09).
 pub fn write_object_end(buf: &mut Buffer) -> Result<()> {
-    buf.write(&[0x00, 0x00, 0x09]).map_err(|_| ErrorCode::Internal)?;
+    buf.write(&[0x00, 0x00, 0x09])
+        .map_err(|_| ErrorCode::Internal)?;
     Ok(())
 }
 
@@ -151,15 +162,18 @@ pub fn write_object_key(buf: &mut Buffer, key: &str) -> Result<()> {
     if len > u16::MAX as usize {
         return Err(ErrorCode::Amf);
     }
-    buf.write(&(len as u16).to_be_bytes()).map_err(|_| ErrorCode::Internal)?;
+    buf.write(&(len as u16).to_be_bytes())
+        .map_err(|_| ErrorCode::Internal)?;
     buf.write(key.as_bytes()).map_err(|_| ErrorCode::Internal)?;
     Ok(())
 }
 
 /// Write the beginning of an AMF0 ECMA array (4-byte count).
 pub fn write_ecma_array_begin(buf: &mut Buffer, count: u32) -> Result<()> {
-    buf.write(&[Amf0Type::EcmaArray as u8]).map_err(|_| ErrorCode::Internal)?;
-    buf.write(&count.to_be_bytes()).map_err(|_| ErrorCode::Internal)?;
+    buf.write(&[Amf0Type::EcmaArray as u8])
+        .map_err(|_| ErrorCode::Internal)?;
+    buf.write(&count.to_be_bytes())
+        .map_err(|_| ErrorCode::Internal)?;
     Ok(())
 }
 
