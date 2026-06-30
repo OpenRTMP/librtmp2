@@ -14,16 +14,19 @@ pub fn parse(data: &[u8], tag: &mut ScriptTag) -> Result<()> {
 
     let mut buf = Buffer::from_slice(data);
 
-    // First value is usually a string "onMetaData"
-    let ty = amf0::read_type(&mut buf)?;
-
-    match ty {
-        amf0::Amf0Type::String => {
+    // First value is usually a string "onMetaData".
+    // Peek at the type byte to choose the right reader; the reader functions
+    // (read_string, read_long_string, skip_value) each consume the marker
+    // themselves, so we must not call read_type() here as that would advance
+    // the buffer past the marker before the reader sees it.
+    let first_byte = buf.peek().first().copied().ok_or(ErrorCode::Internal)?;
+    match first_byte {
+        b if b == amf0::Amf0Type::String as u8 => {
             let mut name = [0u8; 64];
             let len = amf0::read_string(&mut buf, &mut name)?;
             tag.name[..len].copy_from_slice(&name[..len]);
         }
-        amf0::Amf0Type::LongString => {
+        b if b == amf0::Amf0Type::LongString as u8 => {
             let mut name = [0u8; 64];
             let len = amf0::read_long_string(&mut buf, &mut name)?;
             tag.name[..len].copy_from_slice(&name[..len]);

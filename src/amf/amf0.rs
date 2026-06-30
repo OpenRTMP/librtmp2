@@ -233,6 +233,10 @@ pub fn read_string(buf: &mut Buffer, out: &mut [u8]) -> Result<usize> {
 
 /// Read an AMF0 long string.
 pub fn read_long_string(buf: &mut Buffer, out: &mut [u8]) -> Result<usize> {
+    let ty = read_u8(buf)?;
+    if ty != Amf0Type::LongString as u8 {
+        return Err(ErrorCode::Amf);
+    }
     let str_len = read_u32(buf)? as usize;
     if out.is_empty() || str_len >= out.len() {
         return Err(ErrorCode::Amf);
