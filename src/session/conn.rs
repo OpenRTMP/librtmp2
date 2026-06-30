@@ -555,7 +555,7 @@ impl Conn {
         };
         while self.send_buffer.available() > 0 {
             let pending = self.send_buffer.peek();
-            let n = transport.try_send(pending)?;
+            let n = transport.try_send(pending, &mut 0i32)?;
             if n == 0 {
                 break;
             }
@@ -565,7 +565,12 @@ impl Conn {
     }
 
     /// Send an audio or video frame to this connection (for player relay).
-    pub fn send_frame(&mut self, frame_type: FrameType, timestamp: u32, payload: &[u8]) -> Result<()> {
+    pub fn send_frame(
+        &mut self,
+        frame_type: FrameType,
+        timestamp: u32,
+        payload: &[u8],
+    ) -> Result<()> {
         let stream_id = self
             .current_stream
             .as_ref()

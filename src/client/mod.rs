@@ -92,21 +92,10 @@ impl Client {
         self.stream_key = stream_key;
         self.state = ClientState::Connected;
 
-        let tc_url = format!("rtmp://{host}:{port}/{app}");
-        let mut connect_amf = Buffer::with_capacity(512);
-        command::build_connect(&mut connect_amf, &app, &tc_url, "", "", "FMLE/3.0", 0, 0)?;
-        self.send_command_msg(0, connect_amf.as_slice())?;
-        let mut result = self.wait_for_command("_result")?;
-        command::read_connect_result(&mut result)?;
-
-        let mut create_stream_amf = Buffer::with_capacity(64);
-        command::build_create_stream(&mut create_stream_amf, 2.0)?;
-        self.send_command_msg(0, create_stream_amf.as_slice())?;
-        let mut create_result = self.wait_for_command("_result")?;
-        let (_txn, stream_id) = command::read_create_stream_result(&mut create_result)?;
-        self.stream_id = stream_id as u32;
-
-        self.state = ClientState::AppConnected;
+        if let Err(e) = self.do_amf_connect(&app, &host, port) {
+            self.reset_session_state();
+            return Err(e);
+        }
         Ok(())
     }
 
@@ -120,6 +109,28 @@ impl Client {
         self.send_command_msg(self.stream_id, amf.as_slice())?;
         self.wait_for_command("onStatus")?;
         self.state = ClientState::Publishing;
+        Ok(())
+    }
+
+    /// Run the AMF connect + createStream exchange. Separated from `connect()`
+    /// so the transport is already stored before we enter, letting the caller
+    /// call `reset_session_state()` (which drops the transport) on any error.
+    fn do_amf_connect(&mut self, app: &str, host: &str, port: u16) -> Result<()> {
+        let tc_url = format!("rtmp://{host}:{port}/{app}");
+        let mut connect_amf = Buffer::with_capacity(512);
+        command::build_connect(&mut connect_amf, app, &tc_url, "", "", "FMLE/3.0", 0, 0)?;
+        self.send_command_msg(0, connect_amf.as_slice())?;
+        let mut result = self.wait_for_command("_result")?;
+        command::read_connect_result(&mut result)?;
+
+        let mut create_stream_amf = Buffer::with_capacity(64);
+        command::build_create_stream(&mut create_stream_amf, 2.0)?;
+        self.send_command_msg(0, create_stream_amf.as_slice())?;
+        let mut create_result = self.wait_for_command("_result")?;
+        let (_txn, stream_id) = command::read_create_stream_result(&mut create_result)?;
+        self.stream_id = stream_id as u32;
+
+        self.state = ClientState::AppConnected;
         Ok(())
     }
 
@@ -479,7 +490,11 @@ impl Default for Client {
 
 impl Drop for Client {
     fn drop(&mut self) {
-        if self.client_fd >= 0 {
+        // The Transport owns the fd when set; only close directly if there is
+        // no transport (e.g. the fd was set but connecting failed before the
+        // transport was stored, which cannot currently happen — this guard is
+        // here for correctness if the two ever diverge).
+        if self.transport.is_none() && self.client_fd >= 0 {
             unsafe {
                 libc::close(self.client_fd);
             }

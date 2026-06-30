@@ -115,9 +115,11 @@ impl Transport {
     }
 
     /// Non-blocking send. Returns bytes written, or 0 when the socket is not
-    /// writable (EAGAIN/EWOULDBLOCK/EINTR/TLS WANT_WRITE). Used by the server
-    /// poll loop so one slow peer cannot stall all connections.
-    pub fn try_send(&mut self, data: &[u8]) -> Result<usize> {
+    /// ready. On `Ok(0)`, `again` is set to indicate the poll direction:
+    ///   1 = wait for readable (TLS WANT_READ during write, e.g. renegotiation)
+    ///   2 = wait for writable (EAGAIN/EWOULDBLOCK/EINTR/TLS WANT_WRITE)
+    /// Used by the server poll loop so one slow peer cannot stall all connections.
+    pub fn try_send(&mut self, data: &[u8], again: &mut i32) -> Result<usize> {
         if data.is_empty() {
             return Ok(0);
         }
@@ -134,6 +136,7 @@ impl Transport {
                 if n < 0 {
                     let err = unsafe { *libc::__errno_location() };
                     if err == libc::EINTR || err == libc::EAGAIN || err == libc::EWOULDBLOCK {
+                        *again = 2;
                         return Ok(0);
                     }
                     return Err(ErrorCode::Io);
@@ -146,7 +149,15 @@ impl Transport {
                 match stream.ssl_write(data) {
                     Ok(n) => Ok(n),
                     Err(e) => match e.code() {
-                        SslErr::WANT_WRITE | SslErr::WANT_READ => Ok(0),
+                        SslErr::WANT_WRITE => {
+                            *again = 2;
+                            Ok(0)
+                        }
+                        // TLS renegotiation: ssl_write needs read readiness.
+                        SslErr::WANT_READ => {
+                            *again = 1;
+                            Ok(0)
+                        }
                         _ => Err(ErrorCode::Io),
                     },
                 }
@@ -156,17 +167,25 @@ impl Transport {
 
     /// Blocking send of the whole buffer (client-side synchronous I/O).
     ///
-    /// Uses a 10-second writable-poll timeout rather than an infinite wait so
-    /// a peer that stops reading cannot block the caller indefinitely.
+    /// Uses a 10-second poll timeout rather than an infinite wait so a peer
+    /// that stops reading cannot block the caller indefinitely. Correctly
+    /// handles TLS WANT_READ during writes (e.g. renegotiation) by polling
+    /// for read readiness instead of write readiness.
     pub fn send(&mut self, data: &[u8]) -> Result<()> {
         let mut sent = 0;
         while sent < data.len() {
-            let n = self.try_send(&data[sent..])?;
+            let mut again = 0i32;
+            let n = self.try_send(&data[sent..], &mut again)?;
             if n == 0 {
                 let fd = self.fd();
+                let events = if again == 1 {
+                    libc::POLLIN
+                } else {
+                    libc::POLLOUT
+                };
                 let mut pfd = libc::pollfd {
                     fd,
-                    events: libc::POLLOUT,
+                    events,
                     revents: 0,
                 };
                 let rc = unsafe { libc::poll(&mut pfd, 1, 10_000) };
@@ -217,7 +236,9 @@ impl TlsCtx {
         builder
             .set_private_key_file(key_file, SslFiletype::PEM)
             .map_err(|_| ErrorCode::Internal)?;
-        builder.check_private_key().map_err(|_| ErrorCode::Internal)?;
+        builder
+            .check_private_key()
+            .map_err(|_| ErrorCode::Internal)?;
         Ok(Self {
             acceptor: Arc::new(builder.build()),
         })
@@ -241,10 +262,19 @@ impl TlsCtx {
     #[cfg(feature = "tls")]
     pub fn accept(&self, fd: i32) -> Result<Transport> {
         let tcp = unsafe { std::net::TcpStream::from_raw_fd(fd) };
+        // Bound the handshake so a stalled peer cannot block the server poll
+        // loop indefinitely. 10 s covers even slow mobile connections.
+        let timeout = Some(std::time::Duration::from_secs(10));
+        tcp.set_read_timeout(timeout).map_err(|_| ErrorCode::Io)?;
+        tcp.set_write_timeout(timeout).map_err(|_| ErrorCode::Io)?;
         tcp.set_nonblocking(false).map_err(|_| ErrorCode::Io)?;
         match self.acceptor.accept(tcp) {
             Ok(ssl) => {
                 let raw_fd = ssl.get_ref().as_raw_fd();
+                // Clear handshake timeouts and restore non-blocking for the
+                // steady-state poll loop.
+                ssl.get_ref().set_read_timeout(None).ok();
+                ssl.get_ref().set_write_timeout(None).ok();
                 ssl.get_ref()
                     .set_nonblocking(true)
                     .map_err(|_| ErrorCode::Io)?;
