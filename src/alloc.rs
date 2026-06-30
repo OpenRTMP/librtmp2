@@ -27,6 +27,10 @@ fn std_realloc(ptr: *mut u8, size: usize, _ud: *mut u8) -> *mut u8 {
     if ptr.is_null() {
         return std_alloc(size, _ud);
     }
+    if size == 0 {
+        std_free(ptr, _ud);
+        return std::ptr::null_mut();
+    }
     unsafe { libc::realloc(ptr as *mut libc::c_void, size) as *mut u8 }
 }
 
