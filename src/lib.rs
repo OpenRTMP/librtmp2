@@ -61,6 +61,21 @@ pub fn error_string(code: ErrorCode) -> &'static str {
     code.as_str()
 }
 
+fn error_c_string(code: ErrorCode) -> &'static [u8] {
+    match code {
+        ErrorCode::Ok => b"OK\0",
+        ErrorCode::Io => b"I/O error\0",
+        ErrorCode::Timeout => b"Timeout\0",
+        ErrorCode::Protocol => b"Protocol error\0",
+        ErrorCode::Handshake => b"Handshake error\0",
+        ErrorCode::Chunk => b"Chunk error\0",
+        ErrorCode::Amf => b"AMF error\0",
+        ErrorCode::Unsupported => b"Unsupported\0",
+        ErrorCode::Auth => b"Authentication error\0",
+        ErrorCode::Internal => b"Internal error\0",
+    }
+}
+
 // ── FFI-compatible extern "C" API ──
 
 /// Create a server (FFI-compatible).
@@ -221,7 +236,7 @@ pub extern "C" fn lrtmp2_tls_supported() -> i32 {
 /// Get version string (FFI-compatible).
 #[no_mangle]
 pub extern "C" fn lrtmp2_version_string() -> *const u8 {
-    VERSION_STRING.as_ptr()
+    b"0.1.0\0".as_ptr()
 }
 
 /// Get major version (FFI-compatible).
@@ -245,5 +260,5 @@ pub extern "C" fn lrtmp2_version_patch() -> i32 {
 /// Get error string (FFI-compatible).
 #[no_mangle]
 pub unsafe extern "C" fn lrtmp2_error_string(code: ErrorCode) -> *const u8 {
-    error_string(code).as_ptr()
+    error_c_string(code).as_ptr()
 }
