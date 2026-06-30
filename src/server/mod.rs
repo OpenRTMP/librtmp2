@@ -29,6 +29,8 @@ pub struct Server {
     pub tls_ctx: Option<TlsCtx>,
     /// Fired for every audio/video frame on every connection.
     pub on_frame_cb: Option<fn(&Frame)>,
+    /// Fired when a client completes the AMF `connect` exchange.
+    pub on_connect_cb: Option<fn()>,
     listener: Option<TcpListener>,
     stream_cache: HashMap<(String, String), StreamCache>,
 }
@@ -57,6 +59,7 @@ impl Server {
             connections: Vec::new(),
             tls_ctx,
             on_frame_cb: None,
+            on_connect_cb: None,
             listener: None,
             stream_cache: HashMap::new(),
         })
@@ -64,14 +67,6 @@ impl Server {
 
     /// Start listening on the given address ("host:port", default port 1935).
     pub fn listen(&mut self, bind_addr: &str) -> Result<()> {
-        // accept_new_connections() only ever wraps incoming sockets as
-        // plaintext; there is no TLS handshake wired into the accept path.
-        // Refuse to start rather than silently serving TLS-configured
-        // connections as plaintext.
-        if self.tls_ctx.is_some() {
-            return Err(ErrorCode::Unsupported);
-        }
-
         let mut host = String::new();
         let mut port = String::new();
         net::split_host_port(bind_addr, &mut host, &mut port, "1935")?;
@@ -124,12 +119,24 @@ impl Server {
             }
             match listener.accept() {
                 Ok((stream, _addr)) => {
-                    let _ = stream.set_nonblocking(true);
-                    let fd = stream.into_raw_fd();
+                    let transport = if let Some(ref ctx) = self.tls_ctx {
+                        // TlsCtx::accept() takes ownership of the fd, sets the socket
+                        // to blocking for the handshake, then restores non-blocking.
+                        // On error the fd is already closed inside accept(); skip the conn.
+                        match ctx.accept(stream.into_raw_fd()) {
+                            Ok(t) => t,
+                            Err(_) => continue,
+                        }
+                    } else {
+                        let _ = stream.set_nonblocking(true);
+                        Transport::new_plain(stream.into_raw_fd())
+                    };
+                    let conn_fd = transport.fd();
                     let mut conn = Conn::new();
-                    conn.client_fd = fd;
-                    conn.transport = Some(Transport::new_plain(fd));
+                    conn.client_fd = conn_fd;
+                    conn.transport = Some(transport);
                     conn.on_frame_cb = self.on_frame_cb;
+                    conn.on_connect_cb = self.on_connect_cb;
                     self.connections.push(conn);
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
@@ -148,7 +155,7 @@ impl Server {
         // Drive recv/processing for every connection.
         for (i, conn) in self.connections.iter_mut().enumerate() {
             loop {
-                let Some(transport) = conn.transport.as_ref() else {
+                let Some(transport) = conn.transport.as_mut() else {
                     closed.push(i);
                     break;
                 };

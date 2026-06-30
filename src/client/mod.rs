@@ -78,36 +78,24 @@ impl Client {
         self.reset_session_state();
 
         let stream = TcpStream::connect((host.as_str(), port)).map_err(|_| ErrorCode::Io)?;
-        let fd = stream.into_raw_fd();
-        let transport = Transport::new_plain(fd);
+        let mut transport = Transport::new_plain(stream.into_raw_fd());
 
         self.state = ClientState::Handshaking;
-        if let Err(e) = self.do_handshake(&transport) {
-            unsafe { libc::close(fd) };
+        if let Err(e) = self.do_handshake(&mut transport) {
+            // transport drops here, closing the fd via Transport::drop
             return Err(e);
         }
 
-        self.client_fd = fd;
+        self.client_fd = transport.fd();
         self.transport = Some(transport);
         self.app = app.clone();
         self.stream_key = stream_key;
         self.state = ClientState::Connected;
 
-        let tc_url = format!("rtmp://{host}:{port}/{app}");
-        let mut connect_amf = Buffer::with_capacity(512);
-        command::build_connect(&mut connect_amf, &app, &tc_url, "", "", "FMLE/3.0", 0, 0)?;
-        self.send_command_msg(0, connect_amf.as_slice())?;
-        let mut result = self.wait_for_command("_result")?;
-        command::read_connect_result(&mut result)?;
-
-        let mut create_stream_amf = Buffer::with_capacity(64);
-        command::build_create_stream(&mut create_stream_amf, 2.0)?;
-        self.send_command_msg(0, create_stream_amf.as_slice())?;
-        let mut create_result = self.wait_for_command("_result")?;
-        let (_txn, stream_id) = command::read_create_stream_result(&mut create_result)?;
-        self.stream_id = stream_id as u32;
-
-        self.state = ClientState::AppConnected;
+        if let Err(e) = self.do_amf_connect(&app, &host, port) {
+            self.reset_session_state();
+            return Err(e);
+        }
         Ok(())
     }
 
@@ -121,6 +109,28 @@ impl Client {
         self.send_command_msg(self.stream_id, amf.as_slice())?;
         self.wait_for_command("onStatus")?;
         self.state = ClientState::Publishing;
+        Ok(())
+    }
+
+    /// Run the AMF connect + createStream exchange. Separated from `connect()`
+    /// so the transport is already stored before we enter, letting the caller
+    /// call `reset_session_state()` (which drops the transport) on any error.
+    fn do_amf_connect(&mut self, app: &str, host: &str, port: u16) -> Result<()> {
+        let tc_url = format!("rtmp://{host}:{port}/{app}");
+        let mut connect_amf = Buffer::with_capacity(512);
+        command::build_connect(&mut connect_amf, app, &tc_url, "", "", "FMLE/3.0", 0, 0)?;
+        self.send_command_msg(0, connect_amf.as_slice())?;
+        let mut result = self.wait_for_command("_result")?;
+        command::read_connect_result(&mut result)?;
+
+        let mut create_stream_amf = Buffer::with_capacity(64);
+        command::build_create_stream(&mut create_stream_amf, 2.0)?;
+        self.send_command_msg(0, create_stream_amf.as_slice())?;
+        let mut create_result = self.wait_for_command("_result")?;
+        let (_txn, stream_id) = command::read_create_stream_result(&mut create_result)?;
+        self.stream_id = stream_id as u32;
+
+        self.state = ClientState::AppConnected;
         Ok(())
     }
 
@@ -168,7 +178,7 @@ impl Client {
 
         // Flush
         let data = self.send_buffer.peek().to_vec();
-        if let Some(ref transport) = self.transport {
+        if let Some(ref mut transport) = self.transport {
             transport.send(&data)?;
         }
         self.send_buffer.reset();
@@ -182,27 +192,38 @@ impl Client {
             return Err(ErrorCode::Protocol);
         }
 
-        let Some(transport) = self.transport.as_ref() else {
-            return Err(ErrorCode::Internal);
+        // Scope the mutable transport borrow to the recv phase only.
+        let poll_fd = {
+            let Some(t) = self.transport.as_ref() else {
+                return Err(ErrorCode::Internal);
+            };
+            t.fd()
         };
-
         let mut pfd = libc::pollfd {
-            fd: transport.fd(),
+            fd: poll_fd,
             events: libc::POLLIN,
             revents: 0,
         };
         unsafe { libc::poll(&mut pfd, 1, timeout_ms.max(0)) };
 
         let mut buf = [0u8; 65536];
-        let mut again = 0i32;
         loop {
-            let n = transport.recv(&mut buf, &mut again);
+            let (n, again) = {
+                let Some(t) = self.transport.as_mut() else {
+                    return Err(ErrorCode::Internal);
+                };
+                let mut again = 0i32;
+                let n = t.recv(&mut buf, &mut again);
+                (n, again)
+            };
             if n > 0 {
                 self.recv_buffer
                     .write(&buf[..n as usize])
                     .map_err(|_| ErrorCode::Internal)?;
             } else if n == 0 {
                 return Err(ErrorCode::Io);
+            } else if again != 0 {
+                break;
             } else {
                 break;
             }
@@ -268,11 +289,9 @@ impl Client {
     /// Prevents stale recv/send buffers, chunk registry entries, and handshake
     /// state from a previous (failed) session polluting the next attempt.
     fn reset_session_state(&mut self) {
-        if self.client_fd >= 0 {
-            unsafe { libc::close(self.client_fd) };
-            self.client_fd = -1;
-        }
+        // Drop transport first: it owns and closes the fd.
         self.transport = None;
+        self.client_fd = -1;
         self.recv_buffer.reset();
         self.send_buffer.reset();
         self.chunk_reg.destroy();
@@ -283,7 +302,7 @@ impl Client {
     }
 
     /// Drive the legacy C0/C1/C2 client handshake to completion over `transport`.
-    fn do_handshake(&mut self, transport: &Transport) -> Result<()> {
+    fn do_handshake(&mut self, transport: &mut Transport) -> Result<()> {
         handshake::client_init(&mut self.handshake);
         handshake::client_generate_c0c1(&mut self.handshake)?;
         let c0c1 = self.handshake.out.peek().to_vec();
@@ -318,7 +337,7 @@ impl Client {
         chunk_write(&mut self.send_buffer, &cmsg, amf_data, amf_data.len(), 128)?;
 
         let data = self.send_buffer.peek().to_vec();
-        if let Some(ref transport) = self.transport {
+        if let Some(ref mut transport) = self.transport {
             transport.send(&data)?;
         }
         self.send_buffer.reset();
@@ -379,10 +398,15 @@ impl Client {
                 Err(_) => return Err(ErrorCode::Chunk),
             }
 
-            let transport = self.transport.as_ref().ok_or(ErrorCode::Internal)?;
+            // Scope mutable transport borrow tightly to avoid conflict with
+            // other self fields (recv_buffer) used after the borrow ends.
             let mut tmp = [0u8; 4096];
-            let mut again = 0i32;
-            let n = transport.recv(&mut tmp, &mut again);
+            let (n, again, t_fd) = {
+                let t = self.transport.as_mut().ok_or(ErrorCode::Internal)?;
+                let mut again = 0i32;
+                let n = t.recv(&mut tmp, &mut again);
+                (n, again, t.fd())
+            };
             if n > 0 {
                 self.recv_buffer
                     .write(&tmp[..n as usize])
@@ -391,7 +415,7 @@ impl Client {
                 return Err(ErrorCode::Io);
             } else if again != 0 {
                 let mut pfd = libc::pollfd {
-                    fd: transport.fd(),
+                    fd: t_fd,
                     events: libc::POLLIN,
                     revents: 0,
                 };
@@ -407,7 +431,7 @@ impl Client {
 }
 
 /// Block until exactly `n` bytes have been read from `transport`.
-fn read_exact(transport: &Transport, n: usize) -> Result<Vec<u8>> {
+fn read_exact(transport: &mut Transport, n: usize) -> Result<Vec<u8>> {
     let mut out = vec![0u8; n];
     let mut got = 0;
     while got < n {
@@ -466,7 +490,11 @@ impl Default for Client {
 
 impl Drop for Client {
     fn drop(&mut self) {
-        if self.client_fd >= 0 {
+        // The Transport owns the fd when set; only close directly if there is
+        // no transport (e.g. the fd was set but connecting failed before the
+        // transport was stored, which cannot currently happen — this guard is
+        // here for correctness if the two ever diverge).
+        if self.transport.is_none() && self.client_fd >= 0 {
             unsafe {
                 libc::close(self.client_fd);
             }
