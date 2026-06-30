@@ -41,6 +41,10 @@ pub struct TlsCtx {
     pub(crate) acceptor: Arc<SslAcceptor>,
 }
 
+fn last_errno() -> i32 {
+    std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
+}
+
 impl Transport {
     /// Wrap an owned fd as a plaintext transport.
     pub fn new_plain(fd: i32) -> Self {
@@ -85,7 +89,7 @@ impl Transport {
                     libc::MSG_DONTWAIT,
                 );
                 if n < 0 {
-                    let err = *libc::__errno_location();
+                    let err = last_errno();
                     if err == libc::EINTR || err == libc::EAGAIN || err == libc::EWOULDBLOCK {
                         *again = 1;
                     }
@@ -134,7 +138,7 @@ impl Transport {
                     )
                 };
                 if n < 0 {
-                    let err = unsafe { *libc::__errno_location() };
+                    let err = last_errno();
                     if err == libc::EINTR || err == libc::EAGAIN || err == libc::EWOULDBLOCK {
                         *again = 2;
                         return Ok(0);
