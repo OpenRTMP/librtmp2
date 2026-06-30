@@ -60,8 +60,15 @@ pub struct Conn {
     /// Set when a player just joined; the server replays cached codec headers
     /// and the last keyframe before forwarding live frames.
     pub needs_init_frames: bool,
+    /// FourCC / codec string of the first video frame seen on this connection.
+    /// Populated from the FLV/E-RTMP header on the first inbound video frame.
+    pub detected_video_codec: Option<String>,
+    /// Codec string of the first audio frame seen on this connection.
+    pub detected_audio_codec: Option<String>,
     // Callbacks
     pub on_frame_cb: Option<fn(&Frame)>,
+    /// Fired once when the RTMP `connect` command completes successfully.
+    pub on_connect_cb: Option<fn()>,
 }
 
 impl Conn {
@@ -89,7 +96,10 @@ impl Conn {
             send_mutex: Mutex::new(()),
             pending_relay: Vec::new(),
             needs_init_frames: false,
+            detected_video_codec: None,
+            detected_audio_codec: None,
             on_frame_cb: None,
+            on_connect_cb: None,
         }
     }
 
@@ -277,6 +287,11 @@ impl Conn {
                     .map(|s| s.is_publishing)
                     .unwrap_or(false)
                 {
+                    // Detect audio codec from the first audio frame.
+                    if self.detected_audio_codec.is_none() {
+                        self.detected_audio_codec = detect_audio_codec(payload);
+                    }
+
                     let stream_name = self
                         .current_stream
                         .as_ref()
@@ -315,6 +330,11 @@ impl Conn {
                     .map(|s| s.is_publishing)
                     .unwrap_or(false)
                 {
+                    // Detect video codec from the first video frame.
+                    if self.detected_video_codec.is_none() {
+                        self.detected_video_codec = detect_video_codec(payload);
+                    }
+
                     let stream_name = self
                         .current_stream
                         .as_ref()
@@ -368,7 +388,13 @@ impl Conn {
                     .to_string();
                 let _ = state_machine::conn_transition(&mut self.state, ConnState::AppConnected);
                 self.send_connect_response(info.transaction_id)?;
-                // Fire on_connect callback
+                // Fire on_connect callback once per connection.
+                if !self.connect_cb_fired {
+                    self.connect_cb_fired = true;
+                    if let Some(cb) = self.on_connect_cb {
+                        cb();
+                    }
+                }
             }
             "createStream" => {
                 // Must have completed the AMF 'connect' exchange first.
@@ -524,7 +550,7 @@ impl Conn {
         if self.client_fd < 0 || self.send_buffer.available() == 0 {
             return Ok(());
         }
-        let Some(ref transport) = self.transport else {
+        let Some(ref mut transport) = self.transport else {
             return Ok(());
         };
         while self.send_buffer.available() > 0 {
@@ -618,10 +644,59 @@ impl Default for Conn {
 
 impl Drop for Conn {
     fn drop(&mut self) {
-        if self.client_fd >= 0 {
+        // The Transport owns and closes the fd (plain: explicit close in Transport::drop;
+        // TLS: via SslStream<TcpStream> drop). Only close client_fd directly when
+        // no transport was ever assigned (e.g., error before assignment).
+        if self.transport.is_none() && self.client_fd >= 0 {
             unsafe {
                 libc::close(self.client_fd);
             }
         }
     }
+}
+
+// ── Codec detection helpers ──
+
+/// Infer a FourCC-style codec string from the first byte(s) of an FLV video
+/// payload. Returns `None` for unrecognised / empty payloads.
+fn detect_video_codec(payload: &[u8]) -> Option<String> {
+    if payload.is_empty() {
+        return None;
+    }
+    if payload[0] & 0x80 != 0 {
+        // E-RTMP v1 extended video tag: FourCC in bytes 1-4.
+        if payload.len() >= 5 {
+            if let Ok(s) = std::str::from_utf8(&payload[1..5]) {
+                return Some(s.to_string());
+            }
+        }
+        return None;
+    }
+    // Legacy FLV codec ID in lower nibble.
+    Some(match payload[0] & 0x0F {
+        7 => "avc1".to_string(),
+        12 => "hvc1".to_string(),
+        13 => "av01".to_string(),
+        _ => return None,
+    })
+}
+
+/// Infer a codec string from the first byte(s) of an FLV audio payload.
+fn detect_audio_codec(payload: &[u8]) -> Option<String> {
+    if payload.is_empty() {
+        return None;
+    }
+    // E-RTMP v1 extended audio tag: high nibble 0x9 with FourCC in bytes 1-4.
+    if (payload[0] & 0xF0) == 0x90 && payload.len() >= 5 {
+        if let Ok(s) = std::str::from_utf8(&payload[1..5]) {
+            return Some(s.to_string());
+        }
+    }
+    // Legacy audio codec ID in high nibble.
+    Some(match (payload[0] >> 4) & 0x0F {
+        10 => "mp4a".to_string(),
+        2 => "mp3".to_string(),
+        14 => "Opus".to_string(),
+        _ => return None,
+    })
 }
