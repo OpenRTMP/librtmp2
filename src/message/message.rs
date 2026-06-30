@@ -161,7 +161,9 @@ pub fn decode_aggregate(
             base_ts = ts;
             have_base = true;
         }
-        let out_ts = chunk.timestamp + (ts - base_ts);
+        // Use wrapping arithmetic: a sub-tag ts less than base_ts (malformed
+        // but possible) must not cause a panic in debug or silent wrap in release.
+        let out_ts = chunk.timestamp.wrapping_add(ts.wrapping_sub(base_ts));
 
         let is_publishing = conn.get_current_stream().map(|s| s.is_publishing()).unwrap_or(false);
         if tag_type == 0x08 && is_publishing {

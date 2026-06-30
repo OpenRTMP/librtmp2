@@ -35,23 +35,33 @@ static AUDIO_FOURCCS: &[AudioFourCcEntry] = &[
 ];
 
 /// Convert a FourCC string to a video codec.
+/// Returns Err for unknown or too-short FourCCs so callers can use is_ok()
+/// as a reliable enhanced-header discriminator.
 pub fn fourcc_to_video_codec(fourcc: &[u8]) -> Result<VideoCodec> {
+    if fourcc.len() < 4 {
+        return Err(ErrorCode::Chunk);
+    }
     for entry in VIDEO_FOURCCS {
         if fourcc[..4] == entry.fourcc {
             return Ok(entry.codec);
         }
     }
-    Ok(VideoCodec::H264) // fallback
+    Err(ErrorCode::Chunk)
 }
 
 /// Convert a FourCC string to an audio codec.
+/// Returns Err for unknown or too-short FourCCs so callers can use is_ok()
+/// as a reliable enhanced-header discriminator.
 pub fn fourcc_to_audio_codec(fourcc: &[u8]) -> Result<AudioCodec> {
+    if fourcc.len() < 4 {
+        return Err(ErrorCode::Chunk);
+    }
     for entry in AUDIO_FOURCCS {
         if fourcc[..4] == entry.fourcc {
             return Ok(entry.codec);
         }
     }
-    Ok(AudioCodec::Aac) // fallback
+    Err(ErrorCode::Chunk)
 }
 
 /// Convert a video codec to its FourCC string.
@@ -76,6 +86,9 @@ pub fn audio_codec_to_fourcc(codec: AudioCodec) -> &'static str {
 
 /// Get the human-readable name for a video FourCC.
 pub fn fourcc_video_name(fourcc: &[u8]) -> Option<&'static str> {
+    if fourcc.len() < 4 {
+        return None;
+    }
     for entry in VIDEO_FOURCCS {
         if fourcc[..4] == entry.fourcc {
             return Some(entry.name);
@@ -86,6 +99,9 @@ pub fn fourcc_video_name(fourcc: &[u8]) -> Option<&'static str> {
 
 /// Get the human-readable name for an audio FourCC.
 pub fn fourcc_audio_name(fourcc: &[u8]) -> Option<&'static str> {
+    if fourcc.len() < 4 {
+        return None;
+    }
     for entry in AUDIO_FOURCCS {
         if fourcc[..4] == entry.fourcc {
             return Some(entry.name);

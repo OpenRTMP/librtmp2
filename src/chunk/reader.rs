@@ -125,9 +125,11 @@ pub fn chunk_read(
         _ => return Err(ErrorCode::Chunk),
     };
 
-    // Read extended timestamp if needed
+    // Read extended timestamp if needed.
+    // Use buf.available() here, not the stale `available` snapshot captured
+    // before the header bytes were consumed.
     let final_timestamp = if ext_ts {
-        if available < 4 { return Ok(0); }
+        if buf.available() < 4 { return Ok(0); }
         let mut ts_buf = [0u8; 4];
         buf.read(&mut ts_buf).map_err(|_| ErrorCode::Io)?;
         ntoh32(&ts_buf)
