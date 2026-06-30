@@ -2,6 +2,7 @@
 //!
 //! Mirrors `src/server/server.h` and `src/server/server.c`.
 
+use std::collections::HashMap;
 use std::net::TcpListener;
 use std::os::unix::io::{AsRawFd, IntoRawFd};
 
@@ -9,6 +10,15 @@ use crate::net;
 use crate::session::conn::Conn;
 use crate::transport::{TlsCtx, Transport};
 use crate::types::*;
+
+/// Cached codec headers and last keyframe for a (app, stream_name) pair.
+/// Replayed to players that join after the publisher has already sent headers.
+struct StreamCache {
+    avc_header: Option<Vec<u8>>,
+    aac_header: Option<Vec<u8>>,
+    /// (timestamp, payload) of the most recent IDR keyframe.
+    last_keyframe: Option<(u32, Vec<u8>)>,
+}
 
 /// Server object.
 pub struct Server {
@@ -20,6 +30,7 @@ pub struct Server {
     /// Fired for every audio/video frame on every connection.
     pub on_frame_cb: Option<fn(&Frame)>,
     listener: Option<TcpListener>,
+    stream_cache: HashMap<(String, String), StreamCache>,
 }
 
 impl Server {
@@ -47,6 +58,7 @@ impl Server {
             tls_ctx,
             on_frame_cb: None,
             listener: None,
+            stream_cache: HashMap::new(),
         })
     }
 
@@ -160,12 +172,45 @@ impl Server {
         }
 
         // Collect all frames queued by publishers, then relay them to players
-        // on the same stream name.
+        // on the same (app, stream_name) pair.
         let relay_frames: Vec<_> = self
             .connections
             .iter_mut()
             .flat_map(|c| c.pending_relay.drain(..))
             .collect();
+
+        // Update per-stream codec header / keyframe cache.
+        for frame in &relay_frames {
+            let key = (frame.app.clone(), frame.stream_name.clone());
+            let cache = self.stream_cache.entry(key).or_insert(StreamCache {
+                avc_header: None,
+                aac_header: None,
+                last_keyframe: None,
+            });
+            match frame.frame_type {
+                FrameType::Video => {
+                    if frame.payload.len() >= 2 {
+                        if frame.payload[0] == 0x17 && frame.payload[1] == 0x00 {
+                            // AVC sequence header
+                            cache.avc_header = Some(frame.payload.clone());
+                        } else if frame.payload[0] == 0x17 && frame.payload[1] == 0x01 {
+                            // IDR keyframe
+                            cache.last_keyframe = Some((frame.timestamp, frame.payload.clone()));
+                        }
+                    }
+                }
+                FrameType::Audio => {
+                    if frame.payload.len() >= 2
+                        && (frame.payload[0] & 0xF0) == 0xA0
+                        && frame.payload[1] == 0x00
+                    {
+                        // AAC sequence header
+                        cache.aac_header = Some(frame.payload.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
 
         for frame in &relay_frames {
             for conn in self.connections.iter_mut() {
@@ -174,9 +219,26 @@ impl Server {
                     .as_ref()
                     .map(|s| s.is_playing && s.name == frame.stream_name)
                     .unwrap_or(false);
-                if is_player {
-                    let _ = conn.send_frame(frame.frame_type, frame.timestamp, &frame.payload);
+                if !is_player || conn.app != frame.app {
+                    continue;
                 }
+                // New player: replay cached codec headers and last keyframe first.
+                if conn.needs_init_frames {
+                    conn.needs_init_frames = false;
+                    let key = (frame.app.clone(), frame.stream_name.clone());
+                    if let Some(cache) = self.stream_cache.get(&key) {
+                        if let Some(ref hdr) = cache.avc_header.clone() {
+                            let _ = conn.send_frame(FrameType::Video, 0, hdr);
+                        }
+                        if let Some(ref hdr) = cache.aac_header.clone() {
+                            let _ = conn.send_frame(FrameType::Audio, 0, hdr);
+                        }
+                        if let Some((ts, ref kf)) = cache.last_keyframe.clone() {
+                            let _ = conn.send_frame(FrameType::Video, ts, kf);
+                        }
+                    }
+                }
+                let _ = conn.send_frame(frame.frame_type, frame.timestamp, &frame.payload);
             }
         }
 

@@ -31,6 +31,8 @@ pub struct RelayFrame {
     pub frame_type: FrameType,
     pub timestamp: u32,
     pub payload: Vec<u8>,
+    /// App name from the publisher's RTMP connect.
+    pub app: String,
     /// Stream name from the publisher.
     pub stream_name: String,
 }
@@ -55,6 +57,9 @@ pub struct Conn {
     pub send_mutex: Mutex<()>,
     /// Frames received from a publisher, waiting to be relayed to players.
     pub pending_relay: Vec<RelayFrame>,
+    /// Set when a player just joined; the server replays cached codec headers
+    /// and the last keyframe before forwarding live frames.
+    pub needs_init_frames: bool,
     // Callbacks
     pub on_frame_cb: Option<fn(&Frame)>,
 }
@@ -83,6 +88,7 @@ impl Conn {
             connect_cb_fired: false,
             send_mutex: Mutex::new(()),
             pending_relay: Vec::new(),
+            needs_init_frames: false,
             on_frame_cb: None,
         }
     }
@@ -291,6 +297,7 @@ impl Conn {
                         frame_type: FrameType::Audio,
                         timestamp: msg.timestamp,
                         payload: owned,
+                        app: self.app.clone(),
                         stream_name,
                     });
                 }
@@ -323,6 +330,7 @@ impl Conn {
                         frame_type: FrameType::Video,
                         timestamp: msg.timestamp,
                         payload: owned,
+                        app: self.app.clone(),
                         stream_name,
                     });
                 }
@@ -427,6 +435,7 @@ impl Conn {
                         stream.is_playing = true;
                         stream.name = name_str;
                     }
+                    self.needs_init_frames = true;
                     let _ = state_machine::conn_transition(&mut self.state, ConnState::Playing);
                     let sid = self
                         .current_stream
