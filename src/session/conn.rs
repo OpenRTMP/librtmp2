@@ -193,11 +193,17 @@ impl Conn {
         match handshake::server_read_c1(&mut self.handshake, &mut self.recv_buffer) {
             Ok(()) => {
                 // Queue S0+S1+S2; flush() drains without blocking the poll loop.
+                // Only reset handshake.out after both writes succeed so bytes
+                // are not lost on a buffer-append failure.
                 if self.client_fd >= 0 {
                     let s0 = [0x03u8];
-                    let _ = self.send_buffer.write(&s0);
+                    if self.send_buffer.write(&s0).is_err() {
+                        return ErrorCode::Internal as i32;
+                    }
                     let out_data = self.handshake.out.peek();
-                    let _ = self.send_buffer.write(out_data);
+                    if self.send_buffer.write(out_data).is_err() {
+                        return ErrorCode::Internal as i32;
+                    }
                 }
                 self.handshake.out.reset();
                 1

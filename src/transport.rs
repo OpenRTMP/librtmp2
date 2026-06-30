@@ -89,7 +89,7 @@ impl Transport {
                 self.fd,
                 data.as_ptr() as *const libc::c_void,
                 data.len(),
-                libc::MSG_DONTWAIT,
+                libc::MSG_DONTWAIT | libc::MSG_NOSIGNAL,
             )
         };
         if n < 0 {

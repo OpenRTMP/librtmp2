@@ -148,7 +148,7 @@ pub fn chunk_read(
                 },
             )
         })
-        .unwrap_or((DEFAULT_CHUNK_SIZE as usize, 0));
+        .unwrap_or((reg.default_chunk_size as usize, 0));
 
     let remaining = (eff_len_for_avail as usize).saturating_sub(reassembly_read_for_avail);
     let to_read = remaining.min(chunk_sz_for_avail);
@@ -219,14 +219,24 @@ pub fn chunk_read(
 
     // Guard against per-connection reassembly buffer exhaustion before
     // touching any stream state (avoid partial mutation on rejection).
+    // fmt=0/1 will immediately discard this CSID's buffer, so exclude its
+    // current bytes from the total to avoid rejecting a valid restart near
+    // the per-connection limit.
     if to_read > 0 {
+        let replaced = if fmt <= 1 {
+            reg.get(csid)
+                .map(|s| s.reassembly_buf.available())
+                .unwrap_or(0)
+        } else {
+            0
+        };
         let total: usize = reg
             .streams
             .iter()
             .filter(|s| s.in_use)
             .map(|s| s.reassembly_buf.available())
             .sum();
-        if total + to_read > MAX_REASSEMBLY_BYTES_PER_CONN {
+        if total.saturating_sub(replaced) + to_read > MAX_REASSEMBLY_BYTES_PER_CONN {
             return Err(ErrorCode::Chunk);
         }
     }

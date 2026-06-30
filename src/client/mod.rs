@@ -74,9 +74,8 @@ impl Client {
     /// Performs the real TCP connect, the legacy C0/C1/C2 handshake, then
     /// the `connect` + `createStream` AMF0 command exchange.
     pub fn connect(&mut self, url: &str) -> Result<()> {
-        self.reset_session_state();
-
         let (host, port, app, stream_key) = parse_rtmp_url(url)?;
+        self.reset_session_state();
 
         let stream = TcpStream::connect((host.as_str(), port)).map_err(|_| ErrorCode::Io)?;
         let fd = stream.into_raw_fd();
