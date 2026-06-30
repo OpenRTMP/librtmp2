@@ -86,7 +86,7 @@ impl Transport {
                 );
                 if n < 0 {
                     let err = *libc::__errno_location();
-                    if err == libc::EAGAIN || err == libc::EWOULDBLOCK {
+                    if err == libc::EINTR || err == libc::EAGAIN || err == libc::EWOULDBLOCK {
                         *again = 1;
                     }
                 }
