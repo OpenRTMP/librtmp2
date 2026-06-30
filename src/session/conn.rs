@@ -189,12 +189,12 @@ impl Conn {
     fn do_handshake_recurse(&mut self) -> i32 {
         match handshake::server_read_c1(&mut self.handshake, &mut self.recv_buffer) {
             Ok(()) => {
-                // Send S0+S1+S2
+                // Queue S0+S1+S2; flush() drains without blocking the poll loop.
                 if self.client_fd >= 0 {
                     let s0 = [0x03u8];
-                    let _ = self.send_raw(&s0);
-                    let out_data = self.handshake.out.peek().to_vec();
-                    let _ = self.send_raw(&out_data);
+                    let _ = self.send_buffer.write(&s0);
+                    let out_data = self.handshake.out.peek();
+                    let _ = self.send_buffer.write(out_data);
                 }
                 self.handshake.out.reset();
                 1
@@ -402,29 +402,22 @@ impl Conn {
         self.send_command(stream_id, amf_buf.as_slice())
     }
 
-    /// Send raw bytes over the socket.
-    pub fn send_raw(&mut self, data: &[u8]) -> Result<()> {
-        if self.client_fd < 0 {
-            return Ok(());
-        }
-        if let Some(ref transport) = self.transport {
-            transport.send(data)
-        } else {
-            // Direct send
-            use std::io::Write;
-            // This is a simplification; in production you'd use the transport
-            Ok(())
-        }
-    }
-
-    /// Flush the send buffer.
+    /// Flush the send buffer using non-blocking I/O.
     pub fn flush(&mut self) -> Result<()> {
         if self.client_fd < 0 || self.send_buffer.available() == 0 {
             return Ok(());
         }
-        let data = self.send_buffer.peek().to_vec();
-        self.send_raw(&data)?;
-        self.send_buffer.reset();
+        let Some(ref transport) = self.transport else {
+            return Ok(());
+        };
+        while self.send_buffer.available() > 0 {
+            let pending = self.send_buffer.peek();
+            let n = transport.try_send(pending)?;
+            if n == 0 {
+                break;
+            }
+            self.send_buffer.drain(n);
+        }
         Ok(())
     }
 

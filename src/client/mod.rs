@@ -74,6 +74,8 @@ impl Client {
     /// Performs the real TCP connect, the legacy C0/C1/C2 handshake, then
     /// the `connect` + `createStream` AMF0 command exchange.
     pub fn connect(&mut self, url: &str) -> Result<()> {
+        self.reset_session_state();
+
         let (host, port, app, stream_key) = parse_rtmp_url(url)?;
 
         let stream = TcpStream::connect((host.as_str(), port))
@@ -242,6 +244,22 @@ impl Client {
     }
 
     // ── Internal helpers ──
+
+    /// Drop any prior socket and protocol state before a new connect attempt.
+    fn reset_session_state(&mut self) {
+        if self.client_fd >= 0 {
+            unsafe { libc::close(self.client_fd); }
+            self.client_fd = -1;
+        }
+        self.transport = None;
+        self.recv_buffer.reset();
+        self.send_buffer.reset();
+        self.chunk_reg.destroy();
+        self.chunk_reg.init();
+        handshake::client_init(&mut self.handshake);
+        self.state = ClientState::Disconnected;
+        self.stream_id = 0;
+    }
 
     /// Drive the legacy C0/C1/C2 client handshake to completion over `transport`.
     fn do_handshake(&mut self, transport: &Transport) -> Result<()> {

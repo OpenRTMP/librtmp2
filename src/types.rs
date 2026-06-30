@@ -450,7 +450,7 @@ pub struct Modex {
 /* ── FLV tag types ── */
 
 /// FLV audio tag.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 #[repr(C)]
 pub struct AudioTag {
     pub codec: AudioCodec,
@@ -462,8 +462,22 @@ pub struct AudioTag {
     pub size: usize,
 }
 
+impl Default for AudioTag {
+    fn default() -> Self {
+        Self {
+            codec: AudioCodec::default(),
+            sample_rate: 0,
+            bit_depth: 0,
+            channels: 0,
+            aac_packet_type: 0,
+            data: std::ptr::null(),
+            size: 0,
+        }
+    }
+}
+
 /// FLV video tag.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 #[repr(C)]
 pub struct VideoTag {
     pub frame_type: u8,
@@ -472,6 +486,19 @@ pub struct VideoTag {
     pub composition_time: u32,
     pub data: *const u8,
     pub size: usize,
+}
+
+impl Default for VideoTag {
+    fn default() -> Self {
+        Self {
+            frame_type: 0,
+            codec: VideoCodec::default(),
+            avc_packet_type: 0,
+            composition_time: 0,
+            data: std::ptr::null(),
+            size: 0,
+        }
+    }
 }
 
 /// FLV script tag.

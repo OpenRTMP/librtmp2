@@ -77,36 +77,55 @@ impl Transport {
         }
     }
 
-    /// Blocking send of the whole buffer.
+    /// Non-blocking send. Returns bytes written, or 0 when the socket is not
+    /// writable (EAGAIN/EWOULDBLOCK). Used by the server poll loop so one
+    /// slow peer cannot stall all connections.
+    pub fn try_send(&self, data: &[u8]) -> Result<usize> {
+        if data.is_empty() {
+            return Ok(0);
+        }
+        unsafe {
+            let n = libc::send(
+                self.fd,
+                data.as_ptr() as *const libc::c_void,
+                data.len(),
+                libc::MSG_DONTWAIT,
+            );
+            if n < 0 {
+                let err = *libc::__errno_location();
+                if err == libc::EINTR {
+                    return Ok(0);
+                }
+                if err == libc::EAGAIN || err == libc::EWOULDBLOCK {
+                    return Ok(0);
+                }
+                return Err(ErrorCode::Io);
+            }
+            Ok(n as usize)
+        }
+    }
+
+    /// Blocking send of the whole buffer (client-side synchronous I/O).
     pub fn send(&self, data: &[u8]) -> Result<()> {
         let mut sent = 0;
         while sent < data.len() {
-            unsafe {
-                let n = libc::send(
-                    self.fd,
-                    data[sent..].as_ptr() as *const libc::c_void,
-                    data.len() - sent,
-                    0,
-                );
-                if n <= 0 {
-                    let err = *libc::__errno_location();
-                    if err == libc::EINTR {
-                        continue;
-                    }
-                    if err == libc::EAGAIN || err == libc::EWOULDBLOCK {
-                        // Wait for writable
-                        let mut pfd = libc::pollfd {
-                            fd: self.fd,
-                            events: libc::POLLOUT,
-                            revents: 0,
-                        };
-                        libc::poll(&mut pfd, 1, -1);
-                        continue;
-                    }
+            let n = self.try_send(&data[sent..])?;
+            if n == 0 {
+                let mut pfd = libc::pollfd {
+                    fd: self.fd,
+                    events: libc::POLLOUT,
+                    revents: 0,
+                };
+                let rc = unsafe { libc::poll(&mut pfd, 1, 10_000) };
+                if rc == 0 {
+                    return Err(ErrorCode::Timeout);
+                }
+                if rc < 0 {
                     return Err(ErrorCode::Io);
                 }
-                sent += n as usize;
+                continue;
             }
+            sent += n;
         }
         Ok(())
     }
