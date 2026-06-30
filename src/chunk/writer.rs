@@ -22,38 +22,46 @@ pub fn chunk_write(
     let csid = msg.csid;
     let fmt = msg.fmt;
     let ts = msg.timestamp;
+    let ext_ts = ts >= 0xFFFFFF;
 
-    // --- First chunk: full basic header + message header ---
+    // --- First chunk: basic header + conditional message header ---
     let hdr = basic_header(csid, fmt);
     out.write(&hdr).map_err(|_| ErrorCode::Internal)?;
 
-    // timestamp (3 bytes)
-    let mut ts_buf = [0u8; 3];
-    if ts >= 0xFFFFFF {
-        hton24(&mut ts_buf, 0xFFFFFF);
-    } else {
-        hton24(&mut ts_buf, ts);
+    // fmt=0: timestamp+length+type+streamid (11 bytes)
+    // fmt=1: timestamp+length+type         ( 7 bytes, no stream id)
+    // fmt=2: timestamp only                ( 3 bytes)
+    // fmt=3: no message header at all
+
+    if fmt <= 2 {
+        // timestamp (3 bytes)
+        let mut ts_buf = [0u8; 3];
+        hton24(&mut ts_buf, if ext_ts { 0xFFFFFF } else { ts });
+        out.write(&ts_buf).map_err(|_| ErrorCode::Internal)?;
     }
-    out.write(&ts_buf).map_err(|_| ErrorCode::Internal)?;
 
-    // message length (3 bytes)
-    let mut len_buf = [0u8; 3];
-    hton24(&mut len_buf, msg.msg_length);
-    out.write(&len_buf).map_err(|_| ErrorCode::Internal)?;
+    if fmt <= 1 {
+        // message length (3 bytes)
+        let mut len_buf = [0u8; 3];
+        hton24(&mut len_buf, msg.msg_length);
+        out.write(&len_buf).map_err(|_| ErrorCode::Internal)?;
 
-    // message type id (1 byte)
-    out.write(&[msg.msg_type_id]).map_err(|_| ErrorCode::Internal)?;
+        // message type id (1 byte)
+        out.write(&[msg.msg_type_id]).map_err(|_| ErrorCode::Internal)?;
+    }
 
-    // stream id (4 bytes, little-endian for fmt 0)
-    let sid = msg.msg_stream_id;
-    out.write(&[
-        (sid & 0xFF) as u8,
-        ((sid >> 8) & 0xFF) as u8,
-        ((sid >> 16) & 0xFF) as u8,
-        ((sid >> 24) & 0xFF) as u8,
-    ]).map_err(|_| ErrorCode::Internal)?;
+    if fmt == 0 {
+        // stream id (4 bytes, little-endian)
+        let sid = msg.msg_stream_id;
+        out.write(&[
+            (sid & 0xFF) as u8,
+            ((sid >> 8) & 0xFF) as u8,
+            ((sid >> 16) & 0xFF) as u8,
+            ((sid >> 24) & 0xFF) as u8,
+        ]).map_err(|_| ErrorCode::Internal)?;
+    }
 
-    if ts >= 0xFFFFFF {
+    if ext_ts && fmt <= 2 {
         out.write(&ts.to_be_bytes()).map_err(|_| ErrorCode::Internal)?;
     }
 
@@ -65,10 +73,10 @@ pub fn chunk_write(
         offset += to_write;
 
         if offset < payload_len {
-            // Continuation chunk header (fmt=3)
+            // Continuation chunk header (fmt=3, no message header)
             let chdr = basic_header(csid, 3);
             out.write(&chdr).map_err(|_| ErrorCode::Internal)?;
-            if ts >= 0xFFFFFF {
+            if ext_ts {
                 out.write(&ts.to_be_bytes()).map_err(|_| ErrorCode::Internal)?;
             }
         }

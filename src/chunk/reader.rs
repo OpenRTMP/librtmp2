@@ -26,6 +26,11 @@ pub struct ChunkMessage {
 /// - Ok(1) with is_complete=true when a full message is ready
 /// - Ok(0) when more data is needed
 /// - Err on protocol errors
+///
+/// Design: the function uses a "peek-first" strategy.  All availability checks
+/// happen BEFORE any bytes are consumed from `buf`.  This guarantees that every
+/// `Ok(0)` return leaves the cursor exactly where it was on entry, so the next
+/// call can retry without corruption.
 pub fn chunk_read(
     buf: &mut Buffer,
     reg: &mut ChunkRegistry,
@@ -39,53 +44,116 @@ pub fn chunk_read(
         return Ok(0);
     }
 
-    // Peek at the first byte to determine fmt and csid
-    let first = buf.peek()[0];
+    // ── Phase 1: parse header structure by peeking (no bytes consumed yet) ──
+
+    let peek = buf.peek();
+
+    let first = peek[0];
     let fmt = first >> 6;
     let csid_low = (first & 0x3F) as u32;
 
-    let csid = match csid_low {
+    let (csid, header_size) = match csid_low {
         0 => {
             if available < 2 { return Ok(0); }
-            buf.peek()[1] as u32 + 64
+            (peek[1] as u32 + 64, 2usize)
         }
         1 => {
             if available < 3 { return Ok(0); }
-            let peek = buf.peek();
-            ((peek[1] as u32) | ((peek[2] as u32) << 8)) + 64
+            (((peek[1] as u32) | ((peek[2] as u32) << 8)) + 64, 3usize)
         }
-        n => n,
+        n => (n, 1usize),
     };
 
-    // Determine header size based on fmt
-    let header_size = match csid {
-        0 => 2,
-        1 => 3,
-        _ => 1,
-    };
-
-    let msg_header_size = match fmt {
-        0 => 11 + header_size, // timestamp(3) + length(3) + typeid(1) + streamid(4)
-        1 => 7 + header_size,  // timestamp(3) + length(3) + typeid(1)
-        2 => 3 + header_size,  // timestamp(3)
-        3 => header_size,      // nothing
+    // Number of message-header bytes this fmt carries
+    let msg_field_size: usize = match fmt {
+        0 => 11, // timestamp(3) + length(3) + typeid(1) + streamid(4)
+        1 => 7,  // timestamp(3) + length(3) + typeid(1)
+        2 => 3,  // timestamp(3)
+        3 => 0,  // inherited entirely from stream state
         _ => return Err(ErrorCode::Chunk),
     };
 
-    if available < msg_header_size {
+    let base_needed = header_size + msg_field_size;
+    if available < base_needed {
         return Ok(0);
     }
+
+    // Compressed headers (fmt 1/2/3) inherit fields from prior stream state.
+    // A compressed chunk on an unknown CSID is a protocol error.
+    if fmt != 0 && reg.get(csid).is_none() {
+        return Err(ErrorCode::Chunk);
+    }
+
+    // Peek at the 3-byte timestamp field (for fmt 0/1/2) to decide ext_ts
+    // without consuming anything.
+    let ext_ts_from_header = if fmt <= 2 {
+        let off = header_size;
+        let ts_raw = ((peek[off] as u32) << 16)
+            | ((peek[off + 1] as u32) << 8)
+            | (peek[off + 2] as u32);
+        ts_raw >= 0xFFFFFF
+    } else {
+        false
+    };
+
+    // For fmt=3 continuation chunks the writer re-emits the 4-byte extended
+    // timestamp whenever the original message had ts >= 0xFFFFFF.  Inherit
+    // the flag from the stream's stored state.
+    let ext_ts_from_stream = if fmt == 3 {
+        reg.get(csid)
+            .map(|s| s.type0_ext_ts)
+            .ok_or(ErrorCode::Chunk)?
+    } else {
+        false
+    };
+
+    let ext_ts = ext_ts_from_header || ext_ts_from_stream;
+
+    // Total header bytes (basic + message fields + optional ext timestamp)
+    let total_header_needed = base_needed + if ext_ts { 4 } else { 0 };
+    if available < total_header_needed {
+        return Ok(0);
+    }
+
+    // Determine effective_length and per-stream chunk_size/reassembly_bytes_read
+    // so we can include the payload slice in the upfront availability check.
+    let eff_len_for_avail: u32 = match fmt {
+        0 | 1 => {
+            // message length is peeked from header bytes
+            let off = header_size + 3;
+            ((peek[off] as u32) << 16)
+                | ((peek[off + 1] as u32) << 8)
+                | (peek[off + 2] as u32)
+        }
+        _ => reg
+            .get(csid)
+            .map(|s| s.type0_msg_length)
+            .ok_or(ErrorCode::Chunk)?,
+    };
+
+    let (chunk_sz_for_avail, reassembly_read_for_avail) = reg
+        .get(csid)
+        .map(|s| (s.chunk_size as usize, s.reassembly_bytes_read as usize))
+        .unwrap_or((DEFAULT_CHUNK_SIZE as usize, 0));
+
+    let remaining = (eff_len_for_avail as usize).saturating_sub(reassembly_read_for_avail);
+    let to_read = remaining.min(chunk_sz_for_avail);
+
+    if available < total_header_needed + to_read {
+        return Ok(0);
+    }
+
+    // ── Phase 2: all bytes confirmed present — consume them ──
 
     // Consume basic header
     let mut hdr = vec![0u8; header_size];
     buf.read(&mut hdr).map_err(|_| ErrorCode::Io)?;
 
-    // Read message header based on fmt
+    // Consume message header and extract fields
     let timestamp: u32;
     let msg_length: u32;
     let msg_type_id: u8;
     let msg_stream_id: u32;
-    let ext_ts: bool;
 
     match fmt {
         0 => {
@@ -94,8 +162,10 @@ pub fn chunk_read(
             timestamp = ((mh[0] as u32) << 16) | ((mh[1] as u32) << 8) | (mh[2] as u32);
             msg_length = ((mh[3] as u32) << 16) | ((mh[4] as u32) << 8) | (mh[5] as u32);
             msg_type_id = mh[6];
-            msg_stream_id = (mh[7] as u32) | ((mh[8] as u32) << 8) | ((mh[9] as u32) << 16) | ((mh[10] as u32) << 24);
-            ext_ts = timestamp >= 0xFFFFFF;
+            msg_stream_id = (mh[7] as u32)
+                | ((mh[8] as u32) << 8)
+                | ((mh[9] as u32) << 16)
+                | ((mh[10] as u32) << 24);
         }
         1 => {
             let mut mh = [0u8; 7];
@@ -103,8 +173,7 @@ pub fn chunk_read(
             timestamp = ((mh[0] as u32) << 16) | ((mh[1] as u32) << 8) | (mh[2] as u32);
             msg_length = ((mh[3] as u32) << 16) | ((mh[4] as u32) << 8) | (mh[5] as u32);
             msg_type_id = mh[6];
-            msg_stream_id = 0; // carried from previous
-            ext_ts = timestamp >= 0xFFFFFF;
+            msg_stream_id = 0; // inherited from stream state
         }
         2 => {
             let mut mh = [0u8; 3];
@@ -113,21 +182,18 @@ pub fn chunk_read(
             msg_length = 0;
             msg_type_id = 0;
             msg_stream_id = 0;
-            ext_ts = timestamp >= 0xFFFFFF;
         }
         3 => {
             timestamp = 0;
             msg_length = 0;
             msg_type_id = 0;
             msg_stream_id = 0;
-            ext_ts = false;
         }
         _ => return Err(ErrorCode::Chunk),
-    };
+    }
 
-    // Read extended timestamp if needed
+    // Consume extended timestamp if present
     let final_timestamp = if ext_ts {
-        if available < 4 { return Ok(0); }
         let mut ts_buf = [0u8; 4];
         buf.read(&mut ts_buf).map_err(|_| ErrorCode::Io)?;
         ntoh32(&ts_buf)
@@ -135,10 +201,10 @@ pub fn chunk_read(
         timestamp
     };
 
-    // Get or create the chunk stream
+    // ── Phase 3: update stream state and reassemble ──
+
     let stream = reg.get_or_create(csid)?;
 
-    // Update stream state based on fmt
     match fmt {
         0 => {
             stream.type0_timestamp = final_timestamp;
@@ -151,9 +217,11 @@ pub fn chunk_read(
             stream.type0_timestamp = final_timestamp;
             stream.type0_msg_length = msg_length;
             stream.type0_msg_type_id = msg_type_id;
+            stream.type0_ext_ts = ext_ts;
         }
         2 => {
             stream.type0_timestamp = final_timestamp;
+            stream.type0_ext_ts = ext_ts;
         }
         _ => {}
     }
@@ -162,24 +230,15 @@ pub fn chunk_read(
     let effective_length = stream.type0_msg_length;
     let effective_type_id = stream.type0_msg_type_id;
     let effective_stream_id = stream.type0_msg_stream_id;
-
-    // Determine how many bytes to read for this chunk
     let chunk_size = stream.chunk_size as usize;
     let remaining = (effective_length as usize).saturating_sub(stream.reassembly_bytes_read as usize);
     let to_read = remaining.min(chunk_size);
 
-    if buf.available() < to_read {
-        return Ok(0);
-    }
-
-    // Read payload chunk
-    let start = stream.reassembly_buf.available();
     let mut chunk_data = vec![0u8; to_read];
     buf.read(&mut chunk_data).map_err(|_| ErrorCode::Io)?;
     stream.reassembly_buf.write(&chunk_data).map_err(|_| ErrorCode::Chunk)?;
     stream.reassembly_bytes_read += to_read as u32;
 
-    // Check if message is complete
     if stream.reassembly_bytes_read >= effective_length {
         msg.csid = csid;
         msg.fmt = fmt;
@@ -189,13 +248,11 @@ pub fn chunk_read(
         msg.msg_stream_id = effective_stream_id;
         msg.is_complete = true;
 
-        // Return a pointer to the reassembly buffer data.
-        // This is safe because the caller consumes the payload before the next chunk_read.
+        // SAFETY: caller consumes the payload before the next chunk_read call.
         let data = stream.reassembly_buf.peek();
         *payload_len = data.len();
         *payload = data.as_ptr();
 
-        // Reset for next message
         stream.reassembly_bytes_read = 0;
         stream.reassembly_buf.reset();
 

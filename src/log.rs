@@ -3,6 +3,7 @@
 //! Mirrors `src/core/log.h` and `src/core/log.c`.
 
 use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::Mutex;
 
 /// Log levels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -17,9 +18,15 @@ pub enum LogLevel {
 /// Log callback function type.
 pub type LogFn = fn(level: LogLevel, msg: &str, userdata: *mut u8);
 
+struct LogCallback {
+    cb: Option<LogFn>,
+    /// Stored as usize so the struct is Send+Sync; cast back to *mut u8 on use.
+    /// The caller is responsible for keeping the pointed-to data alive.
+    userdata: usize,
+}
+
 static LOG_LEVEL: AtomicU8 = AtomicU8::new(LogLevel::Info as u8);
-static mut LOG_FN: Option<LogFn> = None;
-static mut LOG_USERDATA: *mut u8 = std::ptr::null_mut();
+static LOG_CALLBACK: Mutex<LogCallback> = Mutex::new(LogCallback { cb: None, userdata: 0 });
 
 const LEVEL_STRINGS: [&str; 4] = ["DEBUG", "INFO", "WARN", "ERROR"];
 
@@ -30,10 +37,9 @@ pub fn set_level(level: LogLevel) {
 
 /// Set a custom log callback.
 pub fn set_callback(cb: LogFn, userdata: *mut u8) {
-    unsafe {
-        LOG_FN = Some(cb);
-        LOG_USERDATA = userdata;
-    }
+    let mut guard = LOG_CALLBACK.lock().unwrap_or_else(|e| e.into_inner());
+    guard.cb = Some(cb);
+    guard.userdata = userdata as usize;
 }
 
 /// Log a message at the given level.
@@ -47,12 +53,17 @@ pub fn log(level: LogLevel, file: &str, line: u32, args: std::fmt::Arguments<'_>
     let level_str = LEVEL_STRINGS[level as usize];
     let full_msg = format!("[{}] {}:{}: {}", level_str, basename, line, msg);
 
-    unsafe {
-        if let Some(cb) = LOG_FN {
-            cb(level, &full_msg, LOG_USERDATA);
-        } else {
-            eprintln!("{}", full_msg);
-        }
+    // Snapshot callback under the lock, then call outside the lock so that a
+    // callback that itself logs does not deadlock on LOG_CALLBACK.
+    let snapshot = {
+        let guard = LOG_CALLBACK.lock().unwrap_or_else(|e| e.into_inner());
+        guard.cb.map(|cb| (cb, guard.userdata))
+    };
+
+    if let Some((cb, userdata)) = snapshot {
+        cb(level, &full_msg, userdata as *mut u8);
+    } else {
+        eprintln!("{}", full_msg);
     }
 }
 

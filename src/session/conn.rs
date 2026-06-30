@@ -128,9 +128,10 @@ impl Conn {
             }
         }
 
-        // Send acknowledgement if window exceeded
+        // Send acknowledgement if window exceeded.
+        // wrapping_sub handles the case where bytes_received has wrapped past 0.
         if self.window_ack_size > 0
-            && (self.bytes_received - self.bytes_at_last_ack) >= self.window_ack_size
+            && self.bytes_received.wrapping_sub(self.bytes_at_last_ack) >= self.window_ack_size
         {
             self.send_acknowledgement(self.bytes_received)?;
             self.bytes_at_last_ack = self.bytes_received;
@@ -305,6 +306,11 @@ impl Conn {
                 // Fire on_connect callback
             }
             "createStream" => {
+                // Must have completed the AMF 'connect' exchange first.
+                if self.state < ConnState::AppConnected {
+                    return self.send_onstatus(0, "error", "NetStream.Failed",
+                        "connect required before createStream");
+                }
                 let txn = command::read_create_stream(&mut buf)?;
                 if self.next_stream_id >= MAX_STREAMS_PER_CONN {
                     self.send_onstatus(0, "error", "NetStream.Failed", "Too many streams")?;

@@ -160,6 +160,10 @@ impl Server {
             }
         }
 
+        // A connection that errors on both recv and flush gets pushed twice.
+        // Sort then dedup so each index is removed exactly once.
+        closed.sort_unstable();
+        closed.dedup();
         for i in closed.into_iter().rev() {
             self.connections.remove(i);
         }

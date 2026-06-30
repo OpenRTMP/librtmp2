@@ -58,11 +58,12 @@ pub fn fourcc_list_write(list: &FourCcList, buf: &mut [u8]) -> usize {
         return 0;
     }
 
-    buf[0] = list.count as u8;
-    // For counts > 255 we'd need more, but MAX_FOURCCS=16 so this is fine
-    buf[1] = 0;
-    buf[2] = 0;
-    buf[3] = 0;
+    // Write count as big-endian u32 to match fourcc_list_parse's big-endian read.
+    let cnt = list.count as u32;
+    buf[0] = (cnt >> 24) as u8;
+    buf[1] = (cnt >> 16) as u8;
+    buf[2] = (cnt >> 8) as u8;
+    buf[3] = cnt as u8;
 
     let mut offset = 4;
     for i in 0..list.count {
@@ -151,10 +152,12 @@ pub fn video_fourcc_info_map_write(map: &VideoFourCcInfoMap, buf: &mut [u8]) -> 
         return 0;
     }
 
-    buf[0] = map.count as u8;
-    buf[1] = 0;
-    buf[2] = 0;
-    buf[3] = 0;
+    // Write count as big-endian u32 to match video_fourcc_info_map_parse's big-endian read.
+    let cnt = map.count as u32;
+    buf[0] = (cnt >> 24) as u8;
+    buf[1] = (cnt >> 16) as u8;
+    buf[2] = (cnt >> 8) as u8;
+    buf[3] = cnt as u8;
 
     let mut offset = 4;
     for i in 0..map.count {
