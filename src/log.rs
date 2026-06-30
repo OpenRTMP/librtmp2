@@ -20,15 +20,10 @@ pub type LogFn = fn(level: LogLevel, msg: &str, userdata: *mut u8);
 
 struct LogCallback {
     cb: Option<LogFn>,
-    /// Stored as usize so the struct can be Sync; cast back to *mut u8 on use.
+    /// Stored as usize so the struct is Send+Sync; cast back to *mut u8 on use.
     /// The caller is responsible for keeping the pointed-to data alive.
     userdata: usize,
 }
-
-// SAFETY: LogFn is a plain fn pointer (inherently Send+Sync).
-// userdata is an opaque C pointer owned by the caller; the caller guarantees its lifetime.
-unsafe impl Send for LogCallback {}
-unsafe impl Sync for LogCallback {}
 
 static LOG_LEVEL: AtomicU8 = AtomicU8::new(LogLevel::Info as u8);
 static LOG_CALLBACK: Mutex<LogCallback> = Mutex::new(LogCallback { cb: None, userdata: 0 });
