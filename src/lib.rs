@@ -109,7 +109,7 @@ pub unsafe extern "C" fn lrtmp2_server_listen(
         return ErrorCode::Internal as i32;
     }
     let s = &mut *server;
-    let addr = std::ffi::CStr::from_ptr(bind_addr as *const i8);
+    let addr = std::ffi::CStr::from_ptr(bind_addr as *const std::ffi::c_char);
     match s.listen(addr.to_str().unwrap_or("")) {
         Ok(()) => 0,
         Err(e) => e as i32,
@@ -159,7 +159,7 @@ pub unsafe extern "C" fn lrtmp2_client_connect(c: *mut client::Client, url: *con
         return ErrorCode::Internal as i32;
     }
     let client = &mut *c;
-    let url_str = std::ffi::CStr::from_ptr(url as *const i8);
+    let url_str = std::ffi::CStr::from_ptr(url as *const std::ffi::c_char);
     match client.connect(url_str.to_str().unwrap_or("")) {
         Ok(()) => 0,
         Err(e) => e as i32,
