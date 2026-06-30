@@ -127,11 +127,13 @@ impl Server {
     }
 
     /// Process all active connections: drain readable bytes, drive the
-    /// protocol state machine, flush pending writes, and reap closed peers.
+    /// protocol state machine, relay frames from publishers to players,
+    /// flush pending writes, and reap closed peers.
     pub fn process_connections(&mut self) -> Result<()> {
         let mut buf = [0u8; 65536];
         let mut closed = Vec::new();
 
+        // Drive recv/processing for every connection.
         for (i, conn) in self.connections.iter_mut().enumerate() {
             loop {
                 let Some(transport) = conn.transport.as_ref() else {
@@ -155,6 +157,31 @@ impl Server {
                     break;
                 }
             }
+        }
+
+        // Collect all frames queued by publishers, then relay them to players
+        // on the same stream name.
+        let relay_frames: Vec<_> = self
+            .connections
+            .iter_mut()
+            .flat_map(|c| c.pending_relay.drain(..))
+            .collect();
+
+        for frame in &relay_frames {
+            for conn in self.connections.iter_mut() {
+                let is_player = conn
+                    .current_stream
+                    .as_ref()
+                    .map(|s| s.is_playing && s.name == frame.stream_name)
+                    .unwrap_or(false);
+                if is_player {
+                    let _ = conn.send_frame(frame.frame_type, frame.timestamp, &frame.payload);
+                }
+            }
+        }
+
+        // Flush all connections.
+        for (i, conn) in self.connections.iter_mut().enumerate() {
             if conn.flush().is_err() {
                 closed.push(i);
             }

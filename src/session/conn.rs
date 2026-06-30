@@ -26,6 +26,15 @@ const SERVER_PEER_BANDWIDTH: u32 = 2_500_000;
 /// Peer bandwidth limit type (dynamic)
 const PEER_BANDWIDTH_DYNAMIC: u8 = 2;
 
+/// A frame queued for relay to player connections.
+pub struct RelayFrame {
+    pub frame_type: FrameType,
+    pub timestamp: u32,
+    pub payload: Vec<u8>,
+    /// Stream name from the publisher.
+    pub stream_name: String,
+}
+
 /// Connection object.
 pub struct Conn {
     pub state: ConnState,
@@ -44,6 +53,8 @@ pub struct Conn {
     pub current_stream: Option<Box<Stream>>,
     pub connect_cb_fired: bool,
     pub send_mutex: Mutex<()>,
+    /// Frames received from a publisher, waiting to be relayed to players.
+    pub pending_relay: Vec<RelayFrame>,
     // Callbacks
     pub on_frame_cb: Option<fn(&Frame)>,
 }
@@ -71,6 +82,7 @@ impl Conn {
             current_stream: None,
             connect_cb_fired: false,
             send_mutex: Mutex::new(()),
+            pending_relay: Vec::new(),
             on_frame_cb: None,
         }
     }
@@ -259,16 +271,28 @@ impl Conn {
                     .map(|s| s.is_publishing)
                     .unwrap_or(false)
                 {
+                    let stream_name = self
+                        .current_stream
+                        .as_ref()
+                        .map(|s| s.name.clone())
+                        .unwrap_or_default();
+                    let owned = payload.to_vec();
                     if let Some(ref cb) = self.on_frame_cb {
                         let mut frame = Frame {
                             frame_type: FrameType::Audio,
                             timestamp: msg.timestamp,
                             ..Default::default()
                         };
-                        frame.data = payload.as_ptr();
-                        frame.size = payload.len() as u32;
+                        frame.data = owned.as_ptr();
+                        frame.size = owned.len() as u32;
                         cb(&frame);
                     }
+                    self.pending_relay.push(RelayFrame {
+                        frame_type: FrameType::Audio,
+                        timestamp: msg.timestamp,
+                        payload: owned,
+                        stream_name,
+                    });
                 }
                 Ok(())
             }
@@ -279,16 +303,28 @@ impl Conn {
                     .map(|s| s.is_publishing)
                     .unwrap_or(false)
                 {
+                    let stream_name = self
+                        .current_stream
+                        .as_ref()
+                        .map(|s| s.name.clone())
+                        .unwrap_or_default();
+                    let owned = payload.to_vec();
                     if let Some(ref cb) = self.on_frame_cb {
                         let mut frame = Frame {
                             frame_type: FrameType::Video,
                             timestamp: msg.timestamp,
                             ..Default::default()
                         };
-                        frame.data = payload.as_ptr();
-                        frame.size = payload.len() as u32;
+                        frame.data = owned.as_ptr();
+                        frame.size = owned.len() as u32;
                         cb(&frame);
                     }
+                    self.pending_relay.push(RelayFrame {
+                        frame_type: FrameType::Video,
+                        timestamp: msg.timestamp,
+                        payload: owned,
+                        stream_name,
+                    });
                 }
                 Ok(())
             }
@@ -347,6 +383,10 @@ impl Conn {
                 let mut stream_name = [0u8; 256];
                 let mut publish_type = [0u8; 64];
                 command::read_publish(&mut buf, &mut stream_name, &mut publish_type)?;
+                let name_str = std::str::from_utf8(&stream_name)
+                    .unwrap_or("")
+                    .trim_end_matches('\0')
+                    .to_string();
                 if self.current_stream.is_none() {
                     self.send_onstatus(
                         0,
@@ -357,6 +397,7 @@ impl Conn {
                 } else {
                     if let Some(ref mut stream) = self.current_stream {
                         stream.is_publishing = true;
+                        stream.name = name_str;
                     }
                     let _ = state_machine::conn_transition(&mut self.state, ConnState::Publishing);
                     let sid = self
@@ -370,6 +411,10 @@ impl Conn {
             "play" => {
                 let mut stream_name = [0u8; 256];
                 command::read_play(&mut buf, &mut stream_name)?;
+                let name_str = std::str::from_utf8(&stream_name)
+                    .unwrap_or("")
+                    .trim_end_matches('\0')
+                    .to_string();
                 if self.current_stream.is_none() {
                     self.send_onstatus(
                         0,
@@ -380,6 +425,7 @@ impl Conn {
                 } else {
                     if let Some(ref mut stream) = self.current_stream {
                         stream.is_playing = true;
+                        stream.name = name_str;
                     }
                     let _ = state_machine::conn_transition(&mut self.state, ConnState::Playing);
                     let sid = self
@@ -476,6 +522,37 @@ impl Conn {
             self.send_buffer.drain(n);
         }
         Ok(())
+    }
+
+    /// Send an audio or video frame to this connection (for player relay).
+    pub fn send_frame(&mut self, frame_type: FrameType, timestamp: u32, payload: &[u8]) -> Result<()> {
+        let stream_id = self
+            .current_stream
+            .as_ref()
+            .map(|s| s.stream_id)
+            .unwrap_or(1);
+
+        let mut cmsg = ChunkMessage::default();
+        cmsg.timestamp = timestamp;
+        cmsg.msg_length = payload.len() as u32;
+        cmsg.msg_stream_id = stream_id;
+        cmsg.fmt = 0;
+
+        if frame_type == FrameType::Audio {
+            cmsg.csid = 4;
+            cmsg.msg_type_id = 0x08; // AUDIO
+        } else {
+            cmsg.csid = 6;
+            cmsg.msg_type_id = 0x09; // VIDEO
+        }
+
+        chunk_write(
+            &mut self.send_buffer,
+            &cmsg,
+            payload,
+            payload.len(),
+            self.chunk_size as usize,
+        )
     }
 
     // ── Internal helpers ──
