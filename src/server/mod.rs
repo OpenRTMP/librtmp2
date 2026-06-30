@@ -179,7 +179,36 @@ impl Server {
             .flat_map(|c| c.pending_relay.drain(..))
             .collect();
 
-        // Update per-stream codec header / keyframe cache.
+        // Replay cached codec headers and last keyframe to newly-joined players
+        // using the pre-batch cache state, so init frames always precede live
+        // frames from the current batch.
+        for conn in self.connections.iter_mut() {
+            if !conn.needs_init_frames {
+                continue;
+            }
+            let Some(ref stream) = conn.current_stream else {
+                continue;
+            };
+            if !stream.is_playing {
+                continue;
+            }
+            conn.needs_init_frames = false;
+            let key = (conn.app.clone(), stream.name.clone());
+            if let Some(cache) = self.stream_cache.get(&key) {
+                if let Some(ref hdr) = cache.avc_header.clone() {
+                    let _ = conn.send_frame(FrameType::Video, 0, hdr);
+                }
+                if let Some(ref hdr) = cache.aac_header.clone() {
+                    let _ = conn.send_frame(FrameType::Audio, 0, hdr);
+                }
+                if let Some((ts, ref kf)) = cache.last_keyframe.clone() {
+                    let _ = conn.send_frame(FrameType::Video, ts, kf);
+                }
+            }
+        }
+
+        // Update per-stream cache and relay each frame in order so players
+        // receive frames in the same sequence the publisher sent them.
         for frame in &relay_frames {
             let key = (frame.app.clone(), frame.stream_name.clone());
             let cache = self.stream_cache.entry(key).or_insert(StreamCache {
@@ -191,10 +220,8 @@ impl Server {
                 FrameType::Video => {
                     if frame.payload.len() >= 2 {
                         if frame.payload[0] == 0x17 && frame.payload[1] == 0x00 {
-                            // AVC sequence header
                             cache.avc_header = Some(frame.payload.clone());
                         } else if frame.payload[0] == 0x17 && frame.payload[1] == 0x01 {
-                            // IDR keyframe
                             cache.last_keyframe = Some((frame.timestamp, frame.payload.clone()));
                         }
                     }
@@ -204,15 +231,12 @@ impl Server {
                         && (frame.payload[0] & 0xF0) == 0xA0
                         && frame.payload[1] == 0x00
                     {
-                        // AAC sequence header
                         cache.aac_header = Some(frame.payload.clone());
                     }
                 }
                 _ => {}
             }
-        }
 
-        for frame in &relay_frames {
             for conn in self.connections.iter_mut() {
                 let is_player = conn
                     .current_stream
@@ -221,22 +245,6 @@ impl Server {
                     .unwrap_or(false);
                 if !is_player || conn.app != frame.app {
                     continue;
-                }
-                // New player: replay cached codec headers and last keyframe first.
-                if conn.needs_init_frames {
-                    conn.needs_init_frames = false;
-                    let key = (frame.app.clone(), frame.stream_name.clone());
-                    if let Some(cache) = self.stream_cache.get(&key) {
-                        if let Some(ref hdr) = cache.avc_header.clone() {
-                            let _ = conn.send_frame(FrameType::Video, 0, hdr);
-                        }
-                        if let Some(ref hdr) = cache.aac_header.clone() {
-                            let _ = conn.send_frame(FrameType::Audio, 0, hdr);
-                        }
-                        if let Some((ts, ref kf)) = cache.last_keyframe.clone() {
-                            let _ = conn.send_frame(FrameType::Video, ts, kf);
-                        }
-                    }
                 }
                 let _ = conn.send_frame(frame.frame_type, frame.timestamp, &frame.payload);
             }
@@ -254,6 +262,14 @@ impl Server {
         closed.sort_unstable();
         closed.dedup();
         for i in closed.into_iter().rev() {
+            // Evict the cache when a publisher closes so stale headers/keyframes
+            // do not persist for the next publisher reusing the same key.
+            if let Some(ref stream) = self.connections[i].current_stream {
+                if stream.is_publishing {
+                    self.stream_cache
+                        .remove(&(self.connections[i].app.clone(), stream.name.clone()));
+                }
+            }
             self.connections.remove(i);
         }
         Ok(())
