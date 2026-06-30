@@ -40,8 +40,8 @@ impl Server {
             if config.tls_cert_file.is_null() || config.tls_key_file.is_null() {
                 return Err(ErrorCode::Internal);
             }
-            let cert = unsafe { std::ffi::CStr::from_ptr(config.tls_cert_file as *const i8) };
-            let key = unsafe { std::ffi::CStr::from_ptr(config.tls_key_file as *const i8) };
+            let cert = unsafe { std::ffi::CStr::from_ptr(config.tls_cert_file as *const u8) };
+            let key = unsafe { std::ffi::CStr::from_ptr(config.tls_key_file as *const u8) };
             Some(TlsCtx::new_server(
                 cert.to_str().unwrap_or(""),
                 key.to_str().unwrap_or(""),
