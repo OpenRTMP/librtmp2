@@ -3,8 +3,8 @@
 //! Mirrors `src/chunk/chunk_reader.h` and `src/chunk/chunk_reader.c`.
 
 use crate::buffer::Buffer;
-use crate::chunk::state::{ChunkRegistry, ChunkStream, DEFAULT_CHUNK_SIZE};
-use crate::bytes::{hton24, ntoh32};
+use crate::chunk::state::{ChunkRegistry, ChunkStream, MAX_REASSEMBLY_BYTES_PER_CONN, MAX_CHUNK_STREAMS};
+use crate::bytes::ntoh32;
 use crate::types::Result;
 use crate::types::ErrorCode;
 
@@ -125,62 +125,106 @@ pub fn chunk_read(
         _ => return Err(ErrorCode::Chunk),
     };
 
-    // Read extended timestamp if needed
-    let final_timestamp = if ext_ts {
-        if available < 4 { return Ok(0); }
+    // Resolve chunk stream index (index access avoids overlapping borrows later).
+    let idx = match reg.streams.iter().position(|s| s.csid == csid && s.in_use) {
+        Some(i) => i,
+        None => {
+            if reg.streams.len() >= MAX_CHUNK_STREAMS {
+                return Err(ErrorCode::Chunk);
+            }
+            reg.streams.push(ChunkStream {
+                csid,
+                in_use: true,
+                chunk_size: reg.default_chunk_size,
+                ..ChunkStream::default()
+            });
+            reg.streams.len() - 1
+        }
+    };
+
+    // fmt 0/1/2: ext ts follows the message header when the 24-bit field is 0xFFFFFF.
+    // fmt 3: continuation chunks repeat ext ts when the message started with one.
+    let needs_ext_ts = match fmt {
+        0 | 1 | 2 => ext_ts,
+        3 => reg.streams[idx].type0_ext_ts,
+        _ => false,
+    };
+
+    let final_timestamp = if needs_ext_ts {
+        if buf.available() < 4 {
+            return Ok(0);
+        }
         let mut ts_buf = [0u8; 4];
         buf.read(&mut ts_buf).map_err(|_| ErrorCode::Io)?;
-        ntoh32(&ts_buf)
+        match fmt {
+            3 => reg.streams[idx].type0_timestamp,
+            _ => ntoh32(&ts_buf),
+        }
+    } else if fmt == 3 {
+        reg.streams[idx].type0_timestamp
     } else {
         timestamp
     };
 
-    // Get or create the chunk stream
-    let stream = reg.get_or_create(csid)?;
+    // fmt 0/1 start a new message; discard any partial reassembly from the prior one.
+    if fmt == 0 || fmt == 1 {
+        reg.streams[idx].reassembly_bytes_read = 0;
+        reg.streams[idx].reassembly_buf.reset();
+    }
 
     // Update stream state based on fmt
     match fmt {
         0 => {
-            stream.type0_timestamp = final_timestamp;
-            stream.type0_msg_length = msg_length;
-            stream.type0_msg_type_id = msg_type_id;
-            stream.type0_msg_stream_id = msg_stream_id;
-            stream.type0_ext_ts = ext_ts;
+            reg.streams[idx].type0_timestamp = final_timestamp;
+            reg.streams[idx].type0_msg_length = msg_length;
+            reg.streams[idx].type0_msg_type_id = msg_type_id;
+            reg.streams[idx].type0_msg_stream_id = msg_stream_id;
+            reg.streams[idx].type0_ext_ts = ext_ts;
         }
         1 => {
-            stream.type0_timestamp = final_timestamp;
-            stream.type0_msg_length = msg_length;
-            stream.type0_msg_type_id = msg_type_id;
+            reg.streams[idx].type0_timestamp = final_timestamp;
+            reg.streams[idx].type0_msg_length = msg_length;
+            reg.streams[idx].type0_msg_type_id = msg_type_id;
         }
         2 => {
-            stream.type0_timestamp = final_timestamp;
+            reg.streams[idx].type0_timestamp = final_timestamp;
         }
         _ => {}
     }
 
-    let effective_ts = stream.type0_timestamp;
-    let effective_length = stream.type0_msg_length;
-    let effective_type_id = stream.type0_msg_type_id;
-    let effective_stream_id = stream.type0_msg_stream_id;
+    let effective_ts = reg.streams[idx].type0_timestamp;
+    let effective_length = reg.streams[idx].type0_msg_length;
+    let effective_type_id = reg.streams[idx].type0_msg_type_id;
+    let effective_stream_id = reg.streams[idx].type0_msg_stream_id;
 
     // Determine how many bytes to read for this chunk
-    let chunk_size = stream.chunk_size as usize;
-    let remaining = (effective_length as usize).saturating_sub(stream.reassembly_bytes_read as usize);
+    let chunk_size = reg.streams[idx].chunk_size as usize;
+    let remaining = (effective_length as usize)
+        .saturating_sub(reg.streams[idx].reassembly_bytes_read as usize);
     let to_read = remaining.min(chunk_size);
 
     if buf.available() < to_read {
         return Ok(0);
     }
 
+    if to_read > 0 {
+        let total: usize = reg.streams.iter()
+            .filter(|s| s.in_use)
+            .map(|s| s.reassembly_buf.available())
+            .sum();
+        if total + to_read > MAX_REASSEMBLY_BYTES_PER_CONN {
+            return Err(ErrorCode::Chunk);
+        }
+    }
+
     // Read payload chunk
-    let start = stream.reassembly_buf.available();
     let mut chunk_data = vec![0u8; to_read];
     buf.read(&mut chunk_data).map_err(|_| ErrorCode::Io)?;
-    stream.reassembly_buf.write(&chunk_data).map_err(|_| ErrorCode::Chunk)?;
-    stream.reassembly_bytes_read += to_read as u32;
+    reg.streams[idx].reassembly_buf.write(&chunk_data).map_err(|_| ErrorCode::Chunk)?;
+    reg.streams[idx].reassembly_bytes_read += to_read as u32;
 
     // Check if message is complete
-    if stream.reassembly_bytes_read >= effective_length {
+    if reg.streams[idx].reassembly_bytes_read >= effective_length {
         msg.csid = csid;
         msg.fmt = fmt;
         msg.timestamp = effective_ts;
@@ -191,17 +235,138 @@ pub fn chunk_read(
 
         // Return a pointer to the reassembly buffer data.
         // This is safe because the caller consumes the payload before the next chunk_read.
-        let data = stream.reassembly_buf.peek();
+        let data = reg.streams[idx].reassembly_buf.peek();
         *payload_len = data.len();
         *payload = data.as_ptr();
 
         // Reset for next message
-        stream.reassembly_bytes_read = 0;
-        stream.reassembly_buf.reset();
+        reg.streams[idx].reassembly_bytes_read = 0;
+        reg.streams[idx].reassembly_buf.reset();
 
         Ok(1)
     } else {
         msg.is_complete = false;
         Ok(0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::chunk::writer::chunk_write;
+
+    #[test]
+    fn partial_extended_timestamp_waits_for_more_data() {
+        let payload = b"x";
+        let msg = ChunkMessage {
+            csid: 3,
+            fmt: 0,
+            timestamp: 0x0100_0000,
+            msg_length: payload.len() as u32,
+            msg_type_id: 0x09,
+            msg_stream_id: 1,
+            is_complete: false,
+        };
+
+        let mut wire = Buffer::new();
+        chunk_write(&mut wire, &msg, payload, payload.len(), 128).unwrap();
+
+        // Stop before the 4-byte extended timestamp field.
+        let partial = wire.peek()[..12].to_vec();
+        let mut buf = Buffer::new();
+        buf.write(&partial).unwrap();
+
+        let mut reg = ChunkRegistry::new();
+        let mut out_msg = ChunkMessage::default();
+        let mut ptr = std::ptr::null();
+        let mut len = 0usize;
+
+        assert_eq!(
+            chunk_read(&mut buf, &mut reg, None, &mut out_msg, &mut ptr, &mut len).unwrap(),
+            0
+        );
+        assert!(!out_msg.is_complete);
+    }
+
+    #[test]
+    fn fragmented_extended_timestamp_round_trips() {
+        let payload = vec![0xCD_u8; 300];
+        let msg = ChunkMessage {
+            csid: 6,
+            fmt: 0,
+            timestamp: 0x0100_0000,
+            msg_length: payload.len() as u32,
+            msg_type_id: 0x09,
+            msg_stream_id: 1,
+            is_complete: false,
+        };
+
+        let mut wire = Buffer::new();
+        chunk_write(&mut wire, &msg, &payload, payload.len(), 128).unwrap();
+
+        let mut reg = ChunkRegistry::new();
+        let mut out_msg = ChunkMessage::default();
+        let mut ptr = std::ptr::null();
+        let mut len = 0usize;
+        let mut rc;
+        loop {
+            rc = chunk_read(&mut wire, &mut reg, None, &mut out_msg, &mut ptr, &mut len).unwrap();
+            if rc == 1 || (rc == 0 && wire.available() == 0) {
+                break;
+            }
+        }
+
+        assert_eq!(rc, 1);
+        assert_eq!(out_msg.timestamp, 0x0100_0000);
+        let received = unsafe { std::slice::from_raw_parts(ptr, len) };
+        assert_eq!(received, payload.as_slice());
+    }
+
+    #[test]
+    fn fmt0_new_message_resets_partial_reassembly() {
+        let mut reg = ChunkRegistry::new();
+        let mut wire = Buffer::new();
+
+        // fmt=0, length 200 — only the first 128-byte chunk arrives.
+        let first = ChunkMessage {
+            csid: 7,
+            fmt: 0,
+            timestamp: 1,
+            msg_length: 200,
+            msg_type_id: 0x09,
+            msg_stream_id: 1,
+            is_complete: false,
+        };
+        chunk_write(&mut wire, &first, &vec![0x11; 200], 200, 128).unwrap();
+        // First RTMP chunk only: 1-byte basic hdr + 11-byte msg hdr + 128-byte payload.
+        let first_chunk_bytes = 1 + 11 + 128;
+        let mut buf = Buffer::new();
+        buf.write(&wire.peek()[..first_chunk_bytes]).unwrap();
+
+        let mut out_msg = ChunkMessage::default();
+        let mut ptr = std::ptr::null();
+        let mut len = 0usize;
+        assert_eq!(
+            chunk_read(&mut buf, &mut reg, None, &mut out_msg, &mut ptr, &mut len).unwrap(),
+            0
+        );
+
+        // Peer starts a new fmt=0 message on the same csid before finishing the first.
+        let second = ChunkMessage {
+            csid: 7,
+            fmt: 0,
+            timestamp: 2,
+            msg_length: 4,
+            msg_type_id: 0x14,
+            msg_stream_id: 1,
+            is_complete: false,
+        };
+        chunk_write(&mut buf, &second, b"done", 4, 128).unwrap();
+
+        let rc = chunk_read(&mut buf, &mut reg, None, &mut out_msg, &mut ptr, &mut len).unwrap();
+        assert_eq!(rc, 1);
+        assert_eq!(out_msg.msg_length, 4);
+        let received = unsafe { std::slice::from_raw_parts(ptr, len) };
+        assert_eq!(received, b"done");
     }
 }

@@ -450,7 +450,7 @@ pub struct Modex {
 /* ── FLV tag types ── */
 
 /// FLV audio tag.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 #[repr(C)]
 pub struct AudioTag {
     pub codec: AudioCodec,
@@ -463,7 +463,7 @@ pub struct AudioTag {
 }
 
 /// FLV video tag.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 #[repr(C)]
 pub struct VideoTag {
     pub frame_type: u8,
