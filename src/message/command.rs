@@ -244,8 +244,13 @@ pub fn read_publish(buf: &mut Buffer, stream_name: &mut [u8], app: &mut [u8]) ->
     amf0::read_string(buf, &mut name)?;
     read_number_value(buf)?; // skip txn
     amf0::skip_value(buf)?;
-    amf0::read_string(buf, stream_name)?;
-    let _ = amf0::read_string(buf, app); // optional
+    read_string_trunc(buf, stream_name)?;
+
+    // The publish type argument is optional in practice. Decode it only when a
+    // client actually sent more AMF data; otherwise keep the output buffer empty.
+    if buf.available() > 0 {
+        let _ = read_string_trunc(buf, app);
+    }
     Ok(())
 }
 
@@ -255,7 +260,7 @@ pub fn read_play(buf: &mut Buffer, stream_name: &mut [u8]) -> Result<()> {
     amf0::read_string(buf, &mut name)?;
     read_number_value(buf)?; // skip txn
     amf0::skip_value(buf)?;
-    amf0::read_string(buf, stream_name)?;
+    read_string_trunc(buf, stream_name)?;
     Ok(())
 }
 
