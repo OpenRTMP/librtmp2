@@ -6,7 +6,7 @@ use std::net::TcpStream;
 use std::os::unix::io::IntoRawFd;
 
 use crate::buffer::Buffer;
-use crate::chunk::reader::{ChunkMessage, chunk_read};
+use crate::chunk::reader::{chunk_read, ChunkMessage};
 use crate::chunk::state::ChunkRegistry;
 use crate::chunk::writer::chunk_write;
 use crate::handshake::{self, Handshake};
@@ -74,10 +74,11 @@ impl Client {
     /// Performs the real TCP connect, the legacy C0/C1/C2 handshake, then
     /// the `connect` + `createStream` AMF0 command exchange.
     pub fn connect(&mut self, url: &str) -> Result<()> {
+        self.reset_session_state();
+
         let (host, port, app, stream_key) = parse_rtmp_url(url)?;
 
-        let stream = TcpStream::connect((host.as_str(), port))
-            .map_err(|_| ErrorCode::Io)?;
+        let stream = TcpStream::connect((host.as_str(), port)).map_err(|_| ErrorCode::Io)?;
         let fd = stream.into_raw_fd();
         let transport = Transport::new_plain(fd);
 
@@ -158,7 +159,13 @@ impl Client {
         cmsg.fmt = 0;
 
         let payload = unsafe { std::slice::from_raw_parts(frame.data, frame.size as usize) };
-        chunk_write(&mut self.send_buffer, &cmsg, payload, frame.size as usize, 128)?;
+        chunk_write(
+            &mut self.send_buffer,
+            &cmsg,
+            payload,
+            frame.size as usize,
+            128,
+        )?;
 
         // Flush
         let data = self.send_buffer.peek().to_vec();
@@ -192,7 +199,9 @@ impl Client {
         loop {
             let n = transport.recv(&mut buf, &mut again);
             if n > 0 {
-                self.recv_buffer.write(&buf[..n as usize]).map_err(|_| ErrorCode::Internal)?;
+                self.recv_buffer
+                    .write(&buf[..n as usize])
+                    .map_err(|_| ErrorCode::Internal)?;
             } else if n == 0 {
                 return Err(ErrorCode::Io);
             } else {
@@ -204,7 +213,14 @@ impl Client {
             let mut msg = ChunkMessage::default();
             let mut payload_ptr: *const u8 = std::ptr::null();
             let mut payload_len = 0;
-            match chunk_read(&mut self.recv_buffer, &mut self.chunk_reg, None, &mut msg, &mut payload_ptr, &mut payload_len) {
+            match chunk_read(
+                &mut self.recv_buffer,
+                &mut self.chunk_reg,
+                None,
+                &mut msg,
+                &mut payload_ptr,
+                &mut payload_len,
+            ) {
                 Ok(1) if msg.is_complete => {
                     if msg.msg_type_id == msg_dispatch::RTMP_MSG_SET_CHUNK_SIZE {
                         let payload = if payload_ptr.is_null() || payload_len == 0 {
@@ -215,7 +231,9 @@ impl Client {
                         if let Ok(cs) = control::read_set_chunk_size(payload) {
                             self.chunk_reg.set_all_chunk_size(cs);
                         }
-                    } else if msg.msg_type_id == msg_dispatch::RTMP_MSG_AUDIO || msg.msg_type_id == msg_dispatch::RTMP_MSG_VIDEO {
+                    } else if msg.msg_type_id == msg_dispatch::RTMP_MSG_AUDIO
+                        || msg.msg_type_id == msg_dispatch::RTMP_MSG_VIDEO
+                    {
                         if let Some(ref cb) = self.on_frame_cb {
                             let payload = if payload_ptr.is_null() || payload_len == 0 {
                                 &[][..]
@@ -223,7 +241,11 @@ impl Client {
                                 unsafe { std::slice::from_raw_parts(payload_ptr, payload_len) }
                             };
                             let mut frame = Frame {
-                                frame_type: if msg.msg_type_id == msg_dispatch::RTMP_MSG_AUDIO { FrameType::Audio } else { FrameType::Video },
+                                frame_type: if msg.msg_type_id == msg_dispatch::RTMP_MSG_AUDIO {
+                                    FrameType::Audio
+                                } else {
+                                    FrameType::Video
+                                },
                                 timestamp: msg.timestamp,
                                 ..Default::default()
                             };
@@ -242,6 +264,24 @@ impl Client {
     }
 
     // ── Internal helpers ──
+
+    /// Drop any prior socket and reset all protocol state before a new connect.
+    /// Prevents stale recv/send buffers, chunk registry entries, and handshake
+    /// state from a previous (failed) session polluting the next attempt.
+    fn reset_session_state(&mut self) {
+        if self.client_fd >= 0 {
+            unsafe { libc::close(self.client_fd) };
+            self.client_fd = -1;
+        }
+        self.transport = None;
+        self.recv_buffer.reset();
+        self.send_buffer.reset();
+        self.chunk_reg.destroy();
+        self.chunk_reg.init();
+        handshake::client_init(&mut self.handshake);
+        self.state = ClientState::Disconnected;
+        self.stream_id = 0;
+    }
 
     /// Drive the legacy C0/C1/C2 client handshake to completion over `transport`.
     fn do_handshake(&mut self, transport: &Transport) -> Result<()> {
@@ -298,7 +338,9 @@ impl Client {
             if command::peek_name(&mut buf, &mut name_buf).is_err() {
                 continue;
             }
-            let name = std::str::from_utf8(&name_buf).unwrap_or("").trim_end_matches('\0');
+            let name = std::str::from_utf8(&name_buf)
+                .unwrap_or("")
+                .trim_end_matches('\0');
             if name == want {
                 return Ok(buf);
             }
@@ -312,7 +354,14 @@ impl Client {
             let mut msg = ChunkMessage::default();
             let mut payload_ptr: *const u8 = std::ptr::null();
             let mut payload_len = 0;
-            match chunk_read(&mut self.recv_buffer, &mut self.chunk_reg, None, &mut msg, &mut payload_ptr, &mut payload_len) {
+            match chunk_read(
+                &mut self.recv_buffer,
+                &mut self.chunk_reg,
+                None,
+                &mut msg,
+                &mut payload_ptr,
+                &mut payload_len,
+            ) {
                 Ok(1) if msg.is_complete => {
                     let payload = if payload_ptr.is_null() || payload_len == 0 {
                         Vec::new()
@@ -336,11 +385,17 @@ impl Client {
             let mut again = 0i32;
             let n = transport.recv(&mut tmp, &mut again);
             if n > 0 {
-                self.recv_buffer.write(&tmp[..n as usize]).map_err(|_| ErrorCode::Internal)?;
+                self.recv_buffer
+                    .write(&tmp[..n as usize])
+                    .map_err(|_| ErrorCode::Internal)?;
             } else if n == 0 {
                 return Err(ErrorCode::Io);
             } else if again != 0 {
-                let mut pfd = libc::pollfd { fd: transport.fd(), events: libc::POLLIN, revents: 0 };
+                let mut pfd = libc::pollfd {
+                    fd: transport.fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                };
                 let rc = unsafe { libc::poll(&mut pfd, 1, RECV_POLL_TIMEOUT_MS) };
                 if rc == 0 {
                     return Err(ErrorCode::Timeout);
@@ -364,7 +419,11 @@ fn read_exact(transport: &Transport, n: usize) -> Result<Vec<u8>> {
         } else if r == 0 {
             return Err(ErrorCode::Io);
         } else if again != 0 {
-            let mut pfd = libc::pollfd { fd: transport.fd(), events: libc::POLLIN, revents: 0 };
+            let mut pfd = libc::pollfd {
+                fd: transport.fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
             let rc = unsafe { libc::poll(&mut pfd, 1, RECV_POLL_TIMEOUT_MS) };
             if rc == 0 {
                 return Err(ErrorCode::Timeout);
@@ -409,7 +468,9 @@ impl Default for Client {
 impl Drop for Client {
     fn drop(&mut self) {
         if self.client_fd >= 0 {
-            unsafe { libc::close(self.client_fd); }
+            unsafe {
+                libc::close(self.client_fd);
+            }
         }
     }
 }

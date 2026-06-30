@@ -26,7 +26,10 @@ struct LogCallback {
 }
 
 static LOG_LEVEL: AtomicU8 = AtomicU8::new(LogLevel::Info as u8);
-static LOG_CALLBACK: Mutex<LogCallback> = Mutex::new(LogCallback { cb: None, userdata: 0 });
+static LOG_CALLBACK: Mutex<LogCallback> = Mutex::new(LogCallback {
+    cb: None,
+    userdata: 0,
+});
 
 const LEVEL_STRINGS: [&str; 4] = ["DEBUG", "INFO", "WARN", "ERROR"];
 

@@ -2,7 +2,7 @@
 //!
 //! Mirrors `src/ertmp/metadata.h` and `src/ertmp/metadata.c`.
 
-use crate::types::{HdrInfo, Result, ErrorCode};
+use crate::types::{ErrorCode, HdrInfo, Result};
 
 /// Initialize HDR info with defaults.
 pub fn hdr_init(hdr: &mut HdrInfo) {

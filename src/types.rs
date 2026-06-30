@@ -140,7 +140,9 @@ pub enum AudioCodec {
 }
 
 impl Default for AudioCodec {
-    fn default() -> Self { AudioCodec::Pcm }
+    fn default() -> Self {
+        AudioCodec::Pcm
+    }
 }
 
 /* ── Video codec IDs (legacy) ── */
@@ -161,7 +163,9 @@ pub enum VideoCodec {
 }
 
 impl Default for VideoCodec {
-    fn default() -> Self { VideoCodec::Jpeg }
+    fn default() -> Self {
+        VideoCodec::Jpeg
+    }
 }
 
 /* ── FourCC for E-RTMP ── */
@@ -266,15 +270,32 @@ pub struct ServerConfig {
 /// on_connect callback type
 pub type OnConnectCb = Option<unsafe extern "C" fn(conn: *mut Conn, userdata: *mut u8) -> c_int>;
 /// on_publish callback type
-pub type OnPublishCb = Option<unsafe extern "C" fn(conn: *mut Conn, app: *const u8, stream_key: *const u8, userdata: *mut u8) -> c_int>;
+pub type OnPublishCb = Option<
+    unsafe extern "C" fn(
+        conn: *mut Conn,
+        app: *const u8,
+        stream_key: *const u8,
+        userdata: *mut u8,
+    ) -> c_int,
+>;
 /// on_play callback type
-pub type OnPlayCb = Option<unsafe extern "C" fn(conn: *mut Conn, app: *const u8, stream_key: *const u8, userdata: *mut u8) -> c_int>;
+pub type OnPlayCb = Option<
+    unsafe extern "C" fn(
+        conn: *mut Conn,
+        app: *const u8,
+        stream_key: *const u8,
+        userdata: *mut u8,
+    ) -> c_int,
+>;
 /// on_frame callback type
-pub type OnFrameCb = Option<unsafe extern "C" fn(conn: *mut Conn, frame: *const Frame, userdata: *mut u8) -> c_int>;
+pub type OnFrameCb =
+    Option<unsafe extern "C" fn(conn: *mut Conn, frame: *const Frame, userdata: *mut u8) -> c_int>;
 /// on_close callback type
 pub type OnCloseCb = Option<unsafe extern "C" fn(conn: *mut Conn, userdata: *mut u8)>;
 /// on_send_data callback type
-pub type OnSendDataCb = Option<unsafe extern "C" fn(conn: *mut Conn, data: *const u8, len: usize, userdata: *mut u8) -> c_int>;
+pub type OnSendDataCb = Option<
+    unsafe extern "C" fn(conn: *mut Conn, data: *const u8, len: usize, userdata: *mut u8) -> c_int,
+>;
 
 /* ── Version constants ── */
 
@@ -405,7 +426,9 @@ pub enum MultitrackType {
 }
 
 impl Default for MultitrackType {
-    fn default() -> Self { MultitrackType::Audio }
+    fn default() -> Self {
+        MultitrackType::Audio
+    }
 }
 
 /// Multitrack descriptor.
@@ -436,7 +459,9 @@ pub enum ModexType {
 }
 
 impl Default for ModexType {
-    fn default() -> Self { ModexType::Nop }
+    fn default() -> Self {
+        ModexType::Nop
+    }
 }
 
 /// ModEx extension.

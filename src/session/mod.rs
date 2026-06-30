@@ -3,13 +3,13 @@
 //! Mirrors `src/session/` directory.
 
 pub mod conn;
-pub mod stream;
-pub mod state_machine;
-pub mod publish;
 pub mod play;
+pub mod publish;
+pub mod state_machine;
+pub mod stream;
 
 pub use conn::*;
-pub use stream::*;
-pub use state_machine::*;
-pub use publish::*;
 pub use play::*;
+pub use publish::*;
+pub use state_machine::*;
+pub use stream::*;

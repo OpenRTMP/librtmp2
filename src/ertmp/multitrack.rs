@@ -2,7 +2,7 @@
 //!
 //! Mirrors `src/ertmp/multitrack.c`.
 
-use crate::types::{Multitrack, Result, ErrorCode};
+use crate::types::{ErrorCode, Multitrack, Result};
 
 /// Parse a multitrack descriptor.
 pub fn multitrack_parse(mt: &mut Multitrack, data: &[u8]) -> Result<()> {

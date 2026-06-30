@@ -2,11 +2,11 @@
 //!
 //! Mirrors `src/message/command.h` and `src/message/command.c`.
 
-use crate::buffer::Buffer;
-use crate::types::Result;
-use crate::types::ErrorCode;
-use crate::types::ConnectInfo;
 use crate::amf::amf0;
+use crate::buffer::Buffer;
+use crate::types::ConnectInfo;
+use crate::types::ErrorCode;
+use crate::types::Result;
 
 /// Maximum key/value pairs in a connect object
 const MAX_CONNECT_OBJECT_KEYS: usize = 256;
@@ -126,7 +126,11 @@ pub fn build_deletestream(buf: &mut Buffer, transaction_id: f64, stream_id: u32)
 }
 
 /// Build a createStream _result response.
-pub fn build_create_stream_result(buf: &mut Buffer, transaction_id: f64, stream_id: f64) -> Result<()> {
+pub fn build_create_stream_result(
+    buf: &mut Buffer,
+    transaction_id: f64,
+    stream_id: f64,
+) -> Result<()> {
     amf0::write_string(buf, "_result")?;
     amf0::write_number(buf, transaction_id)?;
     amf0::write_null(buf)?;
@@ -198,7 +202,9 @@ pub fn read_connect(buf: &mut Buffer, info: &mut ConnectInfo) -> Result<()> {
                     "pageUrl" => read_string_trunc(buf, &mut info.page_url)?,
                     "swfUrl" => read_string_trunc(buf, &mut info.swf_url)?,
                     "flashVer" => read_string_trunc(buf, &mut info.flash_ver)?,
-                    _ => { amf0::skip_value(buf)?; }
+                    _ => {
+                        amf0::skip_value(buf)?;
+                    }
                 }
             }
             amf0::Amf0Type::Number => {
@@ -297,7 +303,11 @@ fn read_string_trunc(buf: &mut Buffer, out: &mut [u8]) -> Result<()> {
         return Err(ErrorCode::Io);
     }
 
-    let copy_len = if slen >= out.len() { out.len() - 1 } else { slen };
+    let copy_len = if slen >= out.len() {
+        out.len() - 1
+    } else {
+        slen
+    };
     if copy_len > 0 {
         buf.read(&mut out[..copy_len]).map_err(|_| ErrorCode::Amf)?;
     }

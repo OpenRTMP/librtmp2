@@ -3,10 +3,12 @@
 //! Mirrors `src/chunk/chunk_reader.h` and `src/chunk/chunk_reader.c`.
 
 use crate::buffer::Buffer;
-use crate::chunk::state::{ChunkRegistry, ChunkStream, DEFAULT_CHUNK_SIZE};
 use crate::bytes::{hton24, ntoh32};
-use crate::types::Result;
+use crate::chunk::state::{
+    ChunkRegistry, ChunkStream, DEFAULT_CHUNK_SIZE, MAX_REASSEMBLY_BYTES_PER_CONN,
+};
 use crate::types::ErrorCode;
+use crate::types::Result;
 
 /// A chunk message (resembled from one or more chunk reads).
 #[derive(Debug, Clone, Default)]
@@ -54,11 +56,15 @@ pub fn chunk_read(
 
     let (csid, header_size) = match csid_low {
         0 => {
-            if available < 2 { return Ok(0); }
+            if available < 2 {
+                return Ok(0);
+            }
             (peek[1] as u32 + 64, 2usize)
         }
         1 => {
-            if available < 3 { return Ok(0); }
+            if available < 3 {
+                return Ok(0);
+            }
             (((peek[1] as u32) | ((peek[2] as u32) << 8)) + 64, 3usize)
         }
         n => (n, 1usize),
@@ -88,9 +94,8 @@ pub fn chunk_read(
     // without consuming anything.
     let ext_ts_from_header = if fmt <= 2 {
         let off = header_size;
-        let ts_raw = ((peek[off] as u32) << 16)
-            | ((peek[off + 1] as u32) << 8)
-            | (peek[off + 2] as u32);
+        let ts_raw =
+            ((peek[off] as u32) << 16) | ((peek[off + 1] as u32) << 8) | (peek[off + 2] as u32);
         ts_raw >= 0xFFFFFF
     } else {
         false
@@ -121,9 +126,7 @@ pub fn chunk_read(
         0 | 1 => {
             // message length is peeked from header bytes
             let off = header_size + 3;
-            ((peek[off] as u32) << 16)
-                | ((peek[off + 1] as u32) << 8)
-                | (peek[off + 2] as u32)
+            ((peek[off] as u32) << 16) | ((peek[off + 1] as u32) << 8) | (peek[off + 2] as u32)
         }
         _ => reg
             .get(csid)
@@ -131,9 +134,20 @@ pub fn chunk_read(
             .ok_or(ErrorCode::Chunk)?,
     };
 
+    // fmt 0/1 start a new message; treat reassembly as empty for the upfront
+    // availability check so we compute the correct first-chunk payload size.
     let (chunk_sz_for_avail, reassembly_read_for_avail) = reg
         .get(csid)
-        .map(|s| (s.chunk_size as usize, s.reassembly_bytes_read as usize))
+        .map(|s| {
+            (
+                s.chunk_size as usize,
+                if fmt <= 1 {
+                    0
+                } else {
+                    s.reassembly_bytes_read as usize
+                },
+            )
+        })
         .unwrap_or((DEFAULT_CHUNK_SIZE as usize, 0));
 
     let remaining = (eff_len_for_avail as usize).saturating_sub(reassembly_read_for_avail);
@@ -203,7 +217,28 @@ pub fn chunk_read(
 
     // ── Phase 3: update stream state and reassemble ──
 
+    // Guard against per-connection reassembly buffer exhaustion before
+    // touching any stream state (avoid partial mutation on rejection).
+    if to_read > 0 {
+        let total: usize = reg
+            .streams
+            .iter()
+            .filter(|s| s.in_use)
+            .map(|s| s.reassembly_buf.available())
+            .sum();
+        if total + to_read > MAX_REASSEMBLY_BYTES_PER_CONN {
+            return Err(ErrorCode::Chunk);
+        }
+    }
+
     let stream = reg.get_or_create(csid)?;
+
+    // fmt 0/1 start a fresh message on this CSID; discard any partial
+    // reassembly left over from an abandoned prior message.
+    if fmt == 0 || fmt == 1 {
+        stream.reassembly_bytes_read = 0;
+        stream.reassembly_buf.reset();
+    }
 
     match fmt {
         0 => {
@@ -231,12 +266,16 @@ pub fn chunk_read(
     let effective_type_id = stream.type0_msg_type_id;
     let effective_stream_id = stream.type0_msg_stream_id;
     let chunk_size = stream.chunk_size as usize;
-    let remaining = (effective_length as usize).saturating_sub(stream.reassembly_bytes_read as usize);
+    let remaining =
+        (effective_length as usize).saturating_sub(stream.reassembly_bytes_read as usize);
     let to_read = remaining.min(chunk_size);
 
     let mut chunk_data = vec![0u8; to_read];
     buf.read(&mut chunk_data).map_err(|_| ErrorCode::Io)?;
-    stream.reassembly_buf.write(&chunk_data).map_err(|_| ErrorCode::Chunk)?;
+    stream
+        .reassembly_buf
+        .write(&chunk_data)
+        .map_err(|_| ErrorCode::Chunk)?;
     stream.reassembly_bytes_read += to_read as u32;
 
     if stream.reassembly_bytes_read >= effective_length {

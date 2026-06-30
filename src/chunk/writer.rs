@@ -3,9 +3,9 @@
 //! Mirrors `src/chunk/chunk_writer.h`, `src/chunk/chunk_write.h`, and `src/chunk/chunk_writer.c`.
 
 use crate::buffer::Buffer;
-use crate::types::Result;
-use crate::types::ErrorCode;
 use crate::chunk::reader::ChunkMessage;
+use crate::types::ErrorCode;
+use crate::types::Result;
 
 /// Write a full message to `out`, fragmenting the payload into chunks of at most `chunk_size` bytes.
 pub fn chunk_write(
@@ -47,7 +47,8 @@ pub fn chunk_write(
         out.write(&len_buf).map_err(|_| ErrorCode::Internal)?;
 
         // message type id (1 byte)
-        out.write(&[msg.msg_type_id]).map_err(|_| ErrorCode::Internal)?;
+        out.write(&[msg.msg_type_id])
+            .map_err(|_| ErrorCode::Internal)?;
     }
 
     if fmt == 0 {
@@ -58,18 +59,21 @@ pub fn chunk_write(
             ((sid >> 8) & 0xFF) as u8,
             ((sid >> 16) & 0xFF) as u8,
             ((sid >> 24) & 0xFF) as u8,
-        ]).map_err(|_| ErrorCode::Internal)?;
+        ])
+        .map_err(|_| ErrorCode::Internal)?;
     }
 
     if ext_ts && fmt <= 2 {
-        out.write(&ts.to_be_bytes()).map_err(|_| ErrorCode::Internal)?;
+        out.write(&ts.to_be_bytes())
+            .map_err(|_| ErrorCode::Internal)?;
     }
 
     // --- Payload: fragment across multiple chunks ---
     let mut offset = 0;
     while offset < payload_len {
         let to_write = (payload_len - offset).min(chunk_size);
-        out.write(&payload[offset..offset + to_write]).map_err(|_| ErrorCode::Internal)?;
+        out.write(&payload[offset..offset + to_write])
+            .map_err(|_| ErrorCode::Internal)?;
         offset += to_write;
 
         if offset < payload_len {
@@ -77,7 +81,8 @@ pub fn chunk_write(
             let chdr = basic_header(csid, 3);
             out.write(&chdr).map_err(|_| ErrorCode::Internal)?;
             if ext_ts {
-                out.write(&ts.to_be_bytes()).map_err(|_| ErrorCode::Internal)?;
+                out.write(&ts.to_be_bytes())
+                    .map_err(|_| ErrorCode::Internal)?;
             }
         }
     }
@@ -92,7 +97,8 @@ pub fn chunk_write_extended_timestamp(out: &mut Buffer, timestamp: u32) -> Resul
     out.write(&[hdr]).map_err(|_| ErrorCode::Internal)?;
 
     // 4 bytes extended timestamp
-    out.write(&timestamp.to_be_bytes()).map_err(|_| ErrorCode::Internal)?;
+    out.write(&timestamp.to_be_bytes())
+        .map_err(|_| ErrorCode::Internal)?;
 
     Ok(())
 }
@@ -122,8 +128,8 @@ fn hton24(buf: &mut [u8; 3], val: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chunk::state::ChunkRegistry;
     use crate::chunk::reader::chunk_read;
+    use crate::chunk::state::ChunkRegistry;
 
     #[test]
     fn single_chunk_round_trips_through_reader() {

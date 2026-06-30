@@ -87,5 +87,8 @@ fn server_client_publish_over_real_sockets() {
     }
 
     client_thread.join().unwrap();
-    assert!(FRAMES_RECEIVED.load(Ordering::SeqCst) > 0, "server never observed the published frame");
+    assert!(
+        FRAMES_RECEIVED.load(Ordering::SeqCst) > 0,
+        "server never observed the published frame"
+    );
 }

@@ -5,7 +5,7 @@
 use std::sync::Mutex;
 
 use crate::buffer::Buffer;
-use crate::chunk::reader::{ChunkMessage, chunk_read};
+use crate::chunk::reader::{chunk_read, ChunkMessage};
 use crate::chunk::state::ChunkRegistry;
 use crate::chunk::writer::chunk_write;
 use crate::handshake::{self, Handshake, HandshakeState};
@@ -82,7 +82,9 @@ impl Conn {
 
     /// Feed received data into the connection.
     pub fn recv(&mut self, data: &[u8]) -> Result<()> {
-        self.recv_buffer.write(data).map_err(|_| ErrorCode::Internal)?;
+        self.recv_buffer
+            .write(data)
+            .map_err(|_| ErrorCode::Internal)?;
         self.bytes_received = self.bytes_received.wrapping_add(data.len() as u32);
 
         let mut max_iter = 65536;
@@ -190,12 +192,12 @@ impl Conn {
     fn do_handshake_recurse(&mut self) -> i32 {
         match handshake::server_read_c1(&mut self.handshake, &mut self.recv_buffer) {
             Ok(()) => {
-                // Send S0+S1+S2
+                // Queue S0+S1+S2; flush() drains without blocking the poll loop.
                 if self.client_fd >= 0 {
                     let s0 = [0x03u8];
-                    let _ = self.send_raw(&s0);
-                    let out_data = self.handshake.out.peek().to_vec();
-                    let _ = self.send_raw(&out_data);
+                    let _ = self.send_buffer.write(&s0);
+                    let out_data = self.handshake.out.peek();
+                    let _ = self.send_buffer.write(out_data);
                 }
                 self.handshake.out.reset();
                 1
@@ -243,11 +245,14 @@ impl Conn {
     /// Handle a reassembled message.
     fn handle_message(&mut self, msg: &ChunkMessage, payload: &[u8]) -> Result<()> {
         match msg.msg_type_id {
-            msg_dispatch::RTMP_MSG_AMF0_COMMAND => {
-                self.handle_command(payload)
-            }
+            msg_dispatch::RTMP_MSG_AMF0_COMMAND => self.handle_command(payload),
             msg_dispatch::RTMP_MSG_AUDIO => {
-                if self.current_stream.as_ref().map(|s| s.is_publishing).unwrap_or(false) {
+                if self
+                    .current_stream
+                    .as_ref()
+                    .map(|s| s.is_publishing)
+                    .unwrap_or(false)
+                {
                     if let Some(ref cb) = self.on_frame_cb {
                         let mut frame = Frame {
                             frame_type: FrameType::Audio,
@@ -262,7 +267,12 @@ impl Conn {
                 Ok(())
             }
             msg_dispatch::RTMP_MSG_VIDEO => {
-                if self.current_stream.as_ref().map(|s| s.is_publishing).unwrap_or(false) {
+                if self
+                    .current_stream
+                    .as_ref()
+                    .map(|s| s.is_publishing)
+                    .unwrap_or(false)
+                {
                     if let Some(ref cb) = self.on_frame_cb {
                         let mut frame = Frame {
                             frame_type: FrameType::Video,
@@ -308,8 +318,12 @@ impl Conn {
             "createStream" => {
                 // Must have completed the AMF 'connect' exchange first.
                 if self.state < ConnState::AppConnected {
-                    return self.send_onstatus(0, "error", "NetStream.Failed",
-                        "connect required before createStream");
+                    return self.send_onstatus(
+                        0,
+                        "error",
+                        "NetStream.Failed",
+                        "connect required before createStream",
+                    );
                 }
                 let txn = command::read_create_stream(&mut buf)?;
                 if self.next_stream_id >= MAX_STREAMS_PER_CONN {
@@ -318,7 +332,8 @@ impl Conn {
                     self.next_stream_id += 1;
                     let stream_id = self.next_stream_id;
                     self.current_stream = Some(Box::new(Stream::new(stream_id)));
-                    let _ = state_machine::conn_transition(&mut self.state, ConnState::StreamCreated);
+                    let _ =
+                        state_machine::conn_transition(&mut self.state, ConnState::StreamCreated);
                     self.send_create_stream_response(txn, stream_id)?;
                 }
             }
@@ -327,13 +342,22 @@ impl Conn {
                 let mut publish_type = [0u8; 64];
                 command::read_publish(&mut buf, &mut stream_name, &mut publish_type)?;
                 if self.current_stream.is_none() {
-                    self.send_onstatus(0, "error", "NetStream.Publish.BadConnection", "No stream created")?;
+                    self.send_onstatus(
+                        0,
+                        "error",
+                        "NetStream.Publish.BadConnection",
+                        "No stream created",
+                    )?;
                 } else {
                     if let Some(ref mut stream) = self.current_stream {
                         stream.is_publishing = true;
                     }
                     let _ = state_machine::conn_transition(&mut self.state, ConnState::Publishing);
-                    let sid = self.current_stream.as_ref().map(|s| s.stream_id).unwrap_or(0);
+                    let sid = self
+                        .current_stream
+                        .as_ref()
+                        .map(|s| s.stream_id)
+                        .unwrap_or(0);
                     self.send_onstatus(sid, "status", "NetStream.Publish.Start", "Publishing")?;
                 }
             }
@@ -341,13 +365,22 @@ impl Conn {
                 let mut stream_name = [0u8; 256];
                 command::read_play(&mut buf, &mut stream_name)?;
                 if self.current_stream.is_none() {
-                    self.send_onstatus(0, "error", "NetStream.Play.BadConnection", "No stream created")?;
+                    self.send_onstatus(
+                        0,
+                        "error",
+                        "NetStream.Play.BadConnection",
+                        "No stream created",
+                    )?;
                 } else {
                     if let Some(ref mut stream) = self.current_stream {
                         stream.is_playing = true;
                     }
                     let _ = state_machine::conn_transition(&mut self.state, ConnState::Playing);
-                    let sid = self.current_stream.as_ref().map(|s| s.stream_id).unwrap_or(0);
+                    let sid = self
+                        .current_stream
+                        .as_ref()
+                        .map(|s| s.stream_id)
+                        .unwrap_or(0);
                     self.send_onstatus(sid, "status", "NetStream.Play.Start", "Playing")?;
                 }
             }
@@ -395,42 +428,47 @@ impl Conn {
     }
 
     /// Send a createStream response.
-    pub fn send_create_stream_response(&mut self, transaction_id: f64, stream_id: u32) -> Result<()> {
+    pub fn send_create_stream_response(
+        &mut self,
+        transaction_id: f64,
+        stream_id: u32,
+    ) -> Result<()> {
         let mut amf_buf = Buffer::with_capacity(256);
         command::build_create_stream_result(&mut amf_buf, transaction_id, stream_id as f64)?;
         self.send_command(0, amf_buf.as_slice())
     }
 
     /// Send an onStatus command.
-    pub fn send_onstatus(&mut self, stream_id: u32, level: &str, code: &str, description: &str) -> Result<()> {
+    pub fn send_onstatus(
+        &mut self,
+        stream_id: u32,
+        level: &str,
+        code: &str,
+        description: &str,
+    ) -> Result<()> {
         let mut amf_buf = Buffer::with_capacity(512);
         command::build_onstatus(&mut amf_buf, level, code, description)?;
         self.send_command(stream_id, amf_buf.as_slice())
     }
 
-    /// Send raw bytes over the socket.
-    pub fn send_raw(&mut self, data: &[u8]) -> Result<()> {
-        if self.client_fd < 0 {
-            return Ok(());
-        }
-        if let Some(ref transport) = self.transport {
-            transport.send(data)
-        } else {
-            // Direct send
-            use std::io::Write;
-            // This is a simplification; in production you'd use the transport
-            Ok(())
-        }
-    }
-
-    /// Flush the send buffer.
+    /// Flush the send buffer using non-blocking I/O. Partial sends are left
+    /// in the buffer for the next call — the server poll loop retries each
+    /// iteration so a slow peer cannot stall other connections.
     pub fn flush(&mut self) -> Result<()> {
         if self.client_fd < 0 || self.send_buffer.available() == 0 {
             return Ok(());
         }
-        let data = self.send_buffer.peek().to_vec();
-        self.send_raw(&data)?;
-        self.send_buffer.reset();
+        let Some(ref transport) = self.transport else {
+            return Ok(());
+        };
+        while self.send_buffer.available() > 0 {
+            let pending = self.send_buffer.peek();
+            let n = transport.try_send(pending)?;
+            if n == 0 {
+                break;
+            }
+            self.send_buffer.drain(n);
+        }
         Ok(())
     }
 
@@ -443,7 +481,13 @@ impl Conn {
         msg.msg_length = data.len() as u32;
         msg.msg_type_id = ty;
         msg.msg_stream_id = 0;
-        chunk_write(&mut self.send_buffer, &msg, data, data.len(), self.chunk_size as usize)
+        chunk_write(
+            &mut self.send_buffer,
+            &msg,
+            data,
+            data.len(),
+            self.chunk_size as usize,
+        )
     }
 
     fn send_command(&mut self, msg_stream_id: u32, amf_data: &[u8]) -> Result<()> {
@@ -454,7 +498,13 @@ impl Conn {
         cmd_msg.msg_length = amf_data.len() as u32;
         cmd_msg.msg_type_id = 0x14; // AMF0_COMMAND
         cmd_msg.msg_stream_id = msg_stream_id;
-        chunk_write(&mut self.send_buffer, &cmd_msg, amf_data, amf_data.len(), self.chunk_size as usize)
+        chunk_write(
+            &mut self.send_buffer,
+            &cmd_msg,
+            amf_data,
+            amf_data.len(),
+            self.chunk_size as usize,
+        )
     }
 
     fn send_acknowledgement(&mut self, seq: u32) -> Result<()> {
@@ -472,7 +522,9 @@ impl Default for Conn {
 impl Drop for Conn {
     fn drop(&mut self) {
         if self.client_fd >= 0 {
-            unsafe { libc::close(self.client_fd); }
+            unsafe {
+                libc::close(self.client_fd);
+            }
         }
     }
 }

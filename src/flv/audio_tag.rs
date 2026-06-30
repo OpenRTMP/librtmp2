@@ -2,7 +2,7 @@
 //!
 //! Mirrors `src/flv/audio_tag.h` and `src/flv/audio_tag.c`.
 
-use crate::types::{AudioTag, AudioCodec, Result, ErrorCode};
+use crate::types::{AudioCodec, AudioTag, ErrorCode, Result};
 
 /// Parse an FLV audio tag.
 pub fn parse(data: &[u8], tag: &mut AudioTag) -> Result<()> {

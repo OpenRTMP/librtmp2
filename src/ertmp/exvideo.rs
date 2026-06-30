@@ -2,7 +2,7 @@
 //!
 //! Mirrors `src/ertmp/exvideo.c`.
 
-use crate::types::{VideoHeader, Result, ErrorCode};
+use crate::types::{ErrorCode, Result, VideoHeader};
 
 /// Parse a FourCC from raw bytes.
 pub fn fourcc_parse(data: &[u8]) -> Result<[u8; 5]> {
@@ -48,7 +48,11 @@ pub fn exvideo_parse(data: &[u8], hdr: &mut VideoHeader) -> Result<()> {
             return Err(ErrorCode::Io);
         }
         let ct = ((data[5] as i32) << 16) | ((data[6] as i32) << 8) | (data[7] as i32);
-        let ct = if ct & 0x00800000 != 0 { ct | 0xFF000000u32 as i32 } else { ct };
+        let ct = if ct & 0x00800000 != 0 {
+            ct | 0xFF000000u32 as i32
+        } else {
+            ct
+        };
         hdr.composition_time = ct as u32;
         hdr.header_size = 8;
     }

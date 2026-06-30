@@ -4,8 +4,8 @@
 
 use crate::buffer::Buffer;
 use crate::bytes::ntoh32;
-use crate::types::Result;
 use crate::types::ErrorCode;
+use crate::types::Result;
 
 /// RTMP protocol version byte
 const RTMP_VERSION: u8 = 0x03;

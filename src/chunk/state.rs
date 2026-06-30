@@ -3,8 +3,8 @@
 //! Mirrors `src/chunk/chunk_state.h` and `src/chunk/chunk_state.c`.
 
 use crate::buffer::Buffer;
-use crate::types::Result;
 use crate::types::ErrorCode;
+use crate::types::Result;
 
 /// Default chunk size per RTMP spec
 pub const DEFAULT_CHUNK_SIZE: u32 = 128;
@@ -139,7 +139,9 @@ impl ChunkRegistry {
 
     /// Check if a stream can grow its reassembly buffer.
     pub fn can_grow_reassembly(&self, cs: &ChunkStream, additional: u32) -> Result<()> {
-        let total: usize = self.streams.iter()
+        let total: usize = self
+            .streams
+            .iter()
             .filter(|s| s.in_use)
             .map(|s| s.reassembly_buf.available())
             .sum();

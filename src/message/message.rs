@@ -2,12 +2,12 @@
 //!
 //! Mirrors `src/message/message.h` and `src/message/message.c`.
 
-use crate::buffer::Buffer;
-use crate::chunk::reader::{ChunkMessage, chunk_read};
-use crate::chunk::state::ChunkRegistry;
-use crate::types::{Result, ErrorCode, Frame, FrameType, AudioCodec, VideoCodec};
-use super::control;
 use super::command;
+use super::control;
+use crate::buffer::Buffer;
+use crate::chunk::reader::{chunk_read, ChunkMessage};
+use crate::chunk::state::ChunkRegistry;
+use crate::types::{AudioCodec, ErrorCode, Frame, FrameType, Result, VideoCodec};
 
 /* RTMP message type IDs */
 pub const RTMP_MSG_SET_CHUNK_SIZE: u8 = 0x01;
@@ -165,7 +165,10 @@ pub fn decode_aggregate(
         // but possible) must not cause a panic in debug or silent wrap in release.
         let out_ts = chunk.timestamp.wrapping_add(ts.wrapping_sub(base_ts));
 
-        let is_publishing = conn.get_current_stream().map(|s| s.is_publishing()).unwrap_or(false);
+        let is_publishing = conn
+            .get_current_stream()
+            .map(|s| s.is_publishing())
+            .unwrap_or(false);
         if tag_type == 0x08 && is_publishing {
             deliver_audio_frame(conn, out_ts, &payload[body..body + data_size as usize]);
         } else if tag_type == 0x09 && is_publishing {
@@ -219,12 +222,20 @@ pub fn decode(conn: &mut dyn Connection, chunk: &ChunkMessage, payload: &[u8]) -
             }
         }
         RTMP_MSG_AUDIO => {
-            if conn.get_current_stream().map(|s| s.is_publishing()).unwrap_or(false) {
+            if conn
+                .get_current_stream()
+                .map(|s| s.is_publishing())
+                .unwrap_or(false)
+            {
                 deliver_audio_frame(conn, chunk.timestamp, payload);
             }
         }
         RTMP_MSG_VIDEO => {
-            if conn.get_current_stream().map(|s| s.is_publishing()).unwrap_or(false) {
+            if conn
+                .get_current_stream()
+                .map(|s| s.is_publishing())
+                .unwrap_or(false)
+            {
                 deliver_video_frame(conn, chunk.timestamp, payload);
             }
         }
