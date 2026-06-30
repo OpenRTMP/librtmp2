@@ -10,6 +10,8 @@ pub struct Stream {
     pub stream_id: u32,
     pub is_publishing: bool,
     pub is_playing: bool,
+    /// Stream name from the `publish` or `play` command.
+    pub name: String,
 }
 
 impl Stream {
@@ -19,6 +21,7 @@ impl Stream {
             stream_id,
             is_publishing: false,
             is_playing: false,
+            name: String::new(),
         }
     }
 }

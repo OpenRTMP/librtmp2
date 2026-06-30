@@ -2,6 +2,7 @@
 //!
 //! Mirrors `src/server/server.h` and `src/server/server.c`.
 
+use std::collections::HashMap;
 use std::net::TcpListener;
 use std::os::unix::io::{AsRawFd, IntoRawFd};
 
@@ -9,6 +10,15 @@ use crate::net;
 use crate::session::conn::Conn;
 use crate::transport::{TlsCtx, Transport};
 use crate::types::*;
+
+/// Cached codec headers and last keyframe for a (app, stream_name) pair.
+/// Replayed to players that join after the publisher has already sent headers.
+struct StreamCache {
+    avc_header: Option<Vec<u8>>,
+    aac_header: Option<Vec<u8>>,
+    /// (timestamp, payload) of the most recent IDR keyframe.
+    last_keyframe: Option<(u32, Vec<u8>)>,
+}
 
 /// Server object.
 pub struct Server {
@@ -20,6 +30,7 @@ pub struct Server {
     /// Fired for every audio/video frame on every connection.
     pub on_frame_cb: Option<fn(&Frame)>,
     listener: Option<TcpListener>,
+    stream_cache: HashMap<(String, String), StreamCache>,
 }
 
 impl Server {
@@ -47,6 +58,7 @@ impl Server {
             tls_ctx,
             on_frame_cb: None,
             listener: None,
+            stream_cache: HashMap::new(),
         })
     }
 
@@ -127,11 +139,13 @@ impl Server {
     }
 
     /// Process all active connections: drain readable bytes, drive the
-    /// protocol state machine, flush pending writes, and reap closed peers.
+    /// protocol state machine, relay frames from publishers to players,
+    /// flush pending writes, and reap closed peers.
     pub fn process_connections(&mut self) -> Result<()> {
         let mut buf = [0u8; 65536];
         let mut closed = Vec::new();
 
+        // Drive recv/processing for every connection.
         for (i, conn) in self.connections.iter_mut().enumerate() {
             loop {
                 let Some(transport) = conn.transport.as_ref() else {
@@ -155,6 +169,89 @@ impl Server {
                     break;
                 }
             }
+        }
+
+        // Collect all frames queued by publishers, then relay them to players
+        // on the same (app, stream_name) pair.
+        let relay_frames: Vec<_> = self
+            .connections
+            .iter_mut()
+            .flat_map(|c| c.pending_relay.drain(..))
+            .collect();
+
+        // Replay cached codec headers and last keyframe to newly-joined players
+        // using the pre-batch cache state, so init frames always precede live
+        // frames from the current batch.
+        for conn in self.connections.iter_mut() {
+            if !conn.needs_init_frames {
+                continue;
+            }
+            let Some(ref stream) = conn.current_stream else {
+                continue;
+            };
+            if !stream.is_playing {
+                continue;
+            }
+            conn.needs_init_frames = false;
+            let key = (conn.app.clone(), stream.name.clone());
+            if let Some(cache) = self.stream_cache.get(&key) {
+                if let Some(ref hdr) = cache.avc_header.clone() {
+                    let _ = conn.send_frame(FrameType::Video, 0, hdr);
+                }
+                if let Some(ref hdr) = cache.aac_header.clone() {
+                    let _ = conn.send_frame(FrameType::Audio, 0, hdr);
+                }
+                if let Some((ts, ref kf)) = cache.last_keyframe.clone() {
+                    let _ = conn.send_frame(FrameType::Video, ts, kf);
+                }
+            }
+        }
+
+        // Update per-stream cache and relay each frame in order so players
+        // receive frames in the same sequence the publisher sent them.
+        for frame in &relay_frames {
+            let key = (frame.app.clone(), frame.stream_name.clone());
+            let cache = self.stream_cache.entry(key).or_insert(StreamCache {
+                avc_header: None,
+                aac_header: None,
+                last_keyframe: None,
+            });
+            match frame.frame_type {
+                FrameType::Video => {
+                    if frame.payload.len() >= 2 {
+                        if frame.payload[0] == 0x17 && frame.payload[1] == 0x00 {
+                            cache.avc_header = Some(frame.payload.clone());
+                        } else if frame.payload[0] == 0x17 && frame.payload[1] == 0x01 {
+                            cache.last_keyframe = Some((frame.timestamp, frame.payload.clone()));
+                        }
+                    }
+                }
+                FrameType::Audio => {
+                    if frame.payload.len() >= 2
+                        && (frame.payload[0] & 0xF0) == 0xA0
+                        && frame.payload[1] == 0x00
+                    {
+                        cache.aac_header = Some(frame.payload.clone());
+                    }
+                }
+                _ => {}
+            }
+
+            for conn in self.connections.iter_mut() {
+                let is_player = conn
+                    .current_stream
+                    .as_ref()
+                    .map(|s| s.is_playing && s.name == frame.stream_name)
+                    .unwrap_or(false);
+                if !is_player || conn.app != frame.app {
+                    continue;
+                }
+                let _ = conn.send_frame(frame.frame_type, frame.timestamp, &frame.payload);
+            }
+        }
+
+        // Flush all connections.
+        for (i, conn) in self.connections.iter_mut().enumerate() {
             if conn.flush().is_err() {
                 closed.push(i);
             }
@@ -165,6 +262,14 @@ impl Server {
         closed.sort_unstable();
         closed.dedup();
         for i in closed.into_iter().rev() {
+            // Evict the cache when a publisher closes so stale headers/keyframes
+            // do not persist for the next publisher reusing the same key.
+            if let Some(ref stream) = self.connections[i].current_stream {
+                if stream.is_publishing {
+                    self.stream_cache
+                        .remove(&(self.connections[i].app.clone(), stream.name.clone()));
+                }
+            }
             self.connections.remove(i);
         }
         Ok(())
