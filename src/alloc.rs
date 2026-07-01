@@ -3,7 +3,6 @@
 //! Mirrors `src/core/alloc.h` and `src/core/alloc.c`.
 //! Provides pluggable allocation functions with standard defaults.
 
-
 /// Allocator function type.
 pub type AllocFn = fn(size: usize, userdata: *mut u8) -> *mut u8;
 /// Reallocator function type.
