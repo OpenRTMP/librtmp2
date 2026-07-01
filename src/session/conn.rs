@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use crate::buffer::Buffer;
 use crate::chunk::reader::{chunk_read, ChunkMessage};
-use crate::chunk::state::ChunkRegistry;
+use crate::chunk::state::{ChunkRegistry, DEFAULT_CHUNK_SIZE};
 use crate::chunk::writer::chunk_write;
 use crate::handshake::{self, Handshake, HandshakeState};
 use crate::message::command;
@@ -40,7 +40,11 @@ pub struct Conn {
     pub recv_buffer: Buffer,
     pub send_buffer: Buffer,
     pub chunk_reg: ChunkRegistry,
+    /// Target chunk size announced to the peer (from server config).
     pub chunk_size: u32,
+    /// Active outbound chunk size; stays at the RTMP default until SetChunkSize
+    /// is negotiated on the wire.
+    active_chunk_size: u32,
     pub window_ack_size: u32,
     pub bytes_received: u32,
     pub bytes_at_last_ack: u32,
@@ -93,7 +97,8 @@ impl Conn {
             recv_buffer: Buffer::new(),
             send_buffer: Buffer::new(),
             chunk_reg,
-            chunk_size: 128,
+            chunk_size: DEFAULT_CHUNK_SIZE,
+            active_chunk_size: DEFAULT_CHUNK_SIZE,
             window_ack_size: 0,
             bytes_received: 0,
             bytes_at_last_ack: 0,
@@ -379,7 +384,7 @@ impl Conn {
             msg_dispatch::RTMP_MSG_SET_CHUNK_SIZE => {
                 if payload.len() >= 4 {
                     if let Ok(cs) = control::read_set_chunk_size(payload) {
-                        self.apply_chunk_size(cs);
+                        self.chunk_reg.set_all_chunk_size(cs);
                     }
                 }
             }
@@ -398,20 +403,30 @@ impl Conn {
                 }
             }
             msg_dispatch::RTMP_MSG_ACKNOWLEDGEMENT => {
-                let _ = control::read_acknowledgement_size(payload);
+                if payload.len() >= 4 {
+                    let _ = control::read_acknowledgement_size(payload);
+                }
             }
             msg_dispatch::RTMP_MSG_SET_PEER_BANDWIDTH => {
-                let _ = control::read_set_peer_bandwidth(payload);
+                if payload.len() >= 5 {
+                    let _ = control::read_set_peer_bandwidth(payload);
+                }
             }
             _ => {}
         }
         Ok(())
     }
 
-    /// Apply an outbound/inbound chunk size to this connection's registry.
+    /// Apply a chunk size to outbound writes and inbound reassembly.
     pub fn apply_chunk_size(&mut self, chunk_size: u32) {
         self.chunk_size = chunk_size;
+        self.active_chunk_size = chunk_size;
         self.chunk_reg.set_all_chunk_size(chunk_size);
+    }
+
+    fn activate_announced_chunk_size(&mut self) {
+        self.active_chunk_size = self.chunk_size;
+        self.chunk_reg.set_all_chunk_size(self.chunk_size);
     }
 
     fn handle_user_control(&mut self, payload: &[u8]) -> Result<()> {
@@ -571,6 +586,9 @@ impl Conn {
         self.send_control(0x06, &bw)?;
         let cs = self.chunk_size.to_be_bytes();
         self.send_control(0x01, &cs)?;
+        // Negotiation complete: subsequent server chunks and client sends use
+        // the announced size (connect AMF above was still at 128).
+        self.activate_announced_chunk_size();
         let mut amf_buf = Buffer::with_capacity(512);
         crate::amf::amf0::write_string(&mut amf_buf, "_result")?;
         crate::amf::amf0::write_number(&mut amf_buf, transaction_id)?;
@@ -629,7 +647,7 @@ impl Conn {
             &cmsg,
             payload,
             payload.len(),
-            self.chunk_size as usize,
+            self.active_chunk_size as usize,
         )?;
         self.media_bytes_sent = self
             .media_bytes_sent
@@ -644,7 +662,7 @@ impl Conn {
         msg.msg_length = data.len() as u32;
         msg.msg_type_id = ty;
         msg.msg_stream_id = 0;
-        chunk_write(&mut self.send_buffer, &msg, data, data.len(), self.chunk_size as usize)
+        chunk_write(&mut self.send_buffer, &msg, data, data.len(), self.active_chunk_size as usize)
     }
 
     fn send_command(&mut self, msg_stream_id: u32, amf_data: &[u8]) -> Result<()> {
@@ -655,7 +673,13 @@ impl Conn {
         cmd_msg.msg_length = amf_data.len() as u32;
         cmd_msg.msg_type_id = 0x14;
         cmd_msg.msg_stream_id = msg_stream_id;
-        chunk_write(&mut self.send_buffer, &cmd_msg, amf_data, amf_data.len(), self.chunk_size as usize)
+        chunk_write(
+            &mut self.send_buffer,
+            &cmd_msg,
+            amf_data,
+            amf_data.len(),
+            self.active_chunk_size as usize,
+        )
     }
 
     fn send_acknowledgement(&mut self, seq: u32) -> Result<()> {
@@ -735,22 +759,33 @@ mod tests {
     }
 
     #[test]
-    fn apply_chunk_size_updates_connection_registry() {
+    fn apply_chunk_size_updates_outbound_and_inbound() {
         let mut conn = Conn::new();
         conn.apply_chunk_size(4096);
         assert_eq!(conn.chunk_size, 4096);
+        assert_eq!(conn.active_chunk_size, 4096);
         assert_eq!(conn.chunk_reg.default_chunk_size, 4096);
     }
 
     #[test]
-    fn handle_control_applies_peer_set_chunk_size() {
+    fn new_connection_starts_at_rtmp_default_chunk_size() {
+        let conn = Conn::new();
+        assert_eq!(conn.chunk_size, DEFAULT_CHUNK_SIZE);
+        assert_eq!(conn.active_chunk_size, DEFAULT_CHUNK_SIZE);
+        assert_eq!(conn.chunk_reg.default_chunk_size, DEFAULT_CHUNK_SIZE);
+    }
+
+    #[test]
+    fn handle_control_peer_set_chunk_size_updates_inbound_only() {
         let mut conn = Conn::new();
+        conn.chunk_size = 4096;
         conn.handle_control(
             msg_dispatch::RTMP_MSG_SET_CHUNK_SIZE,
-            &4096u32.to_be_bytes(),
+            &8192u32.to_be_bytes(),
         )
         .unwrap();
         assert_eq!(conn.chunk_size, 4096);
-        assert_eq!(conn.chunk_reg.default_chunk_size, 4096);
+        assert_eq!(conn.active_chunk_size, DEFAULT_CHUNK_SIZE);
+        assert_eq!(conn.chunk_reg.default_chunk_size, 8192);
     }
 }

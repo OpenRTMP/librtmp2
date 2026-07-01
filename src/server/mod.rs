@@ -151,12 +151,13 @@ impl Server {
                     };
                     let conn_fd = transport.fd();
                     let mut conn = Conn::new();
-                    let chunk_size = if self.config.chunk_size > 0 {
+                    // Outbound chunk size only: peers start sending at the RTMP
+                    // default (128) until SetChunkSize is negotiated.
+                    conn.chunk_size = if self.config.chunk_size > 0 {
                         self.config.chunk_size as u32
                     } else {
                         DEFAULT_CHUNK_SIZE
                     };
-                    conn.apply_chunk_size(chunk_size);
                     conn.client_fd = conn_fd;
                     conn.conn_id = self.next_conn_id;
                     self.next_conn_id = self.next_conn_id.saturating_add(1);
