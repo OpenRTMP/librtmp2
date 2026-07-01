@@ -250,11 +250,12 @@ pub fn chunk_read(
         stream.reassembly_buf.reset();
     }
 
-    // fmt=2/3 continue an in-progress message. After completion,
+    // fmt=3 is a continuation chunk with no message header. After completion,
     // reassembly_bytes_read is zero but type0_* metadata lingers; accepting a
-    // compressed header here would reassemble attacker bytes under the prior
-    // message's type/length and deliver a forged message to the session layer.
-    if (fmt == 2 || fmt == 3) && stream.reassembly_bytes_read == 0 {
+    // fmt=3 here would reassemble attacker bytes under the prior message's
+    // type/length. fmt=2 carries a timestamp and legitimately starts a new
+    // message that reuses the prior type/length on this CSID.
+    if fmt == 3 && stream.reassembly_bytes_read == 0 {
         return Err(ErrorCode::Chunk);
     }
 
@@ -383,7 +384,7 @@ mod tests {
     }
 
     #[test]
-    fn fmt2_without_in_progress_message_is_rejected() {
+    fn fmt2_after_complete_message_starts_new_message() {
         let payload = b"done";
         let msg = ChunkMessage {
             csid: 5,
@@ -411,19 +412,23 @@ mod tests {
             &mut len,
         )
         .unwrap();
+        assert!(out_msg.is_complete);
 
-        // fmt=2 header: basic (fmt<<6|csid) + 3-byte timestamp + stale-length payload
-        let mut attack = Buffer::new();
-        attack.write(&[2 << 6 | 5, 0, 0, 1]).unwrap();
-        attack.write(b"evil").unwrap();
+        // fmt=2 header: basic (fmt<<6|csid) + 3-byte timestamp; reuses prior length/type
+        let mut next = Buffer::new();
+        next.write(&[2 << 6 | 5, 0, 0, 1]).unwrap();
+        next.write(b"next").unwrap();
         let result = chunk_read(
-            &mut attack,
+            &mut next,
             &mut reg,
             None,
             &mut out_msg,
             &mut ptr,
             &mut len,
         );
-        assert!(result.is_err());
+        assert_eq!(result.unwrap(), 1);
+        assert!(out_msg.is_complete);
+        assert_eq!(out_msg.msg_type_id, 0x09);
+        assert_eq!(len, 4);
     }
 }
