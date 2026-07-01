@@ -207,7 +207,7 @@ impl Server {
             let Some(ref stream) = conn.current_stream else {
                 continue;
             };
-            if !stream.is_playing {
+            if !stream.is_playing || !conn.relay_enabled {
                 continue;
             }
             conn.needs_init_frames = false;
@@ -256,11 +256,12 @@ impl Server {
             }
 
             for conn in self.connections.iter_mut() {
-                let is_player = conn
-                    .current_stream
-                    .as_ref()
-                    .map(|s| s.is_playing && s.name == frame.stream_name)
-                    .unwrap_or(false);
+                let is_player = conn.relay_enabled
+                    && conn
+                        .current_stream
+                        .as_ref()
+                        .map(|s| s.is_playing && s.name == frame.stream_name)
+                        .unwrap_or(false);
                 if !is_player || conn.app != frame.app {
                     continue;
                 }
