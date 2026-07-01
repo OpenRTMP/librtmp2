@@ -1,12 +1,12 @@
 # Bug scan progress
 
-Last scanned: handshake (2026-06-29)
+Last scanned: chunk (2026-07-01)
 
 ## Modules
 
 - [x] core — Memory, logging, errors, buffer
 - [x] handshake — C0/C1/C2 ↔ S0/S1/S2
-- [ ] chunk — Chunk reader/writer/state
+- [x] chunk — Chunk reader/writer/state
 - [ ] message — Message reassembly, control, commands
 - [ ] amf — AMF0 + AMF3
 - [ ] flv — Audio/video/script tags
@@ -14,6 +14,15 @@ Last scanned: handshake (2026-06-29)
 - [ ] session — State machine, publish/play flows
 - [ ] server — Server listener
 - [ ] client — Outbound client
+
+## Findings (2026-07-01 chunk pass)
+
+- chunk/reader.rs: After a message completed, `type0_*` metadata lingered while
+  `reassembly_bytes_read` was reset to zero. A peer could send fmt=2/3 on the
+  same CSID and have attacker-controlled bytes reassembled under the prior
+  message's type/length, delivering a forged AMF/control message to the session
+  layer. Reject fmt=2/3 when no message is in progress
+  (`reassembly_bytes_read == 0`).
 
 ## Findings (2026-06-29 handshake pass)
 

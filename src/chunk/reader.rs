@@ -250,6 +250,14 @@ pub fn chunk_read(
         stream.reassembly_buf.reset();
     }
 
+    // fmt=2/3 continue an in-progress message. After completion,
+    // reassembly_bytes_read is zero but type0_* metadata lingers; accepting a
+    // compressed header here would reassemble attacker bytes under the prior
+    // message's type/length and deliver a forged message to the session layer.
+    if (fmt == 2 || fmt == 3) && stream.reassembly_bytes_read == 0 {
+        return Err(ErrorCode::Chunk);
+    }
+
     match fmt {
         0 => {
             stream.type0_timestamp = final_timestamp;
@@ -309,5 +317,113 @@ pub fn chunk_read(
     } else {
         msg.is_complete = false;
         Ok(0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::chunk::writer::chunk_write;
+
+    fn fmt3_wire(csid: u32, payload: &[u8]) -> Vec<u8> {
+        let mut v = Vec::new();
+        if csid < 64 {
+            v.push((3 << 6) | csid as u8);
+        } else if csid < 320 {
+            v.push(3 << 6);
+            v.push((csid - 64) as u8);
+        } else {
+            v.push((3 << 6) | 1);
+            v.push(((csid - 64) & 0xFF) as u8);
+            v.push((((csid - 64) >> 8) & 0xFF) as u8);
+        }
+        v.extend_from_slice(payload);
+        v
+    }
+
+    #[test]
+    fn fmt3_after_complete_message_is_rejected() {
+        let payload = b"hello";
+        let msg = ChunkMessage {
+            csid: 3,
+            fmt: 0,
+            timestamp: 1,
+            msg_length: payload.len() as u32,
+            msg_type_id: 0x14,
+            msg_stream_id: 1,
+            is_complete: false,
+        };
+
+        let mut wire = Buffer::new();
+        chunk_write(&mut wire, &msg, payload, payload.len(), 128).unwrap();
+
+        let mut reg = ChunkRegistry::new();
+        let mut out_msg = ChunkMessage::default();
+        let mut ptr = std::ptr::null();
+        let mut len = 0;
+        assert_eq!(
+            chunk_read(&mut wire, &mut reg, None, &mut out_msg, &mut ptr, &mut len).unwrap(),
+            1
+        );
+        assert!(out_msg.is_complete);
+
+        let mut attack = Buffer::new();
+        attack
+            .write(&fmt3_wire(3, b"bogus"))
+            .expect("attack wire");
+        let result = chunk_read(
+            &mut attack,
+            &mut reg,
+            None,
+            &mut out_msg,
+            &mut ptr,
+            &mut len,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn fmt2_without_in_progress_message_is_rejected() {
+        let payload = b"done";
+        let msg = ChunkMessage {
+            csid: 5,
+            fmt: 0,
+            timestamp: 0,
+            msg_length: payload.len() as u32,
+            msg_type_id: 0x09,
+            msg_stream_id: 1,
+            is_complete: false,
+        };
+
+        let mut wire = Buffer::new();
+        chunk_write(&mut wire, &msg, payload, payload.len(), 128).unwrap();
+
+        let mut reg = ChunkRegistry::new();
+        let mut out_msg = ChunkMessage::default();
+        let mut ptr = std::ptr::null();
+        let mut len = 0;
+        chunk_read(
+            &mut wire,
+            &mut reg,
+            None,
+            &mut out_msg,
+            &mut ptr,
+            &mut len,
+        )
+        .unwrap();
+
+        // fmt=2 header: basic (fmt<<6|csid) + 3-byte timestamp + stale-length payload
+        let mut attack = Buffer::new();
+        attack.write(&[2 << 6 | 5, 0, 0, 1]).unwrap();
+        attack.write(b"evil").unwrap();
+        let result = chunk_read(
+            &mut attack,
+            &mut reg,
+            None,
+            &mut out_msg,
+            &mut ptr,
+            &mut len,
+        );
+        assert!(result.is_err());
     }
 }
