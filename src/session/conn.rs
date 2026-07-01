@@ -18,6 +18,10 @@ use crate::types::*;
 
 /// Maximum streams per connection
 pub const MAX_STREAMS_PER_CONN: u32 = 16;
+/// Maximum relay frames queued per publisher between server poll drains.
+pub const MAX_PENDING_RELAY_FRAMES: usize = 1024;
+/// Maximum total payload bytes queued in `pending_relay` per publisher.
+pub const MAX_PENDING_RELAY_BYTES: usize = 8 * 1024 * 1024;
 
 /// Server window ack size
 const SERVER_WINDOW_ACK_SIZE: u32 = 2_500_000;
@@ -69,6 +73,10 @@ pub struct Conn {
     pub on_frame_cb: Option<fn(&Frame)>,
     /// Fired once when the RTMP `connect` command completes successfully.
     pub on_connect_cb: Option<fn()>,
+    /// When set, must return true to allow `publish`; false rejects the command.
+    pub on_publish_cb: Option<fn(app: &str, stream_name: &str) -> bool>,
+    /// When set, must return true to allow `play`; false rejects the command.
+    pub on_play_cb: Option<fn(app: &str, stream_name: &str) -> bool>,
 }
 
 impl Conn {
@@ -100,7 +108,40 @@ impl Conn {
             detected_audio_codec: None,
             on_frame_cb: None,
             on_connect_cb: None,
+            on_publish_cb: None,
+            on_play_cb: None,
         }
+    }
+
+    fn pending_relay_bytes(&self) -> usize {
+        self.pending_relay.iter().map(|f| f.payload.len()).sum()
+    }
+
+    fn queue_relay_frame(
+        &mut self,
+        frame_type: FrameType,
+        timestamp: u32,
+        payload: &[u8],
+    ) -> Result<()> {
+        if self.pending_relay.len() >= MAX_PENDING_RELAY_FRAMES
+            || self.pending_relay_bytes() + payload.len() > MAX_PENDING_RELAY_BYTES
+        {
+            return Err(ErrorCode::Internal);
+        }
+
+        let stream_name = self
+            .current_stream
+            .as_ref()
+            .map(|s| s.name.clone())
+            .unwrap_or_default();
+        self.pending_relay.push(RelayFrame {
+            frame_type,
+            timestamp,
+            payload: payload.to_vec(),
+            app: self.app.clone(),
+            stream_name,
+        });
+        Ok(())
     }
 
     /// Get the file descriptor.
@@ -292,23 +333,17 @@ impl Conn {
                         self.detected_audio_codec = detect_audio_codec(payload);
                     }
 
-                    let stream_name = self
-                        .current_stream
-                        .as_ref()
-                        .map(|s| s.name.clone())
-                        .unwrap_or_default();
                     // Push first so the payload lives in stable heap storage
                     // owned by pending_relay before we hand a raw pointer to
                     // the FFI callback. Moving a Vec doesn't move its heap
                     // buffer, so the pointer remains valid for the connection
                     // lifetime (or until pending_relay is drained).
-                    self.pending_relay.push(RelayFrame {
-                        frame_type: FrameType::Audio,
-                        timestamp: msg.timestamp,
-                        payload: payload.to_vec(),
-                        app: self.app.clone(),
-                        stream_name,
-                    });
+                    if self
+                        .queue_relay_frame(FrameType::Audio, msg.timestamp, payload)
+                        .is_err()
+                    {
+                        return Err(ErrorCode::Internal);
+                    }
                     if let Some(cb) = self.on_frame_cb {
                         let relay = self.pending_relay.last().unwrap();
                         let mut frame = Frame {
@@ -335,18 +370,12 @@ impl Conn {
                         self.detected_video_codec = detect_video_codec(payload);
                     }
 
-                    let stream_name = self
-                        .current_stream
-                        .as_ref()
-                        .map(|s| s.name.clone())
-                        .unwrap_or_default();
-                    self.pending_relay.push(RelayFrame {
-                        frame_type: FrameType::Video,
-                        timestamp: msg.timestamp,
-                        payload: payload.to_vec(),
-                        app: self.app.clone(),
-                        stream_name,
-                    });
+                    if self
+                        .queue_relay_frame(FrameType::Video, msg.timestamp, payload)
+                        .is_err()
+                    {
+                        return Err(ErrorCode::Internal);
+                    }
                     if let Some(cb) = self.on_frame_cb {
                         let relay = self.pending_relay.last().unwrap();
                         let mut frame = Frame {
@@ -426,6 +455,16 @@ impl Conn {
                     .unwrap_or("")
                     .trim_end_matches('\0')
                     .to_string();
+                if let Some(cb) = self.on_publish_cb {
+                    if !cb(&self.app, &name_str) {
+                        return self.send_onstatus(
+                            0,
+                            "error",
+                            "NetStream.Publish.BadName",
+                            "Publish not authorized",
+                        );
+                    }
+                }
                 if self.current_stream.is_none() {
                     self.send_onstatus(
                         0,
@@ -454,6 +493,16 @@ impl Conn {
                     .unwrap_or("")
                     .trim_end_matches('\0')
                     .to_string();
+                if let Some(cb) = self.on_play_cb {
+                    if !cb(&self.app, &name_str) {
+                        return self.send_onstatus(
+                            0,
+                            "error",
+                            "NetStream.Play.Failed",
+                            "Play not authorized",
+                        );
+                    }
+                }
                 if self.current_stream.is_none() {
                     self.send_onstatus(
                         0,
