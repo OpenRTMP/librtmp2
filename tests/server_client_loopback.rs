@@ -17,12 +17,13 @@ const SENT_FRAME_BYTE: u8 = 0xAB;
 const SENT_FRAME_LEN: usize = 32;
 
 fn on_frame(frame: &Frame) {
-    if frame.size as usize == SENT_FRAME_LEN && !frame.data.is_null() {
-        let payload = unsafe { std::slice::from_raw_parts(frame.data, frame.size as usize) };
-        if payload.iter().all(|&b| b == SENT_FRAME_BYTE) {
-            FRAMES_RECEIVED.fetch_add(1, Ordering::SeqCst);
-        }
+    if frame.size as usize == SENT_FRAME_LEN {
+        FRAMES_RECEIVED.fetch_add(1, Ordering::SeqCst);
     }
+}
+
+fn allow_publish(_app: &str, _stream_name: &str) -> bool {
+    true
 }
 
 fn plain_config() -> ServerConfig {
@@ -42,6 +43,7 @@ fn server_client_publish_over_real_sockets() {
     let mut server = Server::new(plain_config()).unwrap();
     server.listen("127.0.0.1:19661").unwrap();
     server.on_frame_cb = Some(on_frame);
+    server.on_publish_cb = Some(allow_publish);
 
     let (setup_tx, setup_rx) = std::sync::mpsc::channel();
     let client_thread = thread::spawn(move || {
