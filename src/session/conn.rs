@@ -44,6 +44,10 @@ pub struct Conn {
     pub window_ack_size: u32,
     pub bytes_received: u32,
     pub bytes_at_last_ack: u32,
+    /// Audio/video payload bytes received (excludes handshake/control overhead).
+    pub media_bytes_received: u64,
+    /// Audio/video payload bytes sent to this peer.
+    pub media_bytes_sent: u64,
     pub client_fd: i32,
     /// Stable per-connection id (monotonic, never reused while the server runs).
     pub conn_id: u64,
@@ -51,6 +55,9 @@ pub struct Conn {
     pub remote_addr: String,
     pub transport: Option<Transport>,
     pub app: String,
+    /// Canonical relay route key. When set, publisher/player media is matched
+    /// on this value instead of the RTMP stream name (e.g. separate publish/play keys).
+    pub relay_key: String,
     pub next_stream_id: u32,
     pub current_stream: Option<Box<Stream>>,
     pub connect_cb_fired: bool,
@@ -64,6 +71,8 @@ pub struct Conn {
     /// after its own post-auth bookkeeping (used by librtmp2-server).
     pub defer_media_relay: bool,
     pub on_frame_cb: Option<fn(&Frame)>,
+    /// When set, must return true before audio/video is queued for relay.
+    pub on_media_cb: Option<fn(u64, FrameType, Option<&str>) -> bool>,
     pub on_connect_cb: Option<fn()>,
     pub on_publish_cb: Option<fn(conn_id: u64, app: &str, stream_name: &str) -> bool>,
     pub on_play_cb: Option<fn(conn_id: u64, app: &str, stream_name: &str) -> bool>,
@@ -88,11 +97,14 @@ impl Conn {
             window_ack_size: 0,
             bytes_received: 0,
             bytes_at_last_ack: 0,
+            media_bytes_received: 0,
+            media_bytes_sent: 0,
             client_fd: -1,
             conn_id: 0,
             remote_addr: String::new(),
             transport: None,
             app: String::new(),
+            relay_key: String::new(),
             next_stream_id: 0,
             current_stream: None,
             connect_cb_fired: false,
@@ -104,6 +116,7 @@ impl Conn {
             relay_enabled: false,
             defer_media_relay: false,
             on_frame_cb: None,
+            on_media_cb: None,
             on_connect_cb: None,
             on_publish_cb: None,
             on_play_cb: None,
@@ -118,20 +131,94 @@ impl Conn {
         self.pending_relay.iter().map(|f| f.payload.len()).sum()
     }
 
+    /// Key used to route relayed media between publishers and players.
+    pub fn relay_route_key(&self) -> String {
+        if !self.relay_key.is_empty() {
+            return self.relay_key.clone();
+        }
+        self.current_stream
+            .as_ref()
+            .map(|s| s.name.clone())
+            .unwrap_or_default()
+    }
+
     fn queue_relay_frame(&mut self, frame_type: FrameType, timestamp: u32, payload: &[u8]) -> Result<()> {
         if self.pending_relay.len() >= MAX_PENDING_RELAY_FRAMES
             || self.pending_relay_bytes() + payload.len() > MAX_PENDING_RELAY_BYTES
         {
             return Err(ErrorCode::Internal);
         }
-        let stream_name = self.current_stream.as_ref().map(|s| s.name.clone()).unwrap_or_default();
         self.pending_relay.push(RelayFrame {
             frame_type,
             timestamp,
             payload: payload.to_vec(),
             app: self.app.clone(),
-            stream_name,
+            stream_name: self.relay_route_key(),
         });
+        Ok(())
+    }
+
+    fn media_allowed(&self, frame_type: FrameType) -> bool {
+        let Some(cb) = self.on_media_cb else {
+            return true;
+        };
+        let codec = match frame_type {
+            FrameType::Video => self.detected_video_codec.as_deref(),
+            FrameType::Audio => self.detected_audio_codec.as_deref(),
+            _ => None,
+        };
+        cb(self.conn_id, frame_type, codec)
+    }
+
+    fn handle_media_frame(
+        &mut self,
+        frame_type: FrameType,
+        timestamp: u32,
+        payload: &[u8],
+    ) -> Result<()> {
+        if !self.relay_enabled
+            || !self
+                .current_stream
+                .as_ref()
+                .map(|s| s.is_publishing)
+                .unwrap_or(false)
+        {
+            return Ok(());
+        }
+
+        match frame_type {
+            FrameType::Video if self.detected_video_codec.is_none() => {
+                self.detected_video_codec = detect_video_codec(payload);
+            }
+            FrameType::Audio if self.detected_audio_codec.is_none() => {
+                self.detected_audio_codec = detect_audio_codec(payload);
+            }
+            _ => {}
+        }
+
+        if !self.media_allowed(frame_type) {
+            return Err(ErrorCode::Auth);
+        }
+
+        self.media_bytes_received = self
+            .media_bytes_received
+            .saturating_add(payload.len() as u64);
+
+        if self.queue_relay_frame(frame_type, timestamp, payload).is_err() {
+            return Err(ErrorCode::Internal);
+        }
+
+        if let Some(cb) = self.on_frame_cb {
+            let relay = self.pending_relay.last().unwrap();
+            let mut frame = Frame {
+                frame_type,
+                timestamp,
+                ..Default::default()
+            };
+            frame.data = relay.payload.as_ptr();
+            frame.size = relay.payload.len() as u32;
+            cb(&frame);
+        }
         Ok(())
     }
 
@@ -244,8 +331,17 @@ impl Conn {
                 Ok(0) => break,
                 Ok(1) => {
                     if msg.is_complete {
-                        let payload_slice = if payload_ptr.is_null() || payload_len == 0 { &[] } else { unsafe { std::slice::from_raw_parts(payload_ptr, payload_len) } };
-                        let _ = self.handle_message(&msg, payload_slice);
+                        let payload_slice = if payload_ptr.is_null() || payload_len == 0 {
+                            &[]
+                        } else {
+                            unsafe { std::slice::from_raw_parts(payload_ptr, payload_len) }
+                        };
+                        if let Err(e) = self.handle_message(&msg, payload_slice) {
+                            return match e {
+                                ErrorCode::Auth => -8,
+                                _ => -3,
+                            };
+                        }
                         let _ = self.flush();
                     }
                 }
@@ -260,34 +356,8 @@ impl Conn {
         match msg.msg_type_id {
             msg_dispatch::RTMP_MSG_USER_CONTROL => self.handle_user_control(payload),
             msg_dispatch::RTMP_MSG_AMF0_COMMAND => self.handle_command(payload),
-            msg_dispatch::RTMP_MSG_AUDIO => {
-                if self.relay_enabled && self.current_stream.as_ref().map(|s| s.is_publishing).unwrap_or(false) {
-                    if self.detected_audio_codec.is_none() { self.detected_audio_codec = detect_audio_codec(payload); }
-                    if self.queue_relay_frame(FrameType::Audio, msg.timestamp, payload).is_err() { return Err(ErrorCode::Internal); }
-                    if let Some(cb) = self.on_frame_cb {
-                        let relay = self.pending_relay.last().unwrap();
-                        let mut frame = Frame { frame_type: FrameType::Audio, timestamp: msg.timestamp, ..Default::default() };
-                        frame.data = relay.payload.as_ptr();
-                        frame.size = relay.payload.len() as u32;
-                        cb(&frame);
-                    }
-                }
-                Ok(())
-            }
-            msg_dispatch::RTMP_MSG_VIDEO => {
-                if self.relay_enabled && self.current_stream.as_ref().map(|s| s.is_publishing).unwrap_or(false) {
-                    if self.detected_video_codec.is_none() { self.detected_video_codec = detect_video_codec(payload); }
-                    if self.queue_relay_frame(FrameType::Video, msg.timestamp, payload).is_err() { return Err(ErrorCode::Internal); }
-                    if let Some(cb) = self.on_frame_cb {
-                        let relay = self.pending_relay.last().unwrap();
-                        let mut frame = Frame { frame_type: FrameType::Video, timestamp: msg.timestamp, ..Default::default() };
-                        frame.data = relay.payload.as_ptr();
-                        frame.size = relay.payload.len() as u32;
-                        cb(&frame);
-                    }
-                }
-                Ok(())
-            }
+            msg_dispatch::RTMP_MSG_AUDIO => self.handle_media_frame(FrameType::Audio, msg.timestamp, payload),
+            msg_dispatch::RTMP_MSG_VIDEO => self.handle_media_frame(FrameType::Video, msg.timestamp, payload),
             _ => Ok(()),
         }
     }
@@ -490,7 +560,17 @@ impl Conn {
             cmsg.csid = 6;
             cmsg.msg_type_id = 0x09;
         }
-        chunk_write(&mut self.send_buffer, &cmsg, payload, payload.len(), self.chunk_size as usize)
+        chunk_write(
+            &mut self.send_buffer,
+            &cmsg,
+            payload,
+            payload.len(),
+            self.chunk_size as usize,
+        )?;
+        self.media_bytes_sent = self
+            .media_bytes_sent
+            .saturating_add(payload.len() as u64);
+        Ok(())
     }
 
     fn send_control(&mut self, ty: u8, data: &[u8]) -> Result<()> {
@@ -562,4 +642,31 @@ fn detect_audio_codec(payload: &[u8]) -> Option<String> {
         14 => "Opus".to_string(),
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session::stream::Stream;
+
+    #[test]
+    fn relay_route_key_prefers_relay_key_over_rtmp_name() {
+        let mut conn = Conn::new();
+        conn.relay_key = "stream-db-id".to_string();
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+        if let Some(ref mut stream) = conn.current_stream {
+            stream.name = "pub_or_play_key".to_string();
+        }
+        assert_eq!(conn.relay_route_key(), "stream-db-id");
+    }
+
+    #[test]
+    fn relay_route_key_falls_back_to_rtmp_stream_name() {
+        let mut conn = Conn::new();
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+        if let Some(ref mut stream) = conn.current_stream {
+            stream.name = "legacy_name".to_string();
+        }
+        assert_eq!(conn.relay_route_key(), "legacy_name");
+    }
 }

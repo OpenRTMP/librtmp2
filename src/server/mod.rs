@@ -35,6 +35,8 @@ pub struct Server {
     pub on_publish_cb: Option<fn(conn_id: u64, app: &str, stream_name: &str) -> bool>,
     /// When set, must return true to allow `play`; false rejects the command.
     pub on_play_cb: Option<fn(conn_id: u64, app: &str, stream_name: &str) -> bool>,
+    /// When set, must return true before publisher media is queued for relay.
+    pub on_media_cb: Option<fn(u64, FrameType, Option<&str>) -> bool>,
     listener: Option<TcpListener>,
     stream_cache: HashMap<(String, String), StreamCache>,
     next_conn_id: u64,
@@ -72,6 +74,7 @@ impl Server {
             on_connect_cb: None,
             on_publish_cb: None,
             on_play_cb: None,
+            on_media_cb: None,
             listener: None,
             stream_cache: HashMap::new(),
             next_conn_id: 1,
@@ -154,6 +157,7 @@ impl Server {
                     conn.defer_media_relay = self.defer_media_relay;
                     conn.transport = Some(transport);
                     conn.on_frame_cb = self.on_frame_cb;
+                    conn.on_media_cb = self.on_media_cb;
                     conn.on_connect_cb = self.on_connect_cb;
                     conn.on_publish_cb = self.on_publish_cb;
                     conn.on_play_cb = self.on_play_cb;
@@ -220,7 +224,7 @@ impl Server {
                 continue;
             }
             conn.needs_init_frames = false;
-            let key = (conn.app.clone(), stream.name.clone());
+            let key = (conn.app.clone(), conn.relay_route_key());
             if let Some(cache) = self.stream_cache.get(&key) {
                 if let Some(ref hdr) = cache.avc_header.clone() {
                     let _ = conn.send_frame(FrameType::Video, 0, hdr);
@@ -269,7 +273,7 @@ impl Server {
                     && conn
                         .current_stream
                         .as_ref()
-                        .map(|s| s.is_playing && s.name == frame.stream_name)
+                        .map(|s| s.is_playing && conn.relay_route_key() == frame.stream_name)
                         .unwrap_or(false);
                 if !is_player || conn.app != frame.app {
                     continue;
@@ -298,8 +302,10 @@ impl Server {
             // do not persist for the next publisher reusing the same key.
             if let Some(ref stream) = self.connections[i].current_stream {
                 if stream.is_publishing {
-                    self.stream_cache
-                        .remove(&(self.connections[i].app.clone(), stream.name.clone()));
+                    self.stream_cache.remove(&(
+                        self.connections[i].app.clone(),
+                        self.connections[i].relay_route_key(),
+                    ));
                 }
             }
             self.connections.remove(i);

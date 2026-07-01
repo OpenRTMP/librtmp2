@@ -12,6 +12,10 @@ pub const DEFAULT_CHUNK_SIZE: u32 = 128;
 pub const MAX_CHUNK_STREAMS: usize = 4096;
 /// Max reassembly bytes per connection
 pub const MAX_REASSEMBLY_BYTES_PER_CONN: usize = 32 * 1024 * 1024;
+/// Default cap on a single RTMP message body (24-bit length field allows 16 MiB).
+pub const DEFAULT_MAX_MSG_LENGTH: u32 = 4 * 1024 * 1024;
+/// Default cap on concurrently active chunk-stream ids per connection.
+pub const DEFAULT_MAX_ACTIVE_CSIDS: usize = 256;
 
 /// Per-chunk-stream state.
 #[derive(Debug)]
@@ -70,6 +74,10 @@ pub struct ChunkRegistry {
     pub streams: Vec<ChunkStream>,
     /// Chunk size applied to new streams
     pub default_chunk_size: u32,
+    /// Reject message bodies larger than this (bytes).
+    pub max_msg_length: u32,
+    /// Reject opening more than this many CSIDs at once on one connection.
+    pub max_active_csids: usize,
     pub initialized: bool,
 }
 
@@ -85,6 +93,8 @@ impl ChunkRegistry {
         Self {
             streams: Vec::new(),
             default_chunk_size: DEFAULT_CHUNK_SIZE,
+            max_msg_length: DEFAULT_MAX_MSG_LENGTH,
+            max_active_csids: DEFAULT_MAX_ACTIVE_CSIDS,
             initialized: true,
         }
     }
@@ -101,6 +111,11 @@ impl ChunkRegistry {
         let idx = self.streams.iter().position(|s| s.csid == csid && s.in_use);
         if let Some(i) = idx {
             return Ok(&mut self.streams[i]);
+        }
+
+        let active = self.streams.iter().filter(|s| s.in_use).count();
+        if active >= self.max_active_csids {
+            return Err(ErrorCode::Chunk);
         }
 
         // Reuse a free slot before growing the vec; this prevents the stream
@@ -171,5 +186,20 @@ impl ChunkRegistry {
     pub fn destroy(&mut self) {
         self.streams.clear();
         self.initialized = false;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_opening_too_many_active_csids() {
+        let mut reg = ChunkRegistry::new();
+        reg.max_active_csids = 2;
+
+        assert!(reg.get_or_create(1).is_ok());
+        assert!(reg.get_or_create(2).is_ok());
+        assert!(matches!(reg.get_or_create(3), Err(ErrorCode::Chunk)));
     }
 }

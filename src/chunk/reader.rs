@@ -134,6 +134,10 @@ pub fn chunk_read(
             .ok_or(ErrorCode::Chunk)?,
     };
 
+    if eff_len_for_avail > reg.max_msg_length {
+        return Err(ErrorCode::Chunk);
+    }
+
     // fmt 0/1 start a new message; treat reassembly as empty for the upfront
     // availability check so we compute the correct first-chunk payload size.
     let (chunk_sz_for_avail, reassembly_read_for_avail) = reg
@@ -430,5 +434,33 @@ mod tests {
         assert!(out_msg.is_complete);
         assert_eq!(out_msg.msg_type_id, 0x09);
         assert_eq!(len, 4);
+    }
+
+    #[test]
+    fn rejects_message_length_above_registry_cap() {
+        let mut reg = ChunkRegistry::new();
+        reg.max_msg_length = 8;
+
+        let payload = vec![0u8; 16];
+        let msg = ChunkMessage {
+            csid: 3,
+            fmt: 0,
+            timestamp: 0,
+            msg_length: payload.len() as u32,
+            msg_type_id: 0x09,
+            msg_stream_id: 1,
+            is_complete: false,
+        };
+
+        let mut wire = Buffer::new();
+        chunk_write(&mut wire, &msg, &payload, payload.len(), 128).unwrap();
+
+        let mut out_msg = ChunkMessage::default();
+        let mut ptr = std::ptr::null();
+        let mut len = 0;
+        assert!(matches!(
+            chunk_read(&mut wire, &mut reg, None, &mut out_msg, &mut ptr, &mut len),
+            Err(ErrorCode::Chunk)
+        ));
     }
 }
