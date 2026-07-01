@@ -250,15 +250,12 @@ pub fn chunk_read(
         stream.reassembly_buf.reset();
     }
 
-    // fmt=3 is a continuation chunk with no message header. After completion,
-    // reassembly_bytes_read is zero but type0_* metadata lingers; accepting a
-    // fmt=3 here would reassemble attacker bytes under the prior message's
-    // type/length. fmt=2 carries a timestamp and legitimately starts a new
-    // message that reuses the prior type/length on this CSID.
-    if fmt == 3 && stream.reassembly_bytes_read == 0 {
-        return Err(ErrorCode::Chunk);
-    }
-
+    // fmt=3 can be either a continuation chunk or a complete new chunk that
+    // legitimately reuses the previous message header context on this CSID.
+    // The chunk layer cannot distinguish an intentionally reused fmt=3 header
+    // from a peer-controlled message with the same inherited metadata, so it
+    // must accept fmt=3 when the CSID has valid prior state. Higher layers must
+    // validate command semantics and authorization for the resulting message.
     match fmt {
         0 => {
             stream.type0_timestamp = final_timestamp;
@@ -343,7 +340,7 @@ mod tests {
     }
 
     #[test]
-    fn fmt3_after_complete_message_is_rejected() {
+    fn fmt3_after_complete_message_can_start_new_message_with_inherited_header() {
         let payload = b"hello";
         let msg = ChunkMessage {
             csid: 3,
@@ -368,19 +365,22 @@ mod tests {
         );
         assert!(out_msg.is_complete);
 
-        let mut attack = Buffer::new();
-        attack
-            .write(&fmt3_wire(3, b"bogus"))
-            .expect("attack wire");
+        let mut next = Buffer::new();
+        next.write(&fmt3_wire(3, b"again")).expect("fmt3 wire");
         let result = chunk_read(
-            &mut attack,
+            &mut next,
             &mut reg,
             None,
             &mut out_msg,
             &mut ptr,
             &mut len,
         );
-        assert!(result.is_err());
+
+        assert_eq!(result.unwrap(), 1);
+        assert!(out_msg.is_complete);
+        assert_eq!(out_msg.msg_type_id, 0x14);
+        assert_eq!(out_msg.msg_stream_id, 1);
+        assert_eq!(len, 5);
     }
 
     #[test]
