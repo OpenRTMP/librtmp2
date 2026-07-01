@@ -105,7 +105,7 @@ impl Client {
             return Err(ErrorCode::Protocol);
         }
         let mut amf = Buffer::with_capacity(256);
-        command::build_publish(&mut amf, &self.stream_key, &self.app)?;
+        command::build_publish(&mut amf, &self.stream_key, "live")?;
         self.send_command_msg(self.stream_id, amf.as_slice())?;
         self.wait_for_command("onStatus")?;
         self.state = ClientState::Publishing;

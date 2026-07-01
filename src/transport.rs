@@ -216,10 +216,14 @@ impl Drop for Transport {
     fn drop(&mut self) {
         // For plain transports, explicitly close the owned fd.
         // For TLS transports, SslStream<TcpStream> closes the fd when it drops.
-        if let TransportInner::Plain(fd) = &self.inner {
-            if *fd >= 0 {
-                unsafe { libc::close(*fd) };
+        match &self.inner {
+            TransportInner::Plain(fd) => {
+                if *fd >= 0 {
+                    unsafe { libc::close(*fd) };
+                }
             }
+            #[cfg(feature = "tls")]
+            TransportInner::Tls { .. } => {}
         }
     }
 }

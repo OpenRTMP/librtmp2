@@ -80,12 +80,14 @@ pub fn build_create_stream(buf: &mut Buffer, transaction_id: f64) -> Result<()> 
 }
 
 /// Build a "publish" command.
-pub fn build_publish(buf: &mut Buffer, stream_name: &str, app: &str) -> Result<()> {
+pub fn build_publish(buf: &mut Buffer, stream_name: &str, publish_type: &str) -> Result<()> {
     amf0::write_string(buf, "publish")?;
     amf0::write_number(buf, 0.0)?;
     amf0::write_null(buf)?;
     amf0::write_string(buf, stream_name)?;
-    amf0::write_string(buf, app)?;
+    if !publish_type.is_empty() {
+        amf0::write_string(buf, publish_type)?;
+    }
     Ok(())
 }
 
@@ -239,7 +241,11 @@ pub fn read_create_stream(buf: &mut Buffer) -> Result<f64> {
 }
 
 /// Read a publish command.
-pub fn read_publish(buf: &mut Buffer, stream_name: &mut [u8], app: &mut [u8]) -> Result<()> {
+pub fn read_publish(
+    buf: &mut Buffer,
+    stream_name: &mut [u8],
+    publish_type: &mut [u8],
+) -> Result<()> {
     let mut name = [0u8; 64];
     amf0::read_string(buf, &mut name)?;
     read_number_value(buf)?; // skip txn
@@ -249,7 +255,7 @@ pub fn read_publish(buf: &mut Buffer, stream_name: &mut [u8], app: &mut [u8]) ->
     // The publish type argument is optional in practice. Decode it only when a
     // client actually sent more AMF data; otherwise keep the output buffer empty.
     if buf.available() > 0 {
-        let _ = read_string_trunc(buf, app);
+        let _ = read_string_trunc(buf, publish_type);
     }
     Ok(())
 }
@@ -321,4 +327,27 @@ fn read_string_trunc(buf: &mut Buffer, out: &mut [u8]) -> Result<()> {
     }
     buf.drain(slen - copy_len);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cstr(buf: &[u8]) -> &str {
+        let len = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+        std::str::from_utf8(&buf[..len]).unwrap()
+    }
+
+    #[test]
+    fn publish_command_round_trips_publish_type() {
+        let mut buf = Buffer::new();
+        build_publish(&mut buf, "stream_key", "record").unwrap();
+
+        let mut stream_name = [0u8; 256];
+        let mut publish_type = [0u8; 64];
+        read_publish(&mut buf, &mut stream_name, &mut publish_type).unwrap();
+
+        assert_eq!(cstr(&stream_name), "stream_key");
+        assert_eq!(cstr(&publish_type), "record");
+    }
 }
