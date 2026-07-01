@@ -31,6 +31,10 @@ pub struct Server {
     pub on_frame_cb: Option<fn(&Frame)>,
     /// Fired when a client completes the AMF `connect` exchange.
     pub on_connect_cb: Option<fn()>,
+    /// When set, must return true to allow `publish`; false rejects the command.
+    pub on_publish_cb: Option<fn(app: &str, stream_name: &str) -> bool>,
+    /// When set, must return true to allow `play`; false rejects the command.
+    pub on_play_cb: Option<fn(app: &str, stream_name: &str) -> bool>,
     listener: Option<TcpListener>,
     stream_cache: HashMap<(String, String), StreamCache>,
 }
@@ -63,6 +67,8 @@ impl Server {
             tls_ctx,
             on_frame_cb: None,
             on_connect_cb: None,
+            on_publish_cb: None,
+            on_play_cb: None,
             listener: None,
             stream_cache: HashMap::new(),
         })
@@ -140,6 +146,8 @@ impl Server {
                     conn.transport = Some(transport);
                     conn.on_frame_cb = self.on_frame_cb;
                     conn.on_connect_cb = self.on_connect_cb;
+                    conn.on_publish_cb = self.on_publish_cb;
+                    conn.on_play_cb = self.on_play_cb;
                     self.connections.push(conn);
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
