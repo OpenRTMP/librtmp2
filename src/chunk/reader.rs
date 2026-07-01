@@ -250,6 +250,12 @@ pub fn chunk_read(
         stream.reassembly_buf.reset();
     }
 
+    // fmt=3 can be either a continuation chunk or a complete new chunk that
+    // legitimately reuses the previous message header context on this CSID.
+    // The chunk layer cannot distinguish an intentionally reused fmt=3 header
+    // from a peer-controlled message with the same inherited metadata, so it
+    // must accept fmt=3 when the CSID has valid prior state. Higher layers must
+    // validate command semantics and authorization for the resulting message.
     match fmt {
         0 => {
             stream.type0_timestamp = final_timestamp;
@@ -309,5 +315,120 @@ pub fn chunk_read(
     } else {
         msg.is_complete = false;
         Ok(0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::chunk::writer::chunk_write;
+
+    fn fmt3_wire(csid: u32, payload: &[u8]) -> Vec<u8> {
+        let mut v = Vec::new();
+        if csid < 64 {
+            v.push((3 << 6) | csid as u8);
+        } else if csid < 320 {
+            v.push(3 << 6);
+            v.push((csid - 64) as u8);
+        } else {
+            v.push((3 << 6) | 1);
+            v.push(((csid - 64) & 0xFF) as u8);
+            v.push((((csid - 64) >> 8) & 0xFF) as u8);
+        }
+        v.extend_from_slice(payload);
+        v
+    }
+
+    #[test]
+    fn fmt3_after_complete_message_can_start_new_message_with_inherited_header() {
+        let payload = b"hello";
+        let msg = ChunkMessage {
+            csid: 3,
+            fmt: 0,
+            timestamp: 1,
+            msg_length: payload.len() as u32,
+            msg_type_id: 0x14,
+            msg_stream_id: 1,
+            is_complete: false,
+        };
+
+        let mut wire = Buffer::new();
+        chunk_write(&mut wire, &msg, payload, payload.len(), 128).unwrap();
+
+        let mut reg = ChunkRegistry::new();
+        let mut out_msg = ChunkMessage::default();
+        let mut ptr = std::ptr::null();
+        let mut len = 0;
+        assert_eq!(
+            chunk_read(&mut wire, &mut reg, None, &mut out_msg, &mut ptr, &mut len).unwrap(),
+            1
+        );
+        assert!(out_msg.is_complete);
+
+        let mut next = Buffer::new();
+        next.write(&fmt3_wire(3, b"again")).expect("fmt3 wire");
+        let result = chunk_read(
+            &mut next,
+            &mut reg,
+            None,
+            &mut out_msg,
+            &mut ptr,
+            &mut len,
+        );
+
+        assert_eq!(result.unwrap(), 1);
+        assert!(out_msg.is_complete);
+        assert_eq!(out_msg.msg_type_id, 0x14);
+        assert_eq!(out_msg.msg_stream_id, 1);
+        assert_eq!(len, 5);
+    }
+
+    #[test]
+    fn fmt2_after_complete_message_starts_new_message() {
+        let payload = b"done";
+        let msg = ChunkMessage {
+            csid: 5,
+            fmt: 0,
+            timestamp: 0,
+            msg_length: payload.len() as u32,
+            msg_type_id: 0x09,
+            msg_stream_id: 1,
+            is_complete: false,
+        };
+
+        let mut wire = Buffer::new();
+        chunk_write(&mut wire, &msg, payload, payload.len(), 128).unwrap();
+
+        let mut reg = ChunkRegistry::new();
+        let mut out_msg = ChunkMessage::default();
+        let mut ptr = std::ptr::null();
+        let mut len = 0;
+        chunk_read(
+            &mut wire,
+            &mut reg,
+            None,
+            &mut out_msg,
+            &mut ptr,
+            &mut len,
+        )
+        .unwrap();
+        assert!(out_msg.is_complete);
+
+        // fmt=2 header: basic (fmt<<6|csid) + 3-byte timestamp; reuses prior length/type
+        let mut next = Buffer::new();
+        next.write(&[2 << 6 | 5, 0, 0, 1]).unwrap();
+        next.write(b"next").unwrap();
+        let result = chunk_read(
+            &mut next,
+            &mut reg,
+            None,
+            &mut out_msg,
+            &mut ptr,
+            &mut len,
+        );
+        assert_eq!(result.unwrap(), 1);
+        assert!(out_msg.is_complete);
+        assert_eq!(out_msg.msg_type_id, 0x09);
+        assert_eq!(len, 4);
     }
 }
