@@ -1,4 +1,6 @@
+use std::collections::HashMap;
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use crate::buffer::Buffer;
 use crate::chunk::reader::{chunk_read, ChunkMessage};
@@ -6,6 +8,7 @@ use crate::chunk::state::ChunkRegistry;
 use crate::chunk::writer::chunk_write;
 use crate::handshake::{self, Handshake, HandshakeState};
 use crate::message::command;
+use crate::message::control::{self, UCTRL_PING_REQUEST, UCTRL_PING_RESPONSE};
 use crate::message::message as msg_dispatch;
 use crate::session::state_machine;
 use crate::session::stream::Stream;
@@ -19,6 +22,9 @@ pub const MAX_PENDING_RELAY_BYTES: usize = 8 * 1024 * 1024;
 const SERVER_WINDOW_ACK_SIZE: u32 = 2_500_000;
 const SERVER_PEER_BANDWIDTH: u32 = 2_500_000;
 const PEER_BANDWIDTH_DYNAMIC: u8 = 2;
+const PING_INTERVAL: Duration = Duration::from_secs(5);
+const PING_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_PENDING_PINGS: usize = 4;
 
 pub struct RelayFrame {
     pub frame_type: FrameType,
@@ -39,6 +45,10 @@ pub struct Conn {
     pub bytes_received: u32,
     pub bytes_at_last_ack: u32,
     pub client_fd: i32,
+    /// Stable per-connection id (monotonic, never reused while the server runs).
+    pub conn_id: u64,
+    /// Peer socket address for logging (not persisted).
+    pub remote_addr: String,
     pub transport: Option<Transport>,
     pub app: String,
     pub next_stream_id: u32,
@@ -50,10 +60,18 @@ pub struct Conn {
     pub detected_video_codec: Option<String>,
     pub detected_audio_codec: Option<String>,
     pub relay_enabled: bool,
+    /// When true, media relay stays off until the integrator sets `relay_enabled`
+    /// after its own post-auth bookkeeping (used by librtmp2-server).
+    pub defer_media_relay: bool,
     pub on_frame_cb: Option<fn(&Frame)>,
     pub on_connect_cb: Option<fn()>,
-    pub on_publish_cb: Option<fn(app: &str, stream_name: &str) -> bool>,
-    pub on_play_cb: Option<fn(app: &str, stream_name: &str) -> bool>,
+    pub on_publish_cb: Option<fn(conn_id: u64, app: &str, stream_name: &str) -> bool>,
+    pub on_play_cb: Option<fn(conn_id: u64, app: &str, stream_name: &str) -> bool>,
+    /// Last measured client↔server RTT in milliseconds (RTMP UserControl ping).
+    pub rtt_ms: f64,
+    pending_pings: HashMap<u32, Instant>,
+    last_ping_sent: Option<Instant>,
+    next_ping_token: u32,
 }
 
 impl Conn {
@@ -71,6 +89,8 @@ impl Conn {
             bytes_received: 0,
             bytes_at_last_ack: 0,
             client_fd: -1,
+            conn_id: 0,
+            remote_addr: String::new(),
             transport: None,
             app: String::new(),
             next_stream_id: 0,
@@ -82,10 +102,15 @@ impl Conn {
             detected_video_codec: None,
             detected_audio_codec: None,
             relay_enabled: false,
+            defer_media_relay: false,
             on_frame_cb: None,
             on_connect_cb: None,
             on_publish_cb: None,
             on_play_cb: None,
+            rtt_ms: 0.0,
+            pending_pings: HashMap::new(),
+            last_ping_sent: None,
+            next_ping_token: 1,
         }
     }
 
@@ -233,6 +258,7 @@ impl Conn {
 
     fn handle_message(&mut self, msg: &ChunkMessage, payload: &[u8]) -> Result<()> {
         match msg.msg_type_id {
+            msg_dispatch::RTMP_MSG_USER_CONTROL => self.handle_user_control(payload),
             msg_dispatch::RTMP_MSG_AMF0_COMMAND => self.handle_command(payload),
             msg_dispatch::RTMP_MSG_AUDIO => {
                 if self.relay_enabled && self.current_stream.as_ref().map(|s| s.is_publishing).unwrap_or(false) {
@@ -264,6 +290,52 @@ impl Conn {
             }
             _ => Ok(()),
         }
+    }
+
+    fn handle_user_control(&mut self, payload: &[u8]) -> Result<()> {
+        if payload.len() < 6 {
+            return Ok(());
+        }
+        let (event_type, param1, _) = control::read_user_control(payload, false)?;
+        match event_type {
+            UCTRL_PING_RESPONSE => {
+                if let Some(sent_at) = self.pending_pings.remove(&param1) {
+                    self.rtt_ms = sent_at.elapsed().as_secs_f64() * 1000.0;
+                }
+            }
+            UCTRL_PING_REQUEST => {
+                self.send_user_control_ping_response(param1)?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Send an RTMP ping when due and measure RTT from the client's response.
+    pub fn maybe_send_ping(&mut self) -> Result<()> {
+        if self.state < ConnState::AppConnected {
+            return Ok(());
+        }
+        let now = Instant::now();
+        if self
+            .last_ping_sent
+            .is_some_and(|t| now.duration_since(t) < PING_INTERVAL)
+        {
+            return Ok(());
+        }
+
+        self.pending_pings
+            .retain(|_, sent| now.duration_since(*sent) < PING_TIMEOUT);
+        if self.pending_pings.len() >= MAX_PENDING_PINGS {
+            return Ok(());
+        }
+
+        let token = self.next_ping_token;
+        self.next_ping_token = self.next_ping_token.wrapping_add(1);
+        self.send_user_control_ping_request(token)?;
+        self.pending_pings.insert(token, now);
+        self.last_ping_sent = Some(now);
+        Ok(())
     }
 
     pub fn handle_command(&mut self, payload: &[u8]) -> Result<()> {
@@ -305,9 +377,11 @@ impl Conn {
                 command::read_publish(&mut buf, &mut stream_name, &mut publish_type)?;
                 let name_str = std::str::from_utf8(&stream_name).unwrap_or("").trim_end_matches('\0').to_string();
                 if let Some(cb) = self.on_publish_cb {
-                    if !cb(&self.app, &name_str) {
+                    if !cb(self.conn_id, &self.app, &name_str) {
                         return self.send_onstatus(0, "error", "NetStream.Publish.BadName", "Publish not authorized");
                     }
+                }
+                if !self.defer_media_relay || self.on_publish_cb.is_none() {
                     self.relay_enabled = true;
                 }
                 if self.current_stream.is_none() {
@@ -327,9 +401,11 @@ impl Conn {
                 command::read_play(&mut buf, &mut stream_name)?;
                 let name_str = std::str::from_utf8(&stream_name).unwrap_or("").trim_end_matches('\0').to_string();
                 if let Some(cb) = self.on_play_cb {
-                    if !cb(&self.app, &name_str) {
+                    if !cb(self.conn_id, &self.app, &name_str) {
                         return self.send_onstatus(0, "error", "NetStream.Play.Failed", "Play not authorized");
                     }
+                }
+                if !self.defer_media_relay || self.on_play_cb.is_none() {
                     self.relay_enabled = true;
                 }
                 if self.current_stream.is_none() {
@@ -440,6 +516,18 @@ impl Conn {
 
     fn send_acknowledgement(&mut self, seq: u32) -> Result<()> {
         self.send_control(0x03, &seq.to_be_bytes())
+    }
+
+    fn send_user_control_ping_request(&mut self, timestamp: u32) -> Result<()> {
+        let mut buf = Buffer::with_capacity(6);
+        control::write_user_control_ping_request(&mut buf, timestamp)?;
+        self.send_control(msg_dispatch::RTMP_MSG_USER_CONTROL, buf.as_slice())
+    }
+
+    fn send_user_control_ping_response(&mut self, timestamp: u32) -> Result<()> {
+        let mut buf = Buffer::with_capacity(6);
+        control::write_user_control_ping_response(&mut buf, timestamp)?;
+        self.send_control(msg_dispatch::RTMP_MSG_USER_CONTROL, buf.as_slice())
     }
 }
 

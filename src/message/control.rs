@@ -108,6 +108,24 @@ pub fn write_user_control_set_buffer_length(
     Ok(())
 }
 
+/// Write a User Control Ping Request event (4-byte opaque timestamp/token).
+pub fn write_user_control_ping_request(buf: &mut Buffer, timestamp: u32) -> Result<()> {
+    buf.write(&UCTRL_PING_REQUEST.to_be_bytes())
+        .map_err(|_| ErrorCode::Internal)?;
+    buf.write(&timestamp.to_be_bytes())
+        .map_err(|_| ErrorCode::Internal)?;
+    Ok(())
+}
+
+/// Write a User Control Ping Response event (echoes the request timestamp/token).
+pub fn write_user_control_ping_response(buf: &mut Buffer, timestamp: u32) -> Result<()> {
+    buf.write(&UCTRL_PING_RESPONSE.to_be_bytes())
+        .map_err(|_| ErrorCode::Internal)?;
+    buf.write(&timestamp.to_be_bytes())
+        .map_err(|_| ErrorCode::Internal)?;
+    Ok(())
+}
+
 /* ── Decoder ── */
 
 /// Read a SetChunkSize message.
@@ -203,5 +221,20 @@ mod tests {
         assert_eq!(event_type, UCTRL_SET_BUFFER_LENGTH);
         assert_eq!(stream_id, 1);
         assert_eq!(ms, Some(3000));
+    }
+
+    #[test]
+    fn user_control_ping_round_trips() {
+        let mut buf = Buffer::new();
+        write_user_control_ping_request(&mut buf, 0x1234_5678).unwrap();
+        let (event_type, token, _) = read_user_control(buf.peek(), false).unwrap();
+        assert_eq!(event_type, UCTRL_PING_REQUEST);
+        assert_eq!(token, 0x1234_5678);
+
+        buf.reset();
+        write_user_control_ping_response(&mut buf, 0x1234_5678).unwrap();
+        let (event_type, token, _) = read_user_control(buf.peek(), false).unwrap();
+        assert_eq!(event_type, UCTRL_PING_RESPONSE);
+        assert_eq!(token, 0x1234_5678);
     }
 }

@@ -22,7 +22,7 @@ fn on_frame(frame: &Frame) {
     }
 }
 
-fn allow_publish(_app: &str, _stream_name: &str) -> bool {
+fn allow_publish(_conn_id: u64, _app: &str, _stream_name: &str) -> bool {
     true
 }
 

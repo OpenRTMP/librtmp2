@@ -32,11 +32,14 @@ pub struct Server {
     /// Fired when a client completes the AMF `connect` exchange.
     pub on_connect_cb: Option<fn()>,
     /// When set, must return true to allow `publish`; false rejects the command.
-    pub on_publish_cb: Option<fn(app: &str, stream_name: &str) -> bool>,
+    pub on_publish_cb: Option<fn(conn_id: u64, app: &str, stream_name: &str) -> bool>,
     /// When set, must return true to allow `play`; false rejects the command.
-    pub on_play_cb: Option<fn(app: &str, stream_name: &str) -> bool>,
+    pub on_play_cb: Option<fn(conn_id: u64, app: &str, stream_name: &str) -> bool>,
     listener: Option<TcpListener>,
     stream_cache: HashMap<(String, String), StreamCache>,
+    next_conn_id: u64,
+    /// Hold media relay until the integrator enables it per connection.
+    pub defer_media_relay: bool,
 }
 
 impl Server {
@@ -71,6 +74,8 @@ impl Server {
             on_play_cb: None,
             listener: None,
             stream_cache: HashMap::new(),
+            next_conn_id: 1,
+            defer_media_relay: false,
         })
     }
 
@@ -127,7 +132,7 @@ impl Server {
                 break;
             }
             match listener.accept() {
-                Ok((stream, _addr)) => {
+                Ok((stream, addr)) => {
                     let transport = if let Some(ref ctx) = self.tls_ctx {
                         // TlsCtx::accept() takes ownership of the fd, sets the socket
                         // to blocking for the handshake, then restores non-blocking.
@@ -143,6 +148,10 @@ impl Server {
                     let conn_fd = transport.fd();
                     let mut conn = Conn::new();
                     conn.client_fd = conn_fd;
+                    conn.conn_id = self.next_conn_id;
+                    self.next_conn_id = self.next_conn_id.saturating_add(1);
+                    conn.remote_addr = addr.to_string();
+                    conn.defer_media_relay = self.defer_media_relay;
                     conn.transport = Some(transport);
                     conn.on_frame_cb = self.on_frame_cb;
                     conn.on_connect_cb = self.on_connect_cb;
@@ -271,6 +280,10 @@ impl Server {
 
         // Flush all connections.
         for (i, conn) in self.connections.iter_mut().enumerate() {
+            if conn.maybe_send_ping().is_err() {
+                closed.push(i);
+                continue;
+            }
             if conn.flush().is_err() {
                 closed.push(i);
             }
