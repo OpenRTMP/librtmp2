@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::net::TcpListener;
 use std::os::unix::io::{AsRawFd, IntoRawFd};
 
+use crate::chunk::state::DEFAULT_CHUNK_SIZE;
 use crate::net;
 use crate::session::conn::Conn;
 use crate::transport::{TlsCtx, Transport};
@@ -150,6 +151,12 @@ impl Server {
                     };
                     let conn_fd = transport.fd();
                     let mut conn = Conn::new();
+                    let chunk_size = if self.config.chunk_size > 0 {
+                        self.config.chunk_size as u32
+                    } else {
+                        DEFAULT_CHUNK_SIZE
+                    };
+                    conn.apply_chunk_size(chunk_size);
                     conn.client_fd = conn_fd;
                     conn.conn_id = self.next_conn_id;
                     self.next_conn_id = self.next_conn_id.saturating_add(1);

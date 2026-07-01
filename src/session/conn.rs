@@ -354,12 +354,64 @@ impl Conn {
 
     fn handle_message(&mut self, msg: &ChunkMessage, payload: &[u8]) -> Result<()> {
         match msg.msg_type_id {
+            msg_dispatch::RTMP_MSG_SET_CHUNK_SIZE
+            | msg_dispatch::RTMP_MSG_ABORT_MESSAGE
+            | msg_dispatch::RTMP_MSG_ACKNOWLEDGEMENT
+            | msg_dispatch::RTMP_MSG_WINDOW_ACK_SIZE
+            | msg_dispatch::RTMP_MSG_SET_PEER_BANDWIDTH => self.handle_control(msg.msg_type_id, payload),
             msg_dispatch::RTMP_MSG_USER_CONTROL => self.handle_user_control(payload),
             msg_dispatch::RTMP_MSG_AMF0_COMMAND => self.handle_command(payload),
+            msg_dispatch::RTMP_MSG_AMF3_COMMAND => {
+                if !payload.is_empty() && payload[0] == 0x00 {
+                    self.handle_command(&payload[1..])
+                } else {
+                    self.handle_command(payload)
+                }
+            }
             msg_dispatch::RTMP_MSG_AUDIO => self.handle_media_frame(FrameType::Audio, msg.timestamp, payload),
             msg_dispatch::RTMP_MSG_VIDEO => self.handle_media_frame(FrameType::Video, msg.timestamp, payload),
             _ => Ok(()),
         }
+    }
+
+    fn handle_control(&mut self, msg_type_id: u8, payload: &[u8]) -> Result<()> {
+        match msg_type_id {
+            msg_dispatch::RTMP_MSG_SET_CHUNK_SIZE => {
+                if payload.len() >= 4 {
+                    if let Ok(cs) = control::read_set_chunk_size(payload) {
+                        self.apply_chunk_size(cs);
+                    }
+                }
+            }
+            msg_dispatch::RTMP_MSG_ABORT_MESSAGE => {
+                if payload.len() >= 4 {
+                    if let Ok(csid) = control::read_abort_message(payload) {
+                        self.chunk_reg.reset_stream(csid);
+                    }
+                }
+            }
+            msg_dispatch::RTMP_MSG_WINDOW_ACK_SIZE => {
+                if payload.len() >= 4 {
+                    if let Ok(win) = control::read_window_ack_size(payload) {
+                        self.window_ack_size = win;
+                    }
+                }
+            }
+            msg_dispatch::RTMP_MSG_ACKNOWLEDGEMENT => {
+                let _ = control::read_acknowledgement_size(payload);
+            }
+            msg_dispatch::RTMP_MSG_SET_PEER_BANDWIDTH => {
+                let _ = control::read_set_peer_bandwidth(payload);
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Apply an outbound/inbound chunk size to this connection's registry.
+    pub fn apply_chunk_size(&mut self, chunk_size: u32) {
+        self.chunk_size = chunk_size;
+        self.chunk_reg.set_all_chunk_size(chunk_size);
     }
 
     fn handle_user_control(&mut self, payload: &[u8]) -> Result<()> {
@@ -446,6 +498,14 @@ impl Conn {
                 let mut publish_type = [0u8; 64];
                 command::read_publish(&mut buf, &mut stream_name, &mut publish_type)?;
                 let name_str = std::str::from_utf8(&stream_name).unwrap_or("").trim_end_matches('\0').to_string();
+                if self.current_stream.is_none() {
+                    return self.send_onstatus(
+                        0,
+                        "error",
+                        "NetStream.Publish.BadConnection",
+                        "No stream created",
+                    );
+                }
                 if let Some(cb) = self.on_publish_cb {
                     if !cb(self.conn_id, &self.app, &name_str) {
                         return self.send_onstatus(0, "error", "NetStream.Publish.BadName", "Publish not authorized");
@@ -454,9 +514,7 @@ impl Conn {
                 if !self.defer_media_relay || self.on_publish_cb.is_none() {
                     self.relay_enabled = true;
                 }
-                if self.current_stream.is_none() {
-                    self.send_onstatus(0, "error", "NetStream.Publish.BadConnection", "No stream created")?;
-                } else {
+                {
                     if let Some(ref mut stream) = self.current_stream {
                         stream.is_publishing = true;
                         stream.name = name_str;
@@ -470,6 +528,14 @@ impl Conn {
                 let mut stream_name = [0u8; 256];
                 command::read_play(&mut buf, &mut stream_name)?;
                 let name_str = std::str::from_utf8(&stream_name).unwrap_or("").trim_end_matches('\0').to_string();
+                if self.current_stream.is_none() {
+                    return self.send_onstatus(
+                        0,
+                        "error",
+                        "NetStream.Play.BadConnection",
+                        "No stream created",
+                    );
+                }
                 if let Some(cb) = self.on_play_cb {
                     if !cb(self.conn_id, &self.app, &name_str) {
                         return self.send_onstatus(0, "error", "NetStream.Play.Failed", "Play not authorized");
@@ -478,9 +544,7 @@ impl Conn {
                 if !self.defer_media_relay || self.on_play_cb.is_none() {
                     self.relay_enabled = true;
                 }
-                if self.current_stream.is_none() {
-                    self.send_onstatus(0, "error", "NetStream.Play.BadConnection", "No stream created")?;
-                } else {
+                {
                     if let Some(ref mut stream) = self.current_stream {
                         stream.is_playing = true;
                         stream.name = name_str;
@@ -668,5 +732,25 @@ mod tests {
             stream.name = "legacy_name".to_string();
         }
         assert_eq!(conn.relay_route_key(), "legacy_name");
+    }
+
+    #[test]
+    fn apply_chunk_size_updates_connection_registry() {
+        let mut conn = Conn::new();
+        conn.apply_chunk_size(4096);
+        assert_eq!(conn.chunk_size, 4096);
+        assert_eq!(conn.chunk_reg.default_chunk_size, 4096);
+    }
+
+    #[test]
+    fn handle_control_applies_peer_set_chunk_size() {
+        let mut conn = Conn::new();
+        conn.handle_control(
+            msg_dispatch::RTMP_MSG_SET_CHUNK_SIZE,
+            &4096u32.to_be_bytes(),
+        )
+        .unwrap();
+        assert_eq!(conn.chunk_size, 4096);
+        assert_eq!(conn.chunk_reg.default_chunk_size, 4096);
     }
 }
