@@ -531,13 +531,18 @@ impl Conn {
                         return self.send_onstatus(0, "error", "NetStream.Publish.BadName", "Publish not authorized");
                     }
                 }
+                let was_publishing = self
+                    .current_stream
+                    .as_ref()
+                    .map(|s| s.is_publishing)
+                    .unwrap_or(false);
                 let prev_route_key = self.relay_route_key();
                 let next_route_key = if !self.relay_key.is_empty() {
                     self.relay_key.clone()
                 } else {
                     name_str.clone()
                 };
-                if !prev_route_key.is_empty() && prev_route_key != next_route_key {
+                if was_publishing && !prev_route_key.is_empty() && prev_route_key != next_route_key {
                     self.pending_cache_evictions
                         .push((self.app.clone(), prev_route_key));
                 }
@@ -833,6 +838,29 @@ mod tests {
             conn.pending_cache_evictions,
             vec![("live".to_string(), "A".to_string())]
         );
+    }
+
+    #[test]
+    fn play_then_publish_does_not_evict_foreign_cache_key() {
+        let mut conn = Conn::new();
+        conn.app = "live".to_string();
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+
+        let mut buf = Buffer::with_capacity(128);
+        command::build_play(&mut buf, "victim").unwrap();
+        conn.handle_command(buf.as_slice()).unwrap();
+        assert_eq!(conn.current_stream.as_ref().unwrap().name, "victim");
+        assert!(!conn.current_stream.as_ref().unwrap().is_publishing);
+
+        let mut buf = Buffer::with_capacity(128);
+        command::build_publish(&mut buf, "other", "live").unwrap();
+        conn.handle_command(buf.as_slice()).unwrap();
+
+        // This connection only ever played "victim" -- it never published it
+        // -- so publishing "other" afterwards must not queue an eviction for
+        // a cache key this connection never created.
+        assert!(conn.pending_cache_evictions.is_empty());
+        assert_eq!(conn.current_stream.as_ref().unwrap().name, "other");
     }
 
     #[test]

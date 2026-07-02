@@ -15,6 +15,9 @@ use crate::types::*;
 /// Maximum distinct (app, stream_name) cache entries retained server-wide.
 const MAX_STREAM_CACHE_ENTRIES: usize = 1024;
 
+/// Maximum total bytes retained across all stream_cache entries server-wide.
+const MAX_STREAM_CACHE_BYTES: usize = 64 * 1024 * 1024;
+
 /// Cached codec headers and last keyframe for a (app, stream_name) pair.
 /// Replayed to players that join after the publisher has already sent headers.
 struct StreamCache {
@@ -217,6 +220,12 @@ impl Server {
             }
         }
 
+        // Renames processed during this batch's recv loop must be evicted
+        // before init-frame replay below, or a newly-joined player could be
+        // handed a stale cache entry for a route key its publisher just
+        // abandoned.
+        self.drain_pending_cache_evictions();
+
         // Collect all frames queued by publishers, then relay them to players
         // on the same (app, stream_name) pair.
         let relay_frames: Vec<_> = self
@@ -288,13 +297,13 @@ impl Server {
         closed.dedup();
         for i in closed.into_iter().rev() {
             let conn = &self.connections[i];
-            if let Some(ref stream) = conn.current_stream {
-                if stream.is_publishing {
-                    if let Some(keys) = self.publisher_cache_keys.remove(&conn.conn_id) {
-                        for key in keys {
-                            self.stream_cache.remove(&key);
-                        }
-                    }
+            // Tracking must be cleared unconditionally: a publisher can issue
+            // another createStream after publishing, replacing current_stream
+            // and leaving is_publishing false even though this conn_id still
+            // owns cache entries.
+            if let Some(keys) = self.publisher_cache_keys.remove(&conn.conn_id) {
+                for key in keys {
+                    self.stream_cache.remove(&key);
                 }
             }
             self.connections.remove(i);
@@ -302,7 +311,49 @@ impl Server {
         Ok(())
     }
 
+    /// Total bytes currently retained across all stream_cache entries.
+    fn stream_cache_bytes(&self) -> usize {
+        self.stream_cache
+            .values()
+            .map(|cache| {
+                cache.avc_header.as_ref().map(|v| v.len()).unwrap_or(0)
+                    + cache.aac_header.as_ref().map(|v| v.len()).unwrap_or(0)
+                    + cache
+                        .last_keyframe
+                        .as_ref()
+                        .map(|(_, v)| v.len())
+                        .unwrap_or(0)
+            })
+            .sum()
+    }
+
+    fn evict_stream_cache_key(&mut self, key: &(String, String)) {
+        self.stream_cache.remove(key);
+        for keys in self.publisher_cache_keys.values_mut() {
+            keys.retain(|k| k != key);
+        }
+    }
+
     fn cache_relay_frame(&mut self, frame: &crate::session::conn::RelayFrame) {
+        let is_avc_header = frame.frame_type == FrameType::Video
+            && frame.payload.len() >= 2
+            && frame.payload[0] == 0x17
+            && frame.payload[1] == 0x00;
+        let is_keyframe = frame.frame_type == FrameType::Video
+            && frame.payload.len() >= 2
+            && frame.payload[0] == 0x17
+            && frame.payload[1] == 0x01;
+        let is_aac_header = frame.frame_type == FrameType::Audio
+            && frame.payload.len() >= 2
+            && (frame.payload[0] & 0xF0) == 0xA0
+            && frame.payload[1] == 0x00;
+
+        // Frames that are neither a codec header nor a keyframe are relayed
+        // live but never cached; don't create an empty entry for them.
+        if !is_avc_header && !is_keyframe && !is_aac_header {
+            return;
+        }
+
         let key = (frame.app.clone(), frame.stream_name.clone());
         let publisher_keys = self
             .publisher_cache_keys
@@ -314,42 +365,57 @@ impl Server {
         if self.stream_cache.len() >= MAX_STREAM_CACHE_ENTRIES
             && !self.stream_cache.contains_key(&key)
         {
-            if let Some(evict) = self
-                .stream_cache
-                .keys()
-                .find(|k| *k != &key)
-                .cloned()
-            {
-                self.stream_cache.remove(&evict);
-                for keys in self.publisher_cache_keys.values_mut() {
-                    keys.retain(|k| k != &evict);
-                }
+            if let Some(evict) = self.stream_cache.keys().find(|k| *k != &key).cloned() {
+                self.evict_stream_cache_key(&evict);
             }
         }
+
+        let existing_field_len = self
+            .stream_cache
+            .get(&key)
+            .map(|cache| {
+                if is_avc_header {
+                    cache.avc_header.as_ref().map(|v| v.len()).unwrap_or(0)
+                } else if is_keyframe {
+                    cache
+                        .last_keyframe
+                        .as_ref()
+                        .map(|(_, v)| v.len())
+                        .unwrap_or(0)
+                } else {
+                    cache.aac_header.as_ref().map(|v| v.len()).unwrap_or(0)
+                }
+            })
+            .unwrap_or(0);
+        let incoming_len = frame.payload.len();
+        if self.stream_cache_bytes() + incoming_len > existing_field_len + MAX_STREAM_CACHE_BYTES {
+            let victims: Vec<_> = self
+                .stream_cache
+                .keys()
+                .filter(|k| *k != &key)
+                .cloned()
+                .collect();
+            for victim in victims {
+                if self.stream_cache_bytes() + incoming_len
+                    <= existing_field_len + MAX_STREAM_CACHE_BYTES
+                {
+                    break;
+                }
+                self.evict_stream_cache_key(&victim);
+            }
+        }
+
         let cache = self.stream_cache.entry(key).or_insert(StreamCache {
             avc_header: None,
             aac_header: None,
             last_keyframe: None,
         });
-        match frame.frame_type {
-            FrameType::Video => {
-                if frame.payload.len() >= 2 {
-                    if frame.payload[0] == 0x17 && frame.payload[1] == 0x00 {
-                        cache.avc_header = Some(frame.payload.clone());
-                    } else if frame.payload[0] == 0x17 && frame.payload[1] == 0x01 {
-                        cache.last_keyframe = Some((frame.timestamp, frame.payload.clone()));
-                    }
-                }
-            }
-            FrameType::Audio => {
-                if frame.payload.len() >= 2
-                    && (frame.payload[0] & 0xF0) == 0xA0
-                    && frame.payload[1] == 0x00
-                {
-                    cache.aac_header = Some(frame.payload.clone());
-                }
-            }
-            _ => {}
+        if is_avc_header {
+            cache.avc_header = Some(frame.payload.clone());
+        } else if is_keyframe {
+            cache.last_keyframe = Some((frame.timestamp, frame.payload.clone()));
+        } else if is_aac_header {
+            cache.aac_header = Some(frame.payload.clone());
         }
     }
 
@@ -375,6 +441,7 @@ impl Drop for Server {
 mod tests {
     use super::*;
     use crate::session::conn::RelayFrame;
+    use crate::session::stream::Stream;
     use crate::types::FrameType;
 
     fn test_config() -> ServerConfig {
@@ -445,5 +512,144 @@ mod tests {
         }
 
         assert!(server.stream_cache.len() <= MAX_STREAM_CACHE_ENTRIES);
+    }
+
+    #[test]
+    fn disconnect_after_publish_then_create_stream_still_clears_publisher_cache_keys() {
+        let config = test_config();
+        let mut server = Server::new(config).unwrap();
+        let avc = [0x17u8, 0x00, 0x00, 0x00, 0x00];
+
+        // Publisher creates a cache entry...
+        server.cache_relay_frame(&relay_frame(1, "live", "old_name", &avc));
+        assert!(server
+            .stream_cache
+            .contains_key(&("live".to_string(), "old_name".to_string())));
+        assert!(server.publisher_cache_keys.contains_key(&1));
+
+        // ...then issues another createStream, replacing current_stream and
+        // resetting is_publishing to false, before disconnecting.
+        let mut conn = Conn::new();
+        conn.conn_id = 1;
+        conn.current_stream = Some(Box::new(Stream::new(2)));
+        // transport left None: the recv loop in process_connections()
+        // marks this connection closed immediately (transport-less
+        // simulates a dead/dropped socket).
+        server.connections.push(conn);
+
+        server.process_connections().unwrap();
+
+        assert!(
+            !server.publisher_cache_keys.contains_key(&1),
+            "publisher_cache_keys must be cleared on disconnect even when \
+             current_stream.is_publishing is false at teardown time"
+        );
+        assert!(!server
+            .stream_cache
+            .contains_key(&("live".to_string(), "old_name".to_string())));
+        assert!(server.connections.is_empty());
+    }
+
+    #[test]
+    fn cache_relay_frame_skips_uncacheable_frames() {
+        let config = test_config();
+        let mut server = Server::new(config).unwrap();
+
+        // Neither an AVC/AAC sequence header nor a keyframe marker.
+        let non_cacheable_video = [0x27u8, 0x01, 0x00, 0x00, 0x00];
+        server.cache_relay_frame(&relay_frame(1, "live", "stream1", &non_cacheable_video));
+
+        assert!(server.stream_cache.is_empty());
+        assert!(server.publisher_cache_keys.is_empty());
+    }
+
+    #[test]
+    fn stream_cache_respects_byte_budget() {
+        let config = test_config();
+        let mut server = Server::new(config).unwrap();
+
+        // Each entry stores a ~2 MiB "keyframe"; enough entries to exceed
+        // MAX_STREAM_CACHE_BYTES well before MAX_STREAM_CACHE_ENTRIES.
+        let payload_len = 2 * 1024 * 1024;
+        let mut payload = vec![0u8; payload_len];
+        payload[0] = 0x17;
+        payload[1] = 0x01;
+
+        for i in 0..40 {
+            let name = format!("stream{i}");
+            server.cache_relay_frame(&relay_frame(1, "live", &name, &payload));
+        }
+
+        assert!(server.stream_cache_bytes() <= MAX_STREAM_CACHE_BYTES);
+    }
+
+    #[test]
+    fn cache_evictions_from_current_batch_apply_before_init_frame_replay() {
+        use crate::buffer::Buffer;
+        use crate::chunk::reader::ChunkMessage;
+        use crate::chunk::writer::chunk_write;
+        use crate::message::command;
+        use crate::transport::Transport;
+        use std::os::unix::io::IntoRawFd;
+        use std::os::unix::net::UnixStream;
+
+        let config = test_config();
+        let mut server = Server::new(config).unwrap();
+
+        // Stale cache entry under the route key the publisher is about to
+        // abandon by renaming.
+        let stale_avc = vec![0x17u8, 0x00, 0xAA, 0xBB, 0xCC];
+        server.stream_cache.insert(
+            ("live".to_string(), "old_name".to_string()),
+            StreamCache {
+                avc_header: Some(stale_avc),
+                aac_header: None,
+                last_keyframe: None,
+            },
+        );
+
+        // Wire up a real socket pair and pre-load it with a chunk-encoded
+        // "publish" command, so process_connections()'s recv loop reads it
+        // via a real recv(2) call within this single batch.
+        let (pub_srv, mut pub_cli) = UnixStream::pair().unwrap();
+        pub_srv.set_nonblocking(true).unwrap();
+
+        let mut amf = Buffer::with_capacity(128);
+        command::build_publish(&mut amf, "new_name", "live").unwrap();
+        let mut wire = Buffer::with_capacity(256);
+        let mut cmsg = ChunkMessage::default();
+        cmsg.csid = 3;
+        cmsg.fmt = 0;
+        cmsg.msg_length = amf.as_slice().len() as u32;
+        cmsg.msg_type_id = 0x14; // AMF0 command
+        cmsg.msg_stream_id = 1;
+        chunk_write(&mut wire, &cmsg, amf.as_slice(), amf.as_slice().len(), 128).unwrap();
+        std::io::Write::write_all(&mut pub_cli, wire.as_slice()).unwrap();
+
+        let mut publisher = Conn::new();
+        publisher.conn_id = 1;
+        publisher.app = "live".to_string();
+        publisher.state = ConnState::Publishing;
+        publisher.current_stream = Some(Box::new(Stream::new(1)));
+        if let Some(ref mut s) = publisher.current_stream {
+            s.is_publishing = true;
+            s.name = "old_name".to_string();
+        }
+        let raw_fd = pub_srv.into_raw_fd();
+        publisher.client_fd = raw_fd;
+        publisher.transport = Some(Transport::new_plain(raw_fd));
+        server.connections.push(publisher);
+
+        server.process_connections().unwrap();
+
+        // The rename to "new_name" happened inside this very call's recv
+        // loop; the stale "old_name" entry must already be gone by the time
+        // this same call returns, not merely on the next poll.
+        assert!(!server
+            .stream_cache
+            .contains_key(&("live".to_string(), "old_name".to_string())));
+
+        // Keep pub_cli alive until here so the socket isn't torn down mid-test.
+        drop(pub_cli);
     }
 }
