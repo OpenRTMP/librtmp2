@@ -531,14 +531,15 @@ impl Conn {
                         return self.send_onstatus(0, "error", "NetStream.Publish.BadName", "Publish not authorized");
                     }
                 }
-                let prev_name = self
-                    .current_stream
-                    .as_ref()
-                    .map(|s| s.name.clone())
-                    .unwrap_or_default();
-                if !prev_name.is_empty() && prev_name != name_str {
+                let prev_route_key = self.relay_route_key();
+                let next_route_key = if !self.relay_key.is_empty() {
+                    self.relay_key.clone()
+                } else {
+                    name_str.clone()
+                };
+                if !prev_route_key.is_empty() && prev_route_key != next_route_key {
                     self.pending_cache_evictions
-                        .push((self.app.clone(), prev_name));
+                        .push((self.app.clone(), prev_route_key));
                 }
                 if !self.defer_media_relay || self.on_publish_cb.is_none() {
                     self.relay_enabled = true;
@@ -787,6 +788,51 @@ mod tests {
         assert_eq!(conn.chunk_size, DEFAULT_CHUNK_SIZE);
         assert_eq!(conn.active_chunk_size, DEFAULT_CHUNK_SIZE);
         assert_eq!(conn.chunk_reg.default_chunk_size, DEFAULT_CHUNK_SIZE);
+    }
+
+    #[test]
+    fn publish_rename_with_relay_key_does_not_evict_stale_rtmp_name() {
+        let mut conn = Conn::new();
+        conn.app = "live".to_string();
+        conn.relay_key = "route-1".to_string();
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+
+        let mut buf = Buffer::with_capacity(128);
+        command::build_publish(&mut buf, "A", "live").unwrap();
+        conn.handle_command(buf.as_slice()).unwrap();
+        assert!(conn.pending_cache_evictions.is_empty());
+        assert_eq!(conn.current_stream.as_ref().unwrap().name, "A");
+
+        let mut buf = Buffer::with_capacity(128);
+        command::build_publish(&mut buf, "B", "live").unwrap();
+        conn.handle_command(buf.as_slice()).unwrap();
+
+        // relay_route_key() is pinned to relay_key, so republishing under a new
+        // RTMP stream name must NOT queue an eviction for the stale RTMP name
+        // ("A") -- the real cache key ("route-1") never changed.
+        assert!(conn.pending_cache_evictions.is_empty());
+        assert_eq!(conn.current_stream.as_ref().unwrap().name, "B");
+    }
+
+    #[test]
+    fn publish_rename_without_relay_key_evicts_old_route_key() {
+        let mut conn = Conn::new();
+        conn.app = "live".to_string();
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+
+        let mut buf = Buffer::with_capacity(128);
+        command::build_publish(&mut buf, "A", "live").unwrap();
+        conn.handle_command(buf.as_slice()).unwrap();
+        assert!(conn.pending_cache_evictions.is_empty());
+
+        let mut buf = Buffer::with_capacity(128);
+        command::build_publish(&mut buf, "B", "live").unwrap();
+        conn.handle_command(buf.as_slice()).unwrap();
+
+        assert_eq!(
+            conn.pending_cache_evictions,
+            vec![("live".to_string(), "A".to_string())]
+        );
     }
 
     #[test]
