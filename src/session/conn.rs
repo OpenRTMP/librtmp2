@@ -32,6 +32,7 @@ pub struct RelayFrame {
     pub payload: Vec<u8>,
     pub app: String,
     pub stream_name: String,
+    pub publisher_conn_id: u64,
 }
 
 pub struct Conn {
@@ -80,6 +81,8 @@ pub struct Conn {
     pub on_connect_cb: Option<fn()>,
     pub on_publish_cb: Option<fn(conn_id: u64, app: &str, stream_name: &str) -> bool>,
     pub on_play_cb: Option<fn(conn_id: u64, app: &str, stream_name: &str) -> bool>,
+    /// Cache keys to evict after the publisher renames its stream.
+    pub pending_cache_evictions: Vec<(String, String)>,
     /// Last measured client↔server RTT in milliseconds (RTMP UserControl ping).
     pub rtt_ms: f64,
     pending_pings: HashMap<u32, Instant>,
@@ -125,6 +128,7 @@ impl Conn {
             on_connect_cb: None,
             on_publish_cb: None,
             on_play_cb: None,
+            pending_cache_evictions: Vec::new(),
             rtt_ms: 0.0,
             pending_pings: HashMap::new(),
             last_ping_sent: None,
@@ -147,6 +151,28 @@ impl Conn {
             .unwrap_or_default()
     }
 
+    /// Queue eviction of the current publish route's cache key when
+    /// `current_stream` is about to be repurposed or replaced while still
+    /// marked as actively publishing (a fresh `createStream`, or switching
+    /// to `play`, both abandon whatever was being published). Unlike a
+    /// `publish` rename there is no new route to keep serving, so this
+    /// always evicts when the connection was publishing. No-op otherwise.
+    fn evict_active_publish_route(&mut self) {
+        let was_publishing = self
+            .current_stream
+            .as_ref()
+            .map(|s| s.is_publishing)
+            .unwrap_or(false);
+        if !was_publishing {
+            return;
+        }
+        let route_key = self.relay_route_key();
+        if !route_key.is_empty() {
+            self.pending_cache_evictions
+                .push((self.app.clone(), route_key));
+        }
+    }
+
     fn queue_relay_frame(&mut self, frame_type: FrameType, timestamp: u32, payload: &[u8]) -> Result<()> {
         if self.pending_relay.len() >= MAX_PENDING_RELAY_FRAMES
             || self.pending_relay_bytes() + payload.len() > MAX_PENDING_RELAY_BYTES
@@ -159,6 +185,7 @@ impl Conn {
             payload: payload.to_vec(),
             app: self.app.clone(),
             stream_name: self.relay_route_key(),
+            publisher_conn_id: self.conn_id,
         });
         Ok(())
     }
@@ -501,6 +528,12 @@ impl Conn {
                 if self.next_stream_id >= MAX_STREAMS_PER_CONN {
                     self.send_onstatus(0, "error", "NetStream.Failed", "Too many streams")?;
                 } else {
+                    // A fresh createStream replaces current_stream outright;
+                    // if the stream it's replacing was actively publishing,
+                    // that route is being abandoned and must be evicted now
+                    // rather than left as a dangling cache-key tracking
+                    // entry until this connection eventually disconnects.
+                    self.evict_active_publish_route();
                     self.next_stream_id += 1;
                     let stream_id = self.next_stream_id;
                     self.current_stream = Some(Box::new(Stream::new(stream_id)));
@@ -525,6 +558,29 @@ impl Conn {
                     if !cb(self.conn_id, &self.app, &name_str) {
                         return self.send_onstatus(0, "error", "NetStream.Publish.BadName", "Publish not authorized");
                     }
+                }
+                // Use current_stream.is_publishing rather than self.state
+                // here: conn_transition() only allows forward moves through
+                // ConnState, so a play-then-publish sequence leaves
+                // self.state stuck at Playing (Publishing < Playing) even
+                // though this stream is genuinely publishing again. `play`
+                // explicitly clears is_publishing when it takes over a
+                // stream, so the flag accurately reflects whether this
+                // specific current_stream is the one actively publishing.
+                let was_publishing = self
+                    .current_stream
+                    .as_ref()
+                    .map(|s| s.is_publishing)
+                    .unwrap_or(false);
+                let prev_route_key = self.relay_route_key();
+                let next_route_key = if !self.relay_key.is_empty() {
+                    self.relay_key.clone()
+                } else {
+                    name_str.clone()
+                };
+                if was_publishing && !prev_route_key.is_empty() && prev_route_key != next_route_key {
+                    self.pending_cache_evictions
+                        .push((self.app.clone(), prev_route_key));
                 }
                 if !self.defer_media_relay || self.on_publish_cb.is_none() {
                     self.relay_enabled = true;
@@ -560,8 +616,15 @@ impl Conn {
                     self.relay_enabled = true;
                 }
                 {
+                    // `play` supersedes any publish role this current_stream
+                    // held: evict the abandoned publish route's cache key
+                    // now (there's no "next" publish route to preserve it
+                    // for), and clear is_publishing so it can't be
+                    // mistaken for an active publish by a later command.
+                    self.evict_active_publish_route();
                     if let Some(ref mut stream) = self.current_stream {
                         stream.is_playing = true;
+                        stream.is_publishing = false;
                         stream.name = name_str;
                     }
                     self.needs_init_frames = true;
@@ -773,6 +836,142 @@ mod tests {
         assert_eq!(conn.chunk_size, DEFAULT_CHUNK_SIZE);
         assert_eq!(conn.active_chunk_size, DEFAULT_CHUNK_SIZE);
         assert_eq!(conn.chunk_reg.default_chunk_size, DEFAULT_CHUNK_SIZE);
+    }
+
+    #[test]
+    fn publish_rename_with_relay_key_does_not_evict_stale_rtmp_name() {
+        let mut conn = Conn::new();
+        conn.app = "live".to_string();
+        conn.relay_key = "route-1".to_string();
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+
+        let mut buf = Buffer::with_capacity(128);
+        command::build_publish(&mut buf, "A", "live").unwrap();
+        conn.handle_command(buf.as_slice()).unwrap();
+        assert!(conn.pending_cache_evictions.is_empty());
+        assert_eq!(conn.current_stream.as_ref().unwrap().name, "A");
+
+        let mut buf = Buffer::with_capacity(128);
+        command::build_publish(&mut buf, "B", "live").unwrap();
+        conn.handle_command(buf.as_slice()).unwrap();
+
+        // relay_route_key() is pinned to relay_key, so republishing under a new
+        // RTMP stream name must NOT queue an eviction for the stale RTMP name
+        // ("A") -- the real cache key ("route-1") never changed.
+        assert!(conn.pending_cache_evictions.is_empty());
+        assert_eq!(conn.current_stream.as_ref().unwrap().name, "B");
+    }
+
+    #[test]
+    fn publish_rename_without_relay_key_evicts_old_route_key() {
+        let mut conn = Conn::new();
+        conn.app = "live".to_string();
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+
+        let mut buf = Buffer::with_capacity(128);
+        command::build_publish(&mut buf, "A", "live").unwrap();
+        conn.handle_command(buf.as_slice()).unwrap();
+        assert!(conn.pending_cache_evictions.is_empty());
+
+        let mut buf = Buffer::with_capacity(128);
+        command::build_publish(&mut buf, "B", "live").unwrap();
+        conn.handle_command(buf.as_slice()).unwrap();
+
+        assert_eq!(
+            conn.pending_cache_evictions,
+            vec![("live".to_string(), "A".to_string())]
+        );
+    }
+
+    #[test]
+    fn play_then_publish_does_not_evict_foreign_cache_key() {
+        let mut conn = Conn::new();
+        conn.app = "live".to_string();
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+
+        let mut buf = Buffer::with_capacity(128);
+        command::build_play(&mut buf, "victim").unwrap();
+        conn.handle_command(buf.as_slice()).unwrap();
+        assert_eq!(conn.current_stream.as_ref().unwrap().name, "victim");
+        assert!(!conn.current_stream.as_ref().unwrap().is_publishing);
+
+        let mut buf = Buffer::with_capacity(128);
+        command::build_publish(&mut buf, "other", "live").unwrap();
+        conn.handle_command(buf.as_slice()).unwrap();
+
+        // This connection only ever played "victim" -- it never published it
+        // -- so publishing "other" afterwards must not queue an eviction for
+        // a cache key this connection never created.
+        assert!(conn.pending_cache_evictions.is_empty());
+        assert_eq!(conn.current_stream.as_ref().unwrap().name, "other");
+    }
+
+    #[test]
+    fn publish_then_play_then_publish_does_not_evict_played_stream_key() {
+        let mut conn = Conn::new();
+        conn.app = "live".to_string();
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+
+        let mut buf = Buffer::with_capacity(128);
+        command::build_publish(&mut buf, "A", "live").unwrap();
+        conn.handle_command(buf.as_slice()).unwrap();
+        assert!(conn.pending_cache_evictions.is_empty());
+
+        // `play` supersedes the active publish of "A" on this stream, so it
+        // must evict "A" itself right away (there's no future publish
+        // rename to hang that eviction off of, and is_publishing is cleared
+        // so this stream can no longer be mistaken for an active publisher
+        // of "A").
+        let mut buf = Buffer::with_capacity(128);
+        command::build_play(&mut buf, "victim").unwrap();
+        conn.handle_command(buf.as_slice()).unwrap();
+        assert_eq!(conn.current_stream.as_ref().unwrap().name, "victim");
+        assert!(!conn.current_stream.as_ref().unwrap().is_publishing);
+        assert_eq!(
+            conn.pending_cache_evictions,
+            vec![("live".to_string(), "A".to_string())]
+        );
+        conn.pending_cache_evictions.clear();
+
+        let mut buf = Buffer::with_capacity(128);
+        command::build_publish(&mut buf, "other", "live").unwrap();
+        conn.handle_command(buf.as_slice()).unwrap();
+
+        // This connection was never actively publishing "victim" -- it was
+        // only playing it -- so publishing "other" must not queue a second
+        // eviction for a cache key it never owned.
+        assert!(conn.pending_cache_evictions.is_empty());
+        assert_eq!(conn.current_stream.as_ref().unwrap().name, "other");
+    }
+
+    #[test]
+    fn create_stream_evicts_active_publish_route() {
+        let mut conn = Conn::new();
+        conn.app = "live".to_string();
+        conn.state = ConnState::AppConnected;
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+
+        let mut buf = Buffer::with_capacity(128);
+        command::build_publish(&mut buf, "A", "live").unwrap();
+        conn.handle_command(buf.as_slice()).unwrap();
+        assert!(conn.pending_cache_evictions.is_empty());
+        assert!(conn.current_stream.as_ref().unwrap().is_publishing);
+
+        // A fresh createStream replaces current_stream outright, abandoning
+        // the active publish of "A" with no future rename to hang an
+        // eviction off of -- it must be evicted immediately here, not left
+        // as a dangling publisher_cache_keys tracking entry until this
+        // connection eventually disconnects.
+        let mut buf = Buffer::with_capacity(128);
+        command::build_create_stream(&mut buf, 4.0).unwrap();
+        conn.handle_command(buf.as_slice()).unwrap();
+
+        assert_eq!(
+            conn.pending_cache_evictions,
+            vec![("live".to_string(), "A".to_string())]
+        );
+        assert!(!conn.current_stream.as_ref().unwrap().is_publishing);
+        assert_eq!(conn.current_stream.as_ref().unwrap().name, "");
     }
 
     #[test]
