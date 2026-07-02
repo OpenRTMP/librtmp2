@@ -223,7 +223,7 @@ pub unsafe extern "C" fn lrtmp2_client_poll(c: *mut client::Client, timeout_ms: 
 
 /// Get connection fd (FFI-compatible).
 #[no_mangle]
-pub unsafe extern "C" fn lrtmp2_conn_get_fd(_conn: *const session::Conn) -> i32 {
+pub unsafe extern "C" fn lrtmp2_conn_get_fd(_conn: *const session::conn::Conn) -> i32 {
     -1
 }
 
