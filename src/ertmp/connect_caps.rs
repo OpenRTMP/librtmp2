@@ -16,6 +16,9 @@ pub fn fourcc_list_add(list: &mut FourCcList, cc: &[u8]) -> Result<()> {
     if list.count >= crate::types::MAX_FOURCCS {
         return Err(ErrorCode::Io);
     }
+    if cc.len() < 4 {
+        return Err(ErrorCode::Io);
+    }
     list.entries[list.count].cc[..4].copy_from_slice(&cc[..4]);
     list.count += 1;
     Ok(())
@@ -74,6 +77,30 @@ pub fn fourcc_list_write(list: &FourCcList, buf: &mut [u8]) -> usize {
         offset += 4;
     }
     offset
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::FourCcList;
+
+    #[test]
+    fn fourcc_list_add_rejects_short_input_instead_of_panicking() {
+        let mut list = FourCcList::default();
+        assert!(matches!(
+            fourcc_list_add(&mut list, &[0x61, 0x76]),
+            Err(ErrorCode::Io)
+        ));
+        assert_eq!(list.count, 0);
+    }
+
+    #[test]
+    fn fourcc_list_add_accepts_exactly_four_bytes() {
+        let mut list = FourCcList::default();
+        assert!(fourcc_list_add(&mut list, b"av01").is_ok());
+        assert_eq!(list.count, 1);
+        assert_eq!(&list.entries[0].cc[..4], b"av01");
+    }
 }
 
 /* ── E-RTMP v2 capsEx ── */

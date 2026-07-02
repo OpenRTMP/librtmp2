@@ -14,15 +14,16 @@ pub fn multitrack_parse(mt: &mut Multitrack, data: &[u8]) -> Result<()> {
         return Err(ErrorCode::Protocol);
     }
 
-    let mut type_val: u64 = 0;
-    for i in 0..8 {
-        type_val = (type_val << 8) | data[1 + i] as u64;
-    }
+    // The 0x00 marker identifies an AMF0_NUMBER: the 8 payload bytes are the
+    // big-endian bit pattern of an IEEE-754 double, not a raw integer.
+    let type_val = f64::from_be_bytes(data[1..9].try_into().unwrap());
 
-    mt.track_type = match type_val {
-        0 => crate::types::MultitrackType::Audio,
-        1 => crate::types::MultitrackType::Video,
-        _ => crate::types::MultitrackType::Metadata,
+    mt.track_type = if type_val == 0.0 {
+        crate::types::MultitrackType::Audio
+    } else if type_val == 1.0 {
+        crate::types::MultitrackType::Video
+    } else {
+        crate::types::MultitrackType::Metadata
     };
 
     let name_offset = 9;
@@ -55,12 +56,9 @@ pub fn multitrack_write(mt: &Multitrack, buf: &mut [u8]) -> usize {
     buf[offset] = 0x00;
     offset += 1;
 
-    // 8-byte number, big-endian
-    let type_val: u64 = mt.track_type as u64;
-    for i in (0..8).rev() {
-        buf[offset] = ((type_val >> (i * 8)) & 0xFF) as u8;
-        offset += 1;
-    }
+    // 8-byte AMF0_NUMBER (IEEE-754 double bit pattern), big-endian.
+    buf[offset..offset + 8].copy_from_slice(&(mt.track_type as u8 as f64).to_be_bytes());
+    offset += 8;
 
     // AMF0_STRING: 2-byte length + N bytes
     buf[offset] = (name_len >> 8) as u8;
@@ -70,4 +68,46 @@ pub fn multitrack_write(mt: &Multitrack, buf: &mut [u8]) -> usize {
     offset += name_len;
 
     offset
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::MultitrackType;
+
+    #[test]
+    fn video_track_type_round_trips_as_amf0_double() {
+        let mut mt = Multitrack {
+            track_type: MultitrackType::Video,
+            track_name: [0; 64],
+        };
+        mt.track_name[..3].copy_from_slice(b"cam");
+
+        let mut buf = [0u8; 128];
+        let n = multitrack_write(&mt, &mut buf);
+        assert!(n > 0);
+
+        // A spec-compliant AMF0 encoding of 1.0 is the IEEE-754 bit pattern
+        // 0x3FF0000000000000, not the raw integer 1.
+        assert_eq!(&buf[1..9], &[0x3F, 0xF0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+
+        let mut out = Multitrack::default();
+        multitrack_parse(&mut out, &buf[..n]).unwrap();
+        assert_eq!(out.track_type, MultitrackType::Video);
+        assert_eq!(&out.track_name[..3], b"cam");
+    }
+
+    #[test]
+    fn audio_track_type_round_trips() {
+        let mt = Multitrack {
+            track_type: MultitrackType::Audio,
+            track_name: [0; 64],
+        };
+        let mut buf = [0u8; 128];
+        let n = multitrack_write(&mt, &mut buf);
+
+        let mut out = Multitrack::default();
+        multitrack_parse(&mut out, &buf[..n]).unwrap();
+        assert_eq!(out.track_type, MultitrackType::Audio);
+    }
 }

@@ -314,6 +314,11 @@ fn read_string_trunc(buf: &mut Buffer, out: &mut [u8]) -> Result<()> {
         return Err(ErrorCode::Io);
     }
 
+    if out.is_empty() {
+        buf.drain(slen);
+        return Ok(());
+    }
+
     let copy_len = if slen >= out.len() {
         out.len() - 1
     } else {
@@ -322,9 +327,7 @@ fn read_string_trunc(buf: &mut Buffer, out: &mut [u8]) -> Result<()> {
     if copy_len > 0 {
         buf.read(&mut out[..copy_len]).map_err(|_| ErrorCode::Amf)?;
     }
-    if !out.is_empty() {
-        out[copy_len] = 0;
-    }
+    out[copy_len] = 0;
     buf.drain(slen - copy_len);
     Ok(())
 }
@@ -355,6 +358,17 @@ mod tests {
         read_connect(&mut buf, &mut info).unwrap();
         let app_len = info.app.iter().position(|&b| b == 0).unwrap_or(0);
         assert_eq!(std::str::from_utf8(&info.app[..app_len]).unwrap(), "live");
+    }
+
+    #[test]
+    fn read_string_trunc_with_empty_output_buffer_does_not_panic() {
+        let mut buf = Buffer::new();
+        amf0::write_string(&mut buf, "hello").unwrap();
+
+        let mut out: [u8; 0] = [];
+        assert!(read_string_trunc(&mut buf, &mut out).is_ok());
+        // The string bytes must still be fully consumed from the buffer.
+        assert_eq!(buf.available(), 0);
     }
 
     #[test]

@@ -346,10 +346,11 @@ fn skip_value_depth(buf: &mut Buffer, depth: i32) -> Result<()> {
             }
         }
         Amf0Type::Date => {
-            if buf.available() < 8 {
+            // 8-byte double (ms since epoch) + 2-byte timezone field.
+            if buf.available() < 10 {
                 return Err(ErrorCode::Io);
             }
-            buf.drain(8);
+            buf.drain(10);
             Ok(())
         }
         Amf0Type::Reference => {
