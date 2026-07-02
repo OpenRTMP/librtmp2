@@ -167,7 +167,11 @@ impl Client {
         }
         cmsg.fmt = 0;
 
-        let payload = unsafe { std::slice::from_raw_parts(frame.data, frame.size as usize) };
+        let payload = if frame.size == 0 || frame.data.is_null() {
+            &[][..]
+        } else {
+            unsafe { std::slice::from_raw_parts(frame.data, frame.size as usize) }
+        };
         chunk_write(
             &mut self.send_buffer,
             &cmsg,

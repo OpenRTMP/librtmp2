@@ -199,7 +199,11 @@ pub unsafe extern "C" fn lrtmp2_client_send_frame(
     if c.is_null() || frame.is_null() {
         return ErrorCode::Internal as i32;
     }
-    match (*c).send_frame(&*frame) {
+    let frame_ref = &*frame;
+    if frame_ref.size > 0 && frame_ref.data.is_null() {
+        return ErrorCode::Internal as i32;
+    }
+    match (*c).send_frame(frame_ref) {
         Ok(()) => 0,
         Err(e) => e as i32,
     }

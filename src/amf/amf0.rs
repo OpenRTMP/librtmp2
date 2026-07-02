@@ -276,6 +276,7 @@ pub fn is_object_end(buf: &mut Buffer) -> bool {
 }
 
 const MAX_SKIP_DEPTH: i32 = 32;
+const MAX_OBJECT_KEYS: usize = 256;
 
 fn skip_value_depth(buf: &mut Buffer, depth: i32) -> Result<()> {
     let ty = read_type(buf)?;
@@ -312,11 +313,16 @@ fn skip_value_depth(buf: &mut Buffer, depth: i32) -> Result<()> {
             if ty == Amf0Type::EcmaArray {
                 read_u32(buf)?; // ecma count
             }
+            let mut keys = 0;
             loop {
                 if is_object_end(buf) {
                     let mut end = [0u8; 3];
                     buf.read(&mut end).map_err(|_| ErrorCode::Io)?;
                     return Ok(());
+                }
+                keys += 1;
+                if keys > MAX_OBJECT_KEYS {
+                    return Err(ErrorCode::Amf);
                 }
                 let klen = read_u16(buf)? as usize;
                 if buf.available() < klen {

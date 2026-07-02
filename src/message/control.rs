@@ -26,6 +26,8 @@ pub const UCTRL_PING_RESPONSE: u16 = 0x07;
 
 const MIN_CHUNK_SIZE: u32 = 1;
 const MAX_CHUNK_SIZE: u32 = 0xFFFFFF;
+/// Upper bound for peer-requested inbound chunk sizes (memory churn protection).
+pub const MAX_INBOUND_CHUNK_SIZE: u32 = 65536;
 /// Reject peer WindowAckSize values below this to prevent ACK-per-byte amplification.
 pub const MIN_WINDOW_ACK_SIZE: u32 = 1024;
 
@@ -132,8 +134,11 @@ pub fn write_user_control_ping_response(buf: &mut Buffer, timestamp: u32) -> Res
 
 /// Read a SetChunkSize message.
 pub fn read_set_chunk_size(data: &[u8]) -> Result<u32> {
+    if data.len() < 4 {
+        return Err(ErrorCode::Protocol);
+    }
     let cs = ntoh32(data);
-    if cs < MIN_CHUNK_SIZE || cs > MAX_CHUNK_SIZE {
+    if cs < MIN_CHUNK_SIZE || cs > MAX_INBOUND_CHUNK_SIZE {
         return Err(ErrorCode::Protocol);
     }
     Ok(cs)
@@ -160,11 +165,17 @@ pub fn read_window_ack_size(data: &[u8]) -> Result<u32> {
 
 /// Read a SetPeerBandwidth.
 pub fn read_set_peer_bandwidth(data: &[u8]) -> Result<(u32, u8)> {
+    if data.len() < 5 {
+        return Err(ErrorCode::Protocol);
+    }
     Ok((ntoh32(data), data[4]))
 }
 
 /// Read a User Control event.
 pub fn read_user_control(data: &[u8], param2: bool) -> Result<(u16, u32, Option<u32>)> {
+    if data.len() < 6 {
+        return Err(ErrorCode::Protocol);
+    }
     let event_type = ((data[0] as u16) << 8) | (data[1] as u16);
     let param1 = ntoh32(&data[2..]);
     let p2 = if param2 && data.len() >= 10 {

@@ -43,7 +43,12 @@ pub fn parse(data: &[u8], tag: &mut ScriptTag) -> Result<()> {
                 let mut count_bytes = [0u8; 4];
                 buf.read(&mut count_bytes).map_err(|_| ErrorCode::Amf)?;
             }
+            let mut keys = 0;
             while !amf0::is_object_end(&mut buf) {
+                keys += 1;
+                if keys > 256 {
+                    return Err(ErrorCode::Amf);
+                }
                 let mut key = [0u8; 256];
                 amf0::read_object_key(&mut buf, &mut key)?;
                 amf0::skip_value(&mut buf)?;

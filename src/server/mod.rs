@@ -66,10 +66,12 @@ impl Server {
             };
             let key =
                 unsafe { std::ffi::CStr::from_ptr(config.tls_key_file as *const std::ffi::c_char) };
-            Some(TlsCtx::new_server(
-                cert.to_str().unwrap_or(""),
-                key.to_str().unwrap_or(""),
-            )?)
+            let cert_str = cert.to_str().map_err(|_| ErrorCode::Internal)?;
+            let key_str = key.to_str().map_err(|_| ErrorCode::Internal)?;
+            if cert_str.is_empty() || key_str.is_empty() {
+                return Err(ErrorCode::Internal);
+            }
+            Some(TlsCtx::new_server(cert_str, key_str)?)
         } else {
             None
         };

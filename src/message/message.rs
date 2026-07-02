@@ -154,7 +154,7 @@ pub fn decode_aggregate(
 
         let body = pos + 11;
         if body + data_size as usize > payload.len() {
-            break;
+            return Err(ErrorCode::Protocol);
         }
 
         if !have_base {

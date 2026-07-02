@@ -52,7 +52,7 @@ pub fn log(level: LogLevel, file: &str, line: u32, args: std::fmt::Arguments<'_>
     }
 
     let msg = format!("{}", args);
-    let basename = file.rsplit('/').next().unwrap_or(file);
+    let basename = file.rsplit(['/', '\\']).next().unwrap_or(file);
     let level_str = LEVEL_STRINGS[level as usize];
     let full_msg = format!("[{}] {}:{}: {}", level_str, basename, line, msg);
 

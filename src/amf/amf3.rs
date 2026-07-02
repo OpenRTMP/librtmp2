@@ -127,11 +127,7 @@ pub fn read_string(buf: &mut Buffer, out: &mut [u8]) -> Result<usize> {
     let inline_bit = ref_val & 1;
 
     if inline_bit == 0 {
-        // String reference — not fully implemented
-        if !out.is_empty() {
-            out[0] = 0;
-        }
-        return Ok(0);
+        return Err(ErrorCode::Unsupported);
     }
 
     if out.is_empty() || len >= out.len() {

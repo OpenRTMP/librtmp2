@@ -240,11 +240,12 @@ impl Conn {
             .saturating_add(payload.len() as u64);
 
         if let Some(cb) = self.on_frame_cb {
+            let owned = payload.to_vec();
             let frame = Frame {
                 frame_type,
                 timestamp,
-                size: payload.len() as u32,
-                data: payload.as_ptr(),
+                size: owned.len() as u32,
+                data: owned.as_ptr(),
                 ..Default::default()
             };
             cb(&frame);
@@ -261,7 +262,7 @@ impl Conn {
     pub fn recv(&mut self, data: &[u8]) -> Result<()> {
         self.recv_buffer.write(data).map_err(|_| ErrorCode::Internal)?;
         self.bytes_received = self.bytes_received.wrapping_add(data.len() as u32);
-        let mut max_iter = 65536;
+        let mut max_iter = 256;
         let mut no_progress = 0;
         while max_iter > 0 {
             max_iter -= 1;
@@ -365,12 +366,14 @@ impl Conn {
                 Ok(0) => break,
                 Ok(1) => {
                     if msg.is_complete {
-                        let payload_slice = if payload_ptr.is_null() || payload_len == 0 {
-                            &[]
+                        let payload_owned: Vec<u8> = if payload_ptr.is_null() || payload_len == 0 {
+                            Vec::new()
                         } else {
-                            unsafe { std::slice::from_raw_parts(payload_ptr, payload_len) }
+                            unsafe {
+                                std::slice::from_raw_parts(payload_ptr, payload_len).to_vec()
+                            }
                         };
-                        if let Err(e) = self.handle_message(&msg, payload_slice) {
+                        if let Err(e) = self.handle_message(&msg, &payload_owned) {
                             return match e {
                                 ErrorCode::Auth => -8,
                                 _ => -3,
@@ -380,6 +383,7 @@ impl Conn {
                     }
                 }
                 Ok(_) => break,
+                Err(ErrorCode::Chunk) => return -5,
                 Err(_) => return -1,
             }
         }
@@ -412,9 +416,8 @@ impl Conn {
         match msg_type_id {
             msg_dispatch::RTMP_MSG_SET_CHUNK_SIZE => {
                 if payload.len() >= 4 {
-                    if let Ok(cs) = control::read_set_chunk_size(payload) {
-                        self.chunk_reg.set_all_chunk_size(cs);
-                    }
+                    let cs = control::read_set_chunk_size(payload)?;
+                    self.chunk_reg.set_all_chunk_size(cs);
                 }
             }
             msg_dispatch::RTMP_MSG_ABORT_MESSAGE => {
@@ -507,7 +510,9 @@ impl Conn {
     pub fn handle_command(&mut self, payload: &[u8]) -> Result<()> {
         let mut buf = Buffer::from_slice(payload);
         let mut name_buf = [0u8; 64];
-        if command::peek_name(&mut buf, &mut name_buf).is_err() { return Ok(()); }
+        if command::peek_name(&mut buf, &mut name_buf).is_err() {
+            return Err(ErrorCode::Amf);
+        }
         let name = std::str::from_utf8(&name_buf).unwrap_or("").trim_end_matches('\0');
         match name {
             "connect" => {

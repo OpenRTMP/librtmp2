@@ -30,7 +30,7 @@ static VIDEO_FOURCCS: &[VideoFourCcEntry] = &[
     },
     VideoFourCcEntry {
         fourcc: *b"vp09",
-        codec: VideoCodec::Vp6,
+        codec: VideoCodec::Vp9,
         name: "VP9",
     },
 ];

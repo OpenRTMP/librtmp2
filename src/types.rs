@@ -160,6 +160,7 @@ pub enum VideoCodec {
     H264 = 7,
     H265 = 12,
     Av1 = 13,
+    Vp9 = 14,
 }
 
 impl Default for VideoCodec {
