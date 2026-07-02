@@ -1,7 +1,6 @@
 # librtmp2
 
 A modern, open-source **Rust library** for Legacy RTMP and Enhanced RTMP v1/v2.  
-`librtmp2` is a complete 1:1 Rust port of the original C `librtmp2` — a reusable protocol foundation, not a media server.
 
 [![License](https://img.shields.io/github/license/OpenRTMP/librtmp2)](LICENSE)
 ![Status](https://img.shields.io/badge/status-alpha-orange)
