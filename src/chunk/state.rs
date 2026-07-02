@@ -78,6 +78,8 @@ pub struct ChunkRegistry {
     pub max_msg_length: u32,
     /// Reject opening more than this many CSIDs at once on one connection.
     pub max_active_csids: usize,
+    /// Max reassembly bytes for this connection's chunk streams.
+    pub max_reassembly_bytes: usize,
     pub initialized: bool,
 }
 
@@ -95,6 +97,7 @@ impl ChunkRegistry {
             default_chunk_size: DEFAULT_CHUNK_SIZE,
             max_msg_length: DEFAULT_MAX_MSG_LENGTH,
             max_active_csids: DEFAULT_MAX_ACTIVE_CSIDS,
+            max_reassembly_bytes: MAX_REASSEMBLY_BYTES_PER_CONN,
             initialized: true,
         }
     }
@@ -169,7 +172,7 @@ impl ChunkRegistry {
             .filter(|s| s.in_use)
             .map(|s| s.reassembly_buf.available())
             .sum();
-        if total + additional as usize > MAX_REASSEMBLY_BYTES_PER_CONN {
+        if total + additional as usize > self.max_reassembly_bytes {
             return Err(ErrorCode::Chunk);
         }
         Ok(())

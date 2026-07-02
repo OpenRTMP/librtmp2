@@ -5,7 +5,7 @@
 use crate::buffer::Buffer;
 use crate::bytes::{hton24, ntoh32};
 use crate::chunk::state::{
-    ChunkRegistry, ChunkStream, DEFAULT_CHUNK_SIZE, MAX_REASSEMBLY_BYTES_PER_CONN,
+    ChunkRegistry, ChunkStream, DEFAULT_CHUNK_SIZE,
 };
 use crate::types::ErrorCode;
 use crate::types::Result;
@@ -240,7 +240,7 @@ pub fn chunk_read(
             .filter(|s| s.in_use)
             .map(|s| s.reassembly_buf.available())
             .sum();
-        if total.saturating_sub(replaced) + to_read > MAX_REASSEMBLY_BYTES_PER_CONN {
+        if total.saturating_sub(replaced) + to_read > reg.max_reassembly_bytes {
             return Err(ErrorCode::Chunk);
         }
     }

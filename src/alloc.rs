@@ -3,6 +3,8 @@
 //! Mirrors `src/core/alloc.h` and `src/core/alloc.c`.
 //! Provides pluggable allocation functions with standard defaults.
 
+use std::sync::RwLock;
+
 /// Allocator function type.
 pub type AllocFn = fn(size: usize, userdata: *mut u8) -> *mut u8;
 /// Reallocator function type.
@@ -10,10 +12,25 @@ pub type ReallocFn = fn(ptr: *mut u8, size: usize, userdata: *mut u8) -> *mut u8
 /// Free function type.
 pub type FreeFn = fn(ptr: *mut u8, userdata: *mut u8);
 
-static mut G_ALLOC: AllocFn = std_alloc;
-static mut G_REALLOC: ReallocFn = std_realloc;
-static mut G_FREE: FreeFn = std_free;
-static mut G_USERDATA: *mut u8 = std::ptr::null_mut();
+struct AllocatorHooks {
+    alloc: AllocFn,
+    realloc: ReallocFn,
+    free: FreeFn,
+    userdata: *mut u8,
+}
+
+impl AllocatorHooks {
+    const fn std_defaults() -> Self {
+        Self {
+            alloc: std_alloc,
+            realloc: std_realloc,
+            free: std_free,
+            userdata: std::ptr::null_mut(),
+        }
+    }
+}
+
+static ALLOCATOR: RwLock<AllocatorHooks> = RwLock::new(AllocatorHooks::std_defaults());
 
 fn std_alloc(size: usize, _ud: *mut u8) -> *mut u8 {
     if size == 0 {
@@ -41,17 +58,21 @@ fn std_free(ptr: *mut u8, _ud: *mut u8) {
 
 /// Set custom allocator functions.
 pub fn set_allocator(alloc: AllocFn, realloc: ReallocFn, free: FreeFn, userdata: *mut u8) {
-    unsafe {
-        G_ALLOC = alloc;
-        G_REALLOC = realloc;
-        G_FREE = free;
-        G_USERDATA = userdata;
-    }
+    let mut hooks = ALLOCATOR.write().unwrap_or_else(|e| e.into_inner());
+    hooks.alloc = alloc;
+    hooks.realloc = realloc;
+    hooks.free = free;
+    hooks.userdata = userdata;
+}
+
+fn with_hooks<R>(f: impl FnOnce(&AllocatorHooks) -> R) -> R {
+    let hooks = ALLOCATOR.read().unwrap_or_else(|e| e.into_inner());
+    f(&hooks)
 }
 
 /// Allocate `size` bytes using the current allocator.
 pub fn lrtmp2_malloc(size: usize) -> *mut u8 {
-    unsafe { G_ALLOC(size, G_USERDATA) }
+    with_hooks(|hooks| (hooks.alloc)(size, hooks.userdata))
 }
 
 /// Allocate zeroed memory for `nmemb` elements of `size` bytes each.
@@ -71,15 +92,13 @@ pub fn lrtmp2_calloc(nmemb: usize, size: usize) -> *mut u8 {
 
 /// Reallocate memory.
 pub fn lrtmp2_realloc(ptr: *mut u8, size: usize) -> *mut u8 {
-    unsafe { G_REALLOC(ptr, size, G_USERDATA) }
+    with_hooks(|hooks| (hooks.realloc)(ptr, size, hooks.userdata))
 }
 
 /// Free memory.
 pub fn lrtmp2_free(ptr: *mut u8) {
     if !ptr.is_null() {
-        unsafe {
-            G_FREE(ptr, G_USERDATA);
-        }
+        with_hooks(|hooks| (hooks.free)(ptr, hooks.userdata));
     }
 }
 

@@ -247,6 +247,27 @@ impl Default for ErrorInfo {
 
 /* ── Server config ── */
 
+/// Per-connection and server-wide memory limits (Rust-only; not part of the C ABI).
+#[derive(Debug, Clone, Copy)]
+pub struct ResourceLimits {
+    /// Total bytes retained across all stream-cache entries.
+    pub max_stream_cache_bytes: usize,
+    /// Max reassembly buffer bytes per RTMP connection.
+    pub max_reassembly_bytes: usize,
+    /// Max queued relay payload bytes per publisher connection.
+    pub max_pending_relay_bytes: usize,
+}
+
+impl Default for ResourceLimits {
+    fn default() -> Self {
+        Self {
+            max_stream_cache_bytes: 64 * 1024 * 1024,
+            max_reassembly_bytes: 32 * 1024 * 1024,
+            max_pending_relay_bytes: 8 * 1024 * 1024,
+        }
+    }
+}
+
 /// Server configuration struct.
 #[derive(Clone, Copy)]
 #[repr(C)]

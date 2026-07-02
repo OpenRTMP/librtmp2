@@ -75,6 +75,8 @@ pub struct Conn {
     /// When true, media relay stays off until the integrator sets `relay_enabled`
     /// after its own post-auth bookkeeping (used by librtmp2-server).
     pub defer_media_relay: bool,
+    /// Cap on queued relay payload bytes for this connection.
+    pub max_pending_relay_bytes: usize,
     pub on_frame_cb: Option<fn(&Frame)>,
     /// When set, must return true before audio/video is queued for relay.
     pub on_media_cb: Option<fn(u64, FrameType, Option<&str>) -> bool>,
@@ -123,6 +125,7 @@ impl Conn {
             detected_audio_codec: None,
             relay_enabled: false,
             defer_media_relay: false,
+            max_pending_relay_bytes: MAX_PENDING_RELAY_BYTES,
             on_frame_cb: None,
             on_media_cb: None,
             on_connect_cb: None,
@@ -175,7 +178,7 @@ impl Conn {
 
     fn queue_relay_frame(&mut self, frame_type: FrameType, timestamp: u32, payload: &[u8]) -> Result<()> {
         if self.pending_relay.len() >= MAX_PENDING_RELAY_FRAMES
-            || self.pending_relay_bytes() + payload.len() > MAX_PENDING_RELAY_BYTES
+            || self.pending_relay_bytes() + payload.len() > self.max_pending_relay_bytes
         {
             return Err(ErrorCode::Internal);
         }

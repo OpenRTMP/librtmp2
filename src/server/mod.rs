@@ -30,6 +30,7 @@ struct StreamCache {
 /// Server object.
 pub struct Server {
     pub config: ServerConfig,
+    pub resource_limits: ResourceLimits,
     pub running: bool,
     pub server_fd: i32,
     pub connections: Vec<Conn>,
@@ -75,6 +76,7 @@ impl Server {
 
         Ok(Self {
             config,
+            resource_limits: ResourceLimits::default(),
             running: false,
             server_fd: -1,
             connections: Vec::new(),
@@ -160,6 +162,9 @@ impl Server {
                     };
                     let conn_fd = transport.fd();
                     let mut conn = Conn::new();
+                    conn.chunk_reg.max_reassembly_bytes =
+                        self.resource_limits.max_reassembly_bytes;
+                    conn.max_pending_relay_bytes = self.resource_limits.max_pending_relay_bytes;
                     // Outbound chunk size only: peers start sending at the RTMP
                     // default (128) until SetChunkSize is negotiated.
                     conn.chunk_size = if self.config.chunk_size > 0 {
@@ -424,7 +429,8 @@ impl Server {
         // stream_cache_bytes() (an O(n) scan) on every eviction, which would
         // make this O(n^2) under sustained cache churn.
         let mut projected_total = self.stream_cache_bytes() + incoming_len - existing_field_len;
-        if projected_total > MAX_STREAM_CACHE_BYTES {
+        let max_cache_bytes = self.resource_limits.max_stream_cache_bytes;
+        if projected_total > max_cache_bytes {
             let victims: Vec<_> = self
                 .stream_cache
                 .keys()
@@ -432,7 +438,7 @@ impl Server {
                 .cloned()
                 .collect();
             for victim in victims {
-                if projected_total <= MAX_STREAM_CACHE_BYTES {
+                if projected_total <= max_cache_bytes {
                     break;
                 }
                 if let Some(cache) = self.stream_cache.get(&victim) {
@@ -444,8 +450,8 @@ impl Server {
 
         // Evicting every other entry still isn't enough when this single
         // payload alone exceeds the budget -- don't cache it at all rather
-        // than let the server-wide total blow past MAX_STREAM_CACHE_BYTES.
-        if projected_total > MAX_STREAM_CACHE_BYTES {
+        // than let the server-wide total blow past the configured cache cap.
+        if projected_total > max_cache_bytes {
             return;
         }
 
