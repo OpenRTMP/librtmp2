@@ -2,6 +2,8 @@
 //!
 //! Mirrors `src/flv/` directory.
 
+#![allow(ambiguous_glob_reexports)]
+
 pub mod audio_tag;
 pub mod script_tag;
 pub mod video_tag;

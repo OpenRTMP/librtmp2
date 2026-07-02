@@ -306,6 +306,19 @@ fn skip_value_depth(buf: &mut Buffer, depth: i32) -> Result<()> {
             buf.drain(len);
             Ok(())
         }
+        Amf0Type::StrictArray => {
+            if depth >= MAX_SKIP_DEPTH {
+                return Err(ErrorCode::Amf);
+            }
+            let count = read_u32(buf)? as usize;
+            if count > MAX_OBJECT_KEYS {
+                return Err(ErrorCode::Amf);
+            }
+            for _ in 0..count {
+                skip_value_depth(buf, depth + 1)?;
+            }
+            Ok(())
+        }
         Amf0Type::Object | Amf0Type::EcmaArray => {
             if depth >= MAX_SKIP_DEPTH {
                 return Err(ErrorCode::Amf);
@@ -331,6 +344,20 @@ fn skip_value_depth(buf: &mut Buffer, depth: i32) -> Result<()> {
                 buf.drain(klen);
                 skip_value_depth(buf, depth + 1)?;
             }
+        }
+        Amf0Type::Date => {
+            if buf.available() < 8 {
+                return Err(ErrorCode::Io);
+            }
+            buf.drain(8);
+            Ok(())
+        }
+        Amf0Type::Reference => {
+            if buf.available() < 2 {
+                return Err(ErrorCode::Io);
+            }
+            buf.drain(2);
+            Ok(())
         }
         Amf0Type::Null | Amf0Type::Undefined => Ok(()),
         _ => Err(ErrorCode::Unsupported),
@@ -391,6 +418,17 @@ mod tests {
         let mut buf = Buffer::new();
         write_object_key(&mut buf, "k").unwrap();
         assert_eq!(buf.peek(), &[0x00, 0x01, b'k']);
+    }
+
+    #[test]
+    fn strict_array_can_be_skipped() {
+        let mut buf = Buffer::new();
+        buf.write(&[
+            0x0A, 0x00, 0x00, 0x00, 0x01, 0x02, 0x00, 0x04, b'a', b'v', b'0', b'1',
+        ])
+        .unwrap();
+        skip_value(&mut buf).unwrap();
+        assert_eq!(buf.available(), 0);
     }
 
     #[test]

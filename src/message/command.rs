@@ -339,6 +339,25 @@ mod tests {
     }
 
     #[test]
+    fn read_connect_skips_four_cc_list_strict_array() {
+        let mut buf = Buffer::new();
+        amf0::write_string(&mut buf, "connect").unwrap();
+        amf0::write_number(&mut buf, 1.0).unwrap();
+        amf0::write_object_begin(&mut buf).unwrap();
+        amf0::write_object_key(&mut buf, "fourCcList").unwrap();
+        buf.write(&[0x0A, 0x00, 0x00, 0x00, 0x01]).unwrap();
+        amf0::write_string(&mut buf, "av01").unwrap();
+        amf0::write_object_key(&mut buf, "app").unwrap();
+        amf0::write_string(&mut buf, "live").unwrap();
+        amf0::write_object_end(&mut buf).unwrap();
+
+        let mut info = ConnectInfo::default();
+        read_connect(&mut buf, &mut info).unwrap();
+        let app_len = info.app.iter().position(|&b| b == 0).unwrap_or(0);
+        assert_eq!(std::str::from_utf8(&info.app[..app_len]).unwrap(), "live");
+    }
+
+    #[test]
     fn publish_command_round_trips_publish_type() {
         let mut buf = Buffer::new();
         build_publish(&mut buf, "stream_key", "record").unwrap();

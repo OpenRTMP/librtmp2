@@ -416,8 +416,9 @@ impl Conn {
         match msg_type_id {
             msg_dispatch::RTMP_MSG_SET_CHUNK_SIZE => {
                 if payload.len() >= 4 {
-                    let cs = control::read_set_chunk_size(payload)?;
-                    self.chunk_reg.set_all_chunk_size(cs);
+                    if let Ok(cs) = control::read_set_chunk_size(payload) {
+                        self.chunk_reg.set_all_chunk_size(cs);
+                    }
                 }
             }
             msg_dispatch::RTMP_MSG_ABORT_MESSAGE => {
@@ -511,7 +512,7 @@ impl Conn {
         let mut buf = Buffer::from_slice(payload);
         let mut name_buf = [0u8; 64];
         if command::peek_name(&mut buf, &mut name_buf).is_err() {
-            return Err(ErrorCode::Amf);
+            return Ok(());
         }
         let name = std::str::from_utf8(&name_buf).unwrap_or("").trim_end_matches('\0');
         match name {
@@ -843,6 +844,31 @@ mod tests {
         assert_eq!(conn.chunk_size, DEFAULT_CHUNK_SIZE);
         assert_eq!(conn.active_chunk_size, DEFAULT_CHUNK_SIZE);
         assert_eq!(conn.chunk_reg.default_chunk_size, DEFAULT_CHUNK_SIZE);
+    }
+
+    #[test]
+    fn enhanced_av1_media_frames_accepted_while_publishing() {
+        let mut conn = Conn::new();
+        conn.relay_enabled = true;
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+        if let Some(s) = conn.current_stream.as_mut() {
+            s.is_publishing = true;
+        }
+
+        let av1_seq = vec![0x90, b'a', b'v', b'0', b'1', 0x01, 0x02, 0x03];
+        assert!(conn
+            .handle_media_frame(FrameType::Video, 0, &av1_seq)
+            .is_ok());
+
+        let aac_seq = vec![0xAF, 0x00, 0x12, 0x10];
+        assert!(conn
+            .handle_media_frame(FrameType::Audio, 0, &aac_seq)
+            .is_ok());
+
+        let av1_frame = vec![0x91, b'a', b'v', b'0', b'1', 0xDE, 0xAD, 0xBE, 0xEF];
+        assert!(conn
+            .handle_media_frame(FrameType::Video, 40, &av1_frame)
+            .is_ok());
     }
 
     #[test]

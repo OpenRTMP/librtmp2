@@ -2,6 +2,8 @@
 //!
 //! Mirrors `src/amf/` directory.
 
+#![allow(ambiguous_glob_reexports)]
+
 pub mod amf0;
 pub mod amf3;
 

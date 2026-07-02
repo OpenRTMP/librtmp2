@@ -2,6 +2,8 @@
 //!
 //! Mirrors `src/session/` directory.
 
+#![allow(ambiguous_glob_reexports)]
+
 pub mod conn;
 pub mod play;
 pub mod publish;

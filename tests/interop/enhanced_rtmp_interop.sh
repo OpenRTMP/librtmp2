@@ -59,6 +59,8 @@ run_one() {
     # i.e. ffmpeg died before the server ever got enough data.
     if [ "$ff_rc" -ne 0 ] && kill -0 "$srv" 2>/dev/null; then
         echo "[$label] ENHANCED-RTMP INTEROP FAILED (ffmpeg publish exit=$ff_rc, ingest server still running)"
+        echo "== [$label] ingest log =="
+        cat "$log"
         kill "$srv" 2>/dev/null || true
         wait "$srv" 2>/dev/null || true
         return 1
@@ -80,11 +82,12 @@ if have_enc libx265; then
     run_one hevc libx265 "-preset ultrafast" "$BASE_PORT"
 fi
 AV1_ENC=""
-for enc in libaom-av1 libsvtav1 librav1e; do
+for enc in libsvtav1 libaom-av1 librav1e; do
     if have_enc "$enc"; then AV1_ENC="$enc"; break; fi
 done
 if [ -n "$AV1_ENC" ]; then
     tested=1
+    sleep 2
     extra=""
     [ "$AV1_ENC" = "libaom-av1" ] && extra="-cpu-used 8"
     [ "$AV1_ENC" = "libsvtav1" ] && extra="-preset 12"
