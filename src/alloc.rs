@@ -21,7 +21,7 @@ struct AllocatorHooks {
 }
 
 impl AllocatorHooks {
-    fn std_defaults() -> Self {
+    const fn std_defaults() -> Self {
         Self {
             alloc: std_alloc,
             realloc: std_realloc,
