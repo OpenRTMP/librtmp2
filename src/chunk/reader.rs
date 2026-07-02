@@ -254,8 +254,12 @@ pub fn chunk_read(
         stream.reassembly_buf.reset();
     }
 
-    if (fmt == 2 || fmt == 3) && stream.reassembly_bytes_read == 0 && stream.type0_msg_length == 0
-    {
+    // fmt=2 is timestamp-only continuation; it must not start a fresh message.
+    if fmt == 2 && stream.reassembly_bytes_read == 0 {
+        return Err(ErrorCode::Chunk);
+    }
+    // fmt=3 with no prior header state on this CSID is invalid.
+    if fmt == 3 && stream.reassembly_bytes_read == 0 && stream.type0_msg_length == 0 {
         return Err(ErrorCode::Chunk);
     }
 
@@ -319,7 +323,6 @@ pub fn chunk_read(
 
         stream.reassembly_bytes_read = 0;
         stream.reassembly_buf.reset();
-        stream.type0_msg_length = 0;
 
         Ok(1)
     } else {
@@ -350,7 +353,7 @@ mod tests {
     }
 
     #[test]
-    fn fmt3_after_complete_message_is_rejected() {
+    fn fmt3_after_complete_message_can_start_new_message_with_inherited_header() {
         let payload = b"hello";
         let msg = ChunkMessage {
             csid: 3,
@@ -386,7 +389,11 @@ mod tests {
             &mut len,
         );
 
-        assert!(matches!(result, Err(ErrorCode::Chunk)));
+        assert_eq!(result.unwrap(), 1);
+        assert!(out_msg.is_complete);
+        assert_eq!(out_msg.msg_type_id, 0x14);
+        assert_eq!(out_msg.msg_stream_id, 1);
+        assert_eq!(len, 5);
     }
 
     #[test]
