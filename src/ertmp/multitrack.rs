@@ -16,11 +16,7 @@ pub fn multitrack_parse(mt: &mut Multitrack, data: &[u8]) -> Result<()> {
 
     // The 0x00 marker identifies an AMF0_NUMBER: the 8 payload bytes are the
     // big-endian bit pattern of an IEEE-754 double, not a raw integer.
-    let mut bits: u64 = 0;
-    for i in 0..8 {
-        bits = (bits << 8) | data[1 + i] as u64;
-    }
-    let type_val = f64::from_bits(bits);
+    let type_val = f64::from_be_bytes(data[1..9].try_into().unwrap());
 
     mt.track_type = if type_val == 0.0 {
         crate::types::MultitrackType::Audio
@@ -61,11 +57,8 @@ pub fn multitrack_write(mt: &Multitrack, buf: &mut [u8]) -> usize {
     offset += 1;
 
     // 8-byte AMF0_NUMBER (IEEE-754 double bit pattern), big-endian.
-    let bits: u64 = (mt.track_type as u8 as f64).to_bits();
-    for i in (0..8).rev() {
-        buf[offset] = ((bits >> (i * 8)) & 0xFF) as u8;
-        offset += 1;
-    }
+    buf[offset..offset + 8].copy_from_slice(&(mt.track_type as u8 as f64).to_be_bytes());
+    offset += 8;
 
     // AMF0_STRING: 2-byte length + N bytes
     buf[offset] = (name_len >> 8) as u8;

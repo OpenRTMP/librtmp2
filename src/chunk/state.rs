@@ -30,6 +30,10 @@ pub struct ChunkStream {
     pub type0_msg_stream_id: u32,
     /// current message uses extended timestamps
     pub type0_ext_ts: bool,
+    /// The most recent fmt=1/2 timestamp delta applied on this CSID. A new
+    /// message that starts with fmt=3 (reusing the prior header entirely)
+    /// implicitly repeats this same delta per RTMP spec 5.3.1.3.
+    pub last_delta: u32,
     /// bytes read so far for current message
     pub reassembly_bytes_read: u32,
     /// buffer for reassembling partial messages
@@ -47,6 +51,7 @@ impl Default for ChunkStream {
             type0_msg_type_id: 0,
             type0_msg_stream_id: 0,
             type0_ext_ts: false,
+            last_delta: 0,
             reassembly_bytes_read: 0,
             reassembly_buf: Buffer::new(),
             in_use: false,
@@ -62,6 +67,7 @@ impl ChunkStream {
         self.type0_msg_type_id = 0;
         self.type0_msg_stream_id = 0;
         self.type0_ext_ts = false;
+        self.last_delta = 0;
         self.reassembly_bytes_read = 0;
         self.reassembly_buf.reset();
         self.chunk_size = default_chunk_size;

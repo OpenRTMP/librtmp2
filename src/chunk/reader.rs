@@ -271,6 +271,13 @@ pub fn chunk_read(
     // from a peer-controlled message with the same inherited metadata, so it
     // must accept fmt=3 when the CSID has valid prior state. Higher layers must
     // validate command semantics and authorization for the resulting message.
+    //
+    // A fmt=3 chunk is a *new-message start* (as opposed to a continuation of
+    // an in-flight message) exactly when no message is currently being
+    // reassembled on this CSID -- reassembly_bytes_read is only 0 between
+    // messages, never mid-message.
+    let fmt3_starts_new_message = fmt == 3 && stream.reassembly_bytes_read == 0;
+
     match fmt {
         0 => {
             stream.type0_timestamp = final_timestamp;
@@ -278,6 +285,7 @@ pub fn chunk_read(
             stream.type0_msg_type_id = msg_type_id;
             stream.type0_msg_stream_id = msg_stream_id;
             stream.type0_ext_ts = ext_ts;
+            stream.last_delta = 0;
         }
         1 => {
             // fmt=1 carries a timestamp DELTA (RTMP spec 5.3.1.1), not an
@@ -286,11 +294,19 @@ pub fn chunk_read(
             stream.type0_msg_length = msg_length;
             stream.type0_msg_type_id = msg_type_id;
             stream.type0_ext_ts = ext_ts;
+            stream.last_delta = final_timestamp;
         }
         2 => {
             // fmt=2 also carries a timestamp DELTA, same as fmt=1.
             stream.type0_timestamp = stream.type0_timestamp.wrapping_add(final_timestamp);
             stream.type0_ext_ts = ext_ts;
+            stream.last_delta = final_timestamp;
+        }
+        3 if fmt3_starts_new_message => {
+            // Per RTMP spec 5.3.1.3, a fmt=3 chunk that starts a new message
+            // (rather than continuing one) implicitly repeats the previous
+            // delta -- it does not freeze the timestamp at its old value.
+            stream.type0_timestamp = stream.type0_timestamp.wrapping_add(stream.last_delta);
         }
         _ => {}
     }
@@ -485,6 +501,18 @@ mod tests {
         fmt2.write(b"next").unwrap();
         chunk_read(&mut fmt2, &mut reg, None, &mut out_msg, &mut ptr, &mut len).unwrap();
         assert_eq!(out_msg.timestamp, 1066, "fmt=2 timestamp must add the delta to the running total");
+
+        // fmt=3 starting a brand new message (no message currently in
+        // flight) implicitly repeats the last delta (33) per RTMP spec
+        // 5.3.1.3 rather than freezing the timestamp at its old value.
+        let mut fmt3 = Buffer::new();
+        fmt3.write(&[3 << 6 | 5]).unwrap();
+        fmt3.write(b"next").unwrap();
+        chunk_read(&mut fmt3, &mut reg, None, &mut out_msg, &mut ptr, &mut len).unwrap();
+        assert_eq!(
+            out_msg.timestamp, 1099,
+            "fmt=3 new-message start must repeat the previous delta"
+        );
     }
 
     #[test]
