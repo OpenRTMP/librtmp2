@@ -254,12 +254,14 @@ pub fn chunk_read(
         stream.reassembly_buf.reset();
     }
 
-    // fmt=2 is timestamp-only continuation; it must not start a fresh message.
-    if fmt == 2 && stream.reassembly_bytes_read == 0 {
-        return Err(ErrorCode::Chunk);
-    }
-    // fmt=3 with no prior header state on this CSID is invalid.
-    if fmt == 3 && stream.reassembly_bytes_read == 0 && stream.type0_msg_length == 0 {
+    // fmt=2/3 inherit length/type/stream-id from prior state on this CSID.
+    // After a complete message, reassembly_bytes_read is 0 but inherited
+    // header fields remain — that is valid for the next constant-size frame
+    // (common for AAC) or a fmt=3 header reuse per RTMP spec.
+    if (fmt == 2 || fmt == 3)
+        && stream.reassembly_bytes_read == 0
+        && stream.type0_msg_length == 0
+    {
         return Err(ErrorCode::Chunk);
     }
 
@@ -397,14 +399,14 @@ mod tests {
     }
 
     #[test]
-    fn fmt2_after_complete_message_is_rejected() {
+    fn fmt2_after_complete_message_can_start_new_message_with_inherited_header() {
         let payload = b"done";
         let msg = ChunkMessage {
             csid: 5,
             fmt: 0,
             timestamp: 0,
             msg_length: payload.len() as u32,
-            msg_type_id: 0x09,
+            msg_type_id: 0x08,
             msg_stream_id: 1,
             is_complete: false,
         };
@@ -430,6 +432,33 @@ mod tests {
         let mut next = Buffer::new();
         next.write(&[2 << 6 | 5, 0, 0, 1]).unwrap();
         next.write(b"next").unwrap();
+        let result = chunk_read(
+            &mut next,
+            &mut reg,
+            None,
+            &mut out_msg,
+            &mut ptr,
+            &mut len,
+        );
+        assert_eq!(result.unwrap(), 1);
+        assert!(out_msg.is_complete);
+        assert_eq!(out_msg.msg_type_id, 0x08);
+        assert_eq!(out_msg.msg_stream_id, 1);
+        assert_eq!(len, 4);
+    }
+
+    #[test]
+    fn fmt2_without_prior_header_state_is_rejected() {
+        let mut reg = ChunkRegistry::new();
+        reg.get_or_create(5).unwrap();
+
+        let mut next = Buffer::new();
+        next.write(&[2 << 6 | 5, 0, 0, 1]).unwrap();
+        next.write(b"data").unwrap();
+
+        let mut out_msg = ChunkMessage::default();
+        let mut ptr = std::ptr::null();
+        let mut len = 0;
         let result = chunk_read(
             &mut next,
             &mut reg,
