@@ -531,11 +531,15 @@ impl Conn {
                         return self.send_onstatus(0, "error", "NetStream.Publish.BadName", "Publish not authorized");
                     }
                 }
-                let was_publishing = self
-                    .current_stream
-                    .as_ref()
-                    .map(|s| s.is_publishing)
-                    .unwrap_or(false);
+                // current_stream.is_publishing is never cleared by `play`, so
+                // a connection that published earlier and then played a
+                // different stream would still read as "was publishing"
+                // here. Gate on the connection state instead: `play`
+                // transitions to ConnState::Playing (a later state than
+                // Publishing), and conn_transition() only allows forward
+                // moves, so a subsequent `publish` cannot silently move the
+                // state back to Publishing before this check runs.
+                let was_publishing = self.state == ConnState::Publishing;
                 let prev_route_key = self.relay_route_key();
                 let next_route_key = if !self.relay_key.is_empty() {
                     self.relay_key.clone()
@@ -859,6 +863,36 @@ mod tests {
         // This connection only ever played "victim" -- it never published it
         // -- so publishing "other" afterwards must not queue an eviction for
         // a cache key this connection never created.
+        assert!(conn.pending_cache_evictions.is_empty());
+        assert_eq!(conn.current_stream.as_ref().unwrap().name, "other");
+    }
+
+    #[test]
+    fn publish_then_play_then_publish_does_not_evict_played_stream_key() {
+        let mut conn = Conn::new();
+        conn.app = "live".to_string();
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+
+        let mut buf = Buffer::with_capacity(128);
+        command::build_publish(&mut buf, "A", "live").unwrap();
+        conn.handle_command(buf.as_slice()).unwrap();
+        assert!(conn.pending_cache_evictions.is_empty());
+
+        // current_stream.is_publishing is left `true` by the publish above
+        // and is never cleared by `play`, so a naive check of that flag
+        // would still read "was publishing" here.
+        let mut buf = Buffer::with_capacity(128);
+        command::build_play(&mut buf, "victim").unwrap();
+        conn.handle_command(buf.as_slice()).unwrap();
+        assert_eq!(conn.current_stream.as_ref().unwrap().name, "victim");
+
+        let mut buf = Buffer::with_capacity(128);
+        command::build_publish(&mut buf, "other", "live").unwrap();
+        conn.handle_command(buf.as_slice()).unwrap();
+
+        // This connection published "A", then switched to playing "victim"
+        // -- it never published "victim" -- so publishing "other" must not
+        // queue an eviction for a cache key it never created.
         assert!(conn.pending_cache_evictions.is_empty());
         assert_eq!(conn.current_stream.as_ref().unwrap().name, "other");
     }

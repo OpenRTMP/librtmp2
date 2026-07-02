@@ -220,10 +220,13 @@ impl Server {
             }
         }
 
-        // Renames processed during this batch's recv loop must be evicted
-        // before init-frame replay below, or a newly-joined player could be
-        // handed a stale cache entry for a route key its publisher just
-        // abandoned.
+        // Ordering within this function is deliberate: evictions from
+        // renames processed by the recv loop just above are applied here,
+        // *after* that recv loop but *before* both init-frame replay and
+        // caching of this batch's freshly-relayed frames below. This means
+        // init-frame replay never sees a cache entry under a route key its
+        // publisher abandoned earlier in this same batch, and a same-batch
+        // rename can't leave a stale entry alive until the next poll() call.
         self.drain_pending_cache_evictions();
 
         // Collect all frames queued by publishers, then relay them to players
@@ -311,19 +314,22 @@ impl Server {
         Ok(())
     }
 
+    /// Bytes retained by a single stream_cache entry.
+    fn stream_cache_entry_bytes(cache: &StreamCache) -> usize {
+        cache.avc_header.as_ref().map(|v| v.len()).unwrap_or(0)
+            + cache.aac_header.as_ref().map(|v| v.len()).unwrap_or(0)
+            + cache
+                .last_keyframe
+                .as_ref()
+                .map(|(_, v)| v.len())
+                .unwrap_or(0)
+    }
+
     /// Total bytes currently retained across all stream_cache entries.
     fn stream_cache_bytes(&self) -> usize {
         self.stream_cache
             .values()
-            .map(|cache| {
-                cache.avc_header.as_ref().map(|v| v.len()).unwrap_or(0)
-                    + cache.aac_header.as_ref().map(|v| v.len()).unwrap_or(0)
-                    + cache
-                        .last_keyframe
-                        .as_ref()
-                        .map(|(_, v)| v.len())
-                        .unwrap_or(0)
-            })
+            .map(Self::stream_cache_entry_bytes)
             .sum()
     }
 
@@ -388,7 +394,11 @@ impl Server {
             })
             .unwrap_or(0);
         let incoming_len = frame.payload.len();
-        if self.stream_cache_bytes() + incoming_len > existing_field_len + MAX_STREAM_CACHE_BYTES {
+        // Track the running total locally instead of recomputing
+        // stream_cache_bytes() (an O(n) scan) on every eviction, which would
+        // make this O(n^2) under sustained cache churn.
+        let mut projected_total = self.stream_cache_bytes() + incoming_len - existing_field_len;
+        if projected_total > MAX_STREAM_CACHE_BYTES {
             let victims: Vec<_> = self
                 .stream_cache
                 .keys()
@@ -396,10 +406,11 @@ impl Server {
                 .cloned()
                 .collect();
             for victim in victims {
-                if self.stream_cache_bytes() + incoming_len
-                    <= existing_field_len + MAX_STREAM_CACHE_BYTES
-                {
+                if projected_total <= MAX_STREAM_CACHE_BYTES {
                     break;
+                }
+                if let Some(cache) = self.stream_cache.get(&victim) {
+                    projected_total -= Self::stream_cache_entry_bytes(cache);
                 }
                 self.evict_stream_cache_key(&victim);
             }
