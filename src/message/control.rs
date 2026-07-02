@@ -162,6 +162,9 @@ pub fn read_acknowledgement_size(data: &[u8]) -> Result<u32> {
 
 /// Read a WindowAckSize.
 pub fn read_window_ack_size(data: &[u8]) -> Result<u32> {
+    if data.len() < 4 {
+        return Err(ErrorCode::Protocol);
+    }
     let win = ntoh32(data);
     if win > 0 && win < MIN_WINDOW_ACK_SIZE {
         return Err(ErrorCode::Protocol);
@@ -248,6 +251,19 @@ mod tests {
         assert_eq!(
             read_acknowledgement_size(&123u32.to_be_bytes()).unwrap(),
             123
+        );
+    }
+
+    #[test]
+    fn window_ack_size_rejects_short_input() {
+        // Same landmine as abort/acknowledgement above: ntoh32() indexes
+        // data[0..4] directly, so this decoder must reject short input itself
+        // rather than relying on every caller to pre-check the length.
+        assert!(read_window_ack_size(&[]).is_err());
+        assert!(read_window_ack_size(&[0x00, 0x00, 0x00]).is_err());
+        assert_eq!(
+            read_window_ack_size(&(MIN_WINDOW_ACK_SIZE).to_be_bytes()).unwrap(),
+            MIN_WINDOW_ACK_SIZE
         );
     }
 
