@@ -1,19 +1,39 @@
 # Bug scan progress
 
-Last scanned: chunk (2026-07-01)
+Last scanned: message (2026-07-02)
 
 ## Modules
 
 - [x] core — Memory, logging, errors, buffer
 - [x] handshake — C0/C1/C2 ↔ S0/S1/S2
 - [x] chunk — Chunk reader/writer/state
-- [ ] message — Message reassembly, control, commands
+- [x] message — Message reassembly, control, commands
 - [ ] amf — AMF0 + AMF3
 - [ ] flv — Audio/video/script tags
 - [ ] ertmp — E-RTMP v1/v2 extensions
 - [ ] session — State machine, publish/play flows
 - [ ] server — Server listener
 - [ ] client — Outbound client
+
+## Findings (2026-07-02 message pass)
+
+- message/control.rs: `read_abort_message()` and `read_acknowledgement_size()`
+  called `ntoh32(data)` (which indexes `data[0..4]` directly) with no length
+  check, unlike every sibling decoder in the file (`read_set_chunk_size`,
+  `read_window_ack_size`, `read_set_peer_bandwidth`, `read_user_control` all
+  guard their own input). Both call sites (message/message.rs `decode()` and
+  session/conn.rs `handle_control()`) currently pre-check `payload.len() >= 4`
+  before calling, so this was not reachable today, but the functions
+  themselves had no defense — a future caller (or a fuzz/API user calling
+  them directly) forwarding a 0-3 byte Abort/Ack control payload would panic
+  on the network-controlled length field, a DoS on that connection/thread.
+  Added the same `data.len() < 4 -> Err(ErrorCode::Protocol)` guard used by
+  the other decoders in this module, plus regression tests
+  (`abort_message_rejects_short_input`, `acknowledgement_size_rejects_short_input`).
+  Rest of src/message/ (command.rs AMF command decode, control.rs remaining
+  decoders, message.rs aggregate/dispatch) reviewed for OOB slicing, integer
+  overflow, and stale-state reuse; all length fields there are already
+  bounds-checked before use and no further issues were found.
 
 ## Findings (2026-07-01 chunk pass)
 

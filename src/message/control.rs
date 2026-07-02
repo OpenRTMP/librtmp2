@@ -146,16 +146,25 @@ pub fn read_set_chunk_size(data: &[u8]) -> Result<u32> {
 
 /// Read an AbortMessage.
 pub fn read_abort_message(data: &[u8]) -> Result<u32> {
+    if data.len() < 4 {
+        return Err(ErrorCode::Protocol);
+    }
     Ok(ntoh32(data))
 }
 
 /// Read an Acknowledgement size.
 pub fn read_acknowledgement_size(data: &[u8]) -> Result<u32> {
+    if data.len() < 4 {
+        return Err(ErrorCode::Protocol);
+    }
     Ok(ntoh32(data))
 }
 
 /// Read a WindowAckSize.
 pub fn read_window_ack_size(data: &[u8]) -> Result<u32> {
+    if data.len() < 4 {
+        return Err(ErrorCode::Protocol);
+    }
     let win = ntoh32(data);
     if win > 0 && win < MIN_WINDOW_ACK_SIZE {
         return Err(ErrorCode::Protocol);
@@ -220,6 +229,42 @@ mod tests {
         assert!(read_window_ack_size(&1023u32.to_be_bytes()).is_err());
         assert_eq!(read_window_ack_size(&0u32.to_be_bytes()).unwrap(), 0);
         assert_eq!(read_window_ack_size(&1024u32.to_be_bytes()).unwrap(), 1024);
+    }
+
+    #[test]
+    fn abort_message_rejects_short_input() {
+        // A truncated AbortMessage (fewer than 4 bytes) must be rejected by
+        // the decoder itself rather than relying on callers to pre-check the
+        // length — `ntoh32()` indexes data[0..4] directly and panics on
+        // shorter slices, so this was a reachable DoS if any caller forwarded
+        // the payload without its own length guard.
+        assert!(read_abort_message(&[]).is_err());
+        assert!(read_abort_message(&[0x00]).is_err());
+        assert!(read_abort_message(&[0x00, 0x00, 0x00]).is_err());
+        assert_eq!(read_abort_message(&7u32.to_be_bytes()).unwrap(), 7);
+    }
+
+    #[test]
+    fn acknowledgement_size_rejects_short_input() {
+        assert!(read_acknowledgement_size(&[]).is_err());
+        assert!(read_acknowledgement_size(&[0x00, 0x00]).is_err());
+        assert_eq!(
+            read_acknowledgement_size(&123u32.to_be_bytes()).unwrap(),
+            123
+        );
+    }
+
+    #[test]
+    fn window_ack_size_rejects_short_input() {
+        // Same landmine as abort/acknowledgement above: ntoh32() indexes
+        // data[0..4] directly, so this decoder must reject short input itself
+        // rather than relying on every caller to pre-check the length.
+        assert!(read_window_ack_size(&[]).is_err());
+        assert!(read_window_ack_size(&[0x00, 0x00, 0x00]).is_err());
+        assert_eq!(
+            read_window_ack_size(&(MIN_WINDOW_ACK_SIZE).to_be_bytes()).unwrap(),
+            MIN_WINDOW_ACK_SIZE
+        );
     }
 
     #[test]
