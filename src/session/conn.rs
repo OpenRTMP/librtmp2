@@ -32,6 +32,7 @@ pub struct RelayFrame {
     pub payload: Vec<u8>,
     pub app: String,
     pub stream_name: String,
+    pub publisher_conn_id: u64,
 }
 
 pub struct Conn {
@@ -80,6 +81,8 @@ pub struct Conn {
     pub on_connect_cb: Option<fn()>,
     pub on_publish_cb: Option<fn(conn_id: u64, app: &str, stream_name: &str) -> bool>,
     pub on_play_cb: Option<fn(conn_id: u64, app: &str, stream_name: &str) -> bool>,
+    /// Cache keys to evict after the publisher renames its stream.
+    pub pending_cache_evictions: Vec<(String, String)>,
     /// Last measured client↔server RTT in milliseconds (RTMP UserControl ping).
     pub rtt_ms: f64,
     pending_pings: HashMap<u32, Instant>,
@@ -125,6 +128,7 @@ impl Conn {
             on_connect_cb: None,
             on_publish_cb: None,
             on_play_cb: None,
+            pending_cache_evictions: Vec::new(),
             rtt_ms: 0.0,
             pending_pings: HashMap::new(),
             last_ping_sent: None,
@@ -159,6 +163,7 @@ impl Conn {
             payload: payload.to_vec(),
             app: self.app.clone(),
             stream_name: self.relay_route_key(),
+            publisher_conn_id: self.conn_id,
         });
         Ok(())
     }
@@ -525,6 +530,15 @@ impl Conn {
                     if !cb(self.conn_id, &self.app, &name_str) {
                         return self.send_onstatus(0, "error", "NetStream.Publish.BadName", "Publish not authorized");
                     }
+                }
+                let prev_name = self
+                    .current_stream
+                    .as_ref()
+                    .map(|s| s.name.clone())
+                    .unwrap_or_default();
+                if !prev_name.is_empty() && prev_name != name_str {
+                    self.pending_cache_evictions
+                        .push((self.app.clone(), prev_name));
                 }
                 if !self.defer_media_relay || self.on_publish_cb.is_none() {
                     self.relay_enabled = true;

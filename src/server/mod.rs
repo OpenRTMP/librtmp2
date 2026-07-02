@@ -12,6 +12,9 @@ use crate::session::conn::Conn;
 use crate::transport::{TlsCtx, Transport};
 use crate::types::*;
 
+/// Maximum distinct (app, stream_name) cache entries retained server-wide.
+const MAX_STREAM_CACHE_ENTRIES: usize = 1024;
+
 /// Cached codec headers and last keyframe for a (app, stream_name) pair.
 /// Replayed to players that join after the publisher has already sent headers.
 struct StreamCache {
@@ -40,6 +43,8 @@ pub struct Server {
     pub on_media_cb: Option<fn(u64, FrameType, Option<&str>) -> bool>,
     listener: Option<TcpListener>,
     stream_cache: HashMap<(String, String), StreamCache>,
+    /// Cache keys created by each publisher connection (for teardown).
+    publisher_cache_keys: HashMap<u64, Vec<(String, String)>>,
     next_conn_id: u64,
     /// Hold media relay until the integrator enables it per connection.
     pub defer_media_relay: bool,
@@ -78,6 +83,7 @@ impl Server {
             on_media_cb: None,
             listener: None,
             stream_cache: HashMap::new(),
+            publisher_cache_keys: HashMap::new(),
             next_conn_id: 1,
             defer_media_relay: false,
         })
@@ -185,6 +191,7 @@ impl Server {
         let mut closed = Vec::new();
 
         // Drive recv/processing for every connection.
+        self.drain_pending_cache_evictions();
         for (i, conn) in self.connections.iter_mut().enumerate() {
             loop {
                 let Some(transport) = conn.transport.as_mut() else {
@@ -249,33 +256,7 @@ impl Server {
         // Update per-stream cache and relay each frame in order so players
         // receive frames in the same sequence the publisher sent them.
         for frame in &relay_frames {
-            let key = (frame.app.clone(), frame.stream_name.clone());
-            let cache = self.stream_cache.entry(key).or_insert(StreamCache {
-                avc_header: None,
-                aac_header: None,
-                last_keyframe: None,
-            });
-            match frame.frame_type {
-                FrameType::Video => {
-                    if frame.payload.len() >= 2 {
-                        if frame.payload[0] == 0x17 && frame.payload[1] == 0x00 {
-                            cache.avc_header = Some(frame.payload.clone());
-                        } else if frame.payload[0] == 0x17 && frame.payload[1] == 0x01 {
-                            cache.last_keyframe = Some((frame.timestamp, frame.payload.clone()));
-                        }
-                    }
-                }
-                FrameType::Audio => {
-                    if frame.payload.len() >= 2
-                        && (frame.payload[0] & 0xF0) == 0xA0
-                        && frame.payload[1] == 0x00
-                    {
-                        cache.aac_header = Some(frame.payload.clone());
-                    }
-                }
-                _ => {}
-            }
-
+            self.cache_relay_frame(frame);
             for conn in self.connections.iter_mut() {
                 let is_player = conn.relay_enabled
                     && conn
@@ -306,24 +287,163 @@ impl Server {
         closed.sort_unstable();
         closed.dedup();
         for i in closed.into_iter().rev() {
-            // Evict the cache when a publisher closes so stale headers/keyframes
-            // do not persist for the next publisher reusing the same key.
-            if let Some(ref stream) = self.connections[i].current_stream {
+            let conn = &self.connections[i];
+            if let Some(ref stream) = conn.current_stream {
                 if stream.is_publishing {
-                    self.stream_cache.remove(&(
-                        self.connections[i].app.clone(),
-                        self.connections[i].relay_route_key(),
-                    ));
+                    if let Some(keys) = self.publisher_cache_keys.remove(&conn.conn_id) {
+                        for key in keys {
+                            self.stream_cache.remove(&key);
+                        }
+                    }
                 }
             }
             self.connections.remove(i);
         }
         Ok(())
     }
+
+    fn cache_relay_frame(&mut self, frame: &crate::session::conn::RelayFrame) {
+        let key = (frame.app.clone(), frame.stream_name.clone());
+        let publisher_keys = self
+            .publisher_cache_keys
+            .entry(frame.publisher_conn_id)
+            .or_default();
+        if !publisher_keys.iter().any(|k| k == &key) {
+            publisher_keys.push(key.clone());
+        }
+        if self.stream_cache.len() >= MAX_STREAM_CACHE_ENTRIES
+            && !self.stream_cache.contains_key(&key)
+        {
+            if let Some(evict) = self
+                .stream_cache
+                .keys()
+                .find(|k| *k != &key)
+                .cloned()
+            {
+                self.stream_cache.remove(&evict);
+                for keys in self.publisher_cache_keys.values_mut() {
+                    keys.retain(|k| k != &evict);
+                }
+            }
+        }
+        let cache = self.stream_cache.entry(key).or_insert(StreamCache {
+            avc_header: None,
+            aac_header: None,
+            last_keyframe: None,
+        });
+        match frame.frame_type {
+            FrameType::Video => {
+                if frame.payload.len() >= 2 {
+                    if frame.payload[0] == 0x17 && frame.payload[1] == 0x00 {
+                        cache.avc_header = Some(frame.payload.clone());
+                    } else if frame.payload[0] == 0x17 && frame.payload[1] == 0x01 {
+                        cache.last_keyframe = Some((frame.timestamp, frame.payload.clone()));
+                    }
+                }
+            }
+            FrameType::Audio => {
+                if frame.payload.len() >= 2
+                    && (frame.payload[0] & 0xF0) == 0xA0
+                    && frame.payload[1] == 0x00
+                {
+                    cache.aac_header = Some(frame.payload.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn drain_pending_cache_evictions(&mut self) {
+        for conn in &mut self.connections {
+            for key in conn.pending_cache_evictions.drain(..) {
+                self.stream_cache.remove(&key);
+                if let Some(keys) = self.publisher_cache_keys.get_mut(&conn.conn_id) {
+                    keys.retain(|k| k != &key);
+                }
+            }
+        }
+    }
 }
 
 impl Drop for Server {
     fn drop(&mut self) {
         self.running = false;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session::conn::RelayFrame;
+    use crate::types::FrameType;
+
+    fn test_config() -> ServerConfig {
+        ServerConfig {
+            max_connections: 0,
+            chunk_size: 0,
+            tls_enabled: 0,
+            tls_cert_file: std::ptr::null(),
+            tls_key_file: std::ptr::null(),
+            tls_ca_file: std::ptr::null(),
+            tls_insecure: 0,
+        }
+    }
+
+    fn relay_frame(
+        publisher_conn_id: u64,
+        app: &str,
+        stream_name: &str,
+        payload: &[u8],
+    ) -> RelayFrame {
+        RelayFrame {
+            frame_type: FrameType::Video,
+            timestamp: 0,
+            payload: payload.to_vec(),
+            app: app.to_string(),
+            stream_name: stream_name.to_string(),
+            publisher_conn_id,
+        }
+    }
+
+    #[test]
+    fn stream_cache_evicts_pending_publisher_renames() {
+        let config = test_config();
+        let mut server = Server::new(config).unwrap();
+        let avc = [0x17u8, 0x00, 0x00, 0x00, 0x00];
+
+        server
+            .stream_cache
+            .insert(("live".to_string(), "old".to_string()), StreamCache {
+                avc_header: Some(avc.to_vec()),
+                aac_header: None,
+                last_keyframe: None,
+            });
+
+        let mut conn = Conn::new();
+        conn.conn_id = 1;
+        conn.pending_cache_evictions
+            .push(("live".to_string(), "old".to_string()));
+        server.connections.push(conn);
+
+        server.drain_pending_cache_evictions();
+
+        assert!(!server.stream_cache.contains_key(&("live".to_string(), "old".to_string())));
+    }
+
+    #[test]
+    fn stream_cache_is_bounded() {
+        let config = test_config();
+        let mut server = Server::new(config).unwrap();
+        let avc = [0x17u8, 0x00, 0x00, 0x00, 0x00];
+
+        for i in 0..=MAX_STREAM_CACHE_ENTRIES {
+            let name = format!("stream{i}");
+            let frames = vec![relay_frame(1, "live", &name, &avc)];
+            for frame in &frames {
+                server.cache_relay_frame(frame);
+            }
+        }
+
+        assert!(server.stream_cache.len() <= MAX_STREAM_CACHE_ENTRIES);
     }
 }

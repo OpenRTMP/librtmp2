@@ -26,6 +26,8 @@ pub const UCTRL_PING_RESPONSE: u16 = 0x07;
 
 const MIN_CHUNK_SIZE: u32 = 1;
 const MAX_CHUNK_SIZE: u32 = 0xFFFFFF;
+/// Reject peer WindowAckSize values below this to prevent ACK-per-byte amplification.
+pub const MIN_WINDOW_ACK_SIZE: u32 = 1024;
 
 /* ── Encoder ── */
 
@@ -149,7 +151,11 @@ pub fn read_acknowledgement_size(data: &[u8]) -> Result<u32> {
 
 /// Read a WindowAckSize.
 pub fn read_window_ack_size(data: &[u8]) -> Result<u32> {
-    Ok(ntoh32(data))
+    let win = ntoh32(data);
+    if win > 0 && win < MIN_WINDOW_ACK_SIZE {
+        return Err(ErrorCode::Protocol);
+    }
+    Ok(win)
 }
 
 /// Read a SetPeerBandwidth.
@@ -192,6 +198,14 @@ mod tests {
         let mut buf = Buffer::new();
         write_window_ack_size(&mut buf, 2_500_000).unwrap();
         assert_eq!(read_window_ack_size(&buf.peek()[1..]).unwrap(), 2_500_000);
+    }
+
+    #[test]
+    fn window_ack_size_rejects_amplification_values() {
+        assert!(read_window_ack_size(&1u32.to_be_bytes()).is_err());
+        assert!(read_window_ack_size(&1023u32.to_be_bytes()).is_err());
+        assert_eq!(read_window_ack_size(&0u32.to_be_bytes()).unwrap(), 0);
+        assert_eq!(read_window_ack_size(&1024u32.to_be_bytes()).unwrap(), 1024);
     }
 
     #[test]
