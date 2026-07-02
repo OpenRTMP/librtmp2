@@ -442,6 +442,13 @@ impl Server {
             }
         }
 
+        // Evicting every other entry still isn't enough when this single
+        // payload alone exceeds the budget -- don't cache it at all rather
+        // than let the server-wide total blow past MAX_STREAM_CACHE_BYTES.
+        if projected_total > MAX_STREAM_CACHE_BYTES {
+            return;
+        }
+
         let cache = self.stream_cache.entry(key).or_insert(StreamCache {
             avc_header: None,
             aac_header: None,
@@ -488,9 +495,20 @@ impl Server {
                 if !owns_key {
                     continue;
                 }
-                self.stream_cache.remove(&key);
                 if let Some(keys) = self.publisher_cache_keys.get_mut(&conn.conn_id) {
                     keys.retain(|k| k != &key);
+                }
+                // A different conn_id can still be tracking this exact
+                // (app, stream_name) (two publishers sharing a route name).
+                // Only actually drop the cache entry once no other tracked
+                // publisher claims it, or renaming away would wipe out a
+                // still-active publisher's cached headers/keyframe.
+                let still_owned = self
+                    .publisher_cache_keys
+                    .values()
+                    .any(|keys| keys.contains(&key));
+                if !still_owned {
+                    self.stream_cache.remove(&key);
                 }
             }
         }
@@ -661,6 +679,55 @@ mod tests {
         server.drain_pending_cache_evictions();
 
         // The real owner's (conn 2) cache entry must survive.
+        assert!(server
+            .stream_cache
+            .contains_key(&("live".to_string(), "shared".to_string())));
+    }
+
+    #[test]
+    fn drain_pending_cache_evictions_preserves_entry_still_owned_by_another_conn_id() {
+        let config = test_config();
+        let mut server = Server::new(config).unwrap();
+        let avc = [0x17u8, 0x00, 0x00, 0x00, 0x00];
+
+        // Both connection 1 and connection 2 are confirmed owners of the
+        // same ("live", "shared") key (e.g. two publishers sharing a route
+        // name).
+        server.cache_relay_frame(&relay_frame(1, "live", "shared", &avc));
+        server.cache_relay_frame(&relay_frame(2, "live", "shared", &avc));
+        assert!(server
+            .publisher_cache_keys
+            .get(&1)
+            .unwrap()
+            .contains(&("live".to_string(), "shared".to_string())));
+        assert!(server
+            .publisher_cache_keys
+            .get(&2)
+            .unwrap()
+            .contains(&("live".to_string(), "shared".to_string())));
+
+        // Connection 1 renames away from "shared" -- a legitimate eviction
+        // request for a key it does own.
+        let mut conn = Conn::new();
+        conn.conn_id = 1;
+        conn.pending_cache_evictions
+            .push(("live".to_string(), "shared".to_string()));
+        server.connections.push(conn);
+
+        server.drain_pending_cache_evictions();
+
+        // Connection 1's own tracking entry is gone, but connection 2 still
+        // owns "shared", so the shared cache entry must survive.
+        assert!(!server
+            .publisher_cache_keys
+            .get(&1)
+            .map(|keys| keys.contains(&("live".to_string(), "shared".to_string())))
+            .unwrap_or(false));
+        assert!(server
+            .publisher_cache_keys
+            .get(&2)
+            .unwrap()
+            .contains(&("live".to_string(), "shared".to_string())));
         assert!(server
             .stream_cache
             .contains_key(&("live".to_string(), "shared".to_string())));
@@ -1048,6 +1115,28 @@ mod tests {
         }
 
         assert!(server.stream_cache_bytes() <= MAX_STREAM_CACHE_BYTES);
+    }
+
+    #[test]
+    fn single_payload_larger_than_byte_budget_is_not_cached() {
+        let config = test_config();
+        let mut server = Server::new(config).unwrap();
+
+        // A single cacheable keyframe whose payload alone already exceeds
+        // MAX_STREAM_CACHE_BYTES. Evicting every other entry (there are
+        // none here) still can't bring the total under budget, so this
+        // must not be cached at all.
+        let payload_len = MAX_STREAM_CACHE_BYTES + 1;
+        let mut payload = vec![0u8; payload_len];
+        payload[0] = 0x17;
+        payload[1] = 0x01;
+
+        server.cache_relay_frame(&relay_frame(1, "live", "huge", &payload));
+
+        assert!(!server
+            .stream_cache
+            .contains_key(&("live".to_string(), "huge".to_string())));
+        assert_eq!(server.stream_cache_bytes(), 0);
     }
 
     #[test]
