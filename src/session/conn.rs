@@ -236,20 +236,19 @@ impl Conn {
             .media_bytes_received
             .saturating_add(payload.len() as u64);
 
-        if self.queue_relay_frame(frame_type, timestamp, payload).is_err() {
-            return Err(ErrorCode::Internal);
-        }
-
         if let Some(cb) = self.on_frame_cb {
-            let relay = self.pending_relay.last().unwrap();
             let mut frame = Frame {
                 frame_type,
                 timestamp,
+                size: payload.len() as u32,
+                data: payload.as_ptr(),
                 ..Default::default()
             };
-            frame.data = relay.payload.as_ptr();
-            frame.size = relay.payload.len() as u32;
             cb(&frame);
+        }
+
+        if self.queue_relay_frame(frame_type, timestamp, payload).is_err() {
+            return Err(ErrorCode::Internal);
         }
         Ok(())
     }
