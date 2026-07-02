@@ -237,7 +237,7 @@ impl Conn {
             .saturating_add(payload.len() as u64);
 
         if let Some(cb) = self.on_frame_cb {
-            let mut frame = Frame {
+            let frame = Frame {
                 frame_type,
                 timestamp,
                 size: payload.len() as u32,

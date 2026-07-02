@@ -90,18 +90,6 @@ pub fn chunk_read(
         return Err(ErrorCode::Chunk);
     }
 
-    // fmt=2/3 are continuations of an in-progress message. After a message
-    // completes, reassembly_bytes_read is reset to zero while type0_* metadata
-    // would still linger — reject compressed headers with no active reassembly
-    // so peers cannot forge AMF/control payloads under stale message metadata.
-    if (fmt == 2 || fmt == 3)
-        && reg
-            .get(csid)
-            .is_some_and(|s| s.reassembly_bytes_read == 0)
-    {
-        return Err(ErrorCode::Chunk);
-    }
-
     // Peek at the 3-byte timestamp field (for fmt 0/1/2) to decide ext_ts
     // without consuming anything.
     let ext_ts_from_header = if fmt <= 2 {
@@ -356,7 +344,7 @@ mod tests {
     }
 
     #[test]
-    fn fmt3_after_complete_message_is_rejected() {
+    fn fmt3_after_complete_message_can_start_new_message_with_inherited_header() {
         let payload = b"hello";
         let msg = ChunkMessage {
             csid: 3,
@@ -392,11 +380,15 @@ mod tests {
             &mut len,
         );
 
-        assert!(matches!(result, Err(ErrorCode::Chunk)));
+        assert_eq!(result.unwrap(), 1);
+        assert!(out_msg.is_complete);
+        assert_eq!(out_msg.msg_type_id, 0x14);
+        assert_eq!(out_msg.msg_stream_id, 1);
+        assert_eq!(len, 5);
     }
 
     #[test]
-    fn fmt2_after_complete_message_is_rejected() {
+    fn fmt2_after_complete_message_starts_new_message() {
         let payload = b"done";
         let msg = ChunkMessage {
             csid: 5,
@@ -438,7 +430,10 @@ mod tests {
             &mut ptr,
             &mut len,
         );
-        assert!(matches!(result, Err(ErrorCode::Chunk)));
+        assert_eq!(result.unwrap(), 1);
+        assert!(out_msg.is_complete);
+        assert_eq!(out_msg.msg_type_id, 0x09);
+        assert_eq!(len, 4);
     }
 
     #[test]
