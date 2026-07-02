@@ -3,7 +3,8 @@
 //! Mirrors `src/core/alloc.h` and `src/core/alloc.c`.
 //! Provides pluggable allocation functions with standard defaults.
 
-use std::sync::RwLock;
+use parking_lot::RwLock;
+use std::sync::atomic::{AtomicPtr, Ordering};
 
 /// Allocator function type.
 pub type AllocFn = fn(size: usize, userdata: *mut u8) -> *mut u8;
@@ -16,17 +17,21 @@ struct AllocatorHooks {
     alloc: AllocFn,
     realloc: ReallocFn,
     free: FreeFn,
-    userdata: *mut u8,
+    userdata: AtomicPtr<u8>,
 }
 
 impl AllocatorHooks {
-    const fn std_defaults() -> Self {
+    fn std_defaults() -> Self {
         Self {
             alloc: std_alloc,
             realloc: std_realloc,
             free: std_free,
-            userdata: std::ptr::null_mut(),
+            userdata: AtomicPtr::new(std::ptr::null_mut()),
         }
+    }
+
+    fn userdata_ptr(&self) -> *mut u8 {
+        self.userdata.load(Ordering::Acquire)
     }
 }
 
@@ -58,21 +63,21 @@ fn std_free(ptr: *mut u8, _ud: *mut u8) {
 
 /// Set custom allocator functions.
 pub fn set_allocator(alloc: AllocFn, realloc: ReallocFn, free: FreeFn, userdata: *mut u8) {
-    let mut hooks = ALLOCATOR.write().unwrap_or_else(|e| e.into_inner());
+    let mut hooks = ALLOCATOR.write();
     hooks.alloc = alloc;
     hooks.realloc = realloc;
     hooks.free = free;
-    hooks.userdata = userdata;
+    hooks.userdata.store(userdata, Ordering::Release);
 }
 
 fn with_hooks<R>(f: impl FnOnce(&AllocatorHooks) -> R) -> R {
-    let hooks = ALLOCATOR.read().unwrap_or_else(|e| e.into_inner());
+    let hooks = ALLOCATOR.read();
     f(&hooks)
 }
 
 /// Allocate `size` bytes using the current allocator.
 pub fn lrtmp2_malloc(size: usize) -> *mut u8 {
-    with_hooks(|hooks| (hooks.alloc)(size, hooks.userdata))
+    with_hooks(|hooks| (hooks.alloc)(size, hooks.userdata_ptr()))
 }
 
 /// Allocate zeroed memory for `nmemb` elements of `size` bytes each.
@@ -92,13 +97,13 @@ pub fn lrtmp2_calloc(nmemb: usize, size: usize) -> *mut u8 {
 
 /// Reallocate memory.
 pub fn lrtmp2_realloc(ptr: *mut u8, size: usize) -> *mut u8 {
-    with_hooks(|hooks| (hooks.realloc)(ptr, size, hooks.userdata))
+    with_hooks(|hooks| (hooks.realloc)(ptr, size, hooks.userdata_ptr()))
 }
 
 /// Free memory.
 pub fn lrtmp2_free(ptr: *mut u8) {
     if !ptr.is_null() {
-        with_hooks(|hooks| (hooks.free)(ptr, hooks.userdata));
+        with_hooks(|hooks| (hooks.free)(ptr, hooks.userdata_ptr()));
     }
 }
 
