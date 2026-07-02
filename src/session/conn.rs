@@ -517,6 +517,15 @@ impl Conn {
         let name = std::str::from_utf8(&name_buf).unwrap_or("").trim_end_matches('\0');
         match name {
             "connect" => {
+                // A connection may only negotiate its app namespace once. Without
+                // this guard a peer that's already publishing/playing under an
+                // authorized app could send a second `connect` with a different
+                // app, silently repointing `self.app` (and therefore relay/cache
+                // routing) to a namespace `on_publish_cb`/`on_play_cb` never
+                // authorized -- cache poisoning / cross-app playback.
+                if self.state >= ConnState::AppConnected {
+                    return Ok(());
+                }
                 let mut info = ConnectInfo::default();
                 command::read_connect(&mut buf, &mut info)?;
                 let app_len = info.app.iter().position(|&b| b == 0).unwrap_or(0);
@@ -827,6 +836,38 @@ mod tests {
             stream.name = "legacy_name".to_string();
         }
         assert_eq!(conn.relay_route_key(), "legacy_name");
+    }
+
+    #[test]
+    fn connect_after_app_connected_does_not_repoint_app_namespace() {
+        let mut conn = Conn::new();
+
+        let mut buf = Buffer::with_capacity(256);
+        command::build_connect(&mut buf, "public", "rtmp://host/public", "", "", "FMLE/3.0", 0, 0)
+            .unwrap();
+        conn.handle_command(buf.as_slice()).unwrap();
+        assert_eq!(conn.app, "public");
+        assert_eq!(conn.state, ConnState::AppConnected);
+
+        // A second `connect` after the app namespace is already authorized
+        // must be ignored -- it must not silently repoint `self.app` (and
+        // therefore relay/cache routing) to a namespace that was never
+        // passed through on_publish_cb/on_play_cb.
+        let mut buf2 = Buffer::with_capacity(256);
+        command::build_connect(
+            &mut buf2,
+            "private",
+            "rtmp://host/private",
+            "",
+            "",
+            "FMLE/3.0",
+            0,
+            0,
+        )
+        .unwrap();
+        conn.handle_command(buf2.as_slice()).unwrap();
+        assert_eq!(conn.app, "public");
+        assert_eq!(conn.state, ConnState::AppConnected);
     }
 
     #[test]

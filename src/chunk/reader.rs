@@ -280,13 +280,16 @@ pub fn chunk_read(
             stream.type0_ext_ts = ext_ts;
         }
         1 => {
-            stream.type0_timestamp = final_timestamp;
+            // fmt=1 carries a timestamp DELTA (RTMP spec 5.3.1.1), not an
+            // absolute value -- it must be added to the running timestamp.
+            stream.type0_timestamp = stream.type0_timestamp.wrapping_add(final_timestamp);
             stream.type0_msg_length = msg_length;
             stream.type0_msg_type_id = msg_type_id;
             stream.type0_ext_ts = ext_ts;
         }
         2 => {
-            stream.type0_timestamp = final_timestamp;
+            // fmt=2 also carries a timestamp DELTA, same as fmt=1.
+            stream.type0_timestamp = stream.type0_timestamp.wrapping_add(final_timestamp);
             stream.type0_ext_ts = ext_ts;
         }
         _ => {}
@@ -445,6 +448,43 @@ mod tests {
         assert_eq!(out_msg.msg_type_id, 0x08);
         assert_eq!(out_msg.msg_stream_id, 1);
         assert_eq!(len, 4);
+    }
+
+    #[test]
+    fn fmt1_and_fmt2_timestamps_accumulate_as_deltas_not_absolutes() {
+        let payload = b"first";
+        let msg = ChunkMessage {
+            csid: 5,
+            fmt: 0,
+            timestamp: 1000,
+            msg_length: payload.len() as u32,
+            msg_type_id: 0x08,
+            msg_stream_id: 1,
+            is_complete: false,
+        };
+        let mut wire = Buffer::new();
+        chunk_write(&mut wire, &msg, payload, payload.len(), 128).unwrap();
+
+        let mut reg = ChunkRegistry::new();
+        let mut out_msg = ChunkMessage::default();
+        let mut ptr = std::ptr::null();
+        let mut len = 0;
+        chunk_read(&mut wire, &mut reg, None, &mut out_msg, &mut ptr, &mut len).unwrap();
+        assert_eq!(out_msg.timestamp, 1000);
+
+        // fmt=1 header: timestamp(3)=33, length(3)=4, typeid(1)=0x08.
+        let mut fmt1 = Buffer::new();
+        fmt1.write(&[1 << 6 | 5, 0, 0, 33, 0, 0, 4, 0x08]).unwrap();
+        fmt1.write(b"next").unwrap();
+        chunk_read(&mut fmt1, &mut reg, None, &mut out_msg, &mut ptr, &mut len).unwrap();
+        assert_eq!(out_msg.timestamp, 1033, "fmt=1 timestamp must add the delta to the running total");
+
+        // fmt=2 header: timestamp(3)=33 (delta only; length/type inherited).
+        let mut fmt2 = Buffer::new();
+        fmt2.write(&[2 << 6 | 5, 0, 0, 33]).unwrap();
+        fmt2.write(b"next").unwrap();
+        chunk_read(&mut fmt2, &mut reg, None, &mut out_msg, &mut ptr, &mut len).unwrap();
+        assert_eq!(out_msg.timestamp, 1066, "fmt=2 timestamp must add the delta to the running total");
     }
 
     #[test]
