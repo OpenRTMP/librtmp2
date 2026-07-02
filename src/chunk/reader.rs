@@ -350,7 +350,7 @@ mod tests {
     }
 
     #[test]
-    fn fmt3_after_complete_message_can_start_new_message_with_inherited_header() {
+    fn fmt3_after_complete_message_is_rejected() {
         let payload = b"hello";
         let msg = ChunkMessage {
             csid: 3,
@@ -386,11 +386,7 @@ mod tests {
             &mut len,
         );
 
-        assert_eq!(result.unwrap(), 1);
-        assert!(out_msg.is_complete);
-        assert_eq!(out_msg.msg_type_id, 0x14);
-        assert_eq!(out_msg.msg_stream_id, 1);
-        assert_eq!(len, 5);
+        assert!(matches!(result, Err(ErrorCode::Chunk)));
     }
 
     #[test]
