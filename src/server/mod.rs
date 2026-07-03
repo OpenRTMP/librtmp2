@@ -105,6 +105,14 @@ impl Server {
     /// colliding IDs. Call this right after [`Server::new`] with disjoint
     /// ranges per instance to keep `conn_id` globally unique.
     pub fn set_conn_id_base(&mut self, base: u64) {
+        debug_assert!(
+            self.connections.is_empty(),
+            "set_conn_id_base should be called before accepting any connections"
+        );
+        debug_assert!(
+            base != 0,
+            "set_conn_id_base(0) would collide with Conn::new's unset conn_id sentinel"
+        );
         self.next_conn_id = base;
     }
 

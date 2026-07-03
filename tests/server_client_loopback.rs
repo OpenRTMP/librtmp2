@@ -3,7 +3,7 @@
 //! createStream + publish exchange over real sockets, and sends one video
 //! frame that the server's `on_frame_cb` should observe.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -92,5 +92,57 @@ fn server_client_publish_over_real_sockets() {
     assert!(
         FRAMES_RECEIVED.load(Ordering::SeqCst) > 0,
         "server never observed the published frame"
+    );
+}
+
+static OBSERVED_CONN_ID: AtomicU64 = AtomicU64::new(0);
+
+fn record_conn_id(conn_id: u64, _app: &str, _stream_name: &str) -> bool {
+    OBSERVED_CONN_ID.store(conn_id, Ordering::SeqCst);
+    true
+}
+
+/// `Server::set_conn_id_base` is what lets an integrator run two `Server`
+/// instances (e.g. plaintext RTMP + RTMPS) in one process without their
+/// auto-assigned `conn_id`s colliding. Verify the first connection accepted
+/// after calling it actually gets the configured base rather than 1.
+#[test]
+fn set_conn_id_base_offsets_first_assigned_conn_id() {
+    const BASE: u64 = 1 << 40;
+
+    let mut server = Server::new(plain_config()).unwrap();
+    server.set_conn_id_base(BASE);
+    server.listen("127.0.0.1:19662").unwrap();
+    server.on_publish_cb = Some(record_conn_id);
+
+    let (setup_tx, setup_rx) = std::sync::mpsc::channel();
+    let client_thread = thread::spawn(move || {
+        let mut client = Client::new();
+        let result = (|| -> std::result::Result<(), librtmp2::types::ErrorCode> {
+            client.connect("rtmp://127.0.0.1:19662/live/stream1")?;
+            client.publish()?;
+            Ok(())
+        })();
+        let _ = setup_tx.send(result.is_ok());
+        result.unwrap();
+        thread::sleep(Duration::from_millis(200));
+    });
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Ok(setup_ok) = setup_rx.try_recv() {
+            assert!(setup_ok, "client setup failed");
+        }
+        if OBSERVED_CONN_ID.load(Ordering::SeqCst) != 0 || Instant::now() >= deadline {
+            break;
+        }
+        server.poll(20).unwrap();
+    }
+
+    client_thread.join().unwrap();
+    assert_eq!(
+        OBSERVED_CONN_ID.load(Ordering::SeqCst),
+        BASE,
+        "first accepted connection should have conn_id == configured base"
     );
 }
