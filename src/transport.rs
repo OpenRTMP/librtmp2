@@ -18,6 +18,11 @@ use std::net::TcpStream;
 use std::os::unix::io::{AsRawFd, FromRawFd};
 #[cfg(feature = "tls")]
 use std::sync::Arc;
+#[cfg(feature = "tls")]
+use std::time::{Duration, Instant};
+
+#[cfg(feature = "tls")]
+const TLS_ACCEPT_TIMEOUT_SECS: u64 = 10;
 
 enum TransportInner {
     Plain(i32),
@@ -324,24 +329,32 @@ impl TlsCtx {
     pub fn accept(&self, fd: i32) -> Result<Transport> {
         match self.accept_nonblocking(fd)? {
             TlsAcceptOutcome::Complete(transport) => Ok(transport),
-            TlsAcceptOutcome::WouldBlock(mut pending) => loop {
-                let mut pfd = libc::pollfd {
-                    fd: pending.fd(),
-                    events: libc::POLLIN | libc::POLLOUT,
-                    revents: 0,
-                };
-                let rc = unsafe { libc::poll(&mut pfd, 1, 10_000) };
-                if rc == 0 {
-                    return Err(ErrorCode::Timeout);
+            TlsAcceptOutcome::WouldBlock(mut pending) => {
+                let deadline = Instant::now() + Duration::from_secs(TLS_ACCEPT_TIMEOUT_SECS);
+                loop {
+                    let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                        return Err(ErrorCode::Timeout);
+                    };
+                    let timeout_ms = remaining.as_millis().min(i32::MAX as u128) as i32;
+                    let timeout_ms = timeout_ms.max(1);
+                    let mut pfd = libc::pollfd {
+                        fd: pending.fd(),
+                        events: libc::POLLIN | libc::POLLOUT,
+                        revents: 0,
+                    };
+                    let rc = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
+                    if rc == 0 {
+                        return Err(ErrorCode::Timeout);
+                    }
+                    if rc < 0 {
+                        return Err(ErrorCode::Io);
+                    }
+                    match pending.progress()? {
+                        TlsAcceptOutcome::Complete(transport) => return Ok(transport),
+                        TlsAcceptOutcome::WouldBlock(next) => pending = next,
+                    }
                 }
-                if rc < 0 {
-                    return Err(ErrorCode::Io);
-                }
-                match pending.progress()? {
-                    TlsAcceptOutcome::Complete(transport) => return Ok(transport),
-                    TlsAcceptOutcome::WouldBlock(next) => pending = next,
-                }
-            },
+            }
         }
     }
 
