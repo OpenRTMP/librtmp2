@@ -304,7 +304,15 @@ impl Server {
                 }
                 if conn.send_frame(frame.frame_type, frame.timestamp, &frame.payload).is_err() {
                     // Player stopped reading; outbound send_buffer is full.
-                    // Drop the connection instead of letting memory grow to 64 MiB.
+                if conn.send_frame(frame.frame_type, frame.timestamp, &frame.payload).is_err() {
+                    // Player stopped reading; outbound send_buffer is full.
+                    // Drop the connection immediately so later relay frames in
+                    // this poll batch skip it and no more socket work is done.
+                    conn.relay_enabled = false;
+                    conn.needs_init_frames = false;
+                    conn.transport = None;
+                    closed.push(i);
+                }
                     closed.push(i);
                 }
             }
