@@ -129,11 +129,10 @@ impl Server {
             self.connections.is_empty(),
             "set_conn_id_base should be called before accepting any connections"
         );
-        debug_assert!(
-            base != 0,
-            "set_conn_id_base(0) would collide with Conn::new's unset conn_id sentinel"
-        );
-        self.next_conn_id = base;
+        // Enforced at runtime (not just debug_assert!): base == 0 would
+        // collide with Conn::new's unset conn_id sentinel even in release
+        // builds, silently producing duplicate conn_ids.
+        self.next_conn_id = base.max(1);
     }
 
     /// Resolve a "host:port" (default port 1935) string into a bindable address.
@@ -212,6 +211,10 @@ impl Server {
     pub fn stop(&mut self) {
         self.running = false;
         self.listeners.clear();
+        // bind_listener() only assigns server_fd when it's negative, so a
+        // later listen() call after stop() must see it reset here or it
+        // would keep exposing the now-closed fd from before this stop().
+        self.server_fd = -1;
     }
 
     /// Accept any pending inbound connections on every bound listener
