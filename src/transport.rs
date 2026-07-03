@@ -62,6 +62,33 @@ pub struct TlsCtx {
 pub(crate) struct PendingTlsAccept {
     stream: MidHandshakeSslStream<TcpStream>,
     fd: i32,
+    interest: TlsPollInterest,
+}
+
+#[cfg(feature = "tls")]
+#[derive(Clone, Copy)]
+enum TlsPollInterest {
+    Read,
+    Write,
+}
+
+#[cfg(feature = "tls")]
+impl TlsPollInterest {
+    fn poll_events(self) -> libc::c_short {
+        match self {
+            Self::Read => libc::POLLIN,
+            Self::Write => libc::POLLOUT,
+        }
+    }
+}
+
+#[cfg(feature = "tls")]
+fn tls_poll_interest(stream: &MidHandshakeSslStream<TcpStream>) -> TlsPollInterest {
+    use openssl::ssl::ErrorCode as SslErr;
+    match stream.error().code() {
+        SslErr::WANT_WRITE => TlsPollInterest::Write,
+        _ => TlsPollInterest::Read,
+    }
 }
 
 #[cfg(feature = "tls")]
@@ -310,7 +337,12 @@ impl TlsCtx {
         match self.acceptor.accept(tcp) {
             Ok(ssl) => Ok(TlsAcceptOutcome::Complete(Transport::new_tls(ssl)?)),
             Err(HandshakeError::WouldBlock(stream)) => {
-                Ok(TlsAcceptOutcome::WouldBlock(PendingTlsAccept { stream, fd }))
+                let interest = tls_poll_interest(&stream);
+                Ok(TlsAcceptOutcome::WouldBlock(PendingTlsAccept {
+                    stream,
+                    fd,
+                    interest,
+                }))
             }
             Err(_) => Err(ErrorCode::Handshake),
         }
@@ -339,7 +371,7 @@ impl TlsCtx {
                     let timeout_ms = timeout_ms.max(1);
                     let mut pfd = libc::pollfd {
                         fd: pending.fd(),
-                        events: libc::POLLIN | libc::POLLOUT,
+                        events: pending.poll_events(),
                         revents: 0,
                     };
                     let rc = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
@@ -370,12 +402,21 @@ impl PendingTlsAccept {
         self.fd
     }
 
+    pub(crate) fn poll_events(&self) -> libc::c_short {
+        self.interest.poll_events()
+    }
+
     pub(crate) fn progress(self) -> Result<TlsAcceptOutcome> {
         let fd = self.fd;
         match self.stream.handshake() {
             Ok(ssl) => Ok(TlsAcceptOutcome::Complete(Transport::new_tls(ssl)?)),
             Err(HandshakeError::WouldBlock(stream)) => {
-                Ok(TlsAcceptOutcome::WouldBlock(PendingTlsAccept { stream, fd }))
+                let interest = tls_poll_interest(&stream);
+                Ok(TlsAcceptOutcome::WouldBlock(PendingTlsAccept {
+                    stream,
+                    fd,
+                    interest,
+                }))
             }
             Err(_) => Err(ErrorCode::Handshake),
         }
