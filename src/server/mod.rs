@@ -92,6 +92,8 @@ pub struct Server {
     /// directly can continue to do so before calling `listen()`.
     pub tls_ctx: Option<TlsCtx>,
     listeners: Vec<ListenerEntry>,
+    /// Listener index to try first on the next accept pass.
+    next_listener_accept: usize,
     #[cfg(feature = "tls")]
     pending_tls: Vec<PendingTlsConnection>,
     stream_cache: HashMap<(String, String), StreamCache>,
@@ -140,6 +142,7 @@ impl Server {
             on_media_cb: None,
             tls_ctx,
             listeners: Vec::new(),
+            next_listener_accept: 0,
             #[cfg(feature = "tls")]
             pending_tls: Vec::new(),
             stream_cache: HashMap::new(),
@@ -261,6 +264,7 @@ impl Server {
     pub fn stop(&mut self) {
         self.running = false;
         self.listeners.clear();
+        self.next_listener_accept = 0;
         #[cfg(feature = "tls")]
         self.pending_tls.clear();
         // bind_listener() only assigns server_fd when it's negative, so a
@@ -374,13 +378,25 @@ impl Server {
     fn accept_new_connections(&mut self) {
         self.progress_pending_tls();
 
-        for i in 0..self.listeners.len() {
-            loop {
+        let listener_count = self.listeners.len();
+        if listener_count == 0 {
+            self.next_listener_accept = 0;
+            return;
+        }
+        self.next_listener_accept %= listener_count;
+
+        loop {
+            let mut accepted_any = false;
+
+            for offset in 0..listener_count {
                 if self.max_connections_reached() {
                     return;
                 }
+                let i = (self.next_listener_accept + offset) % listener_count;
                 match self.listeners[i].tcp.accept() {
                     Ok((stream, addr)) => {
+                        accepted_any = true;
+                        self.next_listener_accept = (i + 1) % listener_count;
                         let remote_addr = addr.to_string();
                         let tls_ctx = self.listeners[i].tls_ctx.clone();
                         if let Some(ctx) = tls_ctx.as_ref() {
@@ -413,9 +429,13 @@ impl Server {
                             self.add_connection(transport, remote_addr);
                         }
                     }
-                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
-                    Err(_) => break,
+                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                    Err(_) => {}
                 }
+            }
+
+            if !accepted_any {
+                break;
             }
         }
     }
