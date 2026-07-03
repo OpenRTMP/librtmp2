@@ -9,7 +9,11 @@ use crate::types::ErrorCode;
 use crate::types::Result;
 
 #[cfg(feature = "tls")]
-use openssl::ssl::{SslAcceptor, SslFiletype, SslMethod, SslStream};
+use openssl::ssl::{
+    HandshakeError, MidHandshakeSslStream, SslAcceptor, SslFiletype, SslMethod, SslStream,
+};
+#[cfg(feature = "tls")]
+use std::net::TcpStream;
 #[cfg(feature = "tls")]
 use std::os::unix::io::{AsRawFd, FromRawFd};
 #[cfg(feature = "tls")]
@@ -19,7 +23,7 @@ enum TransportInner {
     Plain(i32),
     #[cfg(feature = "tls")]
     Tls {
-        stream: SslStream<std::net::TcpStream>,
+        stream: SslStream<TcpStream>,
         /// Cached raw fd, used only for identification and `fd()` / `poll()`.
         fd: i32,
     },
@@ -46,6 +50,21 @@ pub struct TlsCtx {
     pub(crate) acceptor: Arc<SslAcceptor>,
 }
 
+/// A TLS handshake that could not complete immediately on a non-blocking
+/// accepted socket. The server keeps these between `poll()` calls so one slow
+/// RTMPS peer cannot block accepting plaintext peers or processing sessions.
+#[cfg(feature = "tls")]
+pub(crate) struct PendingTlsAccept {
+    stream: MidHandshakeSslStream<TcpStream>,
+    fd: i32,
+}
+
+#[cfg(feature = "tls")]
+pub(crate) enum TlsAcceptOutcome {
+    Complete(Transport),
+    WouldBlock(PendingTlsAccept),
+}
+
 fn last_errno() -> i32 {
     std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
 }
@@ -56,6 +75,18 @@ impl Transport {
         Self {
             inner: TransportInner::Plain(fd),
         }
+    }
+
+    #[cfg(feature = "tls")]
+    fn new_tls(stream: SslStream<TcpStream>) -> Result<Self> {
+        let raw_fd = stream.get_ref().as_raw_fd();
+        stream
+            .get_ref()
+            .set_nonblocking(true)
+            .map_err(|_| ErrorCode::Io)?;
+        Ok(Self {
+            inner: TransportInner::Tls { stream, fd: raw_fd },
+        })
     }
 
     /// Return the underlying file descriptor (used for `poll(2)` and as a
@@ -263,50 +294,78 @@ impl TlsCtx {
         Err(ErrorCode::Unsupported)
     }
 
+    /// Begin or finish a TLS server handshake without blocking the caller.
+    ///
+    /// If the peer has not provided enough handshake data yet, the returned
+    /// [`PendingTlsAccept`] can be stored and retried on a later `poll()` call.
+    #[cfg(feature = "tls")]
+    pub(crate) fn accept_nonblocking(&self, fd: i32) -> Result<TlsAcceptOutcome> {
+        let tcp = unsafe { TcpStream::from_raw_fd(fd) };
+        tcp.set_nonblocking(true).map_err(|_| ErrorCode::Io)?;
+        match self.acceptor.accept(tcp) {
+            Ok(ssl) => Ok(TlsAcceptOutcome::Complete(Transport::new_tls(ssl)?)),
+            Err(HandshakeError::WouldBlock(stream)) => {
+                Ok(TlsAcceptOutcome::WouldBlock(PendingTlsAccept { stream, fd }))
+            }
+            Err(_) => Err(ErrorCode::Handshake),
+        }
+    }
+
     /// Perform a TLS server handshake on the given fd and return a TLS
     /// [`Transport`] that owns the fd.
     ///
-    /// The socket is briefly set to blocking mode for the handshake (typically
-    /// 1–2 RTTs), then restored to non-blocking before returning. The method
-    /// must be called from a non-Tokio thread (the RTMP background thread).
+    /// This convenience helper may block for up to 10 seconds while waiting for
+    /// handshake readiness. The server's accept loop uses `accept_nonblocking`
+    /// instead so one stalled RTMPS peer cannot freeze other listeners.
     ///
     /// On failure the fd is closed (via the dropped `TcpStream` inside the
     /// error value) — the caller must not close it again.
     #[cfg(feature = "tls")]
     pub fn accept(&self, fd: i32) -> Result<Transport> {
-        let tcp = unsafe { std::net::TcpStream::from_raw_fd(fd) };
-        // Bound the handshake so a stalled peer cannot block the server poll
-        // loop indefinitely. 10 s covers even slow mobile connections.
-        let timeout = Some(std::time::Duration::from_secs(10));
-        tcp.set_read_timeout(timeout).map_err(|_| ErrorCode::Io)?;
-        tcp.set_write_timeout(timeout).map_err(|_| ErrorCode::Io)?;
-        tcp.set_nonblocking(false).map_err(|_| ErrorCode::Io)?;
-        match self.acceptor.accept(tcp) {
-            Ok(ssl) => {
-                let raw_fd = ssl.get_ref().as_raw_fd();
-                // Clear handshake timeouts and restore non-blocking for the
-                // steady-state poll loop.
-                ssl.get_ref().set_read_timeout(None).ok();
-                ssl.get_ref().set_write_timeout(None).ok();
-                ssl.get_ref()
-                    .set_nonblocking(true)
-                    .map_err(|_| ErrorCode::Io)?;
-                Ok(Transport {
-                    inner: TransportInner::Tls {
-                        stream: ssl,
-                        fd: raw_fd,
-                    },
-                })
-            }
-            // On any handshake failure the TcpStream inside the error is dropped,
-            // closing the fd. Return an error; the caller must not close fd again.
-            Err(_) => Err(ErrorCode::Handshake),
+        match self.accept_nonblocking(fd)? {
+            TlsAcceptOutcome::Complete(transport) => Ok(transport),
+            TlsAcceptOutcome::WouldBlock(mut pending) => loop {
+                let mut pfd = libc::pollfd {
+                    fd: pending.fd(),
+                    events: libc::POLLIN | libc::POLLOUT,
+                    revents: 0,
+                };
+                let rc = unsafe { libc::poll(&mut pfd, 1, 10_000) };
+                if rc == 0 {
+                    return Err(ErrorCode::Timeout);
+                }
+                if rc < 0 {
+                    return Err(ErrorCode::Io);
+                }
+                match pending.progress()? {
+                    TlsAcceptOutcome::Complete(transport) => return Ok(transport),
+                    TlsAcceptOutcome::WouldBlock(next) => pending = next,
+                }
+            },
         }
     }
 
     #[cfg(not(feature = "tls"))]
     pub fn accept(&self, _fd: i32) -> Result<Transport> {
         Err(ErrorCode::Unsupported)
+    }
+}
+
+#[cfg(feature = "tls")]
+impl PendingTlsAccept {
+    pub(crate) fn fd(&self) -> i32 {
+        self.fd
+    }
+
+    pub(crate) fn progress(self) -> Result<TlsAcceptOutcome> {
+        let fd = self.fd;
+        match self.stream.handshake() {
+            Ok(ssl) => Ok(TlsAcceptOutcome::Complete(Transport::new_tls(ssl)?)),
+            Err(HandshakeError::WouldBlock(stream)) => {
+                Ok(TlsAcceptOutcome::WouldBlock(PendingTlsAccept { stream, fd }))
+            }
+            Err(_) => Err(ErrorCode::Handshake),
+        }
     }
 }
 
