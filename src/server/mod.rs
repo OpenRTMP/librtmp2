@@ -77,6 +77,9 @@ pub struct Server {
     /// Cache keys created by each publisher connection (for teardown).
     publisher_cache_keys: HashMap<u64, Vec<(String, String)>>,
     next_conn_id: u64,
+    /// Set once a connection ID has been handed out. This prevents resetting
+    /// the counter later and reusing IDs after earlier connections were closed.
+    conn_ids_issued: bool,
     /// Hold media relay until the integrator enables it per connection.
     pub defer_media_relay: bool,
 }
@@ -119,6 +122,7 @@ impl Server {
             stream_cache: HashMap::new(),
             publisher_cache_keys: HashMap::new(),
             next_conn_id: 1,
+            conn_ids_issued: false,
             defer_media_relay: false,
         })
     }
@@ -131,15 +135,15 @@ impl Server {
     /// `Server` instance for a second listener — one `Server` with multiple
     /// listeners numbers all of its connections from one counter already, so
     /// this is unnecessary in that case. Call right after [`Server::new`].
+    ///
+    /// Panics if `base` is zero or if any connection ID has already been issued.
     pub fn set_conn_id_base(&mut self, base: u64) {
-        debug_assert!(
-            self.connections.is_empty(),
-            "set_conn_id_base should be called before accepting any connections"
+        assert!(base != 0, "conn_id base must be non-zero");
+        assert!(
+            !self.conn_ids_issued && self.connections.is_empty(),
+            "set_conn_id_base must be called before accepting any connections"
         );
-        // Enforced at runtime (not just debug_assert!): base == 0 would
-        // collide with Conn::new's unset conn_id sentinel even in release
-        // builds, silently producing duplicate conn_ids.
-        self.next_conn_id = base.max(1);
+        self.next_conn_id = base;
     }
 
     /// Resolve a "host:port" (default port 1935) string into a bindable address.
@@ -267,6 +271,7 @@ impl Server {
                         conn.client_fd = conn_fd;
                         conn.conn_id = self.next_conn_id;
                         self.next_conn_id = self.next_conn_id.saturating_add(1);
+                        self.conn_ids_issued = true;
                         conn.remote_addr = addr.to_string();
                         conn.defer_media_relay = self.defer_media_relay;
                         conn.transport = Some(transport);
