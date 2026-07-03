@@ -48,6 +48,13 @@ pub struct Server {
     pub config: ServerConfig,
     pub resource_limits: ResourceLimits,
     pub running: bool,
+    /// Identifies *one* bound listener (whichever was bound first) for
+    /// diagnostics — it is not updated as later [`Server::listen`] /
+    /// [`Server::listen_tls`] calls add more listeners. Do not register just
+    /// this fd with an external epoll/select readiness loop: a connection
+    /// arriving on a later listener would never wake it. [`Server::poll`]
+    /// already checks every bound listener internally, so drive it on a
+    /// timer instead of gating it on this fd's readiness.
     pub server_fd: i32,
     pub connections: Vec<Conn>,
     /// Fired for every audio/video frame on every connection.
