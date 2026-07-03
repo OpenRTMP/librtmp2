@@ -27,14 +27,29 @@ struct StreamCache {
     last_keyframe: Option<(u32, Vec<u8>)>,
 }
 
+/// One bound listener socket plus the TLS context (if any) new connections
+/// accepted on it should use. A `Server` holds one of these per call to
+/// [`Server::listen`] / [`Server::listen_tls`].
+struct ListenerEntry {
+    tcp: TcpListener,
+    tls_ctx: Option<TlsCtx>,
+}
+
 /// Server object.
+///
+/// A single `Server` can bind more than one listener (see [`Server::listen`]
+/// and [`Server::listen_tls`]) — e.g. plaintext RTMP on one port and RTMPS on
+/// another. All listeners share the same `connections`, media relay, and
+/// stream cache, so a publisher on one listener is relayed to players on any
+/// other listener exactly as if they shared a port. Running two *separate*
+/// `Server` instances instead would silently split the relay: each instance
+/// only relays among its own `connections`.
 pub struct Server {
     pub config: ServerConfig,
     pub resource_limits: ResourceLimits,
     pub running: bool,
     pub server_fd: i32,
     pub connections: Vec<Conn>,
-    pub tls_ctx: Option<TlsCtx>,
     /// Fired for every audio/video frame on every connection.
     pub on_frame_cb: Option<fn(&Frame)>,
     /// Fired when a client completes the AMF `connect` exchange.
@@ -45,7 +60,12 @@ pub struct Server {
     pub on_play_cb: Option<fn(conn_id: u64, app: &str, stream_name: &str) -> bool>,
     /// When set, must return true before publisher media is queued for relay.
     pub on_media_cb: Option<fn(u64, FrameType, Option<&str>) -> bool>,
-    listener: Option<TcpListener>,
+    listeners: Vec<ListenerEntry>,
+    /// TLS context built from `config` at construction time; used by plain
+    /// [`Server::listen`] calls (backward-compatible with the single-listener,
+    /// config-driven TLS setup). [`Server::listen_tls`] carries its own
+    /// explicit context instead and ignores this one.
+    default_tls_ctx: Option<TlsCtx>,
     stream_cache: HashMap<(String, String), StreamCache>,
     /// Cache keys created by each publisher connection (for teardown).
     publisher_cache_keys: HashMap<u64, Vec<(String, String)>>,
@@ -57,7 +77,7 @@ pub struct Server {
 impl Server {
     /// Create a new server.
     pub fn new(config: ServerConfig) -> Result<Self> {
-        let tls_ctx = if config.tls_enabled != 0 {
+        let default_tls_ctx = if config.tls_enabled != 0 {
             if config.tls_cert_file.is_null() || config.tls_key_file.is_null() {
                 return Err(ErrorCode::Internal);
             }
@@ -82,13 +102,13 @@ impl Server {
             running: false,
             server_fd: -1,
             connections: Vec::new(),
-            tls_ctx,
             on_frame_cb: None,
             on_connect_cb: None,
             on_publish_cb: None,
             on_play_cb: None,
             on_media_cb: None,
-            listener: None,
+            listeners: Vec::new(),
+            default_tls_ctx,
             stream_cache: HashMap::new(),
             publisher_cache_keys: HashMap::new(),
             next_conn_id: 1,
@@ -98,12 +118,12 @@ impl Server {
 
     /// Set the starting value used for auto-generated connection IDs.
     ///
-    /// Each `Server` instance numbers its own connections starting at 1, so
-    /// two instances running side by side in the same process (e.g. a
-    /// plaintext RTMP listener and an RTMPS listener sharing one integrator
-    /// callback/state layer keyed by `conn_id`) would otherwise hand out
-    /// colliding IDs. Call this right after [`Server::new`] with disjoint
-    /// ranges per instance to keep `conn_id` globally unique.
+    /// Only needed when integrating with something *outside* this crate that
+    /// numbers connections independently and must not collide with this
+    /// `Server`'s IDs. Prefer [`Server::listen_tls`] over running a second
+    /// `Server` instance for a second listener — one `Server` with multiple
+    /// listeners numbers all of its connections from one counter already, so
+    /// this is unnecessary in that case. Call right after [`Server::new`].
     pub fn set_conn_id_base(&mut self, base: u64) {
         debug_assert!(
             self.connections.is_empty(),
@@ -116,25 +136,62 @@ impl Server {
         self.next_conn_id = base;
     }
 
-    /// Start listening on the given address ("host:port", default port 1935).
-    pub fn listen(&mut self, bind_addr: &str) -> Result<()> {
+    /// Resolve a "host:port" (default port 1935) string into a bindable address.
+    fn resolve_bind_addr(bind_addr: &str) -> Result<String> {
         let mut host = String::new();
         let mut port = String::new();
         net::split_host_port(bind_addr, &mut host, &mut port, "1935")?;
-        let addr = if host.is_empty() {
+        Ok(if host.is_empty() {
             format!("0.0.0.0:{port}")
         } else if host.contains(':') {
             format!("[{host}]:{port}")
         } else {
             format!("{host}:{port}")
-        };
+        })
+    }
 
-        let listener = TcpListener::bind(&addr).map_err(|_| ErrorCode::Io)?;
+    fn bind_listener(&mut self, addr: &str) -> Result<TcpListener> {
+        let listener = TcpListener::bind(addr).map_err(|_| ErrorCode::Io)?;
         listener.set_nonblocking(true).map_err(|_| ErrorCode::Io)?;
-
-        self.server_fd = listener.as_raw_fd();
-        self.listener = Some(listener);
+        if self.server_fd < 0 {
+            self.server_fd = listener.as_raw_fd();
+        }
         self.running = true;
+        Ok(listener)
+    }
+
+    /// Start listening on the given address ("host:port", default port 1935).
+    ///
+    /// Uses the TLS/plaintext mode selected at construction time via
+    /// [`ServerConfig::tls_enabled`]. Can be called more than once (e.g. to
+    /// also bind an IPv6 address); every bound listener shares this `Server`'s
+    /// connections, media relay, and stream cache. To add a listener with an
+    /// *independent* TLS certificate — e.g. plaintext RTMP plus RTMPS on a
+    /// second port — use [`Server::listen_tls`] instead.
+    pub fn listen(&mut self, bind_addr: &str) -> Result<()> {
+        let addr = Self::resolve_bind_addr(bind_addr)?;
+        let tcp = self.bind_listener(&addr)?;
+        self.listeners.push(ListenerEntry {
+            tcp,
+            tls_ctx: self.default_tls_ctx.clone(),
+        });
+        Ok(())
+    }
+
+    /// Start an additional RTMPS listener with its own certificate/key,
+    /// independent of the TLS/plaintext mode passed to [`Server::new`].
+    ///
+    /// Connections accepted here land in the same `connections` list as every
+    /// other listener on this `Server`, so a publisher here is relayed to
+    /// players on any other listener (plaintext or TLS) and vice versa.
+    pub fn listen_tls(&mut self, bind_addr: &str, cert_file: &str, key_file: &str) -> Result<()> {
+        let ctx = TlsCtx::new_server(cert_file, key_file)?;
+        let addr = Self::resolve_bind_addr(bind_addr)?;
+        let tcp = self.bind_listener(&addr)?;
+        self.listeners.push(ListenerEntry {
+            tcp,
+            tls_ctx: Some(ctx),
+        });
         Ok(())
     }
 
@@ -154,61 +211,65 @@ impl Server {
     /// Stop the server.
     pub fn stop(&mut self) {
         self.running = false;
-        self.listener = None;
+        self.listeners.clear();
     }
 
-    /// Accept any pending inbound connections (non-blocking).
+    /// Accept any pending inbound connections on every bound listener
+    /// (non-blocking accept per listener; a TLS listener's handshake still
+    /// blocks this thread for up to the handshake timeout — see
+    /// [`crate::transport::TlsCtx::accept`]).
     fn accept_new_connections(&mut self) {
-        let Some(listener) = self.listener.as_ref() else {
-            return;
-        };
-        loop {
-            if self.config.max_connections > 0
-                && self.connections.len() >= self.config.max_connections as usize
-            {
-                break;
-            }
-            match listener.accept() {
-                Ok((stream, addr)) => {
-                    let transport = if let Some(ref ctx) = self.tls_ctx {
-                        // TlsCtx::accept() takes ownership of the fd, sets the socket
-                        // to blocking for the handshake, then restores non-blocking.
-                        // On error the fd is already closed inside accept(); skip the conn.
-                        match ctx.accept(stream.into_raw_fd()) {
-                            Ok(t) => t,
-                            Err(_) => continue,
-                        }
-                    } else {
-                        let _ = stream.set_nonblocking(true);
-                        Transport::new_plain(stream.into_raw_fd())
-                    };
-                    let conn_fd = transport.fd();
-                    let mut conn = Conn::new();
-                    conn.chunk_reg.max_reassembly_bytes =
-                        self.resource_limits.max_reassembly_bytes;
-                    conn.max_pending_relay_bytes = self.resource_limits.max_pending_relay_bytes;
-                    // Outbound chunk size only: peers start sending at the RTMP
-                    // default (128) until SetChunkSize is negotiated.
-                    conn.chunk_size = if self.config.chunk_size > 0 {
-                        self.config.chunk_size as u32
-                    } else {
-                        DEFAULT_CHUNK_SIZE
-                    };
-                    conn.client_fd = conn_fd;
-                    conn.conn_id = self.next_conn_id;
-                    self.next_conn_id = self.next_conn_id.saturating_add(1);
-                    conn.remote_addr = addr.to_string();
-                    conn.defer_media_relay = self.defer_media_relay;
-                    conn.transport = Some(transport);
-                    conn.on_frame_cb = self.on_frame_cb;
-                    conn.on_media_cb = self.on_media_cb;
-                    conn.on_connect_cb = self.on_connect_cb;
-                    conn.on_publish_cb = self.on_publish_cb;
-                    conn.on_play_cb = self.on_play_cb;
-                    self.connections.push(conn);
+        for i in 0..self.listeners.len() {
+            loop {
+                if self.config.max_connections > 0
+                    && self.connections.len() >= self.config.max_connections as usize
+                {
+                    return;
                 }
-                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
-                Err(_) => break,
+                match self.listeners[i].tcp.accept() {
+                    Ok((stream, addr)) => {
+                        let tls_ctx = self.listeners[i].tls_ctx.clone();
+                        let transport = if let Some(ctx) = tls_ctx.as_ref() {
+                            // TlsCtx::accept() takes ownership of the fd, sets the socket
+                            // to blocking for the handshake, then restores non-blocking.
+                            // On error the fd is already closed inside accept(); skip the conn.
+                            match ctx.accept(stream.into_raw_fd()) {
+                                Ok(t) => t,
+                                Err(_) => continue,
+                            }
+                        } else {
+                            let _ = stream.set_nonblocking(true);
+                            Transport::new_plain(stream.into_raw_fd())
+                        };
+                        let conn_fd = transport.fd();
+                        let mut conn = Conn::new();
+                        conn.chunk_reg.max_reassembly_bytes =
+                            self.resource_limits.max_reassembly_bytes;
+                        conn.max_pending_relay_bytes =
+                            self.resource_limits.max_pending_relay_bytes;
+                        // Outbound chunk size only: peers start sending at the RTMP
+                        // default (128) until SetChunkSize is negotiated.
+                        conn.chunk_size = if self.config.chunk_size > 0 {
+                            self.config.chunk_size as u32
+                        } else {
+                            DEFAULT_CHUNK_SIZE
+                        };
+                        conn.client_fd = conn_fd;
+                        conn.conn_id = self.next_conn_id;
+                        self.next_conn_id = self.next_conn_id.saturating_add(1);
+                        conn.remote_addr = addr.to_string();
+                        conn.defer_media_relay = self.defer_media_relay;
+                        conn.transport = Some(transport);
+                        conn.on_frame_cb = self.on_frame_cb;
+                        conn.on_media_cb = self.on_media_cb;
+                        conn.on_connect_cb = self.on_connect_cb;
+                        conn.on_publish_cb = self.on_publish_cb;
+                        conn.on_play_cb = self.on_play_cb;
+                        self.connections.push(conn);
+                    }
+                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                    Err(_) => break,
+                }
             }
         }
     }

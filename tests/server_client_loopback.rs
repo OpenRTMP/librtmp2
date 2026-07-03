@@ -146,3 +146,89 @@ fn set_conn_id_base_offsets_first_assigned_conn_id() {
         "first accepted connection should have conn_id == configured base"
     );
 }
+
+static PLAYER_FRAMES_RECEIVED: AtomicUsize = AtomicUsize::new(0);
+
+fn on_player_frame(frame: &Frame) {
+    if frame.size as usize == SENT_FRAME_LEN {
+        PLAYER_FRAMES_RECEIVED.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+/// A publisher on one listener and a player on a *different* listener of the
+/// same `Server` must still relay to each other — the whole point of binding
+/// multiple listeners (e.g. plaintext RTMP + RTMPS) on one `Server` instead
+/// of running two separate `Server`s is that they share one relay/connection
+/// list. Running two separate `Server`s instead would silently drop this
+/// cross-listener case, since each would only relay within its own
+/// `connections`.
+#[test]
+fn publisher_and_player_relay_across_different_listeners() {
+    let mut server = Server::new(plain_config()).unwrap();
+    server.listen("127.0.0.1:19663").unwrap();
+    server.listen("127.0.0.1:19664").unwrap();
+
+    let (setup_tx, setup_rx) = std::sync::mpsc::channel();
+    let client_thread = thread::spawn(move || {
+        let result = (|| -> std::result::Result<(), librtmp2::types::ErrorCode> {
+            let mut publisher = Client::new();
+            publisher.connect("rtmp://127.0.0.1:19663/live/relaytest")?;
+            publisher.publish()?;
+
+            let mut player = Client::new();
+            player.on_frame_cb = Some(on_player_frame);
+            player.connect("rtmp://127.0.0.1:19664/live/relaytest")?;
+            player.play()?;
+
+            // Give the server a moment to process the play authorization and
+            // enable relay for this connection before the frame is sent.
+            thread::sleep(Duration::from_millis(100));
+
+            let data = [SENT_FRAME_BYTE; SENT_FRAME_LEN];
+            let frame = Frame {
+                frame_type: FrameType::Video,
+                timestamp: 0,
+                composition_time: 0,
+                size: data.len() as u32,
+                data: data.as_ptr(),
+                audio_codec: AudioCodec::default(),
+                audio_sample_rate: 0,
+                audio_channels: 0,
+                audio_bit_depth: 0,
+                audio_fourcc: FourCc::default(),
+                video_codec: VideoCodec::H264,
+                video_fourcc: FourCc::default(),
+                video_frame_type: 1,
+                is_metadata: 0,
+            };
+            publisher.send_frame(&frame)?;
+
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while PLAYER_FRAMES_RECEIVED.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
+                player.poll(50)?;
+            }
+            Ok(())
+        })();
+        let _ = setup_tx.send(result.is_ok());
+        result.unwrap();
+    });
+
+    let deadline = Instant::now() + Duration::from_secs(6);
+    loop {
+        if let Ok(setup_ok) = setup_rx.try_recv() {
+            assert!(setup_ok, "publisher/player setup failed");
+            break;
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+        server.poll(20).unwrap();
+    }
+
+    client_thread.join().unwrap();
+    assert!(
+        PLAYER_FRAMES_RECEIVED.load(Ordering::SeqCst) > 0,
+        "player on a different listener never received the publisher's frame \
+         \u{2014} relay must be shared across every listener on one Server"
+    );
+}

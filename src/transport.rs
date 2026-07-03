@@ -36,6 +36,11 @@ pub struct Transport {
 
 /// Server-side TLS context: holds the validated SSL acceptor shared across
 /// connections.
+///
+/// Cheaply `Clone`: it's just an `Arc` bump, so a `Server` with multiple TLS
+/// listeners can hand each accepted connection its own owned handle without
+/// re-validating the certificate/key per listener.
+#[derive(Clone)]
 pub struct TlsCtx {
     #[cfg(feature = "tls")]
     pub(crate) acceptor: Arc<SslAcceptor>,
