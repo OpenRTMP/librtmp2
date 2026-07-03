@@ -5,6 +5,8 @@
 use std::collections::HashMap;
 use std::net::TcpListener;
 use std::os::unix::io::{AsRawFd, IntoRawFd};
+#[cfg(feature = "tls")]
+use std::time::{Duration, Instant};
 
 use crate::chunk::state::DEFAULT_CHUNK_SIZE;
 use crate::net;
@@ -19,6 +21,16 @@ const MAX_STREAM_CACHE_ENTRIES: usize = 1024;
 
 /// Maximum total bytes retained across all stream_cache entries server-wide.
 const MAX_STREAM_CACHE_BYTES: usize = 64 * 1024 * 1024;
+
+/// Maximum number of incomplete TLS handshakes retained when `max_connections`
+/// is unlimited. When `max_connections` is set, active connections and pending
+/// handshakes share that configured cap instead.
+#[cfg(feature = "tls")]
+const MAX_PENDING_TLS_HANDSHAKES: usize = 128;
+
+/// Drop TLS handshakes that do not complete within this overall budget.
+#[cfg(feature = "tls")]
+const TLS_HANDSHAKE_TIMEOUT_SECS: u64 = 10;
 
 /// Cached codec headers and last keyframe for a (app, stream_name) pair.
 /// Replayed to players that join after the publisher has already sent headers.
@@ -41,6 +53,7 @@ struct ListenerEntry {
 struct PendingTlsConnection {
     handshake: PendingTlsAccept,
     remote_addr: String,
+    deadline: Instant,
 }
 
 /// Server object.
@@ -261,6 +274,21 @@ impl Server {
             && self.connections.len() >= self.config.max_connections as usize
     }
 
+    #[cfg(feature = "tls")]
+    fn tls_handshake_deadline() -> Instant {
+        Instant::now() + Duration::from_secs(TLS_HANDSHAKE_TIMEOUT_SECS)
+    }
+
+    #[cfg(feature = "tls")]
+    fn pending_tls_limit_reached(&self) -> bool {
+        let pending = self.pending_tls.len();
+        if pending >= MAX_PENDING_TLS_HANDSHAKES {
+            return true;
+        }
+        self.config.max_connections > 0
+            && self.connections.len() + pending >= self.config.max_connections as usize
+    }
+
     fn allocate_conn_id(&mut self) -> Option<u64> {
         let conn_id = self.next_conn_id;
         if conn_id == 0 || conn_id == u64::MAX {
@@ -307,7 +335,11 @@ impl Server {
     #[cfg(feature = "tls")]
     fn progress_pending_tls(&mut self) {
         let pending = std::mem::take(&mut self.pending_tls);
+        let now = Instant::now();
         for pending_conn in pending {
+            if now >= pending_conn.deadline {
+                continue;
+            }
             if self.max_connections_reached() {
                 self.pending_tls.push(pending_conn);
                 continue;
@@ -318,10 +350,13 @@ impl Server {
                     self.add_connection(transport, pending_conn.remote_addr);
                 }
                 Ok(TlsAcceptOutcome::WouldBlock(handshake)) => {
-                    self.pending_tls.push(PendingTlsConnection {
-                        handshake,
-                        remote_addr: pending_conn.remote_addr,
-                    });
+                    if Instant::now() < pending_conn.deadline {
+                        self.pending_tls.push(PendingTlsConnection {
+                            handshake,
+                            remote_addr: pending_conn.remote_addr,
+                            deadline: pending_conn.deadline,
+                        });
+                    }
                 }
                 Err(_) => {}
             }
@@ -356,10 +391,13 @@ impl Server {
                                         self.add_connection(transport, remote_addr);
                                     }
                                     Ok(TlsAcceptOutcome::WouldBlock(handshake)) => {
-                                        self.pending_tls.push(PendingTlsConnection {
-                                            handshake,
-                                            remote_addr,
-                                        });
+                                        if !self.pending_tls_limit_reached() {
+                                            self.pending_tls.push(PendingTlsConnection {
+                                                handshake,
+                                                remote_addr,
+                                                deadline: Self::tls_handshake_deadline(),
+                                            });
+                                        }
                                     }
                                     Err(_) => {}
                                 }
