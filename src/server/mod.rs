@@ -174,6 +174,11 @@ impl Server {
             !self.conn_ids_issued && self.connections.is_empty(),
             "set_conn_id_base must be called before accepting any connections"
         );
+        #[cfg(feature = "tls")]
+        assert!(
+            self.pending_tls.is_empty(),
+            "set_conn_id_base must be called before accepting any connections"
+        );
         self.next_conn_id = base;
     }
 
@@ -286,11 +291,11 @@ impl Server {
     #[cfg(feature = "tls")]
     fn pending_tls_limit_reached(&self) -> bool {
         let pending = self.pending_tls.len();
-        if pending >= MAX_PENDING_TLS_HANDSHAKES {
-            return true;
+        if self.config.max_connections > 0 {
+            self.connections.len() + pending >= self.config.max_connections as usize
+        } else {
+            pending >= MAX_PENDING_TLS_HANDSHAKES
         }
-        self.config.max_connections > 0
-            && self.connections.len() + pending >= self.config.max_connections as usize
     }
 
     fn allocate_conn_id(&mut self) -> Option<u64> {
