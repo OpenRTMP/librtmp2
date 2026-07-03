@@ -292,7 +292,7 @@ impl Server {
             if !abandoned_this_batch.contains(&abandon_key) {
                 self.cache_relay_frame(frame);
             }
-            for conn in self.connections.iter_mut() {
+            for (i, conn) in self.connections.iter_mut().enumerate() {
                 let is_player = conn.relay_enabled
                     && conn
                         .current_stream
@@ -302,7 +302,11 @@ impl Server {
                 if !is_player || conn.app != frame.app {
                     continue;
                 }
-                let _ = conn.send_frame(frame.frame_type, frame.timestamp, &frame.payload);
+                if conn.send_frame(frame.frame_type, frame.timestamp, &frame.payload).is_err() {
+                    // Player stopped reading; outbound send_buffer is full.
+                    // Drop the connection instead of letting memory grow to 64 MiB.
+                    closed.push(i);
+                }
             }
         }
 

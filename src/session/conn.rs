@@ -25,6 +25,10 @@ const PEER_BANDWIDTH_DYNAMIC: u8 = 2;
 const PING_INTERVAL: Duration = Duration::from_secs(5);
 const PING_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_PENDING_PINGS: usize = 4;
+/// Cap inbound Ping-Request reflections per connection to prevent trivial
+/// outbound bandwidth/CPU amplification from unauthenticated peers.
+const MAX_INBOUND_PING_RESPONSES: usize = 8;
+const INBOUND_PING_WINDOW: Duration = Duration::from_secs(1);
 
 pub struct RelayFrame {
     pub frame_type: FrameType,
@@ -90,6 +94,8 @@ pub struct Conn {
     pending_pings: HashMap<u32, Instant>,
     last_ping_sent: Option<Instant>,
     next_ping_token: u32,
+    inbound_ping_responses: usize,
+    inbound_ping_window_start: Option<Instant>,
 }
 
 impl Conn {
@@ -136,6 +142,8 @@ impl Conn {
             pending_pings: HashMap::new(),
             last_ping_sent: None,
             next_ping_token: 1,
+            inbound_ping_responses: 0,
+            inbound_ping_window_start: None,
         }
     }
 
@@ -474,6 +482,19 @@ impl Conn {
                 }
             }
             UCTRL_PING_REQUEST => {
+                let now = Instant::now();
+                if let Some(start) = self.inbound_ping_window_start {
+                    if now.duration_since(start) >= INBOUND_PING_WINDOW {
+                        self.inbound_ping_window_start = Some(now);
+                        self.inbound_ping_responses = 0;
+                    }
+                } else {
+                    self.inbound_ping_window_start = Some(now);
+                }
+                if self.inbound_ping_responses >= MAX_INBOUND_PING_RESPONSES {
+                    return Err(ErrorCode::Protocol);
+                }
+                self.inbound_ping_responses += 1;
                 self.send_user_control_ping_response(param1)?;
             }
             _ => {}
@@ -1060,5 +1081,24 @@ mod tests {
         assert_eq!(conn.chunk_size, 4096);
         assert_eq!(conn.active_chunk_size, DEFAULT_CHUNK_SIZE);
         assert_eq!(conn.chunk_reg.default_chunk_size, 8192);
+    }
+
+    #[test]
+    fn inbound_ping_requests_are_rate_limited() {
+        let mut conn = Conn::new();
+        conn.client_fd = 0;
+        conn.transport = None;
+        let mut ping = |token: u32| {
+            let mut buf = Buffer::with_capacity(6);
+            control::write_user_control_ping_request(&mut buf, token).unwrap();
+            conn.handle_user_control(buf.as_slice())
+        };
+        for token in 0..8 {
+            assert!(ping(token).is_ok(), "token {token} should be accepted");
+        }
+        assert!(
+            matches!(ping(99), Err(ErrorCode::Protocol)),
+            "9th ping in one second must be rejected"
+        );
     }
 }

@@ -565,4 +565,75 @@ mod tests {
             Err(ErrorCode::Chunk)
         ));
     }
+
+    #[test]
+    fn tiny_chunk_size_multiplies_chunk_read_iterations() {
+        let payload = vec![0xAB_u8; 512];
+        let msg = ChunkMessage {
+            csid: 4,
+            fmt: 0,
+            timestamp: 0,
+            msg_length: payload.len() as u32,
+            msg_type_id: 0x09,
+            msg_stream_id: 1,
+            is_complete: false,
+        };
+
+        let mut wire_small = Buffer::new();
+        chunk_write(&mut wire_small, &msg, &payload, payload.len(), 1).unwrap();
+        let mut wire_default = Buffer::new();
+        chunk_write(&mut wire_default, &msg, &payload, payload.len(), 128).unwrap();
+
+        let mut reg_small = ChunkRegistry::new();
+        reg_small.set_all_chunk_size(1);
+        let mut reg_default = ChunkRegistry::new();
+
+        let mut iterations_small = 0usize;
+        let mut out_msg = ChunkMessage::default();
+        let mut ptr = std::ptr::null();
+        let mut len = 0usize;
+        loop {
+            let rc = chunk_read(
+                &mut wire_small,
+                &mut reg_small,
+                None,
+                &mut out_msg,
+                &mut ptr,
+                &mut len,
+            )
+            .unwrap();
+            if rc == 1 {
+                break;
+            }
+            iterations_small += 1;
+            if wire_small.available() == 0 {
+                panic!("incomplete reassembly at chunk_size=1");
+            }
+        }
+
+        let mut iterations_default = 0usize;
+        loop {
+            let rc = chunk_read(
+                &mut wire_default,
+                &mut reg_default,
+                None,
+                &mut out_msg,
+                &mut ptr,
+                &mut len,
+            )
+            .unwrap();
+            if rc == 1 {
+                break;
+            }
+            iterations_default += 1;
+            if wire_default.available() == 0 {
+                panic!("incomplete reassembly at chunk_size=128");
+            }
+        }
+
+        assert!(
+            iterations_small > iterations_default * 10,
+            "chunk_size=1 took {iterations_small} iterations vs {iterations_default} at 128"
+        );
+    }
 }

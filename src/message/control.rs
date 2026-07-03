@@ -24,7 +24,10 @@ pub const UCTRL_STREAM_IS_RECORDED: u16 = 0x04;
 pub const UCTRL_PING_REQUEST: u16 = 0x06;
 pub const UCTRL_PING_RESPONSE: u16 = 0x07;
 
-const MIN_CHUNK_SIZE: u32 = 1;
+/// Minimum inbound chunk size accepted from peers. Values below the RTMP default
+/// (128) enable extreme per-byte allocation/parsing amplification during
+/// message reassembly (a 4 MiB message becomes millions of chunk iterations).
+const MIN_CHUNK_SIZE: u32 = 128;
 const MAX_CHUNK_SIZE: u32 = 0xFFFFFF;
 /// Upper bound for peer-requested inbound chunk sizes (memory churn protection).
 pub const MAX_INBOUND_CHUNK_SIZE: u32 = 65536;
@@ -210,6 +213,8 @@ mod tests {
     #[test]
     fn set_chunk_size_rejects_zero_and_clamps_large_values() {
         assert!(read_set_chunk_size(&[0, 0, 0, 0]).is_err());
+        assert!(read_set_chunk_size(&1u32.to_be_bytes()).is_err());
+        assert_eq!(read_set_chunk_size(&128u32.to_be_bytes()).unwrap(), 128);
         assert_eq!(
             read_set_chunk_size(&[0xFF, 0xFF, 0xFF, 0xFF]).unwrap(),
             MAX_INBOUND_CHUNK_SIZE
