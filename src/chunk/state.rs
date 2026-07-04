@@ -38,6 +38,9 @@ pub struct ChunkStream {
     pub reassembly_bytes_read: u32,
     /// buffer for reassembling partial messages
     pub reassembly_buf: Buffer,
+    /// Last completed payload on this CSID. Copied before reassembly_buf is
+    /// reset/shrunk so callers can read via the returned pointer safely.
+    pub last_payload: Vec<u8>,
     pub in_use: bool,
 }
 
@@ -54,13 +57,14 @@ impl Default for ChunkStream {
             last_delta: 0,
             reassembly_bytes_read: 0,
             reassembly_buf: Buffer::new(),
+            last_payload: Vec::new(),
             in_use: false,
         }
     }
 }
 
 impl ChunkStream {
-    /// Reset stream state, keeping the reassembly buffer allocated.
+    /// Reset stream state and release retained payload/reassembly allocations.
     pub fn reset(&mut self, default_chunk_size: u32) {
         self.type0_timestamp = 0;
         self.type0_msg_length = 0;
@@ -70,6 +74,8 @@ impl ChunkStream {
         self.last_delta = 0;
         self.reassembly_bytes_read = 0;
         self.reassembly_buf.reset();
+        self.last_payload.clear();
+        self.last_payload.shrink_to_fit();
         self.chunk_size = default_chunk_size;
     }
 }
@@ -210,5 +216,64 @@ mod tests {
         assert!(reg.get_or_create(1).is_ok());
         assert!(reg.get_or_create(2).is_ok());
         assert!(matches!(reg.get_or_create(3), Err(ErrorCode::Chunk)));
+    }
+
+    #[test]
+    fn completed_messages_do_not_pin_multi_megabyte_reassembly_capacity() {
+        use crate::chunk::reader::{chunk_read, ChunkMessage};
+        use crate::chunk::writer::chunk_write;
+
+        let payload = vec![0xAB_u8; 256 * 1024];
+        let mut reg = ChunkRegistry::new();
+        reg.max_active_csids = 4;
+
+        for csid in 3..7u32 {
+            let msg = ChunkMessage {
+                csid,
+                fmt: 0,
+                timestamp: 0,
+                msg_length: payload.len() as u32,
+                msg_type_id: 0x09,
+                msg_stream_id: 1,
+                is_complete: false,
+            };
+            let mut wire = Buffer::new();
+            chunk_write(&mut wire, &msg, &payload, payload.len(), 128).unwrap();
+
+            let mut out_msg = ChunkMessage::default();
+            let mut ptr = std::ptr::null();
+            let mut len = 0;
+            loop {
+                let rc = chunk_read(&mut wire, &mut reg, None, &mut out_msg, &mut ptr, &mut len)
+                    .unwrap();
+                if rc == 1 {
+                    break;
+                }
+                assert_eq!(rc, 0);
+            }
+        }
+
+        let retained: usize = reg
+            .streams
+            .iter()
+            .filter(|s| s.in_use)
+            .map(|s| s.reassembly_buf.capacity())
+            .sum();
+        assert!(
+            retained <= 4 * crate::buffer::BUFFER_RESET_CAPACITY,
+            "retained {retained} bytes of reassembly capacity"
+        );
+    }
+
+    #[test]
+    fn reset_releases_last_payload_capacity() {
+        let mut stream = ChunkStream::default();
+        stream.last_payload = vec![0u8; 256 * 1024];
+        assert!(stream.last_payload.capacity() >= 256 * 1024);
+
+        stream.reset(DEFAULT_CHUNK_SIZE);
+
+        assert!(stream.last_payload.is_empty());
+        assert_eq!(stream.last_payload.capacity(), 0);
     }
 }

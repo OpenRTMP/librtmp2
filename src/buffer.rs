@@ -8,7 +8,10 @@ use crate::types::Result;
 /// Maximum buffer size: 64 MB
 pub const BUFFER_MAX_SIZE: usize = 64 * 1024 * 1024;
 /// Initial buffer capacity
-const BUFFER_INITIAL_SIZE: usize = 4096;
+pub const BUFFER_INITIAL_SIZE: usize = 4096;
+/// Capacity retained after [`Buffer::reset`] so short-lived large messages
+/// cannot leave multi-megabyte `Vec` allocations pinned for the connection.
+pub const BUFFER_RESET_CAPACITY: usize = BUFFER_INITIAL_SIZE;
 /// Growth factor
 const BUFFER_GROW_FACTOR: usize = 2;
 
@@ -117,10 +120,19 @@ impl Buffer {
         &self.data[self.read_pos..self.size]
     }
 
+    /// Total allocated capacity (logical size plus spare write space).
+    pub fn capacity(&self) -> usize {
+        self.data.len()
+    }
+
     /// Reset the buffer to empty.
     pub fn reset(&mut self) {
         self.size = 0;
         self.read_pos = 0;
+        if self.owned && self.data.len() > BUFFER_RESET_CAPACITY {
+            self.data.truncate(BUFFER_RESET_CAPACITY);
+            self.data.shrink_to_fit();
+        }
     }
 
     /// Drain (skip) `len` bytes from the read position.
@@ -258,6 +270,16 @@ mod tests {
         buf.reset();
         assert_eq!(buf.available(), 0);
         assert_eq!(buf.peek(), b"");
+    }
+
+    #[test]
+    fn reset_shrinks_oversized_capacity() {
+        let mut buf = Buffer::new();
+        buf.write(&vec![0u8; 1024 * 1024]).unwrap();
+        assert!(buf.capacity() >= 1024 * 1024);
+        buf.reset();
+        assert_eq!(buf.available(), 0);
+        assert!(buf.capacity() <= BUFFER_RESET_CAPACITY);
     }
 
     #[test]

@@ -22,6 +22,8 @@ const HANDSHAKE_SIZE: usize = 1536;
 
 /// Max time to wait for the peer to send more data before giving up.
 const RECV_POLL_TIMEOUT_MS: i32 = 10_000;
+/// Cap complete messages handled per `poll` recv pass.
+const MAX_MESSAGES_PER_POLL: usize = 256;
 
 /// Client connection states.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -233,7 +235,12 @@ impl Client {
             }
         }
 
+        let mut messages_processed = 0usize;
         loop {
+            if messages_processed >= MAX_MESSAGES_PER_POLL {
+                break;
+            }
+
             let mut msg = ChunkMessage::default();
             let mut payload_ptr: *const u8 = std::ptr::null();
             let mut payload_len = 0;
@@ -246,6 +253,7 @@ impl Client {
                 &mut payload_len,
             ) {
                 Ok(1) if msg.is_complete => {
+                    messages_processed += 1;
                     if msg.msg_type_id == msg_dispatch::RTMP_MSG_SET_CHUNK_SIZE {
                         let payload = if payload_ptr.is_null() || payload_len == 0 {
                             &[][..]
@@ -259,10 +267,12 @@ impl Client {
                         || msg.msg_type_id == msg_dispatch::RTMP_MSG_VIDEO
                     {
                         if let Some(ref cb) = self.on_frame_cb {
-                            let payload = if payload_ptr.is_null() || payload_len == 0 {
-                                &[][..]
+                            let owned = if payload_ptr.is_null() || payload_len == 0 {
+                                Vec::new()
                             } else {
-                                unsafe { std::slice::from_raw_parts(payload_ptr, payload_len) }
+                                unsafe {
+                                    std::slice::from_raw_parts(payload_ptr, payload_len).to_vec()
+                                }
                             };
                             let mut frame = Frame {
                                 frame_type: if msg.msg_type_id == msg_dispatch::RTMP_MSG_AUDIO {
@@ -271,10 +281,10 @@ impl Client {
                                     FrameType::Video
                                 },
                                 timestamp: msg.timestamp,
+                                size: owned.len() as u32,
+                                data: owned.as_ptr(),
                                 ..Default::default()
                             };
-                            frame.data = payload.as_ptr();
-                            frame.size = payload.len() as u32;
                             cb(&frame);
                         }
                     }
