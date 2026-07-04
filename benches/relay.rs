@@ -87,7 +87,7 @@ fn relay_n_frames(frame_count: u32) {
     });
 
     let deadline = Instant::now() + Duration::from_secs(12);
-    while client.is_finished() == false && Instant::now() < deadline {
+    while !client.is_finished() && Instant::now() < deadline {
         server.poll(5).unwrap();
     }
     client.join().unwrap();

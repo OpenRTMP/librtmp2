@@ -1,4 +1,4 @@
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{Criterion, Throughput, black_box, criterion_group, criterion_main};
 use librtmp2::buffer::Buffer;
 use librtmp2::chunk::reader::{chunk_read, ChunkMessage};
 use librtmp2::chunk::state::ChunkRegistry;
@@ -69,7 +69,7 @@ fn bench_amf_connect(c: &mut Criterion) {
                 252,
             )
             .unwrap();
-            black_box(buf.len())
+            black_box(buf.write_pos())
         });
     });
 }
@@ -110,7 +110,7 @@ fn bench_handshake_server(c: &mut Criterion) {
             handshake::server_init(&mut hs);
             let mut buf = Buffer::from_slice(black_box(&c1));
             handshake::server_read_c1(&mut hs, &mut buf).unwrap();
-            black_box(hs.out.len())
+            black_box(hs.out.write_pos())
         });
     });
 }
