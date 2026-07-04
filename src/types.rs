@@ -321,10 +321,23 @@ pub type OnSendDataCb = Option<
 
 /* ── Version constants ── */
 
-pub const VERSION_MAJOR: u32 = 0;
-pub const VERSION_MINOR: u32 = 1;
-pub const VERSION_PATCH: u32 = 0;
-pub const VERSION_STRING: &str = "0.1.0";
+/// Parses a plain-digit version component (as provided by Cargo's
+/// `CARGO_PKG_VERSION_*` env vars) into a `u32` at compile time.
+const fn parse_version_component(s: &str) -> u32 {
+    let bytes = s.as_bytes();
+    let mut value: u32 = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        value = value * 10 + (bytes[i] - b'0') as u32;
+        i += 1;
+    }
+    value
+}
+
+pub const VERSION_MAJOR: u32 = parse_version_component(env!("CARGO_PKG_VERSION_MAJOR"));
+pub const VERSION_MINOR: u32 = parse_version_component(env!("CARGO_PKG_VERSION_MINOR"));
+pub const VERSION_PATCH: u32 = parse_version_component(env!("CARGO_PKG_VERSION_PATCH"));
+pub const VERSION_STRING: &str = env!("CARGO_PKG_VERSION");
 
 /* ── E-RTMP constants ── */
 

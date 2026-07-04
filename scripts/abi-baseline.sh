@@ -18,17 +18,15 @@ mkdir -p "$ABI_DIR"
 
 build_and_dump() {
     local label="$1"
-    local install_prefix="$PROJECT_DIR/install-abi-$label"
 
     echo "=== Building ($label) ==="
     cd "$PROJECT_DIR"
-    make clean
-    make DEBUG=1 all
-    make install PREFIX="$install_prefix"
+    cargo clean --release
+    cargo build --release --all-features
 
     echo "=== Generating ABI dump ($label) ==="
     abidw \
-        "$install_prefix/lib/liblibrtmp2.so" \
+        "$PROJECT_DIR/target/release/liblibrtmp2.so" \
         --out-file "$ABI_DIR/librtmp2-${label}.xml"
 
     echo "✅ Dump saved: $ABI_DIR/librtmp2-${label}.xml"
