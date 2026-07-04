@@ -39,7 +39,6 @@ pub fn reconnect_write(rc: &Reconnect, buf: &mut [u8]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::Reconnect;
 
     #[test]
     fn round_trips_through_write_and_parse() {

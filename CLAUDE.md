@@ -46,8 +46,8 @@ FFI-compatible `extern "C"` layer (built as `cdylib`/`staticlib`/`lib`, see
 **Module layout (bottom → top):**
 
 ```
-core (alloc.rs, bytes.rs, buffer.rs, log.rs, error.rs)
-                    growable buffers, big-endian byte helpers, logging, errors
+core (alloc.rs, bytes.rs, buffer.rs, log.rs, types.rs)
+                    growable buffers, big-endian byte helpers, logging, error codes
 handshake.rs        C0/C1/C2 <-> S0/S1/S2; partial-read buffering; version detection
 chunk/              chunk_reader, chunk_writer, chunk_state (per-csid); SetChunkSize/Abort
 message/            reassembled message dispatch: control, user-control, AMF command decode/encode

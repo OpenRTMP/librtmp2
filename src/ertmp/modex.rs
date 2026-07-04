@@ -70,7 +70,6 @@ pub fn modex_write(modex: &Modex, buf: &mut [u8]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::Modex;
 
     #[test]
     fn nop_round_trips_through_write_and_parse() {
