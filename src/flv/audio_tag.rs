@@ -37,3 +37,43 @@ pub fn parse(data: &[u8], tag: &mut AudioTag) -> Result<()> {
     tag.size = data.len();
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::AudioTag;
+
+    #[test]
+    fn parse_aac_sets_codec_and_packet_type() {
+        let payload = [0xAF, 0x00];
+        let mut tag = AudioTag::default();
+        parse(&payload, &mut tag).unwrap();
+        assert_eq!(tag.codec, AudioCodec::Aac);
+        assert_eq!(tag.aac_packet_type, 0);
+    }
+
+    #[test]
+    fn parse_mp3_codec_nibble() {
+        let payload = [0x2F];
+        let mut tag = AudioTag::default();
+        parse(&payload, &mut tag).unwrap();
+        assert_eq!(tag.codec, AudioCodec::Mp3);
+    }
+
+    #[test]
+    fn parse_extracts_sample_rate_channels() {
+        // 44100 Hz stereo AAC: rate bits 10, 16-bit, stereo
+        let payload = [0xAF, 0x01];
+        let mut tag = AudioTag::default();
+        parse(&payload, &mut tag).unwrap();
+        assert_eq!(tag.sample_rate, 3);
+        assert_eq!(tag.bit_depth, 1);
+        assert_eq!(tag.channels, 1);
+    }
+
+    #[test]
+    fn parse_rejects_empty_payload() {
+        let mut tag = AudioTag::default();
+        assert_eq!(parse(&[], &mut tag), Err(ErrorCode::Internal));
+    }
+}

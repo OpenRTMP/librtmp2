@@ -62,3 +62,39 @@ pub fn parse(data: &[u8], tag: &mut ScriptTag) -> Result<()> {
     tag.size = data.len();
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::amf::amf0;
+    use crate::types::ScriptTag;
+
+    fn amf0_string(s: &str) -> Vec<u8> {
+        let mut buf = crate::buffer::Buffer::new();
+        amf0::write_string(&mut buf, s).unwrap();
+        buf.as_slice().to_vec()
+    }
+
+    fn amf0_object_end() -> [u8; 3] {
+        [0, 0, 0x09]
+    }
+
+    #[test]
+    fn parse_on_metadata_string_name() {
+        let mut payload = amf0_string("onMetaData");
+        payload.push(amf0::Amf0Type::Object as u8);
+        payload.extend_from_slice(&amf0_object_end());
+        let mut tag = ScriptTag::default();
+        parse(&payload, &mut tag).unwrap();
+        let name = std::str::from_utf8(&tag.name)
+            .unwrap_or("")
+            .trim_end_matches('\0');
+        assert_eq!(name, "onMetaData");
+    }
+
+    #[test]
+    fn parse_rejects_too_short_payload() {
+        let mut tag = ScriptTag::default();
+        assert_eq!(parse(&[0x02], &mut tag), Err(ErrorCode::Internal));
+    }
+}

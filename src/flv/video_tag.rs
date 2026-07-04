@@ -41,3 +41,40 @@ pub fn parse(data: &[u8], tag: &mut VideoTag) -> Result<()> {
     tag.size = data.len();
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::VideoTag;
+
+    #[test]
+    fn parse_h264_keyframe_sets_codec_and_cts() {
+        let payload = [0x17, 0x01, 0x00, 0x01, 0x2C, 0xDE, 0xAD];
+        let mut tag = VideoTag::default();
+        parse(&payload, &mut tag).unwrap();
+        assert_eq!(tag.frame_type, 1);
+        assert_eq!(tag.codec, VideoCodec::H264);
+        assert_eq!(tag.avc_packet_type, 1);
+        assert_eq!(tag.composition_time, 0x00012C);
+    }
+
+    #[test]
+    fn parse_rejects_enhanced_header() {
+        let payload = [0x80, 0x00, 0x00];
+        let mut tag = VideoTag::default();
+        assert_eq!(parse(&payload, &mut tag), Err(ErrorCode::Unsupported));
+    }
+
+    #[test]
+    fn parse_rejects_empty_payload() {
+        let mut tag = VideoTag::default();
+        assert_eq!(parse(&[], &mut tag), Err(ErrorCode::Internal));
+    }
+
+    #[test]
+    fn parse_rejects_unknown_codec_nibble() {
+        let payload = [0x18, 0x00];
+        let mut tag = VideoTag::default();
+        assert_eq!(parse(&payload, &mut tag), Err(ErrorCode::Unsupported));
+    }
+}

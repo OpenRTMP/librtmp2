@@ -141,3 +141,47 @@ pub fn fourcc_audio_name(fourcc: &[u8]) -> Option<&'static str> {
     }
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{AudioCodec, VideoCodec};
+
+    #[test]
+    fn video_fourcc_roundtrip() {
+        assert_eq!(
+            fourcc_to_video_codec(b"avc1").unwrap(),
+            VideoCodec::H264
+        );
+        assert_eq!(
+            fourcc_to_video_codec(b"hvc1").unwrap(),
+            VideoCodec::H265
+        );
+        assert_eq!(fourcc_to_video_codec(b"av01").unwrap(), VideoCodec::Av1);
+        assert_eq!(video_codec_to_fourcc(VideoCodec::H264), "avc1");
+    }
+
+    #[test]
+    fn audio_fourcc_roundtrip() {
+        assert_eq!(
+            fourcc_to_audio_codec(b"mp4a").unwrap(),
+            AudioCodec::Aac
+        );
+        assert_eq!(fourcc_to_audio_codec(b"Opus").unwrap(), AudioCodec::Opus);
+        assert_eq!(audio_codec_to_fourcc(AudioCodec::Aac), "mp4a");
+    }
+
+    #[test]
+    fn unknown_fourcc_returns_error() {
+        assert!(fourcc_to_video_codec(b"xxxx").is_err());
+        assert!(fourcc_to_audio_codec(b"zzzz").is_err());
+        assert!(fourcc_to_video_codec(b"ab").is_err());
+    }
+
+    #[test]
+    fn fourcc_names() {
+        assert_eq!(fourcc_video_name(b"avc1"), Some("H.264/AVC"));
+        assert_eq!(fourcc_audio_name(b"mp4a"), Some("AAC"));
+        assert!(fourcc_video_name(b"zzzz").is_none());
+    }
+}

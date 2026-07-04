@@ -28,6 +28,16 @@ jobs:
     - name: Run tests (default features)
       run: cargo test --all-features --verbose
 
+    - name: Run E2E integration tests (serial)
+      run: |
+        cargo test --all-features --verbose \
+          --test server_client_loopback \
+          --test e2e_publish_play_same_listener \
+          --test e2e_publish_rejection \
+          --test e2e_multiple_frames \
+          --test e2e_audio_frames \
+          -- --test-threads=1
+
     - name: Build & test without TLS
       run: |
         cargo build --no-default-features --verbose
