@@ -38,17 +38,17 @@ pub fn version_string() -> &'static str {
 
 /// Get the major version number.
 pub fn version_major() -> i32 {
-    types::VERSION_MAJOR as i32
+    i32::try_from(types::VERSION_MAJOR).unwrap_or(0)
 }
 
 /// Get the minor version number.
 pub fn version_minor() -> i32 {
-    types::VERSION_MINOR as i32
+    i32::try_from(types::VERSION_MINOR).unwrap_or(0)
 }
 
 /// Get the patch version number.
 pub fn version_patch() -> i32 {
-    types::VERSION_PATCH as i32
+    i32::try_from(types::VERSION_PATCH).unwrap_or(0)
 }
 
 /// Check if TLS support is available.
