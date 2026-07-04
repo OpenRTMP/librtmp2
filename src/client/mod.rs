@@ -109,7 +109,8 @@ impl Client {
         let mut amf = Buffer::with_capacity(256);
         command::build_publish(&mut amf, &self.stream_key, "live")?;
         self.send_command_msg(self.stream_id, amf.as_slice())?;
-        self.wait_for_command("onStatus")?;
+        let mut status = self.wait_for_command("onStatus")?;
+        command::read_onstatus(&mut status)?;
         self.state = ClientState::Publishing;
         Ok(())
     }
@@ -144,7 +145,8 @@ impl Client {
         let mut amf = Buffer::with_capacity(256);
         command::build_play(&mut amf, &self.stream_key)?;
         self.send_command_msg(self.stream_id, amf.as_slice())?;
-        self.wait_for_command("onStatus")?;
+        let mut status = self.wait_for_command("onStatus")?;
+        command::read_onstatus(&mut status)?;
         self.state = ClientState::Playing;
         Ok(())
     }

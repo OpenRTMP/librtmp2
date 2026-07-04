@@ -290,6 +290,37 @@ pub fn read_create_stream_result(buf: &mut Buffer) -> Result<(f64, f64)> {
     Ok((txn, stream_id))
 }
 
+/// Read an onStatus command. Returns [`ErrorCode::Auth`] when level is `error`.
+pub fn read_onstatus(buf: &mut Buffer) -> Result<()> {
+    let mut name = [0u8; 64];
+    amf0::read_string(buf, &mut name)?;
+    read_number_value(buf)?;
+    amf0::skip_value(buf)?;
+
+    amf0::read_object_begin(buf)?;
+    let mut level = [0u8; 32];
+    let mut level_len = 0usize;
+    while !amf0::is_object_end(buf) {
+        let mut key = [0u8; 256];
+        let key_len = amf0::read_object_key(buf, &mut key)?;
+        let key_str = std::str::from_utf8(&key[..key_len]).unwrap_or("");
+        if key_str == "level" {
+            level_len = amf0::read_string(buf, &mut level)?;
+        } else {
+            amf0::skip_value(buf)?;
+        }
+    }
+
+    let mut end = [0u8; 3];
+    buf.read(&mut end).map_err(|_| ErrorCode::Amf)?;
+
+    let level_str = std::str::from_utf8(&level[..level_len]).unwrap_or("");
+    if level_str == "error" {
+        return Err(ErrorCode::Auth);
+    }
+    Ok(())
+}
+
 /* ── Helpers ── */
 
 fn read_number_value(buf: &mut Buffer) -> Result<f64> {
@@ -382,5 +413,33 @@ mod tests {
 
         assert_eq!(cstr(&stream_name), "stream_key");
         assert_eq!(cstr(&publish_type), "record");
+    }
+
+    #[test]
+    fn read_onstatus_rejects_error_level() {
+        let mut buf = Buffer::new();
+        build_onstatus(
+            &mut buf,
+            "error",
+            "NetStream.Publish.BadName",
+            "Publish not authorized",
+        )
+        .unwrap();
+
+        assert_eq!(read_onstatus(&mut buf), Err(ErrorCode::Auth));
+    }
+
+    #[test]
+    fn read_onstatus_accepts_status_level() {
+        let mut buf = Buffer::new();
+        build_onstatus(
+            &mut buf,
+            "status",
+            "NetStream.Publish.Start",
+            "Publishing",
+        )
+        .unwrap();
+
+        assert!(read_onstatus(&mut buf).is_ok());
     }
 }
