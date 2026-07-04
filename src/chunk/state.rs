@@ -64,7 +64,7 @@ impl Default for ChunkStream {
 }
 
 impl ChunkStream {
-    /// Reset stream state, keeping the reassembly buffer allocated.
+    /// Reset stream state and release retained payload/reassembly allocations.
     pub fn reset(&mut self, default_chunk_size: u32) {
         self.type0_timestamp = 0;
         self.type0_msg_length = 0;
@@ -74,6 +74,8 @@ impl ChunkStream {
         self.last_delta = 0;
         self.reassembly_bytes_read = 0;
         self.reassembly_buf.reset();
+        self.last_payload.clear();
+        self.last_payload.shrink_to_fit();
         self.chunk_size = default_chunk_size;
     }
 }
@@ -261,5 +263,17 @@ mod tests {
             retained <= 4 * crate::buffer::BUFFER_RESET_CAPACITY,
             "retained {retained} bytes of reassembly capacity"
         );
+    }
+
+    #[test]
+    fn reset_releases_last_payload_capacity() {
+        let mut stream = ChunkStream::default();
+        stream.last_payload = vec![0u8; 256 * 1024];
+        assert!(stream.last_payload.capacity() >= 256 * 1024);
+
+        stream.reset(DEFAULT_CHUNK_SIZE);
+
+        assert!(stream.last_payload.is_empty());
+        assert_eq!(stream.last_payload.capacity(), 0);
     }
 }
