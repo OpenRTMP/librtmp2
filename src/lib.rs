@@ -38,17 +38,17 @@ pub fn version_string() -> &'static str {
 
 /// Get the major version number.
 pub fn version_major() -> i32 {
-    env!("CARGO_PKG_VERSION_MAJOR").parse().unwrap_or(0)
+    i32::try_from(types::VERSION_MAJOR).unwrap_or(0)
 }
 
 /// Get the minor version number.
 pub fn version_minor() -> i32 {
-    env!("CARGO_PKG_VERSION_MINOR").parse().unwrap_or(0)
+    i32::try_from(types::VERSION_MINOR).unwrap_or(0)
 }
 
 /// Get the patch version number.
 pub fn version_patch() -> i32 {
-    env!("CARGO_PKG_VERSION_PATCH").parse().unwrap_or(0)
+    i32::try_from(types::VERSION_PATCH).unwrap_or(0)
 }
 
 /// Check if TLS support is available.
