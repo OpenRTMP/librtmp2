@@ -338,8 +338,10 @@ pub fn chunk_read(
         msg.is_complete = true;
 
         // Copy out before reset: shrinking the reassembly buffer would
-        // invalidate a pointer into its storage.
-        stream.last_payload = stream.reassembly_buf.peek().to_vec();
+        // invalidate a pointer into its storage. Reuse last_payload's
+        // allocation to avoid allocator churn on every complete message.
+        stream.last_payload.clear();
+        stream.last_payload.extend_from_slice(stream.reassembly_buf.peek());
         *payload_len = stream.last_payload.len();
         *payload = stream.last_payload.as_ptr();
 
