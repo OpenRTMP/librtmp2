@@ -38,6 +38,9 @@ pub struct ChunkStream {
     pub reassembly_bytes_read: u32,
     /// buffer for reassembling partial messages
     pub reassembly_buf: Buffer,
+    /// Last completed payload on this CSID. Copied before reassembly_buf is
+    /// reset/shrunk so callers can read via the returned pointer safely.
+    pub last_payload: Vec<u8>,
     pub in_use: bool,
 }
 
@@ -54,6 +57,7 @@ impl Default for ChunkStream {
             last_delta: 0,
             reassembly_bytes_read: 0,
             reassembly_buf: Buffer::new(),
+            last_payload: Vec::new(),
             in_use: false,
         }
     }

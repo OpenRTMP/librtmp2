@@ -337,10 +337,11 @@ pub fn chunk_read(
         msg.msg_stream_id = effective_stream_id;
         msg.is_complete = true;
 
-        // SAFETY: caller consumes the payload before the next chunk_read call.
-        let data = stream.reassembly_buf.peek();
-        *payload_len = data.len();
-        *payload = data.as_ptr();
+        // Copy out before reset: shrinking the reassembly buffer would
+        // invalidate a pointer into its storage.
+        stream.last_payload = stream.reassembly_buf.peek().to_vec();
+        *payload_len = stream.last_payload.len();
+        *payload = stream.last_payload.as_ptr();
 
         stream.reassembly_bytes_read = 0;
         stream.reassembly_buf.reset();
