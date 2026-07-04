@@ -139,7 +139,7 @@ pub fn server_read_c1(hs: &mut Handshake, buf: &mut Buffer) -> Result<()> {
     // bytes 4-7 = 0
     fill_random(&mut s1[8..]);
 
-    // S2 echoes C1's time1 (bytes 0-4) and random; time2 (bytes 4-8) is the
+    // S2 echoes C1's time1 (bytes 0..4) and random; time2 (bytes 4..8) is the
     // server's own time, per RTMP spec 5.2.4.
     let mut s2 = c1.clone();
     s2[4..8].copy_from_slice(&server_time.to_be_bytes());
@@ -216,7 +216,7 @@ pub fn client_read_s1(hs: &mut Handshake, buf: &mut Buffer) -> Result<()> {
 
     hs.peer_time = ntoh32(&s1[..4]);
 
-    // C2 echoes S1's time1 (bytes 0-4) and random; time2 (bytes 4-8) is the
+    // C2 echoes S1's time1 (bytes 0..4) and random; time2 (bytes 4..8) is the
     // client's own time, per RTMP spec 5.2.5.
     let mut c2 = s1.clone();
     c2[4..8].copy_from_slice(&get_time().to_be_bytes());

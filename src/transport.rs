@@ -116,9 +116,17 @@ impl Transport {
         // the whole host process. Ignore it once, process-wide: RTMP(S)
         // connections always report broken peers via EPIPE/an OpenSSL error
         // return, so the signal itself carries no information we need.
-        static IGNORE_SIGPIPE: std::sync::Once = std::sync::Once::new();
-        IGNORE_SIGPIPE.call_once(|| unsafe {
-            libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+        //
+        // Only do this if the disposition is still the default: an embedding
+        // application that already installed its own SIGPIPE handler (or
+        // explicitly ignored it) made that choice deliberately, and we
+        // shouldn't clobber it.
+        static SET_SIGPIPE_DISPOSITION: std::sync::Once = std::sync::Once::new();
+        SET_SIGPIPE_DISPOSITION.call_once(|| unsafe {
+            let current = libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+            if current != libc::SIG_DFL && current != libc::SIG_ERR {
+                libc::signal(libc::SIGPIPE, current);
+            }
         });
 
         let raw_fd = stream.get_ref().as_raw_fd();

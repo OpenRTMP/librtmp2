@@ -79,8 +79,9 @@ fn error_c_string(code: ErrorCode) -> &'static [u8] {
 /// Map a raw FFI error code integer to `ErrorCode`, falling back to
 /// `Internal` for any value a caller passes that isn't one of ours.
 /// Constructing an `ErrorCode` directly from an arbitrary caller-supplied
-/// value would be undefined behavior, since the enum has non-contiguous
-/// discriminants — so the FFI boundary must validate the raw `i32` first.
+/// value would be undefined behavior, since not every `i32` is a valid
+/// discriminant for the enum — so the FFI boundary must validate the raw
+/// `i32` first.
 fn error_code_from_raw(code: i32) -> ErrorCode {
     match code {
         0 => ErrorCode::Ok,
