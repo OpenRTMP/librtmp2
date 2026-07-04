@@ -18,6 +18,9 @@ use crate::types::*;
 pub const MAX_STREAMS_PER_CONN: u32 = 16;
 pub const MAX_PENDING_RELAY_FRAMES: usize = 1024;
 pub const MAX_PENDING_RELAY_BYTES: usize = 8 * 1024 * 1024;
+/// Cap complete messages handled per `read_messages` call so one TCP recv batch
+/// cannot drain thousands of tiny control messages in a single state-machine step.
+const MAX_MESSAGES_PER_READ: usize = 256;
 
 const SERVER_WINDOW_ACK_SIZE: u32 = 2_500_000;
 const SERVER_PEER_BANDWIDTH: u32 = 2_500_000;
@@ -366,7 +369,11 @@ impl Conn {
     }
 
     pub fn read_messages(&mut self) -> i32 {
+        let mut processed = 0usize;
         loop {
+            if processed >= MAX_MESSAGES_PER_READ {
+                break;
+            }
             let mut msg = ChunkMessage::default();
             let mut payload_ptr: *const u8 = std::ptr::null();
             let mut payload_len = 0;
@@ -374,6 +381,7 @@ impl Conn {
                 Ok(0) => break,
                 Ok(1) => {
                     if msg.is_complete {
+                        processed += 1;
                         let payload_owned: Vec<u8> = if payload_ptr.is_null() || payload_len == 0 {
                             Vec::new()
                         } else {

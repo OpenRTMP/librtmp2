@@ -211,4 +211,51 @@ mod tests {
         assert!(reg.get_or_create(2).is_ok());
         assert!(matches!(reg.get_or_create(3), Err(ErrorCode::Chunk)));
     }
+
+    #[test]
+    fn completed_messages_do_not_pin_multi_megabyte_reassembly_capacity() {
+        use crate::chunk::reader::{chunk_read, ChunkMessage};
+        use crate::chunk::writer::chunk_write;
+
+        let payload = vec![0xAB_u8; 256 * 1024];
+        let mut reg = ChunkRegistry::new();
+        reg.max_active_csids = 4;
+
+        for csid in 3..7u32 {
+            let msg = ChunkMessage {
+                csid,
+                fmt: 0,
+                timestamp: 0,
+                msg_length: payload.len() as u32,
+                msg_type_id: 0x09,
+                msg_stream_id: 1,
+                is_complete: false,
+            };
+            let mut wire = Buffer::new();
+            chunk_write(&mut wire, &msg, &payload, payload.len(), 128).unwrap();
+
+            let mut out_msg = ChunkMessage::default();
+            let mut ptr = std::ptr::null();
+            let mut len = 0;
+            loop {
+                let rc = chunk_read(&mut wire, &mut reg, None, &mut out_msg, &mut ptr, &mut len)
+                    .unwrap();
+                if rc == 1 {
+                    break;
+                }
+                assert_eq!(rc, 0);
+            }
+        }
+
+        let retained: usize = reg
+            .streams
+            .iter()
+            .filter(|s| s.in_use)
+            .map(|s| s.reassembly_buf.capacity())
+            .sum();
+        assert!(
+            retained <= 4 * crate::buffer::BUFFER_RESET_CAPACITY,
+            "retained {retained} bytes of reassembly capacity"
+        );
+    }
 }
