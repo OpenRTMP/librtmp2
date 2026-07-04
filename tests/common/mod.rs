@@ -1,13 +1,12 @@
 //! Shared helpers for librtmp2 integration / E2E tests.
+#![allow(dead_code)]
 
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use librtmp2::client::Client;
 use librtmp2::server::Server;
 use librtmp2::types::*;
-
 pub const SENT_FRAME_BYTE: u8 = 0xAB;
 pub const SENT_FRAME_LEN: usize = 32;
 

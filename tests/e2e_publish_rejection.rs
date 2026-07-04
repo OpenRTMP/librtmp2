@@ -28,21 +28,18 @@ fn publish_rejected_by_callback_does_not_deliver_frames() {
     server.on_publish_cb = Some(deny_publish);
     server.on_frame_cb = Some(count_server_frames);
 
-    let client_result = thread::spawn(|| {
+    let publish_result = thread::spawn(|| {
         let mut client = Client::new();
-        client.connect("rtmp://127.0.0.1:19666/live/denied")
+        client.connect("rtmp://127.0.0.1:19666/live/denied")?;
+        client.publish()
     })
     .join()
     .unwrap();
 
-    // connect may succeed; publish should fail when the server rejects authorization.
-    if let Ok(mut client) = client_result {
-        let publish_result = client.publish();
-        assert!(
-            publish_result.is_err(),
-            "publish should fail when on_publish_cb returns false"
-        );
-    }
+    assert!(
+        publish_result.is_err(),
+        "publish should fail when on_publish_cb returns false"
+    );
 
     poll_until(
         &mut server,
