@@ -36,6 +36,7 @@ pub fn modex_parse(modex: &mut Modex, data: &[u8]) -> Result<()> {
         _ => {
             // Unknown ModEx type — ignore per §16 graceful-degradation rule
             modex.modex_type = ModexType::Nop;
+            modex.offset = 0;
         }
     }
 
@@ -123,6 +124,17 @@ mod tests {
         let mut modex = Modex::default();
         modex_parse(&mut modex, &[0xFF]).unwrap();
         assert_eq!(modex.modex_type, ModexType::Nop);
+    }
+
+    #[test]
+    fn parse_unknown_type_after_timestamp_clears_stale_offset() {
+        let mut modex = Modex::default();
+        modex_parse(&mut modex, &[0x81, 0, 0, 0, 0, 0, 0, 0, 5]).unwrap();
+        assert_eq!(modex.offset, 5);
+
+        modex_parse(&mut modex, &[0xFF]).unwrap();
+        assert_eq!(modex.modex_type, ModexType::Nop);
+        assert_eq!(modex.offset, 0);
     }
 
     #[test]

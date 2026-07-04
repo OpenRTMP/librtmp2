@@ -76,6 +76,27 @@ fn error_c_string(code: ErrorCode) -> &'static [u8] {
     }
 }
 
+/// Map a raw FFI error code integer to `ErrorCode`, falling back to
+/// `Internal` for any value a caller passes that isn't one of ours.
+/// Constructing an `ErrorCode` directly from an arbitrary caller-supplied
+/// value would be undefined behavior, since the enum has non-contiguous
+/// discriminants — so the FFI boundary must validate the raw `i32` first.
+fn error_code_from_raw(code: i32) -> ErrorCode {
+    match code {
+        0 => ErrorCode::Ok,
+        -1 => ErrorCode::Io,
+        -2 => ErrorCode::Timeout,
+        -3 => ErrorCode::Protocol,
+        -4 => ErrorCode::Handshake,
+        -5 => ErrorCode::Chunk,
+        -6 => ErrorCode::Amf,
+        -7 => ErrorCode::Unsupported,
+        -8 => ErrorCode::Auth,
+        -9 => ErrorCode::Internal,
+        _ => ErrorCode::Internal,
+    }
+}
+
 // ── FFI-compatible extern "C" API ──
 
 /// Create a server (FFI-compatible).
@@ -262,7 +283,12 @@ pub extern "C" fn lrtmp2_version_patch() -> i32 {
 }
 
 /// Get error string (FFI-compatible).
+///
+/// Takes a raw `i32` rather than `ErrorCode` so that an out-of-range value
+/// from a caller (e.g. a weakly-typed binding forwarding an unrelated int)
+/// cannot construct an invalid enum discriminant, which would be undefined
+/// behavior.
 #[no_mangle]
-pub unsafe extern "C" fn lrtmp2_error_string(code: ErrorCode) -> *const u8 {
-    error_c_string(code).as_ptr()
+pub unsafe extern "C" fn lrtmp2_error_string(code: i32) -> *const u8 {
+    error_c_string(error_code_from_raw(code)).as_ptr()
 }

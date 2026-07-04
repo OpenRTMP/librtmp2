@@ -111,6 +111,16 @@ impl Transport {
 
     #[cfg(feature = "tls")]
     fn new_tls(stream: SslStream<TcpStream>) -> Result<Self> {
+        // OpenSSL's write path doesn't set MSG_NOSIGNAL the way the plaintext
+        // path does, so a peer resetting mid-write can raise SIGPIPE and kill
+        // the whole host process. Ignore it once, process-wide: RTMP(S)
+        // connections always report broken peers via EPIPE/an OpenSSL error
+        // return, so the signal itself carries no information we need.
+        static IGNORE_SIGPIPE: std::sync::Once = std::sync::Once::new();
+        IGNORE_SIGPIPE.call_once(|| unsafe {
+            libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+        });
+
         let raw_fd = stream.get_ref().as_raw_fd();
         stream
             .get_ref()
