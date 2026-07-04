@@ -29,7 +29,7 @@ pub mod types;
 pub use types::*;
 
 /// Library version string.
-pub const VERSION_STRING: &str = "0.1.0";
+pub const VERSION_STRING: &str = env!("CARGO_PKG_VERSION");
 
 /// Get the library version string.
 pub fn version_string() -> &'static str {
@@ -38,17 +38,25 @@ pub fn version_string() -> &'static str {
 
 /// Get the major version number.
 pub fn version_major() -> i32 {
-    0
+    parse_version_component(0)
 }
 
 /// Get the minor version number.
 pub fn version_minor() -> i32 {
-    1
+    parse_version_component(1)
 }
 
 /// Get the patch version number.
 pub fn version_patch() -> i32 {
-    0
+    parse_version_component(2)
+}
+
+fn parse_version_component(index: usize) -> i32 {
+    VERSION_STRING
+        .split('.')
+        .nth(index)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0)
 }
 
 /// Check if TLS support is available.
@@ -240,7 +248,7 @@ pub extern "C" fn lrtmp2_tls_supported() -> i32 {
 /// Get version string (FFI-compatible).
 #[no_mangle]
 pub extern "C" fn lrtmp2_version_string() -> *const u8 {
-    b"0.1.0\0".as_ptr()
+    concat!(env!("CARGO_PKG_VERSION"), "\0").as_ptr()
 }
 
 /// Get major version (FFI-compatible).

@@ -274,7 +274,7 @@ impl Client {
                                     std::slice::from_raw_parts(payload_ptr, payload_len).to_vec()
                                 }
                             };
-                            let mut frame = Frame {
+                            let frame = Frame {
                                 frame_type: if msg.msg_type_id == msg_dispatch::RTMP_MSG_AUDIO {
                                     FrameType::Audio
                                 } else {

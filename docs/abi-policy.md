@@ -8,38 +8,49 @@ librtmp2 follows [Semantic Versioning](https://semver.org/):
 - **Minor** (`0.X.0`): New functions, types, or enum values. Existing symbols unchanged. Safe to re-link.
 - **Major** (`X.0.0`): Breaking API/ABI changes. Not expected before `1.0.0`.
 
+`librtmp2` is a Rust crate (`cdylib` + `staticlib` + `rlib`, see `Cargo.toml`).
+There is no `include/*.h` in this repo — the ABI boundary is the set of
+`#[no_mangle] pub extern "C"` functions and `#[repr(C)]` types exported from
+`src/lib.rs`, for consumption from C, Go, Python, PHP, and other FFI callers.
+
 ## ABI Guarantees
 
 ### Stable (guaranteed ABI-compatible across minor/patch releases)
 
-- Public function signatures (parameter types, return types)
-- Public struct layouts (`lrtmp2_frame_t`, `lrtmp2_hdr_info_t`, etc.)
-- Enum values (`lrtmp2_video_codec_t`, `lrtmp2_audio_codec_t`, error codes)
-- Type definitions and constants in `include/librtmp2/*.h`
+- Signatures of `#[no_mangle] pub extern "C"` functions in `src/lib.rs`
+  (parameter types, return types)
+- Layout of `#[repr(C)]` structs used across the FFI boundary (e.g. `Frame`)
+- Values of `#[repr(C)]` enums used across the FFI boundary (codec IDs, error
+  codes)
 
 ### May Change
 
-- Internal struct layouts (anything in `src/*.h`)
-- Internal function signatures
-- The `lrtmp2_server_t`, `lrtmp2_client_t`, `lrtmp2_conn_t` opaque types
+- Any Rust-only (non-`extern "C"`) function signature or struct layout
+- Internal module structure under `src/`
+- Opaque connection/server/client types passed only as pointers across FFI
 - Configuration struct field order (new fields may be appended)
 
 ### Symbol Visibility
 
-- Only functions declared in `include/librtmp2/*.h` are exported.
-- All internal functions MUST be `static` or have hidden visibility.
-- Shared library builds MUST use a version script or `-fvisibility=hidden`.
+- Only functions marked `#[no_mangle] pub extern "C"` are exported from the
+  `cdylib`/`staticlib` build artifacts.
+- Everything else in `src/` is a private Rust item, not a stable exported
+  symbol.
 
 ## Linking Recommendations
 
-- **Stable programs**: Link against the shared library (`liblrtmp2.so`).
-- **Embedders**: Link against the static library (`liblrtmp2.a`) for isolation.
-- **FFI**: Use `dlopen`/`dlsym` for runtime binding against the soname `liblrtmp2.so.0`.
+- **Stable programs**: Link against the shared library (`liblibrtmp2.so`,
+  produced by `cargo build --release`).
+- **Embedders**: Link against the static library (`liblibrtmp2.a`) for
+  isolation.
+- **Rust consumers**: Depend on the `librtmp2` crate directly instead of the
+  FFI layer.
 
 ## ABI Check Checklist (before each release)
 
-1. `abi-compliance-checker` against previous release.
-2. No removal or reordering of public struct fields.
-3. No changes to public function signatures.
+1. Run `scripts/abi-baseline.sh compare <previous-tag>` (`abidw` +
+   `abi-compliance-checker` against the previous release).
+2. No removal or reordering of `#[repr(C)]` struct fields.
+3. No changes to `#[no_mangle] pub extern "C"` function signatures.
 4. New enum values are appended (not inserted).
 5. `soname` bumped on ABI break (not expected before 1.0.0).

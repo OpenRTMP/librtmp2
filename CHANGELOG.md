@@ -11,19 +11,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 While in alpha the project stays on `0.x`; semantic-versioning guarantees only
 begin at `1.0.0`.
 
-## [Unreleased] — alpha
+## [Unreleased]
+
+## [0.1.0] — 2026-07-04
+
+First tagged pre-release. `librtmp2` is a Rust crate (built via Cargo as
+`cdylib`/`staticlib`/`lib`) exposing both an idiomatic Rust API and an
+FFI-compatible `extern "C"` layer for consumption from C, Go, Python, PHP,
+and others.
 
 ### Added
-- TLS / RTMPS support via OpenSSL, built in by default (disable with
-  `make TLS=0` / `meson -Dtls=disabled` for a zero-dependency build)
-- Transport abstraction (`src/core/transport.{h,c}`) under the raw send/recv
-  path so plaintext RTMP and TLS share a single code path
-- Server-side TLS termination via `tls_enabled` / `tls_cert_file` /
-  `tls_key_file` in `lrtmp2_server_config`
-- Client-side `rtmps://` connect with SNI and certificate verification
-  (`tls_ca_file`, `tls_insecure` to tune verification)
+- TLS / RTMPS support via OpenSSL, enabled by default through the `tls`
+  Cargo feature (`cargo build --no-default-features` for a zero-dependency,
+  plaintext-only build)
+- Transport abstraction shared by plaintext RTMP and TLS so the layers above
+  never branch on the wire type
+- Server-side TLS termination and client-side `rtmps://` connect with SNI
+  and certificate verification
 - `lrtmp2_tls_supported()` runtime capability check
-- Transport unit tests and an end-to-end RTMPS integration test
 - Legacy RTMP protocol support (handshake, chunk, message, AMF0)
 - Enhanced RTMP v1 support (ExVideo/ExAudio headers, FourCC registry, HDR/colorInfo)
 - Enhanced RTMP v2 support (capsEx, reconnect, multitrack, ModEx)
@@ -32,28 +37,28 @@ begin at `1.0.0`.
 - Frame API supporting audio, video, script, and metadata types
 - H.264, H.265, AV1, and legacy video codec support
 - AAC, Opus, MP3, G.711 audio codec support
-- `dump_frames` example for stream debugging
-- Meson build system with subproject support
-- pkg-config file (`librtmp2.pc`)
-- Comprehensive unit and integration tests
-- ASan/UBSan support for hardening
-- Fuzz harnesses for all critical parsers
+- Example programs: `minimal_server`, `minimal_client`, `play_pull`, `ffmpeg_ingest`
+- Inline unit tests throughout `src/`, an end-to-end loopback integration
+  test (`tests/server_client_loopback.rs`), and interop shell scripts
+  (`tests/interop/`)
+- ABI baseline tooling (`scripts/abi-baseline.sh`) for `0.x` compatibility checks
 
 ### Security
 - Bounds-checked parsers for all network-provided length fields
 - Constant-time RNG for handshake
-- Safe handling of unknown E-RTMP v2 ModEx types (degrades to NOP)
+- Safe handling of unknown E-RTMP v2 ModEx types (degrades to NOP, not panic)
 
 ### Documentation
 - `CLAUDE.md` with build commands and architecture guide
 - `docs/abi-policy.md` with ABI compliance checklist
 - Protocol mapping documents for legacy, E-RTMP v1, and E-RTMP v2
-- Example programs (`minimal_server`, `minimal_client`, `dump_frames`)
+- `CONTRIBUTING.md` guidelines
 
 ### Planned
 - OBS → librtmp2 interop verification
 - SRS → librtmp2 interop verification
 - HaishinKit interop verification
 - Automated ABI compliance checks in CI
-- `CONTRIBUTING.md` guidelines
-- First tagged pre-release once the API settles
+
+[Unreleased]: https://github.com/OpenRTMP/librtmp2/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/OpenRTMP/librtmp2/releases/tag/v0.1.0

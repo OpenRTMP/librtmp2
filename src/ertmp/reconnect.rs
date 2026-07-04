@@ -35,3 +35,43 @@ pub fn reconnect_write(rc: &Reconnect, buf: &mut [u8]) -> usize {
     buf[7] = rc.limit as u8;
     8
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::Reconnect;
+
+    #[test]
+    fn round_trips_through_write_and_parse() {
+        let rc = Reconnect {
+            replay: 0x0102_0304,
+            limit: 0xAABB_CCDD,
+        };
+        let mut buf = [0u8; 8];
+        assert_eq!(reconnect_write(&rc, &mut buf), 8);
+
+        let mut parsed = Reconnect::default();
+        reconnect_parse(&mut parsed, &buf).unwrap();
+        assert_eq!(parsed.replay, rc.replay);
+        assert_eq!(parsed.limit, rc.limit);
+    }
+
+    #[test]
+    fn parse_rejects_short_input() {
+        let mut rc = Reconnect::default();
+        assert!(reconnect_parse(&mut rc, &[0u8; 7]).is_err());
+    }
+
+    #[test]
+    fn parse_rejects_long_input() {
+        let mut rc = Reconnect::default();
+        assert!(reconnect_parse(&mut rc, &[0u8; 9]).is_err());
+    }
+
+    #[test]
+    fn write_rejects_short_buffer() {
+        let rc = Reconnect::default();
+        let mut buf = [0u8; 7];
+        assert_eq!(reconnect_write(&rc, &mut buf), 0);
+    }
+}
