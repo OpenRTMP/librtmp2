@@ -237,6 +237,10 @@ impl Client {
 
         let mut messages_processed = 0usize;
         loop {
+            if messages_processed >= MAX_MESSAGES_PER_POLL {
+                break;
+            }
+
             let mut msg = ChunkMessage::default();
             let mut payload_ptr: *const u8 = std::ptr::null();
             let mut payload_len = 0;
@@ -250,9 +254,6 @@ impl Client {
             ) {
                 Ok(1) if msg.is_complete => {
                     messages_processed += 1;
-                    if messages_processed >= MAX_MESSAGES_PER_POLL {
-                        break;
-                    }
                     if msg.msg_type_id == msg_dispatch::RTMP_MSG_SET_CHUNK_SIZE {
                         let payload = if payload_ptr.is_null() || payload_len == 0 {
                             &[][..]
