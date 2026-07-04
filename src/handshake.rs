@@ -130,7 +130,7 @@ pub fn server_read_c1(hs: &mut Handshake, buf: &mut Buffer) -> Result<()> {
     let mut c1 = vec![0u8; HANDSHAKE_SIZE];
     buf.read(&mut c1).map_err(|_| ErrorCode::Io)?;
 
-    hs.peer_time = ntoh24(&c1[..4]);
+    hs.peer_time = ntoh32(&c1[..4]);
 
     // Build S1
     let mut s1 = vec![0u8; HANDSHAKE_SIZE];
@@ -139,9 +139,10 @@ pub fn server_read_c1(hs: &mut Handshake, buf: &mut Buffer) -> Result<()> {
     // bytes 4-7 = 0
     fill_random(&mut s1[8..]);
 
-    // S2 echoes C1 with time2 replaced
+    // S2 echoes C1's time1 (bytes 0..4) and random; time2 (bytes 4..8) is the
+    // server's own time, per RTMP spec 5.2.4.
     let mut s2 = c1.clone();
-    s2[..4].copy_from_slice(&server_time.to_be_bytes());
+    s2[4..8].copy_from_slice(&server_time.to_be_bytes());
 
     hs.out.reset();
     hs.out.write(&s1).map_err(|_| ErrorCode::Internal)?;
@@ -215,9 +216,10 @@ pub fn client_read_s1(hs: &mut Handshake, buf: &mut Buffer) -> Result<()> {
 
     hs.peer_time = ntoh32(&s1[..4]);
 
-    // C2 echoes S1 with time2 replaced
+    // C2 echoes S1's time1 (bytes 0..4) and random; time2 (bytes 4..8) is the
+    // client's own time, per RTMP spec 5.2.5.
     let mut c2 = s1.clone();
-    c2[..4].copy_from_slice(&get_time().to_be_bytes());
+    c2[4..8].copy_from_slice(&get_time().to_be_bytes());
 
     hs.out.reset();
     hs.out.write(&c2).map_err(|_| ErrorCode::Internal)?;
@@ -236,11 +238,6 @@ pub fn client_read_s2(hs: &mut Handshake, buf: &mut Buffer) -> Result<()> {
 
     hs.state = HandshakeState::Done;
     Ok(())
-}
-
-// Fix the s1 building in server_read_c1
-fn ntoh24(buf: &[u8]) -> u32 {
-    ((buf[0] as u32) << 16) | ((buf[1] as u32) << 8) | (buf[2] as u32)
 }
 
 #[cfg(test)]
@@ -314,5 +311,56 @@ mod tests {
         let s1 = &hs.out.peek()[..HANDSHAKE_SIZE];
         let time_from_s1 = u32::from_be_bytes([s1[0], s1[1], s1[2], s1[3]]);
         assert!(time_from_s1 >= before && time_from_s1 <= after);
+    }
+
+    #[test]
+    fn s2_echoes_c1_time1_and_carries_server_time_in_time2() {
+        let mut hs = Handshake::default();
+        server_init(&mut hs);
+        let mut c1 = vec![0u8; HANDSHAKE_SIZE];
+        c1[..4].copy_from_slice(&0x1234_5678u32.to_be_bytes());
+        c1[8..].copy_from_slice(&[0xAB; HANDSHAKE_SIZE - 8]);
+        let mut buf = Buffer::new();
+        buf.write(&c1).unwrap();
+
+        let before = get_time();
+        server_read_c1(&mut hs, &mut buf).unwrap();
+        let after = get_time();
+
+        let out = hs.out.peek();
+        let s2 = &out[HANDSHAKE_SIZE..HANDSHAKE_SIZE * 2];
+        let time1 = u32::from_be_bytes([s2[0], s2[1], s2[2], s2[3]]);
+        let time2 = u32::from_be_bytes([s2[4], s2[5], s2[6], s2[7]]);
+        assert_eq!(time1, 0x1234_5678, "S2 time1 must echo C1's time1");
+        assert!(
+            time2 >= before && time2 <= after,
+            "S2 time2 must be the server's own time"
+        );
+        assert_eq!(&s2[8..], &c1[8..], "S2 random bytes must echo C1's random bytes");
+    }
+
+    #[test]
+    fn c2_echoes_s1_time1_and_carries_client_time_in_time2() {
+        let mut client = Handshake::default();
+        client_init(&mut client);
+        let mut s1 = vec![0u8; HANDSHAKE_SIZE];
+        s1[..4].copy_from_slice(&0x0BAD_F00Du32.to_be_bytes());
+        s1[8..].copy_from_slice(&[0xCD; HANDSHAKE_SIZE - 8]);
+        let mut buf = Buffer::new();
+        buf.write(&s1).unwrap();
+
+        let before = get_time();
+        client_read_s1(&mut client, &mut buf).unwrap();
+        let after = get_time();
+
+        let c2 = client.out.peek();
+        let time1 = u32::from_be_bytes([c2[0], c2[1], c2[2], c2[3]]);
+        let time2 = u32::from_be_bytes([c2[4], c2[5], c2[6], c2[7]]);
+        assert_eq!(time1, 0x0BAD_F00D, "C2 time1 must echo S1's time1");
+        assert!(
+            time2 >= before && time2 <= after,
+            "C2 time2 must be the client's own time"
+        );
+        assert_eq!(&c2[8..], &s1[8..], "C2 random bytes must echo S1's random bytes");
     }
 }

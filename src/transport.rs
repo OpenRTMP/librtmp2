@@ -111,6 +111,29 @@ impl Transport {
 
     #[cfg(feature = "tls")]
     fn new_tls(stream: SslStream<TcpStream>) -> Result<Self> {
+        // OpenSSL's write path doesn't set MSG_NOSIGNAL the way the plaintext
+        // path does, so a peer resetting mid-write can raise SIGPIPE and kill
+        // the whole host process. Ignore it once, process-wide: RTMP(S)
+        // connections always report broken peers via EPIPE/an OpenSSL error
+        // return, so the signal itself carries no information we need.
+        //
+        // Only do this if the disposition is still the default: an embedding
+        // application that already installed its own SIGPIPE handler (or
+        // explicitly ignored it) made that choice deliberately, and we
+        // shouldn't clobber it.
+        //
+        // Note for embedders: SIG_IGN is inherited across fork/exec. A host
+        // process that forks child processes after opening a TLS connection
+        // through this library, and that relies on the default SIGPIPE
+        // behavior in those children, will need to restore SIG_DFL itself.
+        static SET_SIGPIPE_DISPOSITION: std::sync::Once = std::sync::Once::new();
+        SET_SIGPIPE_DISPOSITION.call_once(|| unsafe {
+            let current = libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+            if current != libc::SIG_DFL && current != libc::SIG_ERR {
+                libc::signal(libc::SIGPIPE, current);
+            }
+        });
+
         let raw_fd = stream.get_ref().as_raw_fd();
         stream
             .get_ref()

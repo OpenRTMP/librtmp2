@@ -210,7 +210,9 @@ impl Client {
             events: libc::POLLIN,
             revents: 0,
         };
-        unsafe { libc::poll(&mut pfd, 1, timeout_ms.max(0)) };
+        // poll(2) already treats a negative timeout as "block indefinitely"
+        // (the POSIX idiom), so pass it through as-is instead of clamping to 0.
+        unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
 
         let mut buf = [0u8; 65536];
         loop {
