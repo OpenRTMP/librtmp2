@@ -350,16 +350,16 @@ fn read_string_trunc(buf: &mut Buffer, out: &mut [u8]) -> Result<()> {
         return Ok(());
     }
 
-    let copy_len = if slen >= out.len() {
-        out.len() - 1
-    } else {
-        slen
-    };
-    if copy_len > 0 {
-        buf.read(&mut out[..copy_len]).map_err(|_| ErrorCode::Amf)?;
+    // Routing keys (app, stream name) and connect metadata must be stored
+    // losslessly. Silently truncating long AMF strings lets two distinct peer
+    // values collide on the same relay namespace.
+    if slen >= out.len() {
+        buf.drain(slen);
+        return Err(ErrorCode::Amf);
     }
-    out[copy_len] = 0;
-    buf.drain(slen - copy_len);
+
+    buf.read(&mut out[..slen]).map_err(|_| ErrorCode::Amf)?;
+    out[slen] = 0;
     Ok(())
 }
 
@@ -389,6 +389,41 @@ mod tests {
         read_connect(&mut buf, &mut info).unwrap();
         let app_len = info.app.iter().position(|&b| b == 0).unwrap_or(0);
         assert_eq!(std::str::from_utf8(&info.app[..app_len]).unwrap(), "live");
+    }
+
+    #[test]
+    fn read_string_trunc_rejects_values_that_do_not_fit_output_buffer() {
+        let mut buf = Buffer::new();
+        let long = "x".repeat(256);
+        amf0::write_string(&mut buf, &long).unwrap();
+
+        let mut out = [0u8; 256];
+        assert_eq!(read_string_trunc(&mut buf, &mut out), Err(ErrorCode::Amf));
+        assert_eq!(buf.available(), 0);
+    }
+
+    #[test]
+    fn read_string_trunc_accepts_values_up_to_buffer_capacity_minus_nul() {
+        let mut buf = Buffer::new();
+        let exact = "y".repeat(255);
+        amf0::write_string(&mut buf, &exact).unwrap();
+
+        let mut out = [0u8; 256];
+        read_string_trunc(&mut buf, &mut out).unwrap();
+        assert_eq!(cstr(&out), exact);
+    }
+
+    #[test]
+    fn read_publish_rejects_stream_names_longer_than_routing_buffer() {
+        let mut buf = Buffer::new();
+        build_publish(&mut buf, &"z".repeat(256), "live").unwrap();
+
+        let mut stream_name = [0u8; 256];
+        let mut publish_type = [0u8; 64];
+        assert_eq!(
+            read_publish(&mut buf, &mut stream_name, &mut publish_type),
+            Err(ErrorCode::Amf)
+        );
     }
 
     #[test]
