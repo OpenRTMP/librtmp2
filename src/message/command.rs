@@ -199,11 +199,11 @@ pub fn read_connect(buf: &mut Buffer, info: &mut ConnectInfo) -> Result<()> {
             amf0::Amf0Type::String => {
                 let key_str = std::str::from_utf8(&key[..key_len]).unwrap_or("");
                 match key_str {
-                    "app" => read_string_trunc(buf, &mut info.app)?,
-                    "tcUrl" => read_string_trunc(buf, &mut info.tc_url)?,
-                    "pageUrl" => read_string_trunc(buf, &mut info.page_url)?,
-                    "swfUrl" => read_string_trunc(buf, &mut info.swf_url)?,
-                    "flashVer" => read_string_trunc(buf, &mut info.flash_ver)?,
+                    "app" => read_string_checked(buf, &mut info.app)?,
+                    "tcUrl" => read_string_checked(buf, &mut info.tc_url)?,
+                    "pageUrl" => read_string_checked(buf, &mut info.page_url)?,
+                    "swfUrl" => read_string_checked(buf, &mut info.swf_url)?,
+                    "flashVer" => read_string_checked(buf, &mut info.flash_ver)?,
                     _ => {
                         amf0::skip_value(buf)?;
                     }
@@ -250,12 +250,12 @@ pub fn read_publish(
     amf0::read_string(buf, &mut name)?;
     read_number_value(buf)?; // skip txn
     amf0::skip_value(buf)?;
-    read_string_trunc(buf, stream_name)?;
+    read_string_checked(buf, stream_name)?;
 
     // The publish type argument is optional in practice. Decode it only when a
     // client actually sent more AMF data; otherwise keep the output buffer empty.
     if buf.available() > 0 {
-        let _ = read_string_trunc(buf, publish_type);
+        let _ = read_string_checked(buf, publish_type);
     }
     Ok(())
 }
@@ -266,7 +266,7 @@ pub fn read_play(buf: &mut Buffer, stream_name: &mut [u8]) -> Result<()> {
     amf0::read_string(buf, &mut name)?;
     read_number_value(buf)?; // skip txn
     amf0::skip_value(buf)?;
-    read_string_trunc(buf, stream_name)?;
+    read_string_checked(buf, stream_name)?;
     Ok(())
 }
 
@@ -331,7 +331,7 @@ fn read_number_value(buf: &mut Buffer) -> Result<f64> {
     amf0::read_number(buf)
 }
 
-fn read_string_trunc(buf: &mut Buffer, out: &mut [u8]) -> Result<()> {
+fn read_string_checked(buf: &mut Buffer, out: &mut [u8]) -> Result<()> {
     let mut byte = [0u8; 1];
     buf.read(&mut byte).map_err(|_| ErrorCode::Amf)?;
     if byte[0] != amf0::Amf0Type::String as u8 {
@@ -392,24 +392,24 @@ mod tests {
     }
 
     #[test]
-    fn read_string_trunc_rejects_values_that_do_not_fit_output_buffer() {
+    fn read_string_checked_rejects_values_that_do_not_fit_output_buffer() {
         let mut buf = Buffer::new();
         let long = "x".repeat(256);
         amf0::write_string(&mut buf, &long).unwrap();
 
         let mut out = [0u8; 256];
-        assert_eq!(read_string_trunc(&mut buf, &mut out), Err(ErrorCode::Amf));
+        assert_eq!(read_string_checked(&mut buf, &mut out), Err(ErrorCode::Amf));
         assert_eq!(buf.available(), 0);
     }
 
     #[test]
-    fn read_string_trunc_accepts_values_up_to_buffer_capacity_minus_nul() {
+    fn read_string_checked_accepts_values_up_to_buffer_capacity_minus_nul() {
         let mut buf = Buffer::new();
         let exact = "y".repeat(255);
         amf0::write_string(&mut buf, &exact).unwrap();
 
         let mut out = [0u8; 256];
-        read_string_trunc(&mut buf, &mut out).unwrap();
+        read_string_checked(&mut buf, &mut out).unwrap();
         assert_eq!(cstr(&out), exact);
     }
 
@@ -427,12 +427,12 @@ mod tests {
     }
 
     #[test]
-    fn read_string_trunc_with_empty_output_buffer_does_not_panic() {
+    fn read_string_checked_with_empty_output_buffer_does_not_panic() {
         let mut buf = Buffer::new();
         amf0::write_string(&mut buf, "hello").unwrap();
 
         let mut out: [u8; 0] = [];
-        assert!(read_string_trunc(&mut buf, &mut out).is_ok());
+        assert!(read_string_checked(&mut buf, &mut out).is_ok());
         // The string bytes must still be fully consumed from the buffer.
         assert_eq!(buf.available(), 0);
     }
