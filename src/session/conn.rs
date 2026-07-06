@@ -868,6 +868,26 @@ mod tests {
     }
 
     #[test]
+    fn connect_rejects_app_names_longer_than_routing_buffer() {
+        let mut conn = Conn::new();
+        let mut buf = Buffer::with_capacity(512);
+        let long_app = "a".repeat(256);
+        command::build_connect(
+            &mut buf,
+            &long_app,
+            "rtmp://host/app",
+            "",
+            "",
+            "FMLE/3.0",
+            0,
+            0,
+        )
+        .unwrap();
+        assert_eq!(conn.handle_command(buf.as_slice()), Err(ErrorCode::Amf));
+        assert!(conn.app.is_empty());
+    }
+
+    #[test]
     fn connect_after_app_connected_does_not_repoint_app_namespace() {
         let mut conn = Conn::new();
 
