@@ -31,7 +31,7 @@ jobs:
           cargo bench --bench relay --features default -- --sample-size 10 --test-threads 1 --noplot 2>&1 | tee bench-relay.txt
 
       - name: Upload benchmark output
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: librtmp2-benchmarks
           path: bench-*.txt
