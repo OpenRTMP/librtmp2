@@ -15,7 +15,9 @@ jobs:
           fetch-depth: 0
 
       - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
+        run: |
+          sudo rm -f /etc/apt/sources.list.d/azure-cli.list /etc/apt/sources.list.d/microsoft-prod.list
+          sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
