@@ -3,18 +3,25 @@
 This project follows the [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/) specification for commit messages. All commits must use English language for messages, even though the repository requires UTF-8 encoding.
 
 ## Code Contribution Guidelines
-- **API Compatibility**: No breaking API changes unless accompanied by ABIs changes in `include/librtmp2/*`. For non-breaking changes that modify internals, only update shared headers if necessary.
-- **Testing**: All new features must be covered by unit/integration tests in `tests/unit` and `tests/integration`
-- **ABI Stability**: Only change public headers (located in `include/librtmp2/`) with major version bumps. Internal headers (in `include/librtmp2-server/`) can change freely.
-- **Documentation**: Update `CLAUDE.md`, `docs/abi-policy.md`, and `docs/protocol-mapping` files when modifying API behavior
-- **Fuzzing**: Add new fuzz targets for data-payload areas (especially chunk/AMF/frame parsers)
+- **API Compatibility**: No breaking changes to the `extern "C"` FFI surface exported from `src/lib.rs` unless accompanied by a major version bump. For non-breaking changes that modify internals, everything outside `src/lib.rs`'s FFI exports is free to change.
+- **Testing**: All new features must be covered by unit tests (inline `#[cfg(test)] mod tests` next to the code they cover) and, where applicable, an end-to-end test in `tests/`
+- **ABI Stability**: See `docs/abi-policy.md`. Only change the `#[no_mangle] pub extern "C"` functions and `#[repr(C)]` types in `src/lib.rs` with a major version bump.
+- **Documentation**: Update `CLAUDE.md`, `docs/abi-policy.md`, and `docs/protocol-mapping-*` files when modifying API or protocol behavior
+- **Parser safety**: Never trust network-provided length fields; all parsers must be bounds-checked
 
 ## Build Guidelines
-1. Use `make asan` or `make ubsan` for CI-style builds
-2. Fuzz testing requires `clang -fsanitize=fuzzer,address`
+```bash
+cargo build                       # debug build
+cargo build --release             # release build
+cargo test                        # unit tests + tests/server_client_loopback.rs
+cargo clippy --all-features --all-targets
+cargo fmt
+```
 
-## Subproject Additions
-When adding new subprojects (e.g., plugins), use Meson's `declarative_parameters` format and add them to `meson.build`.
+TLS/RTMPS is enabled by default via the `tls` feature (OpenSSL). Use
+`cargo build --no-default-features` for a zero-dependency, plaintext-only
+build. Before any release, run `scripts/abi-baseline.sh compare` against the
+previous release tag — see `docs/abi-policy.md` for the full checklist.
 
 ## License
-Source code is under [Apache 2.0 license](https://www.apache.org/licenses/LICENSE-2.0). Additional assets have their own license information.
+Source code is under the [MIT license](LICENSE). Additional assets have their own license information.
