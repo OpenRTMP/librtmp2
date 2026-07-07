@@ -13,7 +13,7 @@ begin at `1.0.0`.
 
 ## [Unreleased]
 
-## [0.1.0] — 2026-07-04
+## [0.1.0] — 2026-07-07
 
 First tagged pre-release. `librtmp2` is a Rust crate (built via Cargo as
 `cdylib`/`staticlib`/`lib`) exposing both an idiomatic Rust API and an
@@ -42,6 +42,7 @@ and others.
   test (`tests/server_client_loopback.rs`), and interop shell scripts
   (`tests/interop/`)
 - ABI baseline tooling (`scripts/abi-baseline.sh`) for `0.x` compatibility checks
+- Automated ABI compliance checks in CI (`cargo-semver-checks` via `.github/workflows/abi-check.yml`)
 
 ### Security
 - Bounds-checked parsers for all network-provided length fields
@@ -58,7 +59,6 @@ and others.
 - OBS → librtmp2 interop verification
 - SRS → librtmp2 interop verification
 - HaishinKit interop verification
-- Automated ABI compliance checks in CI
 
 [Unreleased]: https://github.com/OpenRTMP/librtmp2/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/OpenRTMP/librtmp2/releases/tag/v0.1.0
