@@ -2,10 +2,10 @@
 name = "librtmp2"
 version = "0.1.0"
 edition = "2021"
-authors = ["OpenRTMP Contributors"]
-description = "A Rust port of librtmp2 — RTMP/RTMPS protocol library"
+authors = ["OpenRTMP", "AlexanderWagnerDev <info@alexanderwagnerdev.com>"]
+description = "librtmp2 — RTMP/RTMPS protocol library"
 license = "MIT"
-repository = "https://github.com/openrtmp/librtmp2"
+repository = "https://github.com/OpenRTMP/librtmp2"
 
 [lib]
 name = "librtmp2"
