@@ -355,6 +355,25 @@ pub fn chunk_read(
     }
 }
 
+/// Read one RTMP chunk and return a complete message payload as an owned buffer.
+pub fn chunk_read_owned(
+    buf: &mut Buffer,
+    reg: &mut ChunkRegistry,
+    msg: &mut ChunkMessage,
+) -> Result<(i32, Vec<u8>)> {
+    let mut payload_ptr: *const u8 = std::ptr::null();
+    let mut payload_len = 0;
+    let rc = chunk_read(buf, reg, None, msg, &mut payload_ptr, &mut payload_len)?;
+    let payload = if rc == 1 && msg.is_complete && payload_len > 0 && !payload_ptr.is_null() {
+        // SAFETY: chunk_read only returns non-null pointers into `last_payload`,
+        // which remains valid until the next complete message on this CSID.
+        unsafe { std::slice::from_raw_parts(payload_ptr, payload_len).to_vec() }
+    } else {
+        Vec::new()
+    };
+    Ok((rc, payload))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
