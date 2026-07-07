@@ -1,0 +1,52 @@
+name: Publish to crates.io
+
+# Publishes the crate to crates.io whenever a version tag is pushed. Requires
+# a CARGO_REGISTRY_TOKEN secret (crates.io API token) configured in the repo
+# settings.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Version tag to publish (e.g. v0.1.0)'
+        required: true
+
+jobs:
+  publish:
+    name: cargo publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install dependencies
+        run: |
+          sudo rm -f /etc/apt/sources.list.d/azure-cli.list /etc/apt/sources.list.d/microsoft-prod.list
+          sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Resolve version
+        id: ver
+        run: |
+          REF="${{ github.event.inputs.tag || github.ref_name }}"
+          echo "version=${REF#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Check tag matches Cargo.toml version
+        run: |
+          CARGO_VERSION=$(grep -m1 '^version' Cargo.toml | grep -oP '"\K[0-9]+\.[0-9]+\.[0-9]+')
+          echo "tag version: ${{ steps.ver.outputs.version }}, Cargo.toml version: $CARGO_VERSION"
+          if [ "${{ steps.ver.outputs.version }}" != "$CARGO_VERSION" ]; then
+            echo "::error::Tag version (${{ steps.ver.outputs.version }}) does not match version in Cargo.toml ($CARGO_VERSION)"
+            exit 1
+          fi
+
+      - name: Publish to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish --all-features
