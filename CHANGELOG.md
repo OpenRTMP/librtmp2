@@ -55,10 +55,5 @@ and others.
 - Protocol mapping documents for legacy, E-RTMP v1, and E-RTMP v2
 - `CONTRIBUTING.md` guidelines
 
-### Planned
-- OBS → librtmp2 interop verification
-- SRS → librtmp2 interop verification
-- HaishinKit interop verification
-
 [Unreleased]: https://github.com/OpenRTMP/librtmp2/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/OpenRTMP/librtmp2/releases/tag/v0.1.0
