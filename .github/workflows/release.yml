@@ -135,10 +135,10 @@ jobs:
             dist/*.sha256
 
       - name: Publish GitHub Release
-        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.ver.outputs.tag }}
+          target_commitish: ${{ github.sha }}
           name: librtmp2 ${{ steps.ver.outputs.version }}
           body_path: release-notes.md
           files: |
