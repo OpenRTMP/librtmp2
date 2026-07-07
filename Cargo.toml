@@ -1,7 +1,7 @@
 [package]
 name = "librtmp2"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 authors = ["OpenRTMP", "AlexanderWagnerDev <info@alexanderwagnerdev.com>"]
 description = "librtmp2 — RTMP/RTMPS protocol library"
 license = "MIT"
