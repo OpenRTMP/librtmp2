@@ -74,6 +74,24 @@ jobs:
             exit 1
           fi
 
+      - name: Extract changelog section for this version
+        run: |
+          VERSION="${{ steps.ver.outputs.version }}"
+          awk -v ver="$VERSION" '
+            /^## \[/ {
+              if (found) exit
+              if ($0 ~ ("^## \\[" ver "\\]")) { found=1; next }
+              next
+            }
+            /^\[.*\]:/ { if (found) exit }
+            found { print }
+          ' CHANGELOG.md > release-notes.md
+          if [ ! -s release-notes.md ]; then
+            echo "::error::No CHANGELOG.md section found for version $VERSION"
+            exit 1
+          fi
+          cat release-notes.md
+
       - name: Build release libraries
         run: cargo build --release --all-features --verbose
 
@@ -121,7 +139,7 @@ jobs:
         with:
           tag_name: ${{ steps.ver.outputs.tag }}
           name: librtmp2 ${{ steps.ver.outputs.version }}
-          generate_release_notes: true
+          body_path: release-notes.md
           files: |
             dist/*.tar.gz
             dist/*.sha256
