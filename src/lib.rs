@@ -101,12 +101,12 @@ fn error_code_from_raw(code: i32) -> ErrorCode {
 // ── FFI-compatible extern "C" API ──
 
 /// Create a server (FFI-compatible).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn lrtmp2_server_create(config: *const ServerConfig) -> *mut server::Server {
     if config.is_null() {
         return std::ptr::null_mut();
     }
-    let cfg = &*config;
+    let cfg = unsafe { &*config };
     match server::Server::new(*cfg) {
         Ok(s) => Box::into_raw(Box::new(s)),
         Err(_) => std::ptr::null_mut(),
@@ -114,15 +114,15 @@ pub unsafe extern "C" fn lrtmp2_server_create(config: *const ServerConfig) -> *m
 }
 
 /// Destroy a server (FFI-compatible).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn lrtmp2_server_destroy(server: *mut server::Server) {
     if !server.is_null() {
-        drop(Box::from_raw(server));
+        drop(unsafe { Box::from_raw(server) });
     }
 }
 
 /// Start listening (FFI-compatible).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn lrtmp2_server_listen(
     server: *mut server::Server,
     bind_addr: *const u8,
@@ -130,8 +130,8 @@ pub unsafe extern "C" fn lrtmp2_server_listen(
     if server.is_null() || bind_addr.is_null() {
         return ErrorCode::Internal as i32;
     }
-    let s = &mut *server;
-    let addr = std::ffi::CStr::from_ptr(bind_addr as *const std::ffi::c_char);
+    let s = unsafe { &mut *server };
+    let addr = unsafe { std::ffi::CStr::from_ptr(bind_addr as *const std::ffi::c_char) };
     match s.listen(addr.to_str().unwrap_or("")) {
         Ok(()) => 0,
         Err(e) => e as i32,
@@ -139,12 +139,12 @@ pub unsafe extern "C" fn lrtmp2_server_listen(
 }
 
 /// Poll for events (FFI-compatible).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn lrtmp2_server_poll(server: *mut server::Server, timeout_ms: i32) -> i32 {
     if server.is_null() {
         return ErrorCode::Internal as i32;
     }
-    let s = &mut *server;
+    let s = unsafe { &mut *server };
     match s.poll(timeout_ms) {
         Ok(()) => 0,
         Err(e) => e as i32,
@@ -152,36 +152,36 @@ pub unsafe extern "C" fn lrtmp2_server_poll(server: *mut server::Server, timeout
 }
 
 /// Stop the server (FFI-compatible).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn lrtmp2_server_stop(server: *mut server::Server) {
     if !server.is_null() {
-        (*server).stop();
+        unsafe { (*server).stop() };
     }
 }
 
 /// Create a client (FFI-compatible).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn lrtmp2_client_create(_config: *const ServerConfig) -> *mut client::Client {
     let c = client::Client::new();
     Box::into_raw(Box::new(c))
 }
 
 /// Destroy a client (FFI-compatible).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn lrtmp2_client_destroy(c: *mut client::Client) {
     if !c.is_null() {
-        drop(Box::from_raw(c));
+        drop(unsafe { Box::from_raw(c) });
     }
 }
 
 /// Connect (FFI-compatible).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn lrtmp2_client_connect(c: *mut client::Client, url: *const u8) -> i32 {
     if c.is_null() || url.is_null() {
         return ErrorCode::Internal as i32;
     }
-    let client = &mut *c;
-    let url_str = std::ffi::CStr::from_ptr(url as *const std::ffi::c_char);
+    let client = unsafe { &mut *c };
+    let url_str = unsafe { std::ffi::CStr::from_ptr(url as *const std::ffi::c_char) };
     match client.connect(url_str.to_str().unwrap_or("")) {
         Ok(()) => 0,
         Err(e) => e as i32,
@@ -189,31 +189,31 @@ pub unsafe extern "C" fn lrtmp2_client_connect(c: *mut client::Client, url: *con
 }
 
 /// Publish (FFI-compatible).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn lrtmp2_client_publish(c: *mut client::Client) -> i32 {
     if c.is_null() {
         return ErrorCode::Internal as i32;
     }
-    match (*c).publish() {
+    match unsafe { (*c).publish() } {
         Ok(()) => 0,
         Err(e) => e as i32,
     }
 }
 
 /// Play (FFI-compatible).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn lrtmp2_client_play(c: *mut client::Client) -> i32 {
     if c.is_null() {
         return ErrorCode::Internal as i32;
     }
-    match (*c).play() {
+    match unsafe { (*c).play() } {
         Ok(()) => 0,
         Err(e) => e as i32,
     }
 }
 
 /// Send a frame (FFI-compatible).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn lrtmp2_client_send_frame(
     c: *mut client::Client,
     frame: *const Frame,
@@ -221,36 +221,36 @@ pub unsafe extern "C" fn lrtmp2_client_send_frame(
     if c.is_null() || frame.is_null() {
         return ErrorCode::Internal as i32;
     }
-    let frame_ref = &*frame;
+    let frame_ref = unsafe { &*frame };
     if frame_ref.size > 0 && frame_ref.data.is_null() {
         return ErrorCode::Internal as i32;
     }
-    match (*c).send_frame(frame_ref) {
+    match unsafe { (*c).send_frame(frame_ref) } {
         Ok(()) => 0,
         Err(e) => e as i32,
     }
 }
 
 /// Poll client (FFI-compatible).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn lrtmp2_client_poll(c: *mut client::Client, timeout_ms: i32) -> i32 {
     if c.is_null() {
         return ErrorCode::Internal as i32;
     }
-    match (*c).poll(timeout_ms) {
+    match unsafe { (*c).poll(timeout_ms) } {
         Ok(()) => 0,
         Err(e) => e as i32,
     }
 }
 
 /// Get connection fd (FFI-compatible).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn lrtmp2_conn_get_fd(_conn: *const session::conn::Conn) -> i32 {
     -1
 }
 
 /// Check TLS support (FFI-compatible).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn lrtmp2_tls_supported() -> i32 {
     if tls_supported() {
         1
@@ -260,25 +260,25 @@ pub extern "C" fn lrtmp2_tls_supported() -> i32 {
 }
 
 /// Get version string (FFI-compatible).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn lrtmp2_version_string() -> *const u8 {
     concat!(env!("CARGO_PKG_VERSION"), "\0").as_ptr()
 }
 
 /// Get major version (FFI-compatible).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn lrtmp2_version_major() -> i32 {
     version_major()
 }
 
 /// Get minor version (FFI-compatible).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn lrtmp2_version_minor() -> i32 {
     version_minor()
 }
 
 /// Get patch version (FFI-compatible).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn lrtmp2_version_patch() -> i32 {
     version_patch()
 }
@@ -289,7 +289,7 @@ pub extern "C" fn lrtmp2_version_patch() -> i32 {
 /// from a caller (e.g. a weakly-typed binding forwarding an unrelated int)
 /// cannot construct an invalid enum discriminant, which would be undefined
 /// behavior.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn lrtmp2_error_string(code: i32) -> *const u8 {
     error_c_string(error_code_from_raw(code)).as_ptr()
 }
