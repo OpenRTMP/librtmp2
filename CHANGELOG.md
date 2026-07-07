@@ -13,7 +13,7 @@ begin at `1.0.0`.
 
 ## [Unreleased]
 
-## [0.1.0] — 2026-07-07
+## [0.1.0] — 2026-07-08
 
 First tagged pre-release. `librtmp2` is a Rust crate (built via Cargo as
 `cdylib`/`staticlib`/`lib`) exposing both an idiomatic Rust API and an
