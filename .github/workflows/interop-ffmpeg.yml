@@ -16,7 +16,7 @@ jobs:
 
     - name: Install ffmpeg
       run: |
-        sudo rm -f /etc/apt/sources.list.d/azure-cli.list /etc/apt/sources.list.d/microsoft-prod.list
+        sudo rm -f /etc/apt/sources.list.d/azure-cli.list /etc/apt/sources.list.d/azure-cli.sources /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.list.d/microsoft-prod.sources
         sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
 
     - name: Interop — publish from real ffmpeg
