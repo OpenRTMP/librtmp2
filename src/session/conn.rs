@@ -3,7 +3,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use crate::buffer::Buffer;
-use crate::chunk::reader::{chunk_read, ChunkMessage};
+use crate::chunk::reader::{chunk_read_owned, ChunkMessage};
 use crate::chunk::state::{ChunkRegistry, DEFAULT_CHUNK_SIZE};
 use crate::chunk::writer::chunk_write;
 use crate::handshake::{self, Handshake, HandshakeState};
@@ -375,20 +375,11 @@ impl Conn {
                 break;
             }
             let mut msg = ChunkMessage::default();
-            let mut payload_ptr: *const u8 = std::ptr::null();
-            let mut payload_len = 0;
-            match chunk_read(&mut self.recv_buffer, &mut self.chunk_reg, None, &mut msg, &mut payload_ptr, &mut payload_len) {
-                Ok(0) => break,
-                Ok(1) => {
+            match chunk_read_owned(&mut self.recv_buffer, &mut self.chunk_reg, &mut msg) {
+                Ok((0, _)) => break,
+                Ok((1, payload_owned)) => {
                     if msg.is_complete {
                         processed += 1;
-                        let payload_owned: Vec<u8> = if payload_ptr.is_null() || payload_len == 0 {
-                            Vec::new()
-                        } else {
-                            unsafe {
-                                std::slice::from_raw_parts(payload_ptr, payload_len).to_vec()
-                            }
-                        };
                         if let Err(e) = self.handle_message(&msg, &payload_owned) {
                             return match e {
                                 ErrorCode::Auth => -8,
