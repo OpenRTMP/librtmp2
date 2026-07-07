@@ -1,8 +1,6 @@
 name: Publish to crates.io
 
-# Publishes the crate to crates.io whenever a version tag is pushed. Requires
-# a CARGO_REGISTRY_TOKEN secret (crates.io API token) configured in the repo
-# settings.
+# Publishes the crate to crates.io whenever a version tag is pushed.
 
 on:
   push:
