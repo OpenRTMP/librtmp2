@@ -13,6 +13,14 @@ begin at `1.0.0`.
 
 ## [Unreleased]
 
+### Fixed
+- Cap per-connection recv drain in `process_connections()` to 256 KiB per
+  poll pass, preventing a peer that keeps its kernel recv buffer full from
+  starving other sessions in the single-threaded poll loop
+
+### Documentation
+- Update docs.rs badge to track the latest published version
+
 ## [0.1.0] — 2026-07-08
 
 First tagged pre-release. `librtmp2` is a Rust crate (built via Cargo as
