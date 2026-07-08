@@ -32,6 +32,12 @@ const MAX_PENDING_TLS_HANDSHAKES: usize = 128;
 #[cfg(feature = "tls")]
 const TLS_HANDSHAKE_TIMEOUT_SECS: u64 = 10;
 
+/// Maximum inbound bytes drained from one connection per `process_connections`
+/// pass. Without this cap a peer that keeps the kernel recv buffer full can
+/// monopolize the single-threaded poll loop and starve every other session
+/// until its socket buffer is empty.
+const MAX_RECV_BYTES_PER_CONN_PER_POLL: usize = 256 * 1024;
+
 /// Cached codec headers and last keyframe for a (app, stream_name) pair.
 /// Replayed to players that join after the publisher has already sent headers.
 struct StreamCache {
@@ -455,7 +461,11 @@ impl Server {
         // Drive recv/processing for every connection.
         self.drain_pending_cache_evictions();
         for (i, conn) in self.connections.iter_mut().enumerate() {
+            let mut bytes_drained = 0usize;
             loop {
+                if bytes_drained >= MAX_RECV_BYTES_PER_CONN_PER_POLL {
+                    break;
+                }
                 let Some(transport) = conn.transport.as_mut() else {
                     closed.push(i);
                     break;
@@ -463,10 +473,12 @@ impl Server {
                 let mut again = 0i32;
                 let n = transport.recv(&mut buf, &mut again);
                 if n > 0 {
-                    if conn.recv(&buf[..n as usize]).is_err() {
+                    let chunk_len = n as usize;
+                    if conn.recv(&buf[..chunk_len]).is_err() {
                         closed.push(i);
                         break;
                     }
+                    bytes_drained += chunk_len;
                 } else if n == 0 {
                     closed.push(i);
                     break;
@@ -805,5 +817,20 @@ impl Server {
 impl Drop for Server {
     fn drop(&mut self) {
         self.running = false;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recv_budget_is_at_least_one_socket_read() {
+        assert!(MAX_RECV_BYTES_PER_CONN_PER_POLL >= 65536);
+    }
+
+    #[test]
+    fn recv_budget_is_small_enough_for_fairness_across_connections() {
+        assert!(MAX_RECV_BYTES_PER_CONN_PER_POLL <= 1024 * 1024);
     }
 }
