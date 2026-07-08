@@ -13,6 +13,8 @@ begin at `1.0.0`.
 
 ## [Unreleased]
 
+## [0.1.1] — 2026-07-08
+
 ### Fixed
 - Cap per-connection recv drain in `process_connections()` to 256 KiB per
   poll pass, preventing a peer that keeps its kernel recv buffer full from
@@ -63,5 +65,6 @@ and others.
 - Protocol mapping documents for legacy, E-RTMP v1, and E-RTMP v2
 - `CONTRIBUTING.md` guidelines
 
-[Unreleased]: https://github.com/OpenRTMP/librtmp2/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/OpenRTMP/librtmp2/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/OpenRTMP/librtmp2/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/OpenRTMP/librtmp2/releases/tag/v0.1.0
