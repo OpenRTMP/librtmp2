@@ -151,9 +151,18 @@ impl Transport {
     ///
     /// `stream` must not already be set non-blocking; this performs a
     /// synchronous handshake, matching [`Client`](crate::client::Client)'s
-    /// otherwise-blocking connect sequence.
+    /// otherwise-blocking connect sequence. The handshake itself is bounded by
+    /// a read/write timeout so a peer that completes the TCP connect but then
+    /// stalls mid-handshake cannot hang the caller indefinitely (mirroring the
+    /// bound `send()` places on writes post-handshake).
     #[cfg(feature = "tls")]
     pub fn connect_tls(stream: TcpStream, host: &str) -> Result<Self> {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(TLS_ACCEPT_TIMEOUT_SECS)))
+            .map_err(|_| ErrorCode::Io)?;
+        stream
+            .set_write_timeout(Some(Duration::from_secs(TLS_ACCEPT_TIMEOUT_SECS)))
+            .map_err(|_| ErrorCode::Io)?;
         let connector = SslConnector::builder(SslMethod::tls())
             .map_err(|_| ErrorCode::Internal)?
             .build();
