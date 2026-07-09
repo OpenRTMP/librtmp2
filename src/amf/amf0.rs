@@ -459,4 +459,78 @@ mod tests {
         write_object_end(&mut buf).unwrap();
         assert!(is_object_end(&mut buf));
     }
+
+    #[test]
+    fn read_string_rejects_truncated_payload() {
+        let mut buf = Buffer::from_slice(&[0x02, 0x00, 0x05, b'a', b'b']);
+        let mut out = [0u8; 16];
+        assert_eq!(read_string(&mut buf, &mut out), Err(ErrorCode::Amf));
+    }
+
+    #[test]
+    fn read_long_string_rejects_truncated_payload() {
+        let mut buf = Buffer::from_slice(&[0x0C, 0x00, 0x00, 0x00, 0x04, b'x']);
+        let mut out = [0u8; 16];
+        assert_eq!(read_long_string(&mut buf, &mut out), Err(ErrorCode::Amf));
+    }
+
+    #[test]
+    fn read_object_key_rejects_truncated_key_bytes() {
+        let mut buf = Buffer::from_slice(&[0x00, 0x03, b'a']);
+        let mut out = [0u8; 16];
+        assert_eq!(read_object_key(&mut buf, &mut out), Err(ErrorCode::Amf));
+    }
+
+    #[test]
+    fn skip_value_rejects_truncated_string_length() {
+        let mut buf = Buffer::from_slice(&[0x02, 0x00, 0x10]);
+        assert_eq!(skip_value(&mut buf), Err(ErrorCode::Io));
+    }
+
+    #[test]
+    fn skip_value_rejects_truncated_long_string_length() {
+        let mut buf = Buffer::from_slice(&[0x0C, 0x00, 0x00, 0x00, 0x08, 0xAA]);
+        assert_eq!(skip_value(&mut buf), Err(ErrorCode::Io));
+    }
+
+    #[test]
+    fn skip_value_rejects_truncated_date() {
+        let mut buf = Buffer::from_slice(&[0x0B, 0x00, 0x00, 0x00]);
+        assert_eq!(skip_value(&mut buf), Err(ErrorCode::Io));
+    }
+
+    #[test]
+    fn skip_value_rejects_excessive_strict_array_count() {
+        // count = 257 (> MAX_OBJECT_KEYS)
+        let mut buf = Buffer::from_slice(&[0x0A, 0x00, 0x00, 0x01, 0x01]);
+        assert_eq!(skip_value(&mut buf), Err(ErrorCode::Amf));
+    }
+
+    #[test]
+    fn skip_value_rejects_excessive_nesting_depth() {
+        // Build nested objects via empty-key chains: { "": { "": { ... } } }
+        let mut payload = Vec::new();
+        for _ in 0..=MAX_SKIP_DEPTH as usize {
+            payload.push(Amf0Type::Object as u8);
+            payload.extend_from_slice(&[0x00, 0x00]); // empty key
+        }
+        payload.extend_from_slice(&[Amf0Type::Null as u8]); // innermost value
+        for _ in 0..=MAX_SKIP_DEPTH as usize {
+            payload.extend_from_slice(&[0x00, 0x00, 0x09]);
+        }
+        let mut buf = Buffer::from_slice(&payload);
+        assert_eq!(skip_value(&mut buf), Err(ErrorCode::Amf));
+    }
+
+    #[test]
+    fn skip_value_rejects_object_with_too_many_keys() {
+        let mut buf = Buffer::new();
+        write_object_begin(&mut buf).unwrap();
+        for i in 0..=MAX_OBJECT_KEYS {
+            write_object_key(&mut buf, &format!("k{i}")).unwrap();
+            write_null(&mut buf).unwrap();
+        }
+        write_object_end(&mut buf).unwrap();
+        assert_eq!(skip_value(&mut buf), Err(ErrorCode::Amf));
+    }
 }

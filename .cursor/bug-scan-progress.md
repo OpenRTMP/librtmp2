@@ -1,6 +1,6 @@
 # Bug scan progress
 
-Last scanned: message (2026-07-02)
+Last scanned: amf (2026-07-09)
 
 ## Modules
 
@@ -8,12 +8,23 @@ Last scanned: message (2026-07-02)
 - [x] handshake — C0/C1/C2 ↔ S0/S1/S2
 - [x] chunk — Chunk reader/writer/state
 - [x] message — Message reassembly, control, commands
-- [ ] amf — AMF0 + AMF3
+- [x] amf — AMF0 + AMF3
 - [ ] flv — Audio/video/script tags
 - [ ] ertmp — E-RTMP v1/v2 extensions
 - [ ] session — State machine, publish/play flows
 - [ ] server — Server listener
 - [ ] client — Outbound client
+
+## Findings (2026-07-09 amf pass)
+
+- Reviewed `src/amf/amf0.rs`, `src/amf/amf3.rs`, and `mod.rs` plus all
+  callers (`message/command.rs`, `flv/script_tag.rs`, `session/conn.rs`).
+  Traced encoder/decoder paths for OOB reads, unbounded recursion, integer
+  overflow, and partial-parse desync on adversarial/truncated payloads.
+  `skip_value` enforces `MAX_SKIP_DEPTH` (32) and `MAX_OBJECT_KEYS` (256);
+  string/long-string/date/reference skips all bounds-check before drain.
+  AMF3 U29/string readers reject truncated input and string references.
+  No critical bugs found. Added adversarial regression tests in amf0/amf3.
 
 ## Findings (2026-07-02 message pass)
 
