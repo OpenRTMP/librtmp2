@@ -229,4 +229,30 @@ mod tests {
         write_null(&mut buf).unwrap();
         assert!(read_null(&mut buf).is_ok());
     }
+
+    #[test]
+    fn read_string_rejects_truncated_payload() {
+        let mut buf = Buffer::from_slice(&[AMF3_STRING, 0x07, b'a', b'b']);
+        let mut out = [0u8; 16];
+        assert_eq!(read_string(&mut buf, &mut out), Err(ErrorCode::Io));
+    }
+
+    #[test]
+    fn read_string_rejects_string_reference() {
+        let mut buf = Buffer::from_slice(&[AMF3_STRING, 0x00]);
+        let mut out = [0u8; 16];
+        assert_eq!(read_string(&mut buf, &mut out), Err(ErrorCode::Unsupported));
+    }
+
+    #[test]
+    fn read_integer_rejects_truncated_u29() {
+        let mut buf = Buffer::from_slice(&[0x80, 0x80]);
+        assert_eq!(read_integer(&mut buf), Err(ErrorCode::Io));
+    }
+
+    #[test]
+    fn read_double_rejects_truncated_payload() {
+        let mut buf = Buffer::from_slice(&[0x00, 0x00, 0x00]);
+        assert_eq!(read_double(&mut buf), Err(ErrorCode::Io));
+    }
 }
