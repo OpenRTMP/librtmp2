@@ -10,9 +10,9 @@ use crate::types::Result;
 
 #[cfg(feature = "tls")]
 use openssl::ssl::{
-    HandshakeError, MidHandshakeSslStream, SslAcceptor, SslFiletype, SslMethod, SslStream,
+    HandshakeError, MidHandshakeSslStream, SslAcceptor, SslConnector, SslFiletype, SslMethod,
+    SslStream,
 };
-#[cfg(feature = "tls")]
 use std::net::TcpStream;
 #[cfg(feature = "tls")]
 use std::os::unix::io::{AsRawFd, FromRawFd};
@@ -142,6 +142,31 @@ impl Transport {
         Ok(Self {
             inner: TransportInner::Tls { stream, fd: raw_fd },
         })
+    }
+
+    /// Perform a blocking TLS client handshake over an already-connected
+    /// `stream` (RTMPS). Validates the server certificate against the system
+    /// trust store and checks `host` against the certificate (SNI + hostname
+    /// verification), matching standard TLS client behavior.
+    ///
+    /// `stream` must not already be set non-blocking; this performs a
+    /// synchronous handshake, matching [`Client`](crate::client::Client)'s
+    /// otherwise-blocking connect sequence.
+    #[cfg(feature = "tls")]
+    pub fn connect_tls(stream: TcpStream, host: &str) -> Result<Self> {
+        let connector = SslConnector::builder(SslMethod::tls())
+            .map_err(|_| ErrorCode::Internal)?
+            .build();
+        let ssl_stream = connector
+            .connect(host, stream)
+            .map_err(|_| ErrorCode::Handshake)?;
+        Transport::new_tls(ssl_stream)
+    }
+
+    /// TLS is not available in this build.
+    #[cfg(not(feature = "tls"))]
+    pub fn connect_tls(_stream: TcpStream, _host: &str) -> Result<Self> {
+        Err(ErrorCode::Unsupported)
     }
 
     /// Return the underlying file descriptor (used for `poll(2)` and as a

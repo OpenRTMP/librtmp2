@@ -76,16 +76,23 @@ impl Client {
         }
     }
 
-    /// Connect to an RTMP server at `rtmp://host[:port]/app/streamKey`.
+    /// Connect to an RTMP(S) server at `rtmp://host[:port]/app/streamKey` or
+    /// `rtmps://host[:port]/app/streamKey`.
     ///
-    /// Performs the real TCP connect, the legacy C0/C1/C2 handshake, then
-    /// the `connect` + `createStream` AMF0 command exchange.
+    /// Performs the real TCP connect (wrapped in a TLS client handshake for
+    /// `rtmps://`, verified against the system trust store), the legacy
+    /// C0/C1/C2 handshake, then the `connect` + `createStream` AMF0 command
+    /// exchange.
     pub fn connect(&mut self, url: &str) -> Result<()> {
-        let (host, port, app, stream_key) = parse_rtmp_url(url)?;
+        let (use_tls, host, port, app, stream_key) = parse_rtmp_url(url)?;
         self.reset_session_state();
 
         let stream = TcpStream::connect((host.as_str(), port)).map_err(|_| ErrorCode::Io)?;
-        let mut transport = Transport::new_plain(stream.into_raw_fd());
+        let mut transport = if use_tls {
+            Transport::connect_tls(stream, &host)?
+        } else {
+            Transport::new_plain(stream.into_raw_fd())
+        };
 
         self.state = ClientState::Handshaking;
         if let Err(e) = self.do_handshake(&mut transport) {
@@ -99,7 +106,7 @@ impl Client {
         self.stream_key = stream_key;
         self.state = ClientState::Connected;
 
-        if let Err(e) = self.do_amf_connect(&app, &host, port) {
+        if let Err(e) = self.do_amf_connect(&app, &host, port, use_tls) {
             self.reset_session_state();
             return Err(e);
         }
@@ -123,8 +130,9 @@ impl Client {
     /// Run the AMF connect + createStream exchange. Separated from `connect()`
     /// so the transport is already stored before we enter, letting the caller
     /// call `reset_session_state()` (which drops the transport) on any error.
-    fn do_amf_connect(&mut self, app: &str, host: &str, port: u16) -> Result<()> {
-        let tc_url = format!("rtmp://{host}:{port}/{app}");
+    fn do_amf_connect(&mut self, app: &str, host: &str, port: u16, use_tls: bool) -> Result<()> {
+        let scheme = if use_tls { "rtmps" } else { "rtmp" };
+        let tc_url = format!("{scheme}://{host}:{port}/{app}");
         let mut connect_amf = Buffer::with_capacity(512);
         command::build_connect(&mut connect_amf, app, &tc_url, "", "", "FMLE/3.0", 0, 0)?;
         self.send_command_msg(0, connect_amf.as_slice())?;
@@ -506,9 +514,17 @@ fn read_exact(transport: &mut Transport, n: usize) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-/// Parse `rtmp://host[:port]/app/streamKey` into (host, port, app, stream_key).
-fn parse_rtmp_url(url: &str) -> Result<(String, u16, String, String)> {
-    let rest = url.strip_prefix("rtmp://").ok_or(ErrorCode::Internal)?;
+/// Parse `rtmp://host[:port]/app/streamKey` or `rtmps://host[:port]/app/streamKey`
+/// into (use_tls, host, port, app, stream_key). `rtmps://` defaults to port 443
+/// (the conventional RTMPS port) when no port is given; `rtmp://` defaults to 1935.
+fn parse_rtmp_url(url: &str) -> Result<(bool, String, u16, String, String)> {
+    let (use_tls, rest, default_port) = if let Some(rest) = url.strip_prefix("rtmps://") {
+        (true, rest, "443")
+    } else if let Some(rest) = url.strip_prefix("rtmp://") {
+        (false, rest, "1935")
+    } else {
+        return Err(ErrorCode::Internal);
+    };
     let (authority, path) = match rest.find('/') {
         Some(i) => (&rest[..i], &rest[i + 1..]),
         None => (rest, ""),
@@ -516,7 +532,7 @@ fn parse_rtmp_url(url: &str) -> Result<(String, u16, String, String)> {
 
     let mut host = String::new();
     let mut port_str = String::new();
-    net::split_host_port(authority, &mut host, &mut port_str, "1935")?;
+    net::split_host_port(authority, &mut host, &mut port_str, default_port)?;
     let port: u16 = port_str.parse().map_err(|_| ErrorCode::Internal)?;
 
     let mut parts = path.splitn(2, '/');
@@ -527,7 +543,7 @@ fn parse_rtmp_url(url: &str) -> Result<(String, u16, String, String)> {
         return Err(ErrorCode::Internal);
     }
 
-    Ok((host, port, app, stream_key))
+    Ok((use_tls, host, port, app, stream_key))
 }
 
 impl Default for Client {
@@ -547,5 +563,57 @@ impl Drop for Client {
                 libc::close(self.client_fd);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_rtmp_url_defaults_to_plaintext_and_port_1935() {
+        let (use_tls, host, port, app, stream_key) =
+            parse_rtmp_url("rtmp://example.com/live/streamkey").unwrap();
+        assert!(!use_tls);
+        assert_eq!(host, "example.com");
+        assert_eq!(port, 1935);
+        assert_eq!(app, "live");
+        assert_eq!(stream_key, "streamkey");
+    }
+
+    #[test]
+    fn parse_rtmp_url_rtmps_defaults_to_tls_and_port_443() {
+        let (use_tls, host, port, app, stream_key) =
+            parse_rtmp_url("rtmps://example.com/live/streamkey").unwrap();
+        assert!(use_tls);
+        assert_eq!(host, "example.com");
+        assert_eq!(port, 443);
+        assert_eq!(app, "live");
+        assert_eq!(stream_key, "streamkey");
+    }
+
+    #[test]
+    fn parse_rtmp_url_rtmps_respects_explicit_port() {
+        let (use_tls, host, port, _app, _stream_key) =
+            parse_rtmp_url("rtmps://example.com:1935/live/streamkey").unwrap();
+        assert!(use_tls);
+        assert_eq!(host, "example.com");
+        assert_eq!(port, 1935);
+    }
+
+    #[test]
+    fn parse_rtmp_url_rejects_unknown_scheme() {
+        assert_eq!(
+            parse_rtmp_url("http://example.com/live/streamkey"),
+            Err(ErrorCode::Internal)
+        );
+    }
+
+    #[test]
+    fn parse_rtmp_url_rejects_missing_stream_key() {
+        assert_eq!(
+            parse_rtmp_url("rtmp://example.com/live"),
+            Err(ErrorCode::Internal)
+        );
     }
 }

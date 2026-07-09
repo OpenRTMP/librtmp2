@@ -1,6 +1,15 @@
 //! Message dispatch, aggregate decode
 //!
 //! Mirrors `src/message/message.h` and `src/message/message.c`.
+//!
+//! `decode()`/`decode_aggregate()` and the `Connection`/`Stream` traits below
+//! are a generic, testable reference dispatcher kept for embedders that want
+//! to drive message classification against their own connection type rather
+//! than `session::conn::Conn`. The production ingest path does not go through
+//! this trait object: `session::conn::Conn::handle_message()` (and, for
+//! Aggregate messages specifically, `Conn::handle_aggregate()`) implements
+//! the same dispatch directly against `Conn`'s concrete fields for
+//! performance and to avoid the `dyn Connection` indirection on the hot path.
 
 use super::command;
 use super::control;
