@@ -158,6 +158,9 @@ impl Client {
 
     /// Send a frame while publishing.
     pub fn send_frame(&mut self, frame: &Frame) -> Result<()> {
+        if self.state != ClientState::Publishing {
+            return Err(ErrorCode::Protocol);
+        }
         let payload = self.frame_payload_slice(frame)?;
         self.send_frame_payload(frame.frame_type, frame.timestamp, payload)
     }
@@ -317,8 +320,11 @@ impl Client {
     // ── Internal helpers ──
 
     fn frame_payload_slice<'a>(&self, frame: &'a Frame) -> Result<&'a [u8]> {
-        if frame.size == 0 || frame.data.is_null() {
+        if frame.size == 0 {
             return Ok(&[]);
+        }
+        if frame.data.is_null() {
+            return Err(ErrorCode::Internal);
         }
         let len = frame.size as usize;
         if len > MAX_CLIENT_FRAME_BYTES {
