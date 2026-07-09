@@ -496,21 +496,30 @@ impl Client {
 /// Wait for the readiness direction `Transport::recv`/`send` reported via
 /// `again` (1 = readable, 2 = writable — e.g. TLS renegotiation needing a
 /// write during a read), bounded by `timeout_ms`.
+///
+/// A signal delivered during the wait (`EINTR`) is transient, same as
+/// `Transport::recv`/`try_send` already treat it — retry rather than
+/// surfacing it as a hard I/O error and aborting the caller's read/handshake.
 fn poll_for_transport_direction(fd: i32, again: i32, timeout_ms: i32) -> Result<()> {
     let events = if again == 2 {
         libc::POLLOUT
     } else {
         libc::POLLIN
     };
-    let mut pfd = libc::pollfd { fd, events, revents: 0 };
-    let rc = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
-    if rc == 0 {
-        return Err(ErrorCode::Timeout);
+    loop {
+        let mut pfd = libc::pollfd { fd, events, revents: 0 };
+        let rc = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
+        if rc == 0 {
+            return Err(ErrorCode::Timeout);
+        }
+        if rc < 0 {
+            if std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            return Err(ErrorCode::Io);
+        }
+        return Ok(());
     }
-    if rc < 0 {
-        return Err(ErrorCode::Io);
-    }
-    Ok(())
 }
 
 /// Block until exactly `n` bytes have been read from `transport`.
