@@ -42,6 +42,7 @@ run_once() {
         if ! kill -0 "$SRV" 2>/dev/null; then
             echo "ingest server exited during startup"
             cat "$LOG" || true
+            cleanup
             return 1
         fi
         if (exec 3<>"/dev/tcp/${HOST}/${PORT_NUM}") 2>/dev/null; then
@@ -53,6 +54,7 @@ run_once() {
     if ! kill -0 "$SRV" 2>/dev/null; then
         echo "ingest server exited before RTMP port was ready"
         cat "$LOG" || true
+        cleanup
         return 1
     fi
 
@@ -83,6 +85,7 @@ run_once() {
     if [ "$FF_RC" -ne 0 ] && kill -0 "$SRV" 2>/dev/null; then
         echo "INTEROP FAILED (ffmpeg publish exit=$FF_RC, ingest server still running)"
         cat "$LOG" || true
+        cleanup
         return 1
     fi
 
