@@ -21,6 +21,10 @@ pub const MAX_PENDING_RELAY_BYTES: usize = 8 * 1024 * 1024;
 /// Cap complete messages handled per `read_messages` call so one TCP recv batch
 /// cannot drain thousands of tiny control messages in a single state-machine step.
 const MAX_MESSAGES_PER_READ: usize = 256;
+/// Hard cap on complete messages handled across all `read_messages` passes in a
+/// single `recv` call. Without this, the outer `recv` loop (256 iterations)
+/// multiplies the per-pass cap into 65,536 message parses per recv batch.
+const MAX_MESSAGES_PER_RECV: usize = 256;
 
 const SERVER_WINDOW_ACK_SIZE: u32 = 2_500_000;
 const SERVER_PEER_BANDWIDTH: u32 = 2_500_000;
@@ -99,6 +103,9 @@ pub struct Conn {
     next_ping_token: u32,
     inbound_ping_responses: usize,
     inbound_ping_window_start: Option<Instant>,
+    /// Retains the last frame payload delivered through `on_frame_cb` so
+    /// `Frame.data` stays valid until the next callback on this connection.
+    frame_cb_scratch: Vec<u8>,
 }
 
 impl Conn {
@@ -147,6 +154,7 @@ impl Conn {
             next_ping_token: 1,
             inbound_ping_responses: 0,
             inbound_ping_window_start: None,
+            frame_cb_scratch: Vec::new(),
         }
     }
 
@@ -218,6 +226,7 @@ impl Conn {
 
     fn handle_media_frame(
         &mut self,
+        msg_stream_id: u32,
         frame_type: FrameType,
         timestamp: u32,
         payload: &[u8],
@@ -229,6 +238,15 @@ impl Conn {
                 .map(|s| s.is_publishing)
                 .unwrap_or(false)
         {
+            return Ok(());
+        }
+
+        let expected_stream_id = self
+            .current_stream
+            .as_ref()
+            .map(|s| s.stream_id)
+            .unwrap_or(0);
+        if msg_stream_id != expected_stream_id {
             return Ok(());
         }
 
@@ -251,12 +269,13 @@ impl Conn {
             .saturating_add(payload.len() as u64);
 
         if let Some(cb) = self.on_frame_cb {
-            let owned = payload.to_vec();
+            self.frame_cb_scratch.clear();
+            self.frame_cb_scratch.extend_from_slice(payload);
             let frame = Frame {
                 frame_type,
                 timestamp,
-                size: owned.len() as u32,
-                data: owned.as_ptr(),
+                size: self.frame_cb_scratch.len() as u32,
+                data: self.frame_cb_scratch.as_ptr(),
                 ..Default::default()
             };
             cb(&frame);
@@ -275,12 +294,13 @@ impl Conn {
         self.bytes_received = self.bytes_received.wrapping_add(data.len() as u32);
         let mut max_iter = 256;
         let mut no_progress = 0;
+        let mut messages_budget = MAX_MESSAGES_PER_RECV;
         while max_iter > 0 {
             max_iter -= 1;
             let avail = self.recv_buffer.available();
             if avail == 0 && self.state != ConnState::Handshake { break; }
             let before = avail;
-            let rc = self.process();
+            let rc = self.process(&mut messages_budget);
             if rc < 0 {
                 return Err(match rc {
                     -1 => ErrorCode::Io,
@@ -317,7 +337,7 @@ impl Conn {
         Ok(())
     }
 
-    pub fn process(&mut self) -> i32 {
+    pub fn process(&mut self, messages_budget: &mut usize) -> i32 {
         match self.state {
             ConnState::TcpAccepted | ConnState::Handshake => self.do_handshake(),
             ConnState::Connected
@@ -325,7 +345,7 @@ impl Conn {
             | ConnState::StreamCreated
             | ConnState::Publishing
             | ConnState::Playing
-            | ConnState::CapsNegotiated => self.read_messages(),
+            | ConnState::CapsNegotiated => self.read_messages(messages_budget),
             ConnState::Closing | ConnState::Closed => 0,
         }
     }
@@ -368,10 +388,10 @@ impl Conn {
         }
     }
 
-    pub fn read_messages(&mut self) -> i32 {
+    pub fn read_messages(&mut self, messages_budget: &mut usize) -> i32 {
         let mut processed = 0usize;
         loop {
-            if processed >= MAX_MESSAGES_PER_READ {
+            if processed >= MAX_MESSAGES_PER_READ || *messages_budget == 0 {
                 break;
             }
             let mut msg = ChunkMessage::default();
@@ -380,6 +400,7 @@ impl Conn {
                 Ok((1, payload_owned)) => {
                     if msg.is_complete {
                         processed += 1;
+                        *messages_budget = messages_budget.saturating_sub(1);
                         if let Err(e) = self.handle_message(&msg, &payload_owned) {
                             return match e {
                                 ErrorCode::Auth => -8,
@@ -413,8 +434,18 @@ impl Conn {
                     self.handle_command(payload)
                 }
             }
-            msg_dispatch::RTMP_MSG_AUDIO => self.handle_media_frame(FrameType::Audio, msg.timestamp, payload),
-            msg_dispatch::RTMP_MSG_VIDEO => self.handle_media_frame(FrameType::Video, msg.timestamp, payload),
+            msg_dispatch::RTMP_MSG_AUDIO => self.handle_media_frame(
+                msg.msg_stream_id,
+                FrameType::Audio,
+                msg.timestamp,
+                payload,
+            ),
+            msg_dispatch::RTMP_MSG_VIDEO => self.handle_media_frame(
+                msg.msg_stream_id,
+                FrameType::Video,
+                msg.timestamp,
+                payload,
+            ),
             _ => Ok(()),
         }
     }
@@ -938,17 +969,17 @@ mod tests {
 
         let av1_seq = vec![0x90, b'a', b'v', b'0', b'1', 0x01, 0x02, 0x03];
         assert!(conn
-            .handle_media_frame(FrameType::Video, 0, &av1_seq)
+            .handle_media_frame(1, FrameType::Video, 0, &av1_seq)
             .is_ok());
 
         let aac_seq = vec![0xAF, 0x00, 0x12, 0x10];
         assert!(conn
-            .handle_media_frame(FrameType::Audio, 0, &aac_seq)
+            .handle_media_frame(1, FrameType::Audio, 0, &aac_seq)
             .is_ok());
 
         let av1_frame = vec![0x91, b'a', b'v', b'0', b'1', 0xDE, 0xAD, 0xBE, 0xEF];
         assert!(conn
-            .handle_media_frame(FrameType::Video, 40, &av1_frame)
+            .handle_media_frame(1, FrameType::Video, 40, &av1_frame)
             .is_ok());
     }
 
@@ -1119,5 +1150,65 @@ mod tests {
             matches!(ping(99), Err(ErrorCode::Protocol)),
             "9th ping in one second must be rejected"
         );
+    }
+
+    #[test]
+    fn media_frames_on_wrong_msg_stream_id_are_ignored() {
+        let mut conn = Conn::new();
+        conn.relay_enabled = true;
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+        if let Some(s) = conn.current_stream.as_mut() {
+            s.is_publishing = true;
+        }
+
+        let payload = vec![0x17, 0x01, 0x00, 0x00, 0x00];
+        conn.handle_media_frame(99, FrameType::Video, 0, &payload)
+            .unwrap();
+        assert!(conn.pending_relay.is_empty());
+    }
+
+    #[test]
+    fn read_messages_respects_recv_level_message_budget() {
+        use crate::chunk::writer::chunk_write;
+
+        let mut conn = Conn::new();
+        conn.state = ConnState::Connected;
+
+        let mut wire = Buffer::new();
+        for i in 0..300usize {
+            let payload = [i as u8];
+            let msg = ChunkMessage {
+                csid: 2,
+                fmt: 0,
+                timestamp: 0,
+                msg_length: 1,
+                msg_type_id: 0x03,
+                msg_stream_id: 0,
+                is_complete: false,
+            };
+            chunk_write(&mut wire, &msg, &payload, 1, 128).unwrap();
+        }
+        conn.recv_buffer = wire;
+
+        let mut budget = MAX_MESSAGES_PER_RECV;
+        let _ = conn.read_messages(&mut budget);
+        assert_eq!(budget, 0);
+        assert!(conn.recv_buffer.available() > 0);
+    }
+
+    #[test]
+    fn on_frame_cb_scratch_retains_payload_after_delivery() {
+        let mut conn = Conn::new();
+        conn.relay_enabled = true;
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+        if let Some(s) = conn.current_stream.as_mut() {
+            s.is_publishing = true;
+        }
+        conn.on_frame_cb = Some(|_| {});
+
+        let payload = vec![0x17, 0x42];
+        conn.handle_media_frame(1, FrameType::Video, 0, &payload)
+            .unwrap();
+        assert_eq!(conn.frame_cb_scratch.as_slice(), payload.as_slice());
     }
 }

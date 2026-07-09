@@ -7,7 +7,7 @@ use std::os::unix::io::IntoRawFd;
 
 use crate::buffer::Buffer;
 use crate::chunk::reader::{chunk_read, ChunkMessage};
-use crate::chunk::state::ChunkRegistry;
+use crate::chunk::state::{ChunkRegistry, DEFAULT_MAX_MSG_LENGTH};
 use crate::chunk::writer::chunk_write;
 use crate::handshake::{self, Handshake};
 use crate::message::command;
@@ -22,6 +22,8 @@ const HANDSHAKE_SIZE: usize = 1536;
 
 /// Max time to wait for the peer to send more data before giving up.
 const RECV_POLL_TIMEOUT_MS: i32 = 10_000;
+/// Maximum frame payload accepted from FFI callers.
+pub const MAX_CLIENT_FRAME_BYTES: usize = DEFAULT_MAX_MSG_LENGTH as usize;
 /// Cap complete messages handled per `poll` recv pass.
 const MAX_MESSAGES_PER_POLL: usize = 256;
 
@@ -51,6 +53,8 @@ pub struct Client {
     pub app: String,
     pub stream_key: String,
     pub on_frame_cb: Option<fn(&Frame)>,
+    /// Retains the last frame payload delivered through `on_frame_cb`.
+    frame_cb_scratch: Vec<u8>,
 }
 
 impl Client {
@@ -68,6 +72,7 @@ impl Client {
             app: String::new(),
             stream_key: String::new(),
             on_frame_cb: None,
+            frame_cb_scratch: Vec::new(),
         }
     }
 
@@ -153,16 +158,27 @@ impl Client {
 
     /// Send a frame while publishing.
     pub fn send_frame(&mut self, frame: &Frame) -> Result<()> {
+        let payload = self.frame_payload_slice(frame)?;
+        self.send_frame_payload(frame.frame_type, frame.timestamp, payload)
+    }
+
+    /// Send a frame from an owned payload slice.
+    pub fn send_frame_payload(
+        &mut self,
+        frame_type: FrameType,
+        timestamp: u32,
+        payload: &[u8],
+    ) -> Result<()> {
         if self.state != ClientState::Publishing {
             return Err(ErrorCode::Protocol);
         }
 
         let mut cmsg = ChunkMessage::default();
-        cmsg.timestamp = frame.timestamp;
-        cmsg.msg_length = frame.size;
+        cmsg.timestamp = timestamp;
+        cmsg.msg_length = payload.len() as u32;
         cmsg.msg_stream_id = self.stream_id;
 
-        if frame.frame_type == FrameType::Audio {
+        if frame_type == FrameType::Audio {
             cmsg.csid = 4;
             cmsg.msg_type_id = 0x08; // AUDIO
         } else {
@@ -171,16 +187,11 @@ impl Client {
         }
         cmsg.fmt = 0;
 
-        let payload = if frame.size == 0 || frame.data.is_null() {
-            &[][..]
-        } else {
-            unsafe { std::slice::from_raw_parts(frame.data, frame.size as usize) }
-        };
         chunk_write(
             &mut self.send_buffer,
             &cmsg,
             payload,
-            frame.size as usize,
+            payload.len(),
             128,
         )?;
 
@@ -271,13 +282,12 @@ impl Client {
                         || msg.msg_type_id == msg_dispatch::RTMP_MSG_VIDEO
                     {
                         if let Some(ref cb) = self.on_frame_cb {
-                            let owned = if payload_ptr.is_null() || payload_len == 0 {
-                                Vec::new()
-                            } else {
-                                unsafe {
-                                    std::slice::from_raw_parts(payload_ptr, payload_len).to_vec()
-                                }
-                            };
+                            self.frame_cb_scratch.clear();
+                            if !payload_ptr.is_null() && payload_len > 0 {
+                                self.frame_cb_scratch.extend_from_slice(unsafe {
+                                    std::slice::from_raw_parts(payload_ptr, payload_len)
+                                });
+                            }
                             let frame = Frame {
                                 frame_type: if msg.msg_type_id == msg_dispatch::RTMP_MSG_AUDIO {
                                     FrameType::Audio
@@ -285,8 +295,8 @@ impl Client {
                                     FrameType::Video
                                 },
                                 timestamp: msg.timestamp,
-                                size: owned.len() as u32,
-                                data: owned.as_ptr(),
+                                size: self.frame_cb_scratch.len() as u32,
+                                data: self.frame_cb_scratch.as_ptr(),
                                 ..Default::default()
                             };
                             cb(&frame);
@@ -302,6 +312,17 @@ impl Client {
     }
 
     // ── Internal helpers ──
+
+    fn frame_payload_slice<'a>(&self, frame: &'a Frame) -> Result<&'a [u8]> {
+        if frame.size == 0 || frame.data.is_null() {
+            return Ok(&[]);
+        }
+        let len = frame.size as usize;
+        if len > MAX_CLIENT_FRAME_BYTES {
+            return Err(ErrorCode::Protocol);
+        }
+        Ok(unsafe { std::slice::from_raw_parts(frame.data, len) })
+    }
 
     /// Drop any prior socket and reset all protocol state before a new connect.
     /// Prevents stale recv/send buffers, chunk registry entries, and handshake
