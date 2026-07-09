@@ -85,6 +85,9 @@ impl Client {
     /// exchange.
     pub fn connect(&mut self, url: &str) -> Result<()> {
         let (use_tls, host, port, app, stream_key) = parse_rtmp_url(url)?;
+        if use_tls && !crate::transport::tls_available() {
+            return Err(ErrorCode::Unsupported);
+        }
         self.reset_session_state();
 
         let stream = TcpStream::connect((host.as_str(), port)).map_err(|_| ErrorCode::Io)?;
@@ -257,8 +260,20 @@ impl Client {
                     .map_err(|_| ErrorCode::Internal)?;
             } else if n == 0 {
                 return Err(ErrorCode::Io);
-            } else if again != 0 {
-                break;
+            } else if again == 2 {
+                // TLS renegotiation can need write-readiness during a read;
+                // the POLLIN wait above cannot detect that on its own. Wait
+                // for POLLOUT once, bounded by the same timeout, then retry
+                // the read instead of giving up on a writable socket.
+                let mut wpfd = libc::pollfd {
+                    fd: poll_fd,
+                    events: libc::POLLOUT,
+                    revents: 0,
+                };
+                let rc = unsafe { libc::poll(&mut wpfd, 1, timeout_ms) };
+                if rc <= 0 {
+                    break;
+                }
             } else {
                 break;
             }
@@ -470,20 +485,32 @@ impl Client {
             } else if n == 0 {
                 return Err(ErrorCode::Io);
             } else if again != 0 {
-                let mut pfd = libc::pollfd {
-                    fd: t_fd,
-                    events: libc::POLLIN,
-                    revents: 0,
-                };
-                let rc = unsafe { libc::poll(&mut pfd, 1, RECV_POLL_TIMEOUT_MS) };
-                if rc == 0 {
-                    return Err(ErrorCode::Timeout);
-                }
+                poll_for_transport_direction(t_fd, again, RECV_POLL_TIMEOUT_MS)?;
             } else {
                 return Err(ErrorCode::Io);
             }
         }
     }
+}
+
+/// Wait for the readiness direction `Transport::recv`/`send` reported via
+/// `again` (1 = readable, 2 = writable — e.g. TLS renegotiation needing a
+/// write during a read), bounded by `timeout_ms`.
+fn poll_for_transport_direction(fd: i32, again: i32, timeout_ms: i32) -> Result<()> {
+    let events = if again == 2 {
+        libc::POLLOUT
+    } else {
+        libc::POLLIN
+    };
+    let mut pfd = libc::pollfd { fd, events, revents: 0 };
+    let rc = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
+    if rc == 0 {
+        return Err(ErrorCode::Timeout);
+    }
+    if rc < 0 {
+        return Err(ErrorCode::Io);
+    }
+    Ok(())
 }
 
 /// Block until exactly `n` bytes have been read from `transport`.
@@ -498,15 +525,7 @@ fn read_exact(transport: &mut Transport, n: usize) -> Result<Vec<u8>> {
         } else if r == 0 {
             return Err(ErrorCode::Io);
         } else if again != 0 {
-            let mut pfd = libc::pollfd {
-                fd: transport.fd(),
-                events: libc::POLLIN,
-                revents: 0,
-            };
-            let rc = unsafe { libc::poll(&mut pfd, 1, RECV_POLL_TIMEOUT_MS) };
-            if rc == 0 {
-                return Err(ErrorCode::Timeout);
-            }
+            poll_for_transport_direction(transport.fd(), again, RECV_POLL_TIMEOUT_MS)?;
         } else {
             return Err(ErrorCode::Io);
         }
