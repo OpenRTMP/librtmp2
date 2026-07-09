@@ -36,6 +36,9 @@ const MAX_PENDING_PINGS: usize = 4;
 /// outbound bandwidth/CPU amplification from unauthenticated peers.
 const MAX_INBOUND_PING_RESPONSES: usize = 8;
 const INBOUND_PING_WINDOW: Duration = Duration::from_secs(1);
+/// Cap sub-tags unpacked from a single Aggregate message (mirrors
+/// `message::message::MAX_AGGREGATE_SUBTAGS`).
+const MAX_AGGREGATE_SUBTAGS: usize = 4096;
 
 pub struct RelayFrame {
     pub frame_type: FrameType,
@@ -304,6 +307,67 @@ impl Conn {
         Ok(())
     }
 
+    /// Unpack an RTMP Aggregate message (type 0x16) into its constituent FLV
+    /// sub-tags and route each audio/video sub-tag through the same relay path
+    /// as a standalone `RTMP_MSG_AUDIO`/`RTMP_MSG_VIDEO` message.
+    ///
+    /// Each sub-tag is `tag_type(1) + data_size(3) + timestamp(3) + timestamp_ext(1)
+    /// + stream_id(3) + data(data_size) + prev_tag_size(4)`. Sub-tag timestamps are
+    /// relative to the first sub-tag's timestamp; that delta is added to the
+    /// aggregate message's own chunk timestamp per the FLV/RTMP aggregate spec.
+    fn handle_aggregate(&mut self, msg_stream_id: u32, base_timestamp: u32, payload: &[u8]) -> Result<()> {
+        let mut pos = 0;
+        let mut have_base = false;
+        let mut sub_base_ts: u32 = 0;
+        let mut subtags = 0usize;
+
+        while pos + 11 <= payload.len() {
+            if subtags >= MAX_AGGREGATE_SUBTAGS {
+                return Err(ErrorCode::Protocol);
+            }
+            subtags += 1;
+
+            let tag_type = payload[pos];
+            let data_size = ((payload[pos + 1] as u32) << 16)
+                | ((payload[pos + 2] as u32) << 8)
+                | (payload[pos + 3] as u32);
+            let ts = ((payload[pos + 4] as u32) << 16)
+                | ((payload[pos + 5] as u32) << 8)
+                | (payload[pos + 6] as u32)
+                | ((payload[pos + 7] as u32) << 24);
+
+            let body = pos + 11;
+            let data_size = data_size as usize;
+            if body + data_size > payload.len() {
+                return Err(ErrorCode::Protocol);
+            }
+
+            if !have_base {
+                sub_base_ts = ts;
+                have_base = true;
+            }
+            // Use wrapping arithmetic: a sub-tag ts less than the first sub-tag's
+            // ts (malformed but possible) must not panic in debug or silently
+            // wrap in an unexpected direction in release.
+            let out_ts = base_timestamp.wrapping_add(ts.wrapping_sub(sub_base_ts));
+            let tag_payload = &payload[body..body + data_size];
+
+            match tag_type {
+                msg_dispatch::RTMP_MSG_AUDIO => {
+                    self.handle_media_frame(msg_stream_id, FrameType::Audio, out_ts, tag_payload)?;
+                }
+                msg_dispatch::RTMP_MSG_VIDEO => {
+                    self.handle_media_frame(msg_stream_id, FrameType::Video, out_ts, tag_payload)?;
+                }
+                _ => {}
+            }
+
+            pos = body + data_size + 4;
+        }
+
+        Ok(())
+    }
+
     pub fn get_fd(&self) -> i32 { self.client_fd }
 
     pub fn recv(&mut self, data: &[u8]) -> Result<()> {
@@ -472,6 +536,9 @@ impl Conn {
                 msg.timestamp,
                 payload,
             ),
+            msg_dispatch::RTMP_MSG_AGGREGATE => {
+                self.handle_aggregate(msg.msg_stream_id, msg.timestamp, payload)
+            }
             _ => Ok(()),
         }
     }
@@ -1236,5 +1303,100 @@ mod tests {
         conn.handle_media_frame(1, FrameType::Video, 0, &payload)
             .unwrap();
         assert_eq!(conn.frame_cb_scratch.as_slice(), payload.as_slice());
+    }
+
+    fn flv_subtag(tag_type: u8, timestamp: u32, data: &[u8]) -> Vec<u8> {
+        let mut v = Vec::new();
+        v.push(tag_type);
+        let len = data.len() as u32;
+        v.extend_from_slice(&[(len >> 16) as u8, (len >> 8) as u8, len as u8]);
+        v.extend_from_slice(&[
+            (timestamp >> 16) as u8,
+            (timestamp >> 8) as u8,
+            timestamp as u8,
+            (timestamp >> 24) as u8,
+        ]);
+        v.extend_from_slice(&[0, 0, 0]); // stream id (always 0 on the wire)
+        v.extend_from_slice(data);
+        let prev_tag_size = (11 + data.len()) as u32;
+        v.extend_from_slice(&prev_tag_size.to_be_bytes());
+        v
+    }
+
+    #[test]
+    fn aggregate_message_unpacks_audio_and_video_subtags_into_relay() {
+        let mut conn = Conn::new();
+        conn.relay_enabled = true;
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+        if let Some(s) = conn.current_stream.as_mut() {
+            s.is_publishing = true;
+        }
+
+        let audio_payload = vec![0xAF, 0x01, 0x11, 0x22];
+        let video_payload = vec![0x17, 0x01, 0x00, 0x00, 0x00, 0xAA];
+        let mut aggregate = Vec::new();
+        aggregate.extend(flv_subtag(0x08, 100, &audio_payload));
+        aggregate.extend(flv_subtag(0x09, 140, &video_payload));
+
+        conn.handle_aggregate(1, 1000, &aggregate).unwrap();
+
+        assert_eq!(conn.pending_relay.len(), 2);
+        assert_eq!(conn.pending_relay[0].frame_type, FrameType::Audio);
+        assert_eq!(conn.pending_relay[0].timestamp, 1000);
+        assert_eq!(conn.pending_relay[0].payload, audio_payload);
+        assert_eq!(conn.pending_relay[1].frame_type, FrameType::Video);
+        // Second sub-tag's ts (140) is 40 past the first sub-tag's ts (100),
+        // so its relayed timestamp is the aggregate's own timestamp (1000) + 40.
+        assert_eq!(conn.pending_relay[1].timestamp, 1040);
+        assert_eq!(conn.pending_relay[1].payload, video_payload);
+    }
+
+    #[test]
+    fn aggregate_message_rejects_subtag_size_overrunning_payload() {
+        let mut conn = Conn::new();
+        conn.relay_enabled = true;
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+        if let Some(s) = conn.current_stream.as_mut() {
+            s.is_publishing = true;
+        }
+
+        // Claims a data_size far larger than the bytes actually present.
+        let mut aggregate = vec![0x08, 0xFF, 0xFF, 0xFF];
+        aggregate.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0]);
+        aggregate.extend_from_slice(b"short");
+
+        assert_eq!(
+            conn.handle_aggregate(1, 0, &aggregate),
+            Err(ErrorCode::Protocol)
+        );
+    }
+
+    #[test]
+    fn aggregate_dispatch_reaches_handle_aggregate_via_handle_message() {
+        let mut conn = Conn::new();
+        conn.relay_enabled = true;
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+        if let Some(s) = conn.current_stream.as_mut() {
+            s.is_publishing = true;
+        }
+
+        let video_payload = vec![0x17, 0x01, 0x00, 0x00, 0x00, 0xBB];
+        let aggregate = flv_subtag(0x09, 0, &video_payload);
+        let msg = ChunkMessage {
+            csid: 6,
+            fmt: 0,
+            timestamp: 500,
+            msg_length: aggregate.len() as u32,
+            msg_type_id: msg_dispatch::RTMP_MSG_AGGREGATE,
+            msg_stream_id: 1,
+            is_complete: true,
+        };
+
+        conn.handle_message(&msg, &aggregate).unwrap();
+
+        assert_eq!(conn.pending_relay.len(), 1);
+        assert_eq!(conn.pending_relay[0].frame_type, FrameType::Video);
+        assert_eq!(conn.pending_relay[0].timestamp, 500);
+        assert_eq!(conn.pending_relay[0].payload, video_payload);
     }
 }
