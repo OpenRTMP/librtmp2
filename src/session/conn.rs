@@ -106,6 +106,13 @@ pub struct Conn {
     /// Retains the last frame payload delivered through `on_frame_cb` so
     /// `Frame.data` stays valid until the next callback on this connection.
     frame_cb_scratch: Vec<u8>,
+    /// Set when `read_messages` stops because `MAX_MESSAGES_PER_READ` or
+    /// `MAX_MESSAGES_PER_RECV` was hit while `recv_buffer` still holds
+    /// complete, unprocessed messages -- as opposed to stopping because the
+    /// buffer ran out of data. Callers must keep draining (e.g. via another
+    /// `recv(&[])`) until this clears, or a batch that exceeds the budget can
+    /// sit unprocessed until the peer happens to send more bytes.
+    budget_exhausted: bool,
 }
 
 impl Conn {
@@ -155,7 +162,17 @@ impl Conn {
             inbound_ping_responses: 0,
             inbound_ping_window_start: None,
             frame_cb_scratch: Vec::new(),
+            budget_exhausted: false,
         }
+    }
+
+    /// True if the last `recv`/`process` pass stopped early because the
+    /// per-call message budget was exhausted while complete messages were
+    /// still buffered. Callers (e.g. the server poll loop) should keep
+    /// calling `recv(&[])` until this returns false so a batch larger than
+    /// the budget doesn't stall waiting on the peer to send more bytes.
+    pub fn has_buffered_messages(&self) -> bool {
+        self.budget_exhausted
     }
 
     fn pending_relay_bytes(&self) -> usize {
@@ -292,10 +309,15 @@ impl Conn {
     pub fn recv(&mut self, data: &[u8]) -> Result<()> {
         self.recv_buffer.write(data).map_err(|_| ErrorCode::Internal)?;
         self.bytes_received = self.bytes_received.wrapping_add(data.len() as u32);
+        self.budget_exhausted = false;
         let mut max_iter = 256;
         let mut no_progress = 0;
         let mut messages_budget = MAX_MESSAGES_PER_RECV;
         while max_iter > 0 {
+            if messages_budget == 0 {
+                self.budget_exhausted = true;
+                break;
+            }
             max_iter -= 1;
             let avail = self.recv_buffer.available();
             if avail == 0 && self.state != ConnState::Handshake { break; }
@@ -392,6 +414,10 @@ impl Conn {
         let mut processed = 0usize;
         loop {
             if processed >= MAX_MESSAGES_PER_READ || *messages_budget == 0 {
+                // Stopped because the budget ran out, not because the buffer
+                // is empty -- there may still be complete messages sitting in
+                // `recv_buffer` that the caller needs to keep draining.
+                self.budget_exhausted = true;
                 break;
             }
             let mut msg = ChunkMessage::default();

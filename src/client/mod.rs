@@ -172,6 +172,9 @@ impl Client {
         if self.state != ClientState::Publishing {
             return Err(ErrorCode::Protocol);
         }
+        if payload.len() > MAX_CLIENT_FRAME_BYTES {
+            return Err(ErrorCode::Protocol);
+        }
 
         let mut cmsg = ChunkMessage::default();
         cmsg.timestamp = timestamp;

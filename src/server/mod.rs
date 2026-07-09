@@ -489,6 +489,16 @@ impl Server {
                     break;
                 }
             }
+            // A batch larger than the per-`recv` message budget leaves
+            // complete messages buffered but unprocessed; keep draining them
+            // with no new bytes instead of waiting on the peer to send more,
+            // which may never happen if it's waiting on our response.
+            while conn.has_buffered_messages() {
+                if conn.recv(&[]).is_err() {
+                    closed.push(i);
+                    break;
+                }
+            }
         }
 
         // Ordering within this function is deliberate: evictions from

@@ -222,6 +222,9 @@ pub unsafe extern "C" fn lrtmp2_client_send_frame(
         return ErrorCode::Internal as i32;
     }
     let frame_ref = unsafe { &*frame };
+    if unsafe { (*c).state } != client::ClientState::Publishing {
+        return ErrorCode::Protocol as i32;
+    }
     if frame_ref.size > 0 && frame_ref.data.is_null() {
         return ErrorCode::Internal as i32;
     }
