@@ -222,10 +222,29 @@ pub unsafe extern "C" fn lrtmp2_client_send_frame(
         return ErrorCode::Internal as i32;
     }
     let frame_ref = unsafe { &*frame };
+    if unsafe { (*c).state } != client::ClientState::Publishing {
+        return ErrorCode::Protocol as i32;
+    }
     if frame_ref.size > 0 && frame_ref.data.is_null() {
         return ErrorCode::Internal as i32;
     }
-    match unsafe { (*c).send_frame(frame_ref) } {
+    if frame_ref.size as usize > client::MAX_CLIENT_FRAME_BYTES {
+        return ErrorCode::Protocol as i32;
+    }
+    let payload = if frame_ref.size == 0 || frame_ref.data.is_null() {
+        Vec::new()
+    } else {
+        unsafe {
+            std::slice::from_raw_parts(frame_ref.data, frame_ref.size as usize).to_vec()
+        }
+    };
+    match unsafe {
+        (*c).send_frame_payload(
+            frame_ref.frame_type,
+            frame_ref.timestamp,
+            &payload,
+        )
+    } {
         Ok(()) => 0,
         Err(e) => e as i32,
     }

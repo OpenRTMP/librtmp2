@@ -38,6 +38,14 @@ const TLS_HANDSHAKE_TIMEOUT_SECS: u64 = 10;
 /// until its socket buffer is empty.
 const MAX_RECV_BYTES_PER_CONN_PER_POLL: usize = 256 * 1024;
 
+/// Maximum number of extra budget-only `recv(&[])` passes used to drain
+/// already-buffered messages left over from `Conn`'s per-recv message cap.
+/// Each pass affords another full message budget, so this bounds one
+/// connection to this many extra budgets per poll tick -- any remainder
+/// waits for the next `process_connections` pass instead of starving other
+/// connections in this one.
+const MAX_BUDGET_DRAIN_PASSES_PER_CONN_PER_POLL: usize = 3;
+
 /// Cached codec headers and last keyframe for a (app, stream_name) pair.
 /// Replayed to players that join after the publisher has already sent headers.
 struct StreamCache {
@@ -485,6 +493,21 @@ impl Server {
                 } else if again != 0 {
                     break;
                 } else {
+                    closed.push(i);
+                    break;
+                }
+            }
+            // A batch larger than the per-`recv` message budget leaves
+            // complete messages buffered but unprocessed; keep draining them
+            // with no new bytes instead of waiting on the peer to send more,
+            // which may never happen if it's waiting on our response. Capped
+            // so one connection with a huge batch can't monopolize this poll
+            // tick -- any remainder is picked up on the next poll() call.
+            for _ in 0..MAX_BUDGET_DRAIN_PASSES_PER_CONN_PER_POLL {
+                if !conn.has_buffered_messages() {
+                    break;
+                }
+                if conn.recv(&[]).is_err() {
                     closed.push(i);
                     break;
                 }
