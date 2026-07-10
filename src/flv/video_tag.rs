@@ -9,6 +9,8 @@ use crate::types::{ErrorCode, Result, VideoCodec, VideoTag};
 /// Returns `Err(ErrorCode::Unsupported)` if `IsExHeader` (bit 7) is set —
 /// the caller must route those frames through the E-RTMP enhanced parser instead.
 pub fn parse(data: &[u8], tag: &mut VideoTag) -> Result<()> {
+    *tag = VideoTag::default();
+
     if data.is_empty() {
         return Err(ErrorCode::Internal);
     }
@@ -76,5 +78,31 @@ mod tests {
         let payload = [0x18, 0x00];
         let mut tag = VideoTag::default();
         assert_eq!(parse(&payload, &mut tag), Err(ErrorCode::Unsupported));
+    }
+
+    #[test]
+    fn parse_clears_avc_fields_on_non_h264_reuse() {
+        let mut tag = VideoTag::default();
+        parse(&[0x17, 0x01, 0x00, 0x01, 0x2C], &mut tag).unwrap();
+        assert_eq!(tag.avc_packet_type, 1);
+        assert_eq!(tag.composition_time, 0x00012C);
+
+        parse(&[0x24, 0xDE, 0xAD], &mut tag).unwrap();
+        assert_eq!(tag.codec, VideoCodec::Vp6);
+        assert_eq!(tag.avc_packet_type, 0);
+        assert_eq!(tag.composition_time, 0);
+    }
+
+    #[test]
+    fn parse_error_leaves_tag_cleared() {
+        let mut tag = VideoTag::default();
+        parse(&[0x17, 0x01, 0x00, 0x01, 0x2C], &mut tag).unwrap();
+        assert_eq!(
+            parse(&[0x18, 0x00], &mut tag),
+            Err(ErrorCode::Unsupported)
+        );
+        assert_eq!(tag.codec, VideoCodec::Jpeg);
+        assert_eq!(tag.avc_packet_type, 0);
+        assert_eq!(tag.composition_time, 0);
     }
 }

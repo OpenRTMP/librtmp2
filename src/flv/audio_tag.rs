@@ -6,6 +6,8 @@ use crate::types::{AudioCodec, AudioTag, ErrorCode, Result};
 
 /// Parse an FLV audio tag.
 pub fn parse(data: &[u8], tag: &mut AudioTag) -> Result<()> {
+    *tag = AudioTag::default();
+
     if data.is_empty() {
         return Err(ErrorCode::Internal);
     }
@@ -75,5 +77,25 @@ mod tests {
     fn parse_rejects_empty_payload() {
         let mut tag = AudioTag::default();
         assert_eq!(parse(&[], &mut tag), Err(ErrorCode::Internal));
+    }
+
+    #[test]
+    fn parse_clears_aac_packet_type_on_non_aac_reuse() {
+        let mut tag = AudioTag::default();
+        parse(&[0xAF, 0x01], &mut tag).unwrap();
+        assert_eq!(tag.aac_packet_type, 1);
+
+        parse(&[0x2F], &mut tag).unwrap();
+        assert_eq!(tag.codec, AudioCodec::Mp3);
+        assert_eq!(tag.aac_packet_type, 0);
+    }
+
+    #[test]
+    fn parse_error_leaves_tag_cleared() {
+        let mut tag = AudioTag::default();
+        parse(&[0xAF, 0x01], &mut tag).unwrap();
+        assert_eq!(parse(&[], &mut tag), Err(ErrorCode::Internal));
+        assert_eq!(tag.codec, AudioCodec::Pcm);
+        assert_eq!(tag.aac_packet_type, 0);
     }
 }

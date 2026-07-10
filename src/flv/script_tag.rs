@@ -8,6 +8,8 @@ use crate::types::{ErrorCode, Result, ScriptTag};
 
 /// Parse an FLV script tag.
 pub fn parse(data: &[u8], tag: &mut ScriptTag) -> Result<()> {
+    *tag = ScriptTag::default();
+
     if data.len() < 2 {
         return Err(ErrorCode::Internal);
     }
@@ -96,5 +98,36 @@ mod tests {
     fn parse_rejects_too_short_payload() {
         let mut tag = ScriptTag::default();
         assert_eq!(parse(&[0x02], &mut tag), Err(ErrorCode::Internal));
+    }
+
+    #[test]
+    fn parse_clears_name_suffix_on_shorter_reuse() {
+        let mut payload = amf0_string("onMetaData");
+        payload.push(amf0::Amf0Type::Object as u8);
+        payload.extend_from_slice(&amf0_object_end());
+        let mut tag = ScriptTag::default();
+        parse(&payload, &mut tag).unwrap();
+
+        let mut short = amf0_string("hi");
+        short.push(amf0::Amf0Type::Object as u8);
+        short.extend_from_slice(&amf0_object_end());
+        parse(&short, &mut tag).unwrap();
+
+        let name = std::str::from_utf8(&tag.name)
+            .unwrap_or("")
+            .trim_end_matches('\0');
+        assert_eq!(name, "hi");
+    }
+
+    #[test]
+    fn parse_error_leaves_tag_cleared() {
+        let mut payload = amf0_string("onMetaData");
+        payload.push(amf0::Amf0Type::Object as u8);
+        payload.extend_from_slice(&amf0_object_end());
+        let mut tag = ScriptTag::default();
+        parse(&payload, &mut tag).unwrap();
+
+        assert_eq!(parse(&[0x02], &mut tag), Err(ErrorCode::Internal));
+        assert_eq!(tag.name, [0u8; 64]);
     }
 }

@@ -1,6 +1,6 @@
 # Bug scan progress
 
-Last scanned: amf (2026-07-09)
+Last scanned: flv (2026-07-10)
 
 ## Modules
 
@@ -9,11 +9,26 @@ Last scanned: amf (2026-07-09)
 - [x] chunk — Chunk reader/writer/state
 - [x] message — Message reassembly, control, commands
 - [x] amf — AMF0 + AMF3
-- [ ] flv — Audio/video/script tags
+- [x] flv — Audio/video/script tags
 - [ ] ertmp — E-RTMP v1/v2 extensions
 - [ ] session — State machine, publish/play flows
 - [ ] server — Server listener
 - [ ] client — Outbound client
+
+## Findings (2026-07-10 flv pass)
+
+- Reviewed `src/flv/audio_tag.rs`, `src/flv/video_tag.rs`, `src/flv/script_tag.rs`,
+  and `mod.rs`. Traced callers (benches, embedder Rust API; session ingest uses
+  lightweight `detect_*_codec` instead). AMF paths in `script_tag` inherit amf0
+  bounds checks (`MAX_OBJECT_KEYS`, `MAX_SKIP_DEPTH`, string length caps).
+- **Bug:** All three `parse()` functions reused caller-owned `AudioTag`/`VideoTag`/
+  `ScriptTag` structs without clearing prior fields. Re-parsing a shorter script
+  name left a stale suffix (`"hi"` after `"onMetaData"` → `"hiataData"` as C
+  string). Re-parsing H264 then VP6 left stale `avc_packet_type`/`composition_time`;
+  AAC→MP3 left stale `aac_packet_type`. Failed parses (empty payload, unknown
+  codec) could also leave a mix of old and new fields. Fixed by resetting
+  `*tag = Tag::default()` at the start of each `parse()`. Added regression tests
+  for reuse and error paths.
 
 ## Findings (2026-07-09 amf pass)
 
