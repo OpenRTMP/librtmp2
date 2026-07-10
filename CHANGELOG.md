@@ -13,6 +13,39 @@ begin at `1.0.0`.
 
 ## [Unreleased]
 
+## [0.2.1] — 2026-07-10
+
+### Added
+- `lrtmp2_tls_supported()` runtime capability check exported to FFI
+- Parse `onMetaData` from RTMP data messages into `Conn` fields (duration, width, height, framerate, videodatarate, audiodatarate, codec info)
+
+### Fixed
+- `flv::audio_tag` / `video_tag` / `script_tag` parsers now reset the
+  caller-owned tag struct at the start of every `parse()` call, so switching
+  between codecs mid-stream (or a shorter value following a longer one, e.g.
+  a script tag name) no longer leaves stale fields from a previous parse
+- CodeQL invalid-pointer alert in FFI `server_create` test resolved
+- Borrow checker errors in AMF0 `skip_value_depth`
+- `onMetaData` parsing scope and lifecycle per review feedback
+
+### Security
+- Cap and copy FFI frame payloads before sending and reject an oversized
+  `frame.size`; ignore inbound media whose `msg_stream_id` doesn't match
+  the current stream; retain `on_frame_cb` payloads in connection-scoped
+  scratch buffers instead of a shared one
+- Add per-poll (256 KiB) and per-command-wait (256 KiB) byte budgets to the
+  RTMP client's recv path, mirroring the server's existing fairness cap, so
+  a malicious server can no longer monopolize the embedder's event-loop
+  thread or force hundreds of megabytes through the AMF connect handshake
+- `lrtmp2_server_create` now substitutes a default `max_connections` (256)
+  when the FFI caller passes a zero-initialized `ServerConfig` (e.g. via
+  `calloc`/`{0}`), which previously disabled all connection limiting; an
+  explicit negative value continues to mean "unlimited", matching
+  `Server::new`
+
+### Documentation
+- Improved `onMetaData` parsing robustness per CodeRabbit/Codex reviews
+
 ## [0.2.0] — 2026-07-10
 
 ### Added
@@ -126,7 +159,8 @@ and others.
 - Protocol mapping documents for legacy, E-RTMP v1, and E-RTMP v2
 - `CONTRIBUTING.md` guidelines
 
-[Unreleased]: https://github.com/OpenRTMP/librtmp2/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/OpenRTMP/librtmp2/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/OpenRTMP/librtmp2/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/OpenRTMP/librtmp2/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/OpenRTMP/librtmp2/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/OpenRTMP/librtmp2/releases/tag/v0.1.0
