@@ -13,6 +13,30 @@ begin at `1.0.0`.
 
 ## [Unreleased]
 
+### Fixed
+- `flv::audio_tag` / `video_tag` / `script_tag` parsers now reset the
+  caller-owned tag struct at the start of every `parse()` call, so switching
+  between codecs mid-stream (or a shorter value following a longer one, e.g.
+  a script tag name) no longer leaves stale fields from a previous parse
+- The RTMP client's inbound recv budget accounting no longer discards an
+  already-read chunk once it slightly exceeds the remaining budget; the read
+  itself is now capped at the remaining budget so bytes belonging to the
+  response being waited for are never dropped
+- `Client::poll()` no longer risks blocking in `poll(2)` for the full
+  timeout when TLS already has decrypted plaintext buffered internally from
+  a previous budget-limited drain
+
+### Security
+- Add per-poll (256 KiB) and per-command-wait (256 KiB) byte budgets to the
+  RTMP client's recv path, mirroring the server's existing fairness cap, so
+  a malicious server can no longer monopolize the embedder's event-loop
+  thread or force hundreds of megabytes through the AMF connect handshake
+- `lrtmp2_server_create` now substitutes a default `max_connections` (256)
+  when the FFI caller passes a zero-initialized `ServerConfig` (e.g. via
+  `calloc`/`{0}`), which previously disabled all connection limiting; an
+  explicit negative value continues to mean "unlimited", matching
+  `Server::new`
+
 ## [0.1.1] — 2026-07-08
 
 ### Fixed
