@@ -5,7 +5,7 @@ A modern, open-source **Rust library** for Legacy RTMP and Enhanced RTMP v1/v2.
 [![crates.io](https://img.shields.io/crates/v/librtmp2.svg)](https://crates.io/crates/librtmp2)
 [![docs.rs](https://img.shields.io/docsrs/librtmp2/latest.svg)](https://docs.rs/librtmp2)
 [![License](https://img.shields.io/github/license/OpenRTMP/librtmp2)](LICENSE)
-![Version](https://img.shields.io/badge/version-v0.1.0-orange)
+![Version](https://img.shields.io/badge/version-v0.2.1-orange)
 ![Language](https://img.shields.io/badge/language-Rust-orange)
 
 ---
