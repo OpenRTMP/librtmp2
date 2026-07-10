@@ -16,14 +16,17 @@ begin at `1.0.0`.
 ## [0.2.0] — 2026-07-10
 
 ### Added
-- RTMPS (TLS) client support: `Client::connect()` now accepts `rtmps://`
-  URLs, dialing over TLS and verifying the server certificate against the
-  system trust store (`Transport::connect_tls()`)
 - RTMP Aggregate message (`0x16`) handling: aggregate-framed audio/video
   from a publisher is now unpacked and relayed through the normal
   media-frame path instead of being silently dropped
 
 ### Fixed
+- `Client::connect()` now actually accepts `rtmps://` URLs via the new
+  `Transport::connect_tls()` (dialing over TLS and verifying the server
+  certificate against the system trust store) — previously only the
+  server side implemented RTMPS, despite the 0.1.0 notes describing
+  client-side `rtmps://` support; `parse_rtmp_url()` now recognizes the
+  scheme and defaults to port 443
 - `flv::audio_tag` / `video_tag` / `script_tag` parsers now reset the
   caller-owned tag struct at the start of every `parse()` call, so switching
   between codecs mid-stream (or a shorter value following a longer one, e.g.
