@@ -13,6 +13,8 @@ begin at `1.0.0`.
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-07-10
+
 ### Fixed
 - `flv::audio_tag` / `video_tag` / `script_tag` parsers now reset the
   caller-owned tag struct at the start of every `parse()` call, so switching
