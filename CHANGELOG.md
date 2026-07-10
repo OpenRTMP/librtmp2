@@ -15,6 +15,14 @@ begin at `1.0.0`.
 
 ## [0.2.0] — 2026-07-10
 
+### Added
+- RTMPS (TLS) client support: `Client::connect()` now accepts `rtmps://`
+  URLs, dialing over TLS and verifying the server certificate against the
+  system trust store (`Transport::connect_tls()`)
+- RTMP Aggregate message (`0x16`) handling: aggregate-framed audio/video
+  from a publisher is now unpacked and relayed through the normal
+  media-frame path instead of being silently dropped
+
 ### Fixed
 - `flv::audio_tag` / `video_tag` / `script_tag` parsers now reset the
   caller-owned tag struct at the start of every `parse()` call, so switching
@@ -27,8 +35,32 @@ begin at `1.0.0`.
 - `Client::poll()` no longer risks blocking in `poll(2)` for the full
   timeout when TLS already has decrypted plaintext buffered internally from
   a previous budget-limited drain
+- FFI `lrtmp2_client_send_frame` and `Client::send_frame_payload` now
+  enforce the max client frame-size cap consistently on every call path,
+  and reject a stale/non-owned frame pointer when the client isn't in the
+  `Publishing` state, instead of only checking on one of two paths
+- The server poll loop keeps draining a connection's already-buffered
+  messages (up to 3 extra passes) when a batch exceeds the per-recv message
+  budget, instead of stalling until the peer happens to send more bytes
+- The RTMPS client now checks TLS support before dialing, instead of
+  opening a plaintext TCP connection first even in a
+  `--no-default-features` build that given an `rtmps://` URL would only
+  reject after connecting
+- The client's blocking read helpers now poll for write-readiness (not
+  just read-readiness) when a TLS read reports `WANT_WRITE` during
+  renegotiation, instead of stalling until timeout on the wrong direction
+- The client's TLS handshake is now bounded by the same 10s timeout used
+  elsewhere in the transport, instead of blocking indefinitely if a peer
+  stalls mid-handshake
+- Retry `poll(2)` on `EINTR` in the client's transport-readiness wait
+  helper instead of surfacing it as a hard I/O error and aborting the
+  caller's read/handshake
 
 ### Security
+- Cap and copy FFI frame payloads before sending and reject an oversized
+  `frame.size`; ignore inbound media whose `msg_stream_id` doesn't match
+  the current stream; retain `on_frame_cb` payloads in connection-scoped
+  scratch buffers instead of a shared one
 - Add per-poll (256 KiB) and per-command-wait (256 KiB) byte budgets to the
   RTMP client's recv path, mirroring the server's existing fairness cap, so
   a malicious server can no longer monopolize the embedder's event-loop
@@ -91,6 +123,7 @@ and others.
 - Protocol mapping documents for legacy, E-RTMP v1, and E-RTMP v2
 - `CONTRIBUTING.md` guidelines
 
-[Unreleased]: https://github.com/OpenRTMP/librtmp2/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/OpenRTMP/librtmp2/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/OpenRTMP/librtmp2/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/OpenRTMP/librtmp2/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/OpenRTMP/librtmp2/releases/tag/v0.1.0
