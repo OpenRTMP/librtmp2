@@ -14,7 +14,7 @@
 use super::command;
 use super::control;
 use crate::buffer::Buffer;
-use crate::chunk::reader::{chunk_read, ChunkMessage};
+use crate::chunk::reader::{ChunkMessage, chunk_read};
 use crate::chunk::state::ChunkRegistry;
 use crate::types::{AudioCodec, ErrorCode, Frame, FrameType, Result, VideoCodec};
 
@@ -258,7 +258,8 @@ pub fn decode(conn: &mut dyn Connection, chunk: &ChunkMessage, payload: &[u8]) -
             return conn.handle_command(payload);
         }
         RTMP_MSG_AMF0_DATA | RTMP_MSG_AMF3_DATA | RTMP_MSG_AMF3_SHARED_OBJECT => {
-            // Data messages — log only
+            // Data messages — handled on the production path in
+            // `session::conn::Conn::handle_data_message()`.
         }
         RTMP_MSG_AGGREGATE => {
             return decode_aggregate(conn, chunk, payload);

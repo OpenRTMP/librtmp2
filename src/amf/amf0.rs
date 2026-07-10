@@ -278,9 +278,12 @@ pub fn is_object_end(buf: &mut Buffer) -> bool {
 const MAX_SKIP_DEPTH: i32 = 32;
 const MAX_OBJECT_KEYS: usize = 256;
 
-fn skip_value_depth(buf: &mut Buffer, depth: i32) -> Result<()> {
-    let ty = read_type(buf)?;
+/// Skip an AMF0 value whose type marker has already been consumed.
+pub fn skip_value_after_type(buf: &mut Buffer, ty: Amf0Type) -> Result<()> {
+    skip_value_depth(buf, 0, ty)
+}
 
+fn skip_value_depth(buf: &mut Buffer, depth: i32, ty: Amf0Type) -> Result<()> {
     match ty {
         Amf0Type::Number => {
             read_double(buf)?;
@@ -315,7 +318,7 @@ fn skip_value_depth(buf: &mut Buffer, depth: i32) -> Result<()> {
                 return Err(ErrorCode::Amf);
             }
             for _ in 0..count {
-                skip_value_depth(buf, depth + 1)?;
+                skip_value_depth(buf, depth + 1, read_type(buf)?)?;
             }
             Ok(())
         }
@@ -342,7 +345,7 @@ fn skip_value_depth(buf: &mut Buffer, depth: i32) -> Result<()> {
                     return Err(ErrorCode::Io);
                 }
                 buf.drain(klen);
-                skip_value_depth(buf, depth + 1)?;
+                skip_value_depth(buf, depth + 1, read_type(buf)?)?;
             }
         }
         Amf0Type::Date => {
@@ -367,7 +370,7 @@ fn skip_value_depth(buf: &mut Buffer, depth: i32) -> Result<()> {
 
 /// Skip an AMF0 value.
 pub fn skip_value(buf: &mut Buffer) -> Result<()> {
-    skip_value_depth(buf, 0)
+    skip_value_depth(buf, 0, read_type(buf)?)
 }
 
 #[cfg(test)]

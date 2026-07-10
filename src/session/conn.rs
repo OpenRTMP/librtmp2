@@ -3,7 +3,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use crate::buffer::Buffer;
-use crate::chunk::reader::{chunk_read_owned, ChunkMessage};
+use crate::chunk::reader::{ChunkMessage, chunk_read_owned};
 use crate::chunk::state::{ChunkRegistry, DEFAULT_CHUNK_SIZE};
 use crate::chunk::writer::chunk_write;
 use crate::handshake::{self, Handshake, HandshakeState};
@@ -85,6 +85,11 @@ pub struct Conn {
     pub needs_init_frames: bool,
     pub detected_video_codec: Option<String>,
     pub detected_audio_codec: Option<String>,
+    pub detected_video_width: Option<u32>,
+    pub detected_video_height: Option<u32>,
+    pub detected_video_framerate: Option<f64>,
+    pub detected_audio_sample_rate: Option<u32>,
+    pub detected_audio_channels: Option<u32>,
     pub relay_enabled: bool,
     /// When true, media relay stays off until the integrator sets `relay_enabled`
     /// after its own post-auth bookkeeping (used by librtmp2-server).
@@ -149,6 +154,11 @@ impl Conn {
             needs_init_frames: false,
             detected_video_codec: None,
             detected_audio_codec: None,
+            detected_video_width: None,
+            detected_video_height: None,
+            detected_video_framerate: None,
+            detected_audio_sample_rate: None,
+            detected_audio_channels: None,
             relay_enabled: false,
             defer_media_relay: false,
             max_pending_relay_bytes: MAX_PENDING_RELAY_BYTES,
@@ -215,7 +225,12 @@ impl Conn {
         }
     }
 
-    fn queue_relay_frame(&mut self, frame_type: FrameType, timestamp: u32, payload: &[u8]) -> Result<()> {
+    fn queue_relay_frame(
+        &mut self,
+        frame_type: FrameType,
+        timestamp: u32,
+        payload: &[u8],
+    ) -> Result<()> {
         if self.pending_relay.len() >= MAX_PENDING_RELAY_FRAMES
             || self.pending_relay_bytes() + payload.len() > self.max_pending_relay_bytes
         {
@@ -301,7 +316,10 @@ impl Conn {
             cb(&frame);
         }
 
-        if self.queue_relay_frame(frame_type, timestamp, payload).is_err() {
+        if self
+            .queue_relay_frame(frame_type, timestamp, payload)
+            .is_err()
+        {
             return Err(ErrorCode::Internal);
         }
         Ok(())
@@ -315,7 +333,12 @@ impl Conn {
     /// + stream_id(3) + data(data_size) + prev_tag_size(4)`. Sub-tag timestamps are
     /// relative to the first sub-tag's timestamp; that delta is added to the
     /// aggregate message's own chunk timestamp per the FLV/RTMP aggregate spec.
-    fn handle_aggregate(&mut self, msg_stream_id: u32, base_timestamp: u32, payload: &[u8]) -> Result<()> {
+    fn handle_aggregate(
+        &mut self,
+        msg_stream_id: u32,
+        base_timestamp: u32,
+        payload: &[u8],
+    ) -> Result<()> {
         let mut pos = 0;
         let mut have_base = false;
         let mut sub_base_ts: u32 = 0;
@@ -368,10 +391,14 @@ impl Conn {
         Ok(())
     }
 
-    pub fn get_fd(&self) -> i32 { self.client_fd }
+    pub fn get_fd(&self) -> i32 {
+        self.client_fd
+    }
 
     pub fn recv(&mut self, data: &[u8]) -> Result<()> {
-        self.recv_buffer.write(data).map_err(|_| ErrorCode::Internal)?;
+        self.recv_buffer
+            .write(data)
+            .map_err(|_| ErrorCode::Internal)?;
         self.bytes_received = self.bytes_received.wrapping_add(data.len() as u32);
         self.budget_exhausted = false;
         let mut max_iter = 256;
@@ -384,7 +411,9 @@ impl Conn {
             }
             max_iter -= 1;
             let avail = self.recv_buffer.available();
-            if avail == 0 && self.state != ConnState::Handshake { break; }
+            if avail == 0 && self.state != ConnState::Handshake {
+                break;
+            }
             let before = avail;
             let rc = self.process(&mut messages_budget);
             if rc < 0 {
@@ -405,11 +434,15 @@ impl Conn {
                 let after = self.recv_buffer.available();
                 if after == before {
                     no_progress += 1;
-                    if no_progress > 3 { break; }
+                    if no_progress > 3 {
+                        break;
+                    }
                 } else {
                     no_progress = 0;
                 }
-                if after == 0 && self.state < ConnState::Closing { break; }
+                if after == 0 && self.state < ConnState::Closing {
+                    break;
+                }
             } else {
                 no_progress = 0;
             }
@@ -441,18 +474,29 @@ impl Conn {
             HandshakeState::ServerWaitC0 => {
                 handshake::server_init(&mut self.handshake);
                 match handshake::server_read_c0(&mut self.handshake, &mut self.recv_buffer) {
-                    Ok(()) => { self.state = ConnState::Handshake; self.do_handshake_recurse() }
+                    Ok(()) => {
+                        self.state = ConnState::Handshake;
+                        self.do_handshake_recurse()
+                    }
                     Err(ErrorCode::Io) => 0,
                     Err(e) => e as i32,
                 }
             }
             HandshakeState::ServerWaitC1 => self.do_handshake_recurse(),
-            HandshakeState::ServerWaitC2 => match handshake::server_read_c2(&mut self.handshake, &mut self.recv_buffer) {
-                Ok(()) => { self.state = ConnState::Connected; 1 }
-                Err(ErrorCode::Io) => 0,
-                Err(e) => e as i32,
-            },
-            HandshakeState::Done => { self.state = ConnState::Connected; 1 }
+            HandshakeState::ServerWaitC2 => {
+                match handshake::server_read_c2(&mut self.handshake, &mut self.recv_buffer) {
+                    Ok(()) => {
+                        self.state = ConnState::Connected;
+                        1
+                    }
+                    Err(ErrorCode::Io) => 0,
+                    Err(e) => e as i32,
+                }
+            }
+            HandshakeState::Done => {
+                self.state = ConnState::Connected;
+                1
+            }
             _ => -1,
         }
     }
@@ -462,9 +506,13 @@ impl Conn {
             Ok(()) => {
                 if self.client_fd >= 0 {
                     let s0 = [0x03u8];
-                    if self.send_buffer.write(&s0).is_err() { return ErrorCode::Internal as i32; }
+                    if self.send_buffer.write(&s0).is_err() {
+                        return ErrorCode::Internal as i32;
+                    }
                     let out_data = self.handshake.out.peek();
-                    if self.send_buffer.write(out_data).is_err() { return ErrorCode::Internal as i32; }
+                    if self.send_buffer.write(out_data).is_err() {
+                        return ErrorCode::Internal as i32;
+                    }
                 }
                 self.handshake.out.reset();
                 1
@@ -514,7 +562,9 @@ impl Conn {
             | msg_dispatch::RTMP_MSG_ABORT_MESSAGE
             | msg_dispatch::RTMP_MSG_ACKNOWLEDGEMENT
             | msg_dispatch::RTMP_MSG_WINDOW_ACK_SIZE
-            | msg_dispatch::RTMP_MSG_SET_PEER_BANDWIDTH => self.handle_control(msg.msg_type_id, payload),
+            | msg_dispatch::RTMP_MSG_SET_PEER_BANDWIDTH => {
+                self.handle_control(msg.msg_type_id, payload)
+            }
             msg_dispatch::RTMP_MSG_USER_CONTROL => self.handle_user_control(payload),
             msg_dispatch::RTMP_MSG_AMF0_COMMAND => self.handle_command(payload),
             msg_dispatch::RTMP_MSG_AMF3_COMMAND => {
@@ -524,23 +574,173 @@ impl Conn {
                     self.handle_command(payload)
                 }
             }
-            msg_dispatch::RTMP_MSG_AUDIO => self.handle_media_frame(
-                msg.msg_stream_id,
-                FrameType::Audio,
-                msg.timestamp,
-                payload,
-            ),
-            msg_dispatch::RTMP_MSG_VIDEO => self.handle_media_frame(
-                msg.msg_stream_id,
-                FrameType::Video,
-                msg.timestamp,
-                payload,
-            ),
+            msg_dispatch::RTMP_MSG_AUDIO => {
+                self.handle_media_frame(msg.msg_stream_id, FrameType::Audio, msg.timestamp, payload)
+            }
+            msg_dispatch::RTMP_MSG_VIDEO => {
+                self.handle_media_frame(msg.msg_stream_id, FrameType::Video, msg.timestamp, payload)
+            }
             msg_dispatch::RTMP_MSG_AGGREGATE => {
                 self.handle_aggregate(msg.msg_stream_id, msg.timestamp, payload)
             }
+            msg_dispatch::RTMP_MSG_AMF0_DATA => self.handle_data_message(payload),
+            msg_dispatch::RTMP_MSG_AMF3_DATA => {
+                if !payload.is_empty() && payload[0] == 0x00 {
+                    self.handle_data_message(&payload[1..])
+                } else {
+                    self.handle_data_message(payload)
+                }
+            }
             _ => Ok(()),
         }
+    }
+
+    fn handle_data_message(&mut self, payload: &[u8]) -> Result<()> {
+        let mut buf = Buffer::from_slice(payload);
+        let first_byte = match buf.peek().first().copied() {
+            Some(b) => b,
+            None => return Ok(()),
+        };
+        if first_byte != crate::amf::amf0::Amf0Type::String as u8
+            && first_byte != crate::amf::amf0::Amf0Type::LongString as u8
+        {
+            return Ok(());
+        }
+
+        let mut name = [0u8; 64];
+        let name_len = if first_byte == crate::amf::amf0::Amf0Type::String as u8 {
+            crate::amf::amf0::read_string(&mut buf, &mut name)?
+        } else {
+            crate::amf::amf0::read_long_string(&mut buf, &mut name)?
+        };
+        let name_str = std::str::from_utf8(&name[..name_len]).unwrap_or("");
+
+        if name_str == "@setDataFrame" {
+            let next_byte = match buf.peek().first().copied() {
+                Some(b) => b,
+                None => return Ok(()),
+            };
+            if next_byte != crate::amf::amf0::Amf0Type::String as u8
+                && next_byte != crate::amf::amf0::Amf0Type::LongString as u8
+            {
+                return Ok(());
+            }
+            let mut inner = [0u8; 64];
+            let inner_len = if next_byte == crate::amf::amf0::Amf0Type::String as u8 {
+                crate::amf::amf0::read_string(&mut buf, &mut inner)?
+            } else {
+                crate::amf::amf0::read_long_string(&mut buf, &mut inner)?
+            };
+            let inner_str = std::str::from_utf8(&inner[..inner_len]).unwrap_or("");
+            if inner_str != "onMetaData" {
+                return Ok(());
+            }
+        } else if name_str != "onMetaData" {
+            return Ok(());
+        }
+
+        self.parse_on_metadata_object(&mut buf)
+    }
+
+    fn parse_on_metadata_object(&mut self, buf: &mut Buffer) -> Result<()> {
+        let ty = match crate::amf::amf0::read_type(buf) {
+            Ok(t) => t,
+            Err(_) => return Ok(()),
+        };
+        if ty != crate::amf::amf0::Amf0Type::Object && ty != crate::amf::amf0::Amf0Type::EcmaArray {
+            return Ok(());
+        }
+        if ty == crate::amf::amf0::Amf0Type::EcmaArray {
+            let mut count_bytes = [0u8; 4];
+            if buf.read(&mut count_bytes).is_err() {
+                return Err(ErrorCode::Amf);
+            }
+        }
+
+        let mut keys = 0usize;
+        while !crate::amf::amf0::is_object_end(buf) {
+            keys += 1;
+            if keys > 256 {
+                return Err(ErrorCode::Amf);
+            }
+            let mut key = [0u8; 256];
+            crate::amf::amf0::read_object_key(buf, &mut key)?;
+            let key_len = key.iter().position(|&b| b == 0).unwrap_or(key.len());
+            let key_str = std::str::from_utf8(&key[..key_len]).unwrap_or("");
+            self.apply_metadata_key(key_str, buf)?;
+        }
+        let mut end = [0u8; 3];
+        buf.read(&mut end).map_err(|_| ErrorCode::Amf)?;
+        Ok(())
+    }
+
+    fn apply_metadata_key(&mut self, key: &str, buf: &mut Buffer) -> Result<()> {
+        let ty = crate::amf::amf0::read_type(buf)?;
+        match key {
+            "width" => {
+                if ty == crate::amf::amf0::Amf0Type::Number {
+                    let v = crate::amf::amf0::read_number(buf)?;
+                    if let Some(w) = positive_f64_to_u32(v) {
+                        self.detected_video_width.get_or_insert(w);
+                    }
+                } else {
+                    crate::amf::amf0::skip_value_after_type(buf, ty)?;
+                }
+            }
+            "height" => {
+                if ty == crate::amf::amf0::Amf0Type::Number {
+                    let v = crate::amf::amf0::read_number(buf)?;
+                    if let Some(h) = positive_f64_to_u32(v) {
+                        self.detected_video_height.get_or_insert(h);
+                    }
+                } else {
+                    crate::amf::amf0::skip_value_after_type(buf, ty)?;
+                }
+            }
+            "framerate" | "videoframerate" => {
+                if ty == crate::amf::amf0::Amf0Type::Number {
+                    let v = crate::amf::amf0::read_number(buf)?;
+                    if sane_framerate(v) {
+                        self.detected_video_framerate.get_or_insert(v);
+                    }
+                } else {
+                    crate::amf::amf0::skip_value_after_type(buf, ty)?;
+                }
+            }
+            "audiosamplerate" => {
+                if ty == crate::amf::amf0::Amf0Type::Number {
+                    let v = crate::amf::amf0::read_number(buf)?;
+                    if let Some(sr) = positive_f64_to_u32(v) {
+                        self.detected_audio_sample_rate.get_or_insert(sr);
+                    }
+                } else {
+                    crate::amf::amf0::skip_value_after_type(buf, ty)?;
+                }
+            }
+            "audiochannels" => {
+                if ty == crate::amf::amf0::Amf0Type::Number {
+                    let v = crate::amf::amf0::read_number(buf)?;
+                    if let Some(ch) = positive_f64_to_u32(v) {
+                        if ch > 0 && ch <= 32 {
+                            self.detected_audio_channels.get_or_insert(ch);
+                        }
+                    }
+                } else {
+                    crate::amf::amf0::skip_value_after_type(buf, ty)?;
+                }
+            }
+            "stereo" => {
+                if ty == crate::amf::amf0::Amf0Type::Boolean {
+                    let stereo = crate::amf::amf0::read_boolean(buf)?;
+                    self.detected_audio_channels
+                        .get_or_insert(if stereo { 2 } else { 1 });
+                } else {
+                    crate::amf::amf0::skip_value_after_type(buf, ty)?;
+                }
+            }
+            _ => crate::amf::amf0::skip_value_after_type(buf, ty)?,
+        }
+        Ok(())
     }
 
     fn handle_control(&mut self, msg_type_id: u8, payload: &[u8]) -> Result<()> {
@@ -658,7 +858,9 @@ impl Conn {
         if command::peek_name(&mut buf, &mut name_buf).is_err() {
             return Ok(());
         }
-        let name = std::str::from_utf8(&name_buf).unwrap_or("").trim_end_matches('\0');
+        let name = std::str::from_utf8(&name_buf)
+            .unwrap_or("")
+            .trim_end_matches('\0');
         match name {
             "connect" => {
                 // A connection may only negotiate its app namespace once. Without
@@ -673,17 +875,26 @@ impl Conn {
                 let mut info = ConnectInfo::default();
                 command::read_connect(&mut buf, &mut info)?;
                 let app_len = info.app.iter().position(|&b| b == 0).unwrap_or(0);
-                self.app = std::str::from_utf8(&info.app[..app_len]).unwrap_or("").to_string();
+                self.app = std::str::from_utf8(&info.app[..app_len])
+                    .unwrap_or("")
+                    .to_string();
                 let _ = state_machine::conn_transition(&mut self.state, ConnState::AppConnected);
                 self.send_connect_response(info.transaction_id)?;
                 if !self.connect_cb_fired {
                     self.connect_cb_fired = true;
-                    if let Some(cb) = self.on_connect_cb { cb(); }
+                    if let Some(cb) = self.on_connect_cb {
+                        cb();
+                    }
                 }
             }
             "createStream" => {
                 if self.state < ConnState::AppConnected {
-                    return self.send_onstatus(0, "error", "NetStream.Failed", "connect required before createStream");
+                    return self.send_onstatus(
+                        0,
+                        "error",
+                        "NetStream.Failed",
+                        "connect required before createStream",
+                    );
                 }
                 let txn = command::read_create_stream(&mut buf)?;
                 if self.next_stream_id >= MAX_STREAMS_PER_CONN {
@@ -698,7 +909,8 @@ impl Conn {
                     self.next_stream_id += 1;
                     let stream_id = self.next_stream_id;
                     self.current_stream = Some(Box::new(Stream::new(stream_id)));
-                    let _ = state_machine::conn_transition(&mut self.state, ConnState::StreamCreated);
+                    let _ =
+                        state_machine::conn_transition(&mut self.state, ConnState::StreamCreated);
                     self.send_create_stream_response(txn, stream_id)?;
                 }
             }
@@ -706,7 +918,10 @@ impl Conn {
                 let mut stream_name = [0u8; 256];
                 let mut publish_type = [0u8; 64];
                 command::read_publish(&mut buf, &mut stream_name, &mut publish_type)?;
-                let name_str = std::str::from_utf8(&stream_name).unwrap_or("").trim_end_matches('\0').to_string();
+                let name_str = std::str::from_utf8(&stream_name)
+                    .unwrap_or("")
+                    .trim_end_matches('\0')
+                    .to_string();
                 if self.current_stream.is_none() {
                     return self.send_onstatus(
                         0,
@@ -717,7 +932,12 @@ impl Conn {
                 }
                 if let Some(cb) = self.on_publish_cb {
                     if !cb(self.conn_id, &self.app, &name_str) {
-                        return self.send_onstatus(0, "error", "NetStream.Publish.BadName", "Publish not authorized");
+                        return self.send_onstatus(
+                            0,
+                            "error",
+                            "NetStream.Publish.BadName",
+                            "Publish not authorized",
+                        );
                     }
                 }
                 // Use current_stream.is_publishing rather than self.state
@@ -739,7 +959,8 @@ impl Conn {
                 } else {
                     name_str.clone()
                 };
-                if was_publishing && !prev_route_key.is_empty() && prev_route_key != next_route_key {
+                if was_publishing && !prev_route_key.is_empty() && prev_route_key != next_route_key
+                {
                     self.pending_cache_evictions
                         .push((self.app.clone(), prev_route_key));
                 }
@@ -752,14 +973,21 @@ impl Conn {
                         stream.name = name_str;
                     }
                     let _ = state_machine::conn_transition(&mut self.state, ConnState::Publishing);
-                    let sid = self.current_stream.as_ref().map(|s| s.stream_id).unwrap_or(0);
+                    let sid = self
+                        .current_stream
+                        .as_ref()
+                        .map(|s| s.stream_id)
+                        .unwrap_or(0);
                     self.send_onstatus(sid, "status", "NetStream.Publish.Start", "Publishing")?;
                 }
             }
             "play" => {
                 let mut stream_name = [0u8; 256];
                 command::read_play(&mut buf, &mut stream_name)?;
-                let name_str = std::str::from_utf8(&stream_name).unwrap_or("").trim_end_matches('\0').to_string();
+                let name_str = std::str::from_utf8(&stream_name)
+                    .unwrap_or("")
+                    .trim_end_matches('\0')
+                    .to_string();
                 if self.current_stream.is_none() {
                     return self.send_onstatus(
                         0,
@@ -770,7 +998,12 @@ impl Conn {
                 }
                 if let Some(cb) = self.on_play_cb {
                     if !cb(self.conn_id, &self.app, &name_str) {
-                        return self.send_onstatus(0, "error", "NetStream.Play.Failed", "Play not authorized");
+                        return self.send_onstatus(
+                            0,
+                            "error",
+                            "NetStream.Play.Failed",
+                            "Play not authorized",
+                        );
                     }
                 }
                 if !self.defer_media_relay || self.on_play_cb.is_none() {
@@ -790,7 +1023,11 @@ impl Conn {
                     }
                     self.needs_init_frames = true;
                     let _ = state_machine::conn_transition(&mut self.state, ConnState::Playing);
-                    let sid = self.current_stream.as_ref().map(|s| s.stream_id).unwrap_or(0);
+                    let sid = self
+                        .current_stream
+                        .as_ref()
+                        .map(|s| s.stream_id)
+                        .unwrap_or(0);
                     self.send_onstatus(sid, "status", "NetStream.Play.Start", "Playing")?;
                 }
             }
@@ -828,32 +1065,57 @@ impl Conn {
         self.send_command(0, amf_buf.as_slice())
     }
 
-    pub fn send_create_stream_response(&mut self, transaction_id: f64, stream_id: u32) -> Result<()> {
+    pub fn send_create_stream_response(
+        &mut self,
+        transaction_id: f64,
+        stream_id: u32,
+    ) -> Result<()> {
         let mut amf_buf = Buffer::with_capacity(256);
         command::build_create_stream_result(&mut amf_buf, transaction_id, stream_id as f64)?;
         self.send_command(0, amf_buf.as_slice())
     }
 
-    pub fn send_onstatus(&mut self, stream_id: u32, level: &str, code: &str, description: &str) -> Result<()> {
+    pub fn send_onstatus(
+        &mut self,
+        stream_id: u32,
+        level: &str,
+        code: &str,
+        description: &str,
+    ) -> Result<()> {
         let mut amf_buf = Buffer::with_capacity(512);
         command::build_onstatus(&mut amf_buf, level, code, description)?;
         self.send_command(stream_id, amf_buf.as_slice())
     }
 
     pub fn flush(&mut self) -> Result<()> {
-        if self.client_fd < 0 || self.send_buffer.available() == 0 { return Ok(()); }
-        let Some(ref mut transport) = self.transport else { return Ok(()); };
+        if self.client_fd < 0 || self.send_buffer.available() == 0 {
+            return Ok(());
+        }
+        let Some(ref mut transport) = self.transport else {
+            return Ok(());
+        };
         while self.send_buffer.available() > 0 {
             let pending = self.send_buffer.peek();
             let n = transport.try_send(pending, &mut 0i32)?;
-            if n == 0 { break; }
+            if n == 0 {
+                break;
+            }
             self.send_buffer.drain(n);
         }
         Ok(())
     }
 
-    pub fn send_frame(&mut self, frame_type: FrameType, timestamp: u32, payload: &[u8]) -> Result<()> {
-        let stream_id = self.current_stream.as_ref().map(|s| s.stream_id).unwrap_or(1);
+    pub fn send_frame(
+        &mut self,
+        frame_type: FrameType,
+        timestamp: u32,
+        payload: &[u8],
+    ) -> Result<()> {
+        let stream_id = self
+            .current_stream
+            .as_ref()
+            .map(|s| s.stream_id)
+            .unwrap_or(1);
         let mut cmsg = ChunkMessage::default();
         cmsg.timestamp = timestamp;
         cmsg.msg_length = payload.len() as u32;
@@ -873,9 +1135,7 @@ impl Conn {
             payload.len(),
             self.active_chunk_size as usize,
         )?;
-        self.media_bytes_sent = self
-            .media_bytes_sent
-            .saturating_add(payload.len() as u64);
+        self.media_bytes_sent = self.media_bytes_sent.saturating_add(payload.len() as u64);
         Ok(())
     }
 
@@ -886,7 +1146,13 @@ impl Conn {
         msg.msg_length = data.len() as u32;
         msg.msg_type_id = ty;
         msg.msg_stream_id = 0;
-        chunk_write(&mut self.send_buffer, &msg, data, data.len(), self.active_chunk_size as usize)
+        chunk_write(
+            &mut self.send_buffer,
+            &msg,
+            data,
+            data.len(),
+            self.active_chunk_size as usize,
+        )
     }
 
     fn send_command(&mut self, msg_stream_id: u32, amf_data: &[u8]) -> Result<()> {
@@ -924,14 +1190,31 @@ impl Conn {
 }
 
 impl Default for Conn {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn positive_f64_to_u32(v: f64) -> Option<u32> {
+    if !v.is_finite() || v < 0.0 || v > u32::MAX as f64 {
+        return None;
+    }
+    Some(v as u32)
+}
+
+fn sane_framerate(v: f64) -> bool {
+    v.is_finite() && v > 0.0 && v <= 1000.0
 }
 
 fn detect_video_codec(payload: &[u8]) -> Option<String> {
-    if payload.is_empty() { return None; }
+    if payload.is_empty() {
+        return None;
+    }
     if payload[0] & 0x80 != 0 {
         if payload.len() >= 5 {
-            if let Ok(s) = std::str::from_utf8(&payload[1..5]) { return Some(s.to_string()); }
+            if let Ok(s) = std::str::from_utf8(&payload[1..5]) {
+                return Some(s.to_string());
+            }
         }
         return None;
     }
@@ -944,9 +1227,13 @@ fn detect_video_codec(payload: &[u8]) -> Option<String> {
 }
 
 fn detect_audio_codec(payload: &[u8]) -> Option<String> {
-    if payload.is_empty() { return None; }
+    if payload.is_empty() {
+        return None;
+    }
     if (payload[0] & 0xF0) == 0x90 && payload.len() >= 5 {
-        if let Ok(s) = std::str::from_utf8(&payload[1..5]) { return Some(s.to_string()); }
+        if let Ok(s) = std::str::from_utf8(&payload[1..5]) {
+            return Some(s.to_string());
+        }
     }
     Some(match (payload[0] >> 4) & 0x0F {
         10 => "mp4a".to_string(),
@@ -1007,8 +1294,17 @@ mod tests {
         let mut conn = Conn::new();
 
         let mut buf = Buffer::with_capacity(256);
-        command::build_connect(&mut buf, "public", "rtmp://host/public", "", "", "FMLE/3.0", 0, 0)
-            .unwrap();
+        command::build_connect(
+            &mut buf,
+            "public",
+            "rtmp://host/public",
+            "",
+            "",
+            "FMLE/3.0",
+            0,
+            0,
+        )
+        .unwrap();
         conn.handle_command(buf.as_slice()).unwrap();
         assert_eq!(conn.app, "public");
         assert_eq!(conn.state, ConnState::AppConnected);
@@ -1061,19 +1357,22 @@ mod tests {
         }
 
         let av1_seq = vec![0x90, b'a', b'v', b'0', b'1', 0x01, 0x02, 0x03];
-        assert!(conn
-            .handle_media_frame(1, FrameType::Video, 0, &av1_seq)
-            .is_ok());
+        assert!(
+            conn.handle_media_frame(1, FrameType::Video, 0, &av1_seq)
+                .is_ok()
+        );
 
         let aac_seq = vec![0xAF, 0x00, 0x12, 0x10];
-        assert!(conn
-            .handle_media_frame(1, FrameType::Audio, 0, &aac_seq)
-            .is_ok());
+        assert!(
+            conn.handle_media_frame(1, FrameType::Audio, 0, &aac_seq)
+                .is_ok()
+        );
 
         let av1_frame = vec![0x91, b'a', b'v', b'0', b'1', 0xDE, 0xAD, 0xBE, 0xEF];
-        assert!(conn
-            .handle_media_frame(1, FrameType::Video, 40, &av1_frame)
-            .is_ok());
+        assert!(
+            conn.handle_media_frame(1, FrameType::Video, 40, &av1_frame)
+                .is_ok()
+        );
     }
 
     #[test]
@@ -1398,5 +1697,149 @@ mod tests {
         assert_eq!(conn.pending_relay[0].frame_type, FrameType::Video);
         assert_eq!(conn.pending_relay[0].timestamp, 500);
         assert_eq!(conn.pending_relay[0].payload, video_payload);
+    }
+
+    fn amf0_string(s: &str) -> Vec<u8> {
+        let mut buf = Buffer::with_capacity(64);
+        crate::amf::amf0::write_string(&mut buf, s).unwrap();
+        buf.as_slice().to_vec()
+    }
+
+    fn amf0_object_end() -> [u8; 3] {
+        [0, 0, 0x09]
+    }
+
+    fn build_on_metadata_payload(
+        with_set_data_frame: bool,
+        entries: &[(&str, f64)],
+        extra: &[(&str, bool)],
+    ) -> Vec<u8> {
+        let mut payload = Vec::new();
+        if with_set_data_frame {
+            payload.extend(amf0_string("@setDataFrame"));
+        }
+        payload.extend(amf0_string("onMetaData"));
+        payload.push(crate::amf::amf0::Amf0Type::Object as u8);
+        for (key, value) in entries {
+            let mut buf = Buffer::with_capacity(32);
+            crate::amf::amf0::write_object_key(&mut buf, key).unwrap();
+            crate::amf::amf0::write_number(&mut buf, *value).unwrap();
+            payload.extend_from_slice(buf.as_slice());
+        }
+        for (key, value) in extra {
+            let mut buf = Buffer::with_capacity(32);
+            crate::amf::amf0::write_object_key(&mut buf, key).unwrap();
+            crate::amf::amf0::write_boolean(&mut buf, *value).unwrap();
+            payload.extend_from_slice(buf.as_slice());
+        }
+        payload.extend_from_slice(&amf0_object_end());
+        payload
+    }
+
+    #[test]
+    fn on_metadata_populates_conn_fields() {
+        let mut conn = Conn::new();
+        let payload = build_on_metadata_payload(
+            false,
+            &[
+                ("width", 1920.0),
+                ("height", 1080.0),
+                ("framerate", 30.0),
+                ("audiosamplerate", 48000.0),
+                ("audiochannels", 2.0),
+            ],
+            &[],
+        );
+        conn.handle_data_message(&payload).unwrap();
+        assert_eq!(conn.detected_video_width, Some(1920));
+        assert_eq!(conn.detected_video_height, Some(1080));
+        assert_eq!(conn.detected_video_framerate, Some(30.0));
+        assert_eq!(conn.detected_audio_sample_rate, Some(48000));
+        assert_eq!(conn.detected_audio_channels, Some(2));
+    }
+
+    #[test]
+    fn on_metadata_with_set_data_frame_prefix() {
+        let mut conn = Conn::new();
+        let payload = build_on_metadata_payload(
+            true,
+            &[
+                ("width", 1280.0),
+                ("height", 720.0),
+                ("videoframerate", 60.0),
+            ],
+            &[("stereo", true)],
+        );
+        conn.handle_data_message(&payload).unwrap();
+        assert_eq!(conn.detected_video_width, Some(1280));
+        assert_eq!(conn.detected_video_height, Some(720));
+        assert_eq!(conn.detected_video_framerate, Some(60.0));
+        assert_eq!(conn.detected_audio_channels, Some(2));
+        assert_eq!(conn.detected_audio_sample_rate, None);
+    }
+
+    #[test]
+    fn on_metadata_missing_keys_leave_fields_none() {
+        let mut conn = Conn::new();
+        let payload = build_on_metadata_payload(false, &[("width", 640.0)], &[]);
+        conn.handle_data_message(&payload).unwrap();
+        assert_eq!(conn.detected_video_width, Some(640));
+        assert_eq!(conn.detected_video_height, None);
+        assert_eq!(conn.detected_video_framerate, None);
+        assert_eq!(conn.detected_audio_sample_rate, None);
+        assert_eq!(conn.detected_audio_channels, None);
+    }
+
+    #[test]
+    fn on_metadata_skips_unknown_extra_keys() {
+        let mut conn = Conn::new();
+        let mut payload = amf0_string("onMetaData");
+        payload.push(crate::amf::amf0::Amf0Type::Object as u8);
+        let mut width = Buffer::with_capacity(32);
+        crate::amf::amf0::write_object_key(&mut width, "width").unwrap();
+        crate::amf::amf0::write_number(&mut width, 800.0).unwrap();
+        payload.extend_from_slice(width.as_slice());
+        let mut unknown = Buffer::with_capacity(64);
+        crate::amf::amf0::write_object_key(&mut unknown, "customTag").unwrap();
+        crate::amf::amf0::write_string(&mut unknown, "ignored").unwrap();
+        payload.extend_from_slice(unknown.as_slice());
+        payload.extend_from_slice(&amf0_object_end());
+
+        conn.handle_data_message(&payload).unwrap();
+        assert_eq!(conn.detected_video_width, Some(800));
+    }
+
+    #[test]
+    fn on_metadata_rejects_out_of_range_dimensions() {
+        let mut conn = Conn::new();
+        let payload = build_on_metadata_payload(
+            false,
+            &[("width", -1.0), ("height", (u32::MAX as f64) + 1.0)],
+            &[],
+        );
+        conn.handle_data_message(&payload).unwrap();
+        assert_eq!(conn.detected_video_width, None);
+        assert_eq!(conn.detected_video_height, None);
+    }
+
+    #[test]
+    fn amf3_data_message_strips_leading_zero_byte() {
+        let mut conn = Conn::new();
+        let mut body =
+            build_on_metadata_payload(false, &[("width", 1024.0), ("height", 576.0)], &[]);
+        let mut payload = vec![0x00];
+        payload.append(&mut body);
+        let msg = ChunkMessage {
+            csid: 4,
+            fmt: 0,
+            timestamp: 0,
+            msg_length: payload.len() as u32,
+            msg_type_id: msg_dispatch::RTMP_MSG_AMF3_DATA,
+            msg_stream_id: 1,
+            is_complete: true,
+        };
+        conn.handle_message(&msg, &payload).unwrap();
+        assert_eq!(conn.detected_video_width, Some(1024));
+        assert_eq!(conn.detected_video_height, Some(576));
     }
 }
