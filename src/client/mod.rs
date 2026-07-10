@@ -26,6 +26,16 @@ const RECV_POLL_TIMEOUT_MS: i32 = 10_000;
 pub const MAX_CLIENT_FRAME_BYTES: usize = DEFAULT_MAX_MSG_LENGTH as usize;
 /// Cap complete messages handled per `poll` recv pass.
 const MAX_MESSAGES_PER_POLL: usize = 256;
+/// Maximum inbound bytes drained from the socket per `poll` call. Without
+/// this cap a malicious server can monopolize the embedder's event-loop thread
+/// by keeping the kernel recv queue full across many `recv` syscalls in one
+/// `poll()` invocation (mirrors the server-side fairness cap).
+const MAX_RECV_BYTES_PER_POLL: usize = 256 * 1024;
+/// Total inbound bytes allowed while waiting for AMF `_result` / `onStatus`
+/// during `connect` / `publish` / `play`. Prevents a malicious server from
+/// forcing the client through dozens of max-size junk commands before the
+/// expected response.
+const MAX_RECV_BYTES_PER_COMMAND_WAIT: usize = 256 * 1024;
 
 /// Client connection states.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -229,23 +239,34 @@ impl Client {
         }
 
         // Scope the mutable transport borrow to the recv phase only.
-        let poll_fd = {
+        let (poll_fd, has_buffered_tls_data) = {
             let Some(t) = self.transport.as_ref() else {
                 return Err(ErrorCode::Internal);
             };
-            t.fd()
+            (t.fd(), t.pending() > 0)
         };
-        let mut pfd = libc::pollfd {
-            fd: poll_fd,
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        // poll(2) already treats a negative timeout as "block indefinitely"
-        // (the POSIX idiom), so pass it through as-is instead of clamping to 0.
-        unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
+        // A prior poll() call may have stopped draining at
+        // MAX_RECV_BYTES_PER_POLL while OpenSSL still held decrypted
+        // plaintext internally. The kernel socket can then have nothing left
+        // to report ready, so blocking in poll(2) here would wait out the
+        // full timeout even though data is already available via recv().
+        if !has_buffered_tls_data {
+            let mut pfd = libc::pollfd {
+                fd: poll_fd,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            // poll(2) already treats a negative timeout as "block indefinitely"
+            // (the POSIX idiom), so pass it through as-is instead of clamping to 0.
+            unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
+        }
 
         let mut buf = [0u8; 65536];
+        let mut bytes_drained = 0usize;
         loop {
+            if bytes_drained >= MAX_RECV_BYTES_PER_POLL {
+                break;
+            }
             let (n, again) = {
                 let Some(t) = self.transport.as_mut() else {
                     return Err(ErrorCode::Internal);
@@ -255,9 +276,11 @@ impl Client {
                 (n, again)
             };
             if n > 0 {
+                let chunk_len = n as usize;
                 self.recv_buffer
-                    .write(&buf[..n as usize])
+                    .write(&buf[..chunk_len])
                     .map_err(|_| ErrorCode::Internal)?;
+                bytes_drained += chunk_len;
             } else if n == 0 {
                 return Err(ErrorCode::Io);
             } else if again == 2 {
@@ -417,8 +440,9 @@ impl Client {
 
     /// Block until an AMF0 command named `want` is received, returning its payload buffer.
     fn wait_for_command(&mut self, want: &str) -> Result<Buffer> {
+        let mut recv_budget = MAX_RECV_BYTES_PER_COMMAND_WAIT;
         for _ in 0..64 {
-            let (msg, payload) = self.recv_message()?;
+            let (msg, payload) = self.recv_message(&mut recv_budget)?;
             if msg.msg_type_id != msg_dispatch::RTMP_MSG_AMF0_COMMAND {
                 continue;
             }
@@ -438,7 +462,7 @@ impl Client {
     }
 
     /// Block until one fully-reassembled chunk message is available.
-    fn recv_message(&mut self) -> Result<(ChunkMessage, Vec<u8>)> {
+    fn recv_message(&mut self, recv_budget: &mut usize) -> Result<(ChunkMessage, Vec<u8>)> {
         loop {
             let mut msg = ChunkMessage::default();
             let mut payload_ptr: *const u8 = std::ptr::null();
@@ -469,18 +493,31 @@ impl Client {
                 Err(_) => return Err(ErrorCode::Chunk),
             }
 
+            if *recv_budget == 0 {
+                return Err(ErrorCode::Timeout);
+            }
+
             // Scope mutable transport borrow tightly to avoid conflict with
             // other self fields (recv_buffer) used after the borrow ends.
+            // Cap the read itself at the remaining budget rather than reading
+            // a full 4096-byte chunk and discarding it after the fact -- a
+            // discard here would drop bytes the peer already sent (which can
+            // include the tail of the very command this call is waiting for)
+            // instead of just deferring them to the next wait_for_command
+            // call, desynchronizing this connection's view of the stream.
             let mut tmp = [0u8; 4096];
+            let read_cap = tmp.len().min(*recv_budget);
             let (n, again, t_fd) = {
                 let t = self.transport.as_mut().ok_or(ErrorCode::Internal)?;
                 let mut again = 0i32;
-                let n = t.recv(&mut tmp, &mut again);
+                let n = t.recv(&mut tmp[..read_cap], &mut again);
                 (n, again, t.fd())
             };
             if n > 0 {
+                let chunk_len = n as usize;
+                *recv_budget -= chunk_len;
                 self.recv_buffer
-                    .write(&tmp[..n as usize])
+                    .write(&tmp[..chunk_len])
                     .map_err(|_| ErrorCode::Internal)?;
             } else if n == 0 {
                 return Err(ErrorCode::Io);
@@ -597,6 +634,18 @@ impl Drop for Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recv_budget_is_at_least_one_socket_read() {
+        assert!(MAX_RECV_BYTES_PER_POLL >= 65536);
+    }
+
+    #[test]
+    fn command_wait_recv_budget_bounds_connect_handshake_amplification() {
+        // 64 max-size AMF commands would be 256 MiB without a byte cap.
+        assert!(MAX_RECV_BYTES_PER_COMMAND_WAIT < 64 * 4 * 1024 * 1024);
+        assert!(MAX_RECV_BYTES_PER_COMMAND_WAIT >= 65536);
+    }
 
     #[test]
     fn parse_rtmp_url_defaults_to_plaintext_and_port_1935() {
