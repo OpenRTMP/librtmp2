@@ -318,7 +318,8 @@ fn skip_value_depth(buf: &mut Buffer, depth: i32, ty: Amf0Type) -> Result<()> {
                 return Err(ErrorCode::Amf);
             }
             for _ in 0..count {
-                skip_value_depth(buf, depth + 1, read_type(buf)?)?;
+                let child_ty = read_type(buf)?;
+                skip_value_depth(buf, depth + 1, child_ty)?;
             }
             Ok(())
         }
@@ -345,7 +346,8 @@ fn skip_value_depth(buf: &mut Buffer, depth: i32, ty: Amf0Type) -> Result<()> {
                     return Err(ErrorCode::Io);
                 }
                 buf.drain(klen);
-                skip_value_depth(buf, depth + 1, read_type(buf)?)?;
+                let child_ty = read_type(buf)?;
+                skip_value_depth(buf, depth + 1, child_ty)?;
             }
         }
         Amf0Type::Date => {
@@ -370,7 +372,8 @@ fn skip_value_depth(buf: &mut Buffer, depth: i32, ty: Amf0Type) -> Result<()> {
 
 /// Skip an AMF0 value.
 pub fn skip_value(buf: &mut Buffer) -> Result<()> {
-    skip_value_depth(buf, 0, read_type(buf)?)
+    let ty = read_type(buf)?;
+    skip_value_depth(buf, 0, ty)
 }
 
 #[cfg(test)]
