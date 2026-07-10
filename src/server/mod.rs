@@ -856,4 +856,45 @@ mod tests {
     fn recv_budget_is_small_enough_for_fairness_across_connections() {
         assert!(MAX_RECV_BYTES_PER_CONN_PER_POLL <= 1024 * 1024);
     }
+
+    #[test]
+    fn max_connections_limit_is_enforced_when_configured() {
+        let config = ServerConfig {
+            max_connections: 2,
+            chunk_size: 128,
+            tls_enabled: 0,
+            tls_cert_file: std::ptr::null(),
+            tls_key_file: std::ptr::null(),
+            tls_ca_file: std::ptr::null(),
+            tls_insecure: 0,
+        };
+        let mut server = Server::new(config).unwrap();
+        server.listen("127.0.0.1:0").unwrap();
+
+        let port = {
+            let mut addr: libc::sockaddr_in = unsafe { std::mem::zeroed() };
+            let mut len = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
+            let rc = unsafe {
+                libc::getsockname(
+                    server.server_fd,
+                    &mut addr as *mut _ as *mut libc::sockaddr,
+                    &mut len,
+                )
+            };
+            assert_eq!(rc, 0);
+            u16::from_be(addr.sin_port)
+        };
+        let addr = format!("127.0.0.1:{port}");
+
+        let mut streams = Vec::new();
+        for _ in 0..2 {
+            streams.push(std::net::TcpStream::connect(&addr).unwrap());
+        }
+        server.accept_new_connections();
+        assert_eq!(server.connections.len(), 2);
+
+        let _third = std::net::TcpStream::connect(&addr).unwrap();
+        server.accept_new_connections();
+        assert_eq!(server.connections.len(), 2);
+    }
 }

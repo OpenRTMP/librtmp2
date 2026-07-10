@@ -98,7 +98,53 @@ fn error_code_from_raw(code: i32) -> ErrorCode {
     }
 }
 
-// ── FFI-compatible extern "C" API ──
+#[cfg(test)]
+mod ffi_tests {
+    use super::*;
+    use crate::server::Server;
+
+    #[test]
+    fn server_create_applies_default_max_connections_for_zero_config() {
+        let config = ServerConfig {
+            max_connections: 0,
+            chunk_size: 128,
+            tls_enabled: 0,
+            tls_cert_file: std::ptr::null(),
+            tls_key_file: std::ptr::null(),
+            tls_ca_file: std::ptr::null(),
+            tls_insecure: 0,
+        };
+        let server = unsafe { lrtmp2_server_create(&config) };
+        assert!(!server.is_null());
+        unsafe {
+            let s = &*server;
+            assert_eq!(s.config.max_connections, DEFAULT_FFI_MAX_CONNECTIONS);
+            lrtmp2_server_destroy(server);
+        }
+    }
+
+    #[test]
+    fn server_new_preserves_zero_max_connections_for_rust_api() {
+        let config = ServerConfig {
+            max_connections: 0,
+            chunk_size: 128,
+            tls_enabled: 0,
+            tls_cert_file: std::ptr::null(),
+            tls_key_file: std::ptr::null(),
+            tls_ca_file: std::ptr::null(),
+            tls_insecure: 0,
+        };
+        let server = Server::new(config).unwrap();
+        assert_eq!(server.config.max_connections, 0);
+    }
+}
+
+use std::ffi::c_int;
+
+/// Default connection cap applied at the FFI boundary when `max_connections`
+/// is zero or negative — the usual pattern from `calloc`/`{0}` initialization
+/// in C embedders, which would otherwise disable all connection limiting.
+const DEFAULT_FFI_MAX_CONNECTIONS: c_int = 256;
 
 /// Create a server (FFI-compatible).
 #[unsafe(no_mangle)]
@@ -106,8 +152,11 @@ pub unsafe extern "C" fn lrtmp2_server_create(config: *const ServerConfig) -> *m
     if config.is_null() {
         return std::ptr::null_mut();
     }
-    let cfg = unsafe { &*config };
-    match server::Server::new(*cfg) {
+    let mut cfg = unsafe { *config };
+    if cfg.max_connections <= 0 {
+        cfg.max_connections = DEFAULT_FFI_MAX_CONNECTIONS;
+    }
+    match server::Server::new(cfg) {
         Ok(s) => Box::into_raw(Box::new(s)),
         Err(_) => std::ptr::null_mut(),
     }
