@@ -276,7 +276,7 @@ pub fn is_object_end(buf: &mut Buffer) -> bool {
 }
 
 const MAX_SKIP_DEPTH: i32 = 32;
-const MAX_OBJECT_KEYS: usize = 256;
+pub const MAX_OBJECT_KEYS: usize = 256;
 
 /// Skip an AMF0 value whose type marker has already been consumed.
 pub fn skip_value_after_type(buf: &mut Buffer, ty: Amf0Type) -> Result<()> {
@@ -365,7 +365,44 @@ fn skip_value_depth(buf: &mut Buffer, depth: i32, ty: Amf0Type) -> Result<()> {
             buf.drain(2);
             Ok(())
         }
-        Amf0Type::Null | Amf0Type::Undefined => Ok(()),
+        Amf0Type::Null | Amf0Type::Undefined | Amf0Type::Movieclip => Ok(()),
+        Amf0Type::XmlDoc => {
+            let len = read_u32(buf)? as usize;
+            if buf.available() < len {
+                return Err(ErrorCode::Io);
+            }
+            buf.drain(len);
+            Ok(())
+        }
+        Amf0Type::TypedObject => {
+            if depth >= MAX_SKIP_DEPTH {
+                return Err(ErrorCode::Amf);
+            }
+            let class_len = read_u16(buf)? as usize;
+            if buf.available() < class_len {
+                return Err(ErrorCode::Io);
+            }
+            buf.drain(class_len);
+            let mut keys = 0;
+            loop {
+                if is_object_end(buf) {
+                    let mut end = [0u8; 3];
+                    buf.read(&mut end).map_err(|_| ErrorCode::Io)?;
+                    return Ok(());
+                }
+                keys += 1;
+                if keys > MAX_OBJECT_KEYS {
+                    return Err(ErrorCode::Amf);
+                }
+                let klen = read_u16(buf)? as usize;
+                if buf.available() < klen {
+                    return Err(ErrorCode::Io);
+                }
+                buf.drain(klen);
+                let child_ty = read_type(buf)?;
+                skip_value_depth(buf, depth + 1, child_ty)?;
+            }
+        }
         _ => Err(ErrorCode::Unsupported),
     }
 }

@@ -608,10 +608,12 @@ impl Conn {
         }
 
         let mut name = [0u8; 64];
-        let name_len = if first_byte == crate::amf::amf0::Amf0Type::String as u8 {
-            crate::amf::amf0::read_string(&mut buf, &mut name)?
-        } else {
-            crate::amf::amf0::read_long_string(&mut buf, &mut name)?
+        let Some(name_len) = read_data_event_name(
+            &mut buf,
+            first_byte == crate::amf::amf0::Amf0Type::String as u8,
+            &mut name,
+        ) else {
+            return Ok(());
         };
         let name_str = std::str::from_utf8(&name[..name_len]).unwrap_or("");
 
@@ -626,10 +628,12 @@ impl Conn {
                 return Ok(());
             }
             let mut inner = [0u8; 64];
-            let inner_len = if next_byte == crate::amf::amf0::Amf0Type::String as u8 {
-                crate::amf::amf0::read_string(&mut buf, &mut inner)?
-            } else {
-                crate::amf::amf0::read_long_string(&mut buf, &mut inner)?
+            let Some(inner_len) = read_data_event_name(
+                &mut buf,
+                next_byte == crate::amf::amf0::Amf0Type::String as u8,
+                &mut inner,
+            ) else {
+                return Ok(());
             };
             let inner_str = std::str::from_utf8(&inner[..inner_len]).unwrap_or("");
             if inner_str != "onMetaData" {
@@ -660,87 +664,112 @@ impl Conn {
         let mut keys = 0usize;
         while !crate::amf::amf0::is_object_end(buf) {
             keys += 1;
-            if keys > 256 {
+            if keys > crate::amf::amf0::MAX_OBJECT_KEYS {
                 return Err(ErrorCode::Amf);
             }
             let mut key = [0u8; 256];
-            crate::amf::amf0::read_object_key(buf, &mut key)?;
+            if crate::amf::amf0::read_object_key(buf, &mut key).is_err() {
+                return Ok(());
+            }
             let key_len = key.iter().position(|&b| b == 0).unwrap_or(key.len());
             let key_str = std::str::from_utf8(&key[..key_len]).unwrap_or("");
-            self.apply_metadata_key(key_str, buf)?;
+            if !self.apply_metadata_key(key_str, buf) {
+                return Ok(());
+            }
         }
         let mut end = [0u8; 3];
         buf.read(&mut end).map_err(|_| ErrorCode::Amf)?;
         Ok(())
     }
 
-    fn apply_metadata_key(&mut self, key: &str, buf: &mut Buffer) -> Result<()> {
-        let ty = crate::amf::amf0::read_type(buf)?;
+    fn apply_metadata_key(&mut self, key: &str, buf: &mut Buffer) -> bool {
+        let ty = match crate::amf::amf0::read_type(buf) {
+            Ok(t) => t,
+            Err(_) => return false,
+        };
         match key {
             "width" => {
                 if ty == crate::amf::amf0::Amf0Type::Number {
-                    let v = crate::amf::amf0::read_number(buf)?;
+                    let v = match crate::amf::amf0::read_number(buf) {
+                        Ok(v) => v,
+                        Err(_) => return false,
+                    };
                     if let Some(w) = positive_f64_to_u32(v) {
                         self.detected_video_width.get_or_insert(w);
                     }
                 } else {
-                    crate::amf::amf0::skip_value_after_type(buf, ty)?;
+                    return crate::amf::amf0::skip_value_after_type(buf, ty).is_ok();
                 }
             }
             "height" => {
                 if ty == crate::amf::amf0::Amf0Type::Number {
-                    let v = crate::amf::amf0::read_number(buf)?;
+                    let v = match crate::amf::amf0::read_number(buf) {
+                        Ok(v) => v,
+                        Err(_) => return false,
+                    };
                     if let Some(h) = positive_f64_to_u32(v) {
                         self.detected_video_height.get_or_insert(h);
                     }
                 } else {
-                    crate::amf::amf0::skip_value_after_type(buf, ty)?;
+                    return crate::amf::amf0::skip_value_after_type(buf, ty).is_ok();
                 }
             }
             "framerate" | "videoframerate" => {
                 if ty == crate::amf::amf0::Amf0Type::Number {
-                    let v = crate::amf::amf0::read_number(buf)?;
+                    let v = match crate::amf::amf0::read_number(buf) {
+                        Ok(v) => v,
+                        Err(_) => return false,
+                    };
                     if sane_framerate(v) {
                         self.detected_video_framerate.get_or_insert(v);
                     }
                 } else {
-                    crate::amf::amf0::skip_value_after_type(buf, ty)?;
+                    return crate::amf::amf0::skip_value_after_type(buf, ty).is_ok();
                 }
             }
             "audiosamplerate" => {
                 if ty == crate::amf::amf0::Amf0Type::Number {
-                    let v = crate::amf::amf0::read_number(buf)?;
+                    let v = match crate::amf::amf0::read_number(buf) {
+                        Ok(v) => v,
+                        Err(_) => return false,
+                    };
                     if let Some(sr) = positive_f64_to_u32(v) {
                         self.detected_audio_sample_rate.get_or_insert(sr);
                     }
                 } else {
-                    crate::amf::amf0::skip_value_after_type(buf, ty)?;
+                    return crate::amf::amf0::skip_value_after_type(buf, ty).is_ok();
                 }
             }
             "audiochannels" => {
                 if ty == crate::amf::amf0::Amf0Type::Number {
-                    let v = crate::amf::amf0::read_number(buf)?;
+                    let v = match crate::amf::amf0::read_number(buf) {
+                        Ok(v) => v,
+                        Err(_) => return false,
+                    };
                     if let Some(ch) = positive_f64_to_u32(v) {
                         if ch > 0 && ch <= 32 {
                             self.detected_audio_channels.get_or_insert(ch);
                         }
                     }
                 } else {
-                    crate::amf::amf0::skip_value_after_type(buf, ty)?;
+                    return crate::amf::amf0::skip_value_after_type(buf, ty).is_ok();
                 }
             }
             "stereo" => {
                 if ty == crate::amf::amf0::Amf0Type::Boolean {
-                    let stereo = crate::amf::amf0::read_boolean(buf)?;
+                    let stereo = match crate::amf::amf0::read_boolean(buf) {
+                        Ok(v) => v,
+                        Err(_) => return false,
+                    };
                     self.detected_audio_channels
                         .get_or_insert(if stereo { 2 } else { 1 });
                 } else {
-                    crate::amf::amf0::skip_value_after_type(buf, ty)?;
+                    return crate::amf::amf0::skip_value_after_type(buf, ty).is_ok();
                 }
             }
-            _ => crate::amf::amf0::skip_value_after_type(buf, ty)?,
+            _ => return crate::amf::amf0::skip_value_after_type(buf, ty).is_ok(),
         }
-        Ok(())
+        true
     }
 
     fn handle_control(&mut self, msg_type_id: u8, payload: &[u8]) -> Result<()> {
@@ -1204,6 +1233,17 @@ fn positive_f64_to_u32(v: f64) -> Option<u32> {
 
 fn sane_framerate(v: f64) -> bool {
     v.is_finite() && v > 0.0 && v <= 1000.0
+}
+
+fn read_data_event_name(buf: &mut Buffer, is_string: bool, out: &mut [u8; 64]) -> Option<usize> {
+    match if is_string {
+        crate::amf::amf0::read_string(buf, out)
+    } else {
+        crate::amf::amf0::read_long_string(buf, out)
+    } {
+        Ok(n) => Some(n),
+        Err(_) => None,
+    }
 }
 
 fn detect_video_codec(payload: &[u8]) -> Option<String> {
@@ -1841,5 +1881,51 @@ mod tests {
         conn.handle_message(&msg, &payload).unwrap();
         assert_eq!(conn.detected_video_width, Some(1024));
         assert_eq!(conn.detected_video_height, Some(576));
+    }
+
+    #[test]
+    fn on_metadata_ignores_oversized_leading_event_name() {
+        let mut conn = Conn::new();
+        let long_name = "x".repeat(65);
+        let mut payload = amf0_string(&long_name);
+        payload.push(crate::amf::amf0::Amf0Type::Object as u8);
+        payload.extend_from_slice(&amf0_object_end());
+
+        conn.handle_data_message(&payload).unwrap();
+        assert_eq!(conn.detected_video_width, None);
+    }
+
+    #[test]
+    fn on_metadata_ignores_oversized_set_data_frame_inner_name() {
+        let mut conn = Conn::new();
+        let long_name = "y".repeat(65);
+        let mut payload = amf0_string("@setDataFrame");
+        payload.extend(amf0_string(&long_name));
+        payload.push(crate::amf::amf0::Amf0Type::Object as u8);
+        payload.extend_from_slice(&amf0_object_end());
+
+        conn.handle_data_message(&payload).unwrap();
+        assert_eq!(conn.detected_video_width, None);
+    }
+
+    #[test]
+    fn on_metadata_keeps_partial_fields_when_unknown_value_cannot_be_skipped() {
+        let mut conn = Conn::new();
+        let mut payload = amf0_string("onMetaData");
+        payload.push(crate::amf::amf0::Amf0Type::Object as u8);
+        let mut width = Buffer::with_capacity(32);
+        crate::amf::amf0::write_object_key(&mut width, "width").unwrap();
+        crate::amf::amf0::write_number(&mut width, 1280.0).unwrap();
+        payload.extend_from_slice(width.as_slice());
+        let mut unknown = Buffer::with_capacity(8);
+        crate::amf::amf0::write_object_key(&mut unknown, "vendor").unwrap();
+        unknown
+            .write(&[crate::amf::amf0::Amf0Type::Recordset as u8])
+            .unwrap();
+        payload.extend_from_slice(unknown.as_slice());
+        payload.extend_from_slice(&amf0_object_end());
+
+        conn.handle_data_message(&payload).unwrap();
+        assert_eq!(conn.detected_video_width, Some(1280));
     }
 }
