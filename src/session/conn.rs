@@ -223,6 +223,32 @@ impl Conn {
             self.pending_cache_evictions
                 .push((self.app.clone(), route_key));
         }
+        self.clear_detected_stream_metadata();
+    }
+
+    fn clear_detected_stream_metadata(&mut self) {
+        self.detected_video_width = None;
+        self.detected_video_height = None;
+        self.detected_video_framerate = None;
+        self.detected_audio_sample_rate = None;
+        self.detected_audio_channels = None;
+    }
+
+    fn publishing_metadata_allowed(&self, msg_stream_id: u32) -> bool {
+        let expected_stream_id = self
+            .current_stream
+            .as_ref()
+            .filter(|s| s.is_publishing)
+            .map(|s| s.stream_id)
+            .unwrap_or(0);
+        msg_stream_id == expected_stream_id && expected_stream_id != 0
+    }
+
+    fn handle_publisher_data_message(&mut self, msg_stream_id: u32, payload: &[u8]) -> Result<()> {
+        if !self.publishing_metadata_allowed(msg_stream_id) {
+            return Ok(());
+        }
+        self.handle_data_message(payload)
     }
 
     fn queue_relay_frame(
@@ -381,6 +407,9 @@ impl Conn {
                 }
                 msg_dispatch::RTMP_MSG_VIDEO => {
                     self.handle_media_frame(msg_stream_id, FrameType::Video, out_ts, tag_payload)?;
+                }
+                msg_dispatch::RTMP_MSG_AMF0_DATA => {
+                    self.handle_publisher_data_message(msg_stream_id, tag_payload)?;
                 }
                 _ => {}
             }
@@ -583,12 +612,14 @@ impl Conn {
             msg_dispatch::RTMP_MSG_AGGREGATE => {
                 self.handle_aggregate(msg.msg_stream_id, msg.timestamp, payload)
             }
-            msg_dispatch::RTMP_MSG_AMF0_DATA => self.handle_data_message(payload),
+            msg_dispatch::RTMP_MSG_AMF0_DATA => {
+                self.handle_publisher_data_message(msg.msg_stream_id, payload)
+            }
             msg_dispatch::RTMP_MSG_AMF3_DATA => {
                 if !payload.is_empty() && payload[0] == 0x00 {
-                    self.handle_data_message(&payload[1..])
+                    self.handle_publisher_data_message(msg.msg_stream_id, &payload[1..])
                 } else {
-                    self.handle_data_message(payload)
+                    self.handle_publisher_data_message(msg.msg_stream_id, payload)
                 }
             }
             _ => Ok(()),
@@ -643,6 +674,7 @@ impl Conn {
             return Ok(());
         }
 
+        self.clear_detected_stream_metadata();
         self.parse_on_metadata_object(&mut buf)
     }
 
@@ -657,7 +689,7 @@ impl Conn {
         if ty == crate::amf::amf0::Amf0Type::EcmaArray {
             let mut count_bytes = [0u8; 4];
             if buf.read(&mut count_bytes).is_err() {
-                return Err(ErrorCode::Amf);
+                return Ok(());
             }
         }
 
@@ -665,7 +697,7 @@ impl Conn {
         while !crate::amf::amf0::is_object_end(buf) {
             keys += 1;
             if keys > crate::amf::amf0::MAX_OBJECT_KEYS {
-                return Err(ErrorCode::Amf);
+                return Ok(());
             }
             let mut key = [0u8; 256];
             if crate::amf::amf0::read_object_key(buf, &mut key).is_err() {
@@ -678,7 +710,9 @@ impl Conn {
             }
         }
         let mut end = [0u8; 3];
-        buf.read(&mut end).map_err(|_| ErrorCode::Amf)?;
+        if buf.read(&mut end).is_err() {
+            return Ok(());
+        }
         Ok(())
     }
 
@@ -695,7 +729,7 @@ impl Conn {
                         Err(_) => return false,
                     };
                     if let Some(w) = positive_f64_to_u32(v) {
-                        self.detected_video_width.get_or_insert(w);
+                        self.detected_video_width = Some(w);
                     }
                 } else {
                     return crate::amf::amf0::skip_value_after_type(buf, ty).is_ok();
@@ -708,7 +742,7 @@ impl Conn {
                         Err(_) => return false,
                     };
                     if let Some(h) = positive_f64_to_u32(v) {
-                        self.detected_video_height.get_or_insert(h);
+                        self.detected_video_height = Some(h);
                     }
                 } else {
                     return crate::amf::amf0::skip_value_after_type(buf, ty).is_ok();
@@ -721,7 +755,7 @@ impl Conn {
                         Err(_) => return false,
                     };
                     if sane_framerate(v) {
-                        self.detected_video_framerate.get_or_insert(v);
+                        self.detected_video_framerate = Some(v);
                     }
                 } else {
                     return crate::amf::amf0::skip_value_after_type(buf, ty).is_ok();
@@ -734,7 +768,7 @@ impl Conn {
                         Err(_) => return false,
                     };
                     if let Some(sr) = positive_f64_to_u32(v) {
-                        self.detected_audio_sample_rate.get_or_insert(sr);
+                        self.detected_audio_sample_rate = Some(sr);
                     }
                 } else {
                     return crate::amf::amf0::skip_value_after_type(buf, ty).is_ok();
@@ -748,7 +782,7 @@ impl Conn {
                     };
                     if let Some(ch) = positive_f64_to_u32(v) {
                         if ch > 0 && ch <= 32 {
-                            self.detected_audio_channels.get_or_insert(ch);
+                            self.detected_audio_channels = Some(ch);
                         }
                     }
                 } else {
@@ -761,8 +795,7 @@ impl Conn {
                         Ok(v) => v,
                         Err(_) => return false,
                     };
-                    self.detected_audio_channels
-                        .get_or_insert(if stereo { 2 } else { 1 });
+                    self.detected_audio_channels = Some(if stereo { 2 } else { 1 });
                 } else {
                     return crate::amf::amf0::skip_value_after_type(buf, ty).is_ok();
                 }
@@ -1001,6 +1034,7 @@ impl Conn {
                         stream.is_publishing = true;
                         stream.name = name_str;
                     }
+                    self.clear_detected_stream_metadata();
                     let _ = state_machine::conn_transition(&mut self.state, ConnState::Publishing);
                     let sid = self
                         .current_stream
@@ -1749,6 +1783,15 @@ mod tests {
         [0, 0, 0x09]
     }
 
+    fn publishing_conn(stream_id: u32) -> Conn {
+        let mut conn = Conn::new();
+        conn.current_stream = Some(Box::new(Stream::new(stream_id)));
+        if let Some(s) = conn.current_stream.as_mut() {
+            s.is_publishing = true;
+        }
+        conn
+    }
+
     fn build_on_metadata_payload(
         with_set_data_frame: bool,
         entries: &[(&str, f64)],
@@ -1864,7 +1907,7 @@ mod tests {
 
     #[test]
     fn amf3_data_message_strips_leading_zero_byte() {
-        let mut conn = Conn::new();
+        let mut conn = publishing_conn(1);
         let mut body =
             build_on_metadata_payload(false, &[("width", 1024.0), ("height", 576.0)], &[]);
         let mut payload = vec![0x00];
@@ -1927,5 +1970,82 @@ mod tests {
 
         conn.handle_data_message(&payload).unwrap();
         assert_eq!(conn.detected_video_width, Some(1280));
+    }
+
+    #[test]
+    fn on_metadata_ignored_while_not_publishing() {
+        let mut conn = Conn::new();
+        let payload = build_on_metadata_payload(false, &[("width", 1920.0)], &[]);
+        let msg = ChunkMessage {
+            csid: 4,
+            fmt: 0,
+            timestamp: 0,
+            msg_length: payload.len() as u32,
+            msg_type_id: msg_dispatch::RTMP_MSG_AMF0_DATA,
+            msg_stream_id: 1,
+            is_complete: true,
+        };
+        conn.handle_message(&msg, &payload).unwrap();
+        assert_eq!(conn.detected_video_width, None);
+    }
+
+    #[test]
+    fn on_metadata_ignored_on_wrong_stream_id() {
+        let mut conn = publishing_conn(1);
+        let payload = build_on_metadata_payload(false, &[("width", 1920.0)], &[]);
+        let msg = ChunkMessage {
+            csid: 4,
+            fmt: 0,
+            timestamp: 0,
+            msg_length: payload.len() as u32,
+            msg_type_id: msg_dispatch::RTMP_MSG_AMF0_DATA,
+            msg_stream_id: 99,
+            is_complete: true,
+        };
+        conn.handle_message(&msg, &payload).unwrap();
+        assert_eq!(conn.detected_video_width, None);
+    }
+
+    #[test]
+    fn later_on_metadata_replaces_stale_values() {
+        let mut conn = publishing_conn(1);
+        let first = build_on_metadata_payload(false, &[("width", 1920.0), ("height", 1080.0)], &[]);
+        let second = build_on_metadata_payload(false, &[("width", 1280.0), ("height", 720.0)], &[]);
+        conn.handle_data_message(&first).unwrap();
+        conn.handle_data_message(&second).unwrap();
+        assert_eq!(conn.detected_video_width, Some(1280));
+        assert_eq!(conn.detected_video_height, Some(720));
+    }
+
+    #[test]
+    fn aggregate_script_subtag_populates_metadata() {
+        let mut conn = publishing_conn(1);
+        let metadata =
+            build_on_metadata_payload(false, &[("width", 720.0), ("height", 480.0)], &[]);
+        let aggregate = flv_subtag(msg_dispatch::RTMP_MSG_AMF0_DATA, 0, &metadata);
+        conn.handle_aggregate(1, 0, &aggregate).unwrap();
+        assert_eq!(conn.detected_video_width, Some(720));
+        assert_eq!(conn.detected_video_height, Some(480));
+    }
+
+    #[test]
+    fn on_metadata_tolerates_excess_keys() {
+        let mut conn = publishing_conn(1);
+        let mut payload = amf0_string("onMetaData");
+        payload.push(crate::amf::amf0::Amf0Type::Object as u8);
+        let mut width = Buffer::with_capacity(32);
+        crate::amf::amf0::write_object_key(&mut width, "width").unwrap();
+        crate::amf::amf0::write_number(&mut width, 800.0).unwrap();
+        payload.extend_from_slice(width.as_slice());
+        for i in 0..crate::amf::amf0::MAX_OBJECT_KEYS {
+            let mut entry = Buffer::with_capacity(32);
+            crate::amf::amf0::write_object_key(&mut entry, &format!("k{i}")).unwrap();
+            crate::amf::amf0::write_null(&mut entry).unwrap();
+            payload.extend_from_slice(entry.as_slice());
+        }
+        payload.extend_from_slice(&amf0_object_end());
+
+        conn.handle_data_message(&payload).unwrap();
+        assert_eq!(conn.detected_video_width, Some(800));
     }
 }
