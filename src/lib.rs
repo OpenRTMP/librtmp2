@@ -127,6 +127,28 @@ mod ffi_tests {
     }
 
     #[test]
+    fn server_create_preserves_negative_max_connections_as_unlimited() {
+        let config = ServerConfig {
+            max_connections: -1,
+            chunk_size: 128,
+            tls_enabled: 0,
+            tls_cert_file: std::ptr::null(),
+            tls_key_file: std::ptr::null(),
+            tls_ca_file: std::ptr::null(),
+            tls_insecure: 0,
+        };
+        let server = NonNull::new(unsafe { lrtmp2_server_create(&config) })
+            .expect("lrtmp2_server_create returned null");
+        unsafe {
+            // Only the zero-initialized case gets the default; an explicit
+            // negative value must pass through unchanged since `Server`
+            // already treats `max_connections <= 0` as unlimited.
+            assert_eq!(server.as_ref().config.max_connections, -1);
+            lrtmp2_server_destroy(server.as_ptr());
+        }
+    }
+
+    #[test]
     fn server_new_preserves_zero_max_connections_for_rust_api() {
         let config = ServerConfig {
             max_connections: 0,
@@ -145,8 +167,11 @@ mod ffi_tests {
 use std::ffi::c_int;
 
 /// Default connection cap applied at the FFI boundary when `max_connections`
-/// is zero or negative — the usual pattern from `calloc`/`{0}` initialization
-/// in C embedders, which would otherwise disable all connection limiting.
+/// is exactly zero — the usual pattern from `calloc`/`{0}` initialization in
+/// C embedders, which would otherwise disable all connection limiting. A
+/// negative value is left as-is: `Server` already treats `max_connections <=
+/// 0` as unlimited, and callers may pass a negative value deliberately to
+/// request that, so only the zero-initialized case needs the default.
 const DEFAULT_FFI_MAX_CONNECTIONS: c_int = 256;
 
 /// Create a server (FFI-compatible).
@@ -156,7 +181,7 @@ pub unsafe extern "C" fn lrtmp2_server_create(config: *const ServerConfig) -> *m
         return std::ptr::null_mut();
     }
     let mut cfg = unsafe { *config };
-    if cfg.max_connections <= 0 {
+    if cfg.max_connections == 0 {
         cfg.max_connections = DEFAULT_FFI_MAX_CONNECTIONS;
     }
     match server::Server::new(cfg) {

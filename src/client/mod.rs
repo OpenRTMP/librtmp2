@@ -239,20 +239,27 @@ impl Client {
         }
 
         // Scope the mutable transport borrow to the recv phase only.
-        let poll_fd = {
+        let (poll_fd, has_buffered_tls_data) = {
             let Some(t) = self.transport.as_ref() else {
                 return Err(ErrorCode::Internal);
             };
-            t.fd()
+            (t.fd(), t.pending() > 0)
         };
-        let mut pfd = libc::pollfd {
-            fd: poll_fd,
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        // poll(2) already treats a negative timeout as "block indefinitely"
-        // (the POSIX idiom), so pass it through as-is instead of clamping to 0.
-        unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
+        // A prior poll() call may have stopped draining at
+        // MAX_RECV_BYTES_PER_POLL while OpenSSL still held decrypted
+        // plaintext internally. The kernel socket can then have nothing left
+        // to report ready, so blocking in poll(2) here would wait out the
+        // full timeout even though data is already available via recv().
+        if !has_buffered_tls_data {
+            let mut pfd = libc::pollfd {
+                fd: poll_fd,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            // poll(2) already treats a negative timeout as "block indefinitely"
+            // (the POSIX idiom), so pass it through as-is instead of clamping to 0.
+            unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
+        }
 
         let mut buf = [0u8; 65536];
         let mut bytes_drained = 0usize;
@@ -492,18 +499,22 @@ impl Client {
 
             // Scope mutable transport borrow tightly to avoid conflict with
             // other self fields (recv_buffer) used after the borrow ends.
+            // Cap the read itself at the remaining budget rather than reading
+            // a full 4096-byte chunk and discarding it after the fact -- a
+            // discard here would drop bytes the peer already sent (which can
+            // include the tail of the very command this call is waiting for)
+            // instead of just deferring them to the next wait_for_command
+            // call, desynchronizing this connection's view of the stream.
             let mut tmp = [0u8; 4096];
+            let read_cap = tmp.len().min(*recv_budget);
             let (n, again, t_fd) = {
                 let t = self.transport.as_mut().ok_or(ErrorCode::Internal)?;
                 let mut again = 0i32;
-                let n = t.recv(&mut tmp, &mut again);
+                let n = t.recv(&mut tmp[..read_cap], &mut again);
                 (n, again, t.fd())
             };
             if n > 0 {
                 let chunk_len = n as usize;
-                if chunk_len > *recv_budget {
-                    return Err(ErrorCode::Timeout);
-                }
                 *recv_budget -= chunk_len;
                 self.recv_buffer
                     .write(&tmp[..chunk_len])

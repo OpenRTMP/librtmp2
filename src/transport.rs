@@ -331,9 +331,17 @@ impl Transport {
         Ok(())
     }
 
-    /// Number of bytes already buffered inside the transport (0 for plaintext).
+    /// Number of decrypted bytes already buffered inside the transport (always
+    /// 0 for plaintext). For TLS, `SSL_pending()` reports application data
+    /// OpenSSL has already decrypted but the caller hasn't read yet -- data a
+    /// `poll(2)` readiness check on the raw fd cannot see, since the kernel
+    /// socket buffer it was decrypted from may already be empty.
     pub fn pending(&self) -> i32 {
-        0
+        match &self.inner {
+            TransportInner::Plain(_) => 0,
+            #[cfg(feature = "tls")]
+            TransportInner::Tls { stream, .. } => stream.ssl().pending() as i32,
+        }
     }
 }
 
