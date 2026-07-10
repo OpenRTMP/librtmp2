@@ -102,6 +102,7 @@ fn error_code_from_raw(code: i32) -> ErrorCode {
 mod ffi_tests {
     use super::*;
     use crate::server::Server;
+    use std::ptr::NonNull;
 
     #[test]
     fn server_create_applies_default_max_connections_for_zero_config() {
@@ -114,12 +115,14 @@ mod ffi_tests {
             tls_ca_file: std::ptr::null(),
             tls_insecure: 0,
         };
-        let server = unsafe { lrtmp2_server_create(&config) };
-        assert!(!server.is_null());
+        let server = NonNull::new(unsafe { lrtmp2_server_create(&config) })
+            .expect("lrtmp2_server_create returned null");
         unsafe {
-            let s = &*server;
-            assert_eq!(s.config.max_connections, DEFAULT_FFI_MAX_CONNECTIONS);
-            lrtmp2_server_destroy(server);
+            assert_eq!(
+                server.as_ref().config.max_connections,
+                DEFAULT_FFI_MAX_CONNECTIONS
+            );
+            lrtmp2_server_destroy(server.as_ptr());
         }
     }
 
