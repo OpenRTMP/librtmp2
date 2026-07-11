@@ -68,6 +68,12 @@ pub struct Client {
     pub on_frame_cb: Option<fn(&Frame)>,
     /// Retains the last frame payload delivered through `on_frame_cb`.
     frame_cb_scratch: Vec<u8>,
+    /// PEM CA bundle used to verify `rtmps://` servers, in addition to the
+    /// system trust store. `None` uses the system trust store only.
+    tls_ca_file: Option<String>,
+    /// Skip TLS certificate verification for `rtmps://` connections.
+    /// Only for testing against self-signed deployments.
+    tls_insecure: bool,
 }
 
 impl Client {
@@ -86,16 +92,25 @@ impl Client {
             stream_key: String::new(),
             on_frame_cb: None,
             frame_cb_scratch: Vec::new(),
+            tls_ca_file: None,
+            tls_insecure: false,
         }
+    }
+
+    /// Configure `rtmps://` verification for subsequent `connect()` calls.
+    pub fn set_tls_client_config(&mut self, ca_file: Option<String>, insecure: bool) {
+        self.tls_ca_file = ca_file;
+        self.tls_insecure = insecure;
     }
 
     /// Connect to an RTMP(S) server at `rtmp://host[:port]/app/streamKey` or
     /// `rtmps://host[:port]/app/streamKey`.
     ///
     /// Performs the real TCP connect (wrapped in a TLS client handshake for
-    /// `rtmps://`, verified against the system trust store), the legacy
-    /// C0/C1/C2 handshake, then the `connect` + `createStream` AMF0 command
-    /// exchange.
+    /// `rtmps://`, verified against the system trust store by default), the
+    /// legacy C0/C1/C2 handshake, then the `connect` + `createStream` AMF0
+    /// command exchange. Call [`Client::set_tls_client_config`] before
+    /// `connect()` to trust an additional CA bundle or disable verification.
     pub fn connect(&mut self, url: &str) -> Result<()> {
         let (use_tls, host, port, app, stream_key) = parse_rtmp_url(url)?;
         if use_tls && !crate::transport::tls_available() {
@@ -129,7 +144,12 @@ impl Client {
             ErrorCode::Io
         })?;
         let mut transport = if use_tls {
-            Transport::connect_tls(stream, &host)?
+            Transport::connect_tls(
+                stream,
+                &host,
+                self.tls_ca_file.as_deref(),
+                self.tls_insecure,
+            )?
         } else {
             Transport::new_plain(stream.into_raw_fd())
         };
@@ -678,6 +698,21 @@ mod tests {
     fn tcp_connect_timeout_is_bounded() {
         assert!(TCP_CONNECT_TIMEOUT_SECS > 0);
         assert!(TCP_CONNECT_TIMEOUT_SECS <= 30);
+    }
+
+    #[test]
+    fn tls_client_config_defaults_to_verified() {
+        let client = Client::new();
+        assert_eq!(client.tls_ca_file, None);
+        assert!(!client.tls_insecure);
+    }
+
+    #[test]
+    fn tls_client_config_is_stored() {
+        let mut client = Client::new();
+        client.set_tls_client_config(Some("/etc/ca.pem".to_string()), true);
+        assert_eq!(client.tls_ca_file.as_deref(), Some("/etc/ca.pem"));
+        assert!(client.tls_insecure);
     }
 
     #[test]

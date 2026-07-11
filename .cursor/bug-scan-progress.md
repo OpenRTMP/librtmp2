@@ -1,6 +1,6 @@
 # Bug scan progress
 
-Last scanned: ertmp (2026-07-11)
+Last scanned: session / server / client / transport (2026-07-11)
 
 ## Modules
 
@@ -11,9 +11,46 @@ Last scanned: ertmp (2026-07-11)
 - [x] amf — AMF0 + AMF3
 - [x] flv — Audio/video/script tags
 - [x] ertmp — E-RTMP v1/v2 extensions
-- [ ] session — State machine, publish/play flows
-- [ ] server — Server listener
-- [ ] client — Outbound client
+- [x] session — State machine, publish/play flows
+- [x] server — Server listener
+- [x] client — Outbound client
+
+All modules in the module layout have now had at least one full pass.
+
+## Findings (2026-07-11 session/server/client/transport pass)
+
+- Reviewed `src/session/conn.rs`, `src/server/mod.rs`, `src/client/mod.rs`,
+  `src/transport.rs` in full. The recv-buffer cap, bounded TCP connect, and
+  stream-cache byte/frame caps landed by earlier passes (see git log:
+  "cap recv_buffer, bound client TCP connect, limit stream cache init
+  frames") are present and correct in the current code. Traced network-length
+  indexing, caller-owned struct reuse, integer over/underflow, reachable
+  panics (`.unwrap()`/`.expect()`/indexing) from network input, fd/socket
+  leaks on error paths, unbounded growth, TLS certificate verification, and
+  the connection state machine. No new critical or high-severity issue found.
+- **Bug (fixed):** `lrtmp2_client_create()` accepted a `*const ServerConfig`
+  parameter but discarded it entirely (`_config: *const ServerConfig`) —
+  `ServerConfig.tls_ca_file` ("Client: CA bundle for verification") and
+  `ServerConfig.tls_insecure` ("Client: skip certificate verification") were
+  documented ABI fields that did nothing. `Client::connect()` had no TLS
+  config path at all; `Transport::connect_tls()` always built a bare
+  `SslConnector` with the default verify mode. An integrator setting
+  `tls_insecure=1` to reach a self-signed RTMPS deployment, or `tls_ca_file`
+  to pin a private CA, would get silent full verification against the system
+  trust store instead (fails closed, but the documented control was a no-op).
+  Fixed: `Client` now stores `tls_ca_file`/`tls_insecure` (set via
+  `Client::set_tls_client_config`, wired from `ServerConfig` in
+  `lrtmp2_client_create`), and `Transport::connect_tls()` takes `ca_file`/
+  `insecure` and applies `set_ca_file` / `SslVerifyMode::NONE` accordingly.
+  Added regression tests in `client/mod.rs`.
+- Two low-confidence items noted, not actioned (design/scope decisions):
+  - `Client::connect()` resolves DNS synchronously via `to_socket_addrs()`
+    before the bounded TCP-connect loop starts; `TCP_CONNECT_TIMEOUT_SECS`
+    does not cover the resolver call itself. Only relevant if a deployment
+    passes attacker-influenced hostnames to `connect()`.
+  - No other unbounded-blocking or resource issues found in the reviewed
+    files; existing regression tests already cover ping rate limiting,
+    stream-cache eviction bookkeeping, and TLS pending-handshake accounting.
 
 ## Findings (2026-07-11 ertmp pass)
 

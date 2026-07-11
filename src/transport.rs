@@ -10,8 +10,8 @@ use crate::types::Result;
 
 #[cfg(feature = "tls")]
 use openssl::ssl::{
-    HandshakeError, MidHandshakeSslStream, SslAcceptor, SslConnector, SslFiletype, SslMethod,
-    SslStream,
+    HandshakeError, MidHandshakeSslStream, SslAcceptor, SslFiletype, SslMethod, SslStream,
+    SslVerifyMode,
 };
 use std::net::TcpStream;
 #[cfg(feature = "tls")]
@@ -145,9 +145,18 @@ impl Transport {
     }
 
     /// Perform a blocking TLS client handshake over an already-connected
-    /// `stream` (RTMPS). Validates the server certificate against the system
-    /// trust store and checks `host` against the certificate (SNI + hostname
-    /// verification), matching standard TLS client behavior.
+    /// `stream` (RTMPS). By default validates the server certificate against
+    /// the system trust store and checks `host` against the certificate (SNI
+    /// + hostname verification), matching standard TLS client behavior.
+    ///
+    /// - `ca_file` (PEM bundle): verification trusts *only* the CAs in this
+    ///   bundle, replacing the system trust store rather than adding to it —
+    ///   so a caller pinning a private CA doesn't also accept publicly
+    ///   trusted certificates for the same hostname.
+    /// - `insecure = true`: skip certificate verification entirely (only for
+    ///   testing against self-signed deployments; never use in production).
+    ///   The system default verify paths are never touched in this mode, so
+    ///   a host with no usable default CA store still connects.
     ///
     /// `stream` must not already be set non-blocking; this performs a
     /// synchronous handshake, matching [`Client`](crate::client::Client)'s
@@ -156,25 +165,78 @@ impl Transport {
     /// stalls mid-handshake cannot hang the caller indefinitely (mirroring the
     /// bound `send()` places on writes post-handshake).
     #[cfg(feature = "tls")]
-    pub fn connect_tls(stream: TcpStream, host: &str) -> Result<Self> {
+    pub fn connect_tls(
+        stream: TcpStream,
+        host: &str,
+        ca_file: Option<&str>,
+        insecure: bool,
+    ) -> Result<Self> {
+        use openssl::ssl::{Ssl, SslContextBuilder};
+        use openssl::x509::store::X509StoreBuilder;
+        use openssl::x509::verify::X509CheckFlags;
+        use openssl::x509::X509;
+
         stream
             .set_read_timeout(Some(Duration::from_secs(TLS_ACCEPT_TIMEOUT_SECS)))
             .map_err(|_| ErrorCode::Io)?;
         stream
             .set_write_timeout(Some(Duration::from_secs(TLS_ACCEPT_TIMEOUT_SECS)))
             .map_err(|_| ErrorCode::Io)?;
-        let connector = SslConnector::builder(SslMethod::tls())
-            .map_err(|_| ErrorCode::Internal)?
-            .build();
-        let ssl_stream = connector
-            .connect(host, stream)
-            .map_err(|_| ErrorCode::Handshake)?;
+
+        let mut ctx = SslContextBuilder::new(SslMethod::tls()).map_err(|_| ErrorCode::Internal)?;
+        ctx.set_cipher_list("DEFAULT:!aNULL:!eNULL:!MD5:!3DES:!DES:!RC4:!IDEA:!SEED:!aDSS:!SRP:!PSK")
+            .map_err(|_| ErrorCode::Internal)?;
+        if insecure {
+            // Verification is disabled outright, so don't touch the system
+            // verify-path configuration at all: a minimal host without a
+            // usable default CA store must still be able to connect.
+            ctx.set_verify(SslVerifyMode::NONE);
+        } else {
+            ctx.set_verify(SslVerifyMode::PEER);
+            match ca_file {
+                Some(ca) => {
+                    // Build a replacement trust store containing only the
+                    // caller-supplied CA(s), instead of augmenting the
+                    // system default store: a custom CA is meant to
+                    // restrict verification, not merely extend it.
+                    let pem = std::fs::read(ca).map_err(|_| ErrorCode::Internal)?;
+                    let certs = X509::stack_from_pem(&pem).map_err(|_| ErrorCode::Internal)?;
+                    let mut store = X509StoreBuilder::new().map_err(|_| ErrorCode::Internal)?;
+                    for cert in certs {
+                        store.add_cert(cert).map_err(|_| ErrorCode::Internal)?;
+                    }
+                    ctx.set_cert_store(store.build());
+                }
+                None => {
+                    ctx.set_default_verify_paths().map_err(|_| ErrorCode::Internal)?;
+                }
+            }
+        }
+        let ssl_ctx = ctx.build();
+
+        let mut ssl = Ssl::new(&ssl_ctx).map_err(|_| ErrorCode::Internal)?;
+        if !insecure {
+            let param = ssl.param_mut();
+            param.set_hostflags(X509CheckFlags::NO_PARTIAL_WILDCARDS);
+            match host.parse() {
+                Ok(ip) => param.set_ip(ip).map_err(|_| ErrorCode::Internal)?,
+                Err(_) => param.set_host(host).map_err(|_| ErrorCode::Internal)?,
+            }
+        }
+        ssl.set_hostname(host).map_err(|_| ErrorCode::Internal)?;
+
+        let ssl_stream = ssl.connect(stream).map_err(|_| ErrorCode::Handshake)?;
         Transport::new_tls(ssl_stream)
     }
 
     /// TLS is not available in this build.
     #[cfg(not(feature = "tls"))]
-    pub fn connect_tls(_stream: TcpStream, _host: &str) -> Result<Self> {
+    pub fn connect_tls(
+        _stream: TcpStream,
+        _host: &str,
+        _ca_file: Option<&str>,
+        _insecure: bool,
+    ) -> Result<Self> {
         Err(ErrorCode::Unsupported)
     }
 
@@ -491,4 +553,169 @@ impl PendingTlsAccept {
 /// Check if TLS support is available.
 pub fn tls_available() -> bool {
     cfg!(feature = "tls")
+}
+
+#[cfg(all(test, feature = "tls"))]
+mod client_tls_tests {
+    use super::*;
+    use openssl::asn1::Asn1Time;
+    use openssl::bn::{BigNum, MsbOption};
+    use openssl::hash::MessageDigest;
+    use openssl::pkey::PKey;
+    use openssl::rsa::Rsa;
+    use openssl::x509::extension::{BasicConstraints, SubjectAlternativeName};
+    use openssl::x509::{X509NameBuilder, X509};
+    use std::net::TcpListener;
+    use std::os::unix::io::IntoRawFd;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// Generates a self-signed cert/key pair (PEM) for `cn`, written to
+    /// unique temp files so `TlsCtx::new_server`/`connect_tls` (both of
+    /// which take file paths) can consume them. Returns the paths; callers
+    /// should remove them when done.
+    fn self_signed_cert_files(cn: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let rsa = Rsa::generate(2048).unwrap();
+        let pkey = PKey::from_rsa(rsa).unwrap();
+
+        let mut name = X509NameBuilder::new().unwrap();
+        name.append_entry_by_text("CN", cn).unwrap();
+        let name = name.build();
+
+        let mut builder = X509::builder().unwrap();
+        builder.set_version(2).unwrap();
+        let mut sn = BigNum::new().unwrap();
+        sn.rand(64, MsbOption::MAYBE_ZERO, false).unwrap();
+        builder
+            .set_serial_number(&sn.to_asn1_integer().unwrap())
+            .unwrap();
+        builder.set_subject_name(&name).unwrap();
+        builder.set_issuer_name(&name).unwrap();
+        builder.set_pubkey(&pkey).unwrap();
+        builder
+            .set_not_before(&Asn1Time::days_from_now(0).unwrap())
+            .unwrap();
+        builder
+            .set_not_after(&Asn1Time::days_from_now(1).unwrap())
+            .unwrap();
+        builder
+            .append_extension(BasicConstraints::new().critical().ca().build().unwrap())
+            .unwrap();
+        let san = SubjectAlternativeName::new()
+            .dns(cn)
+            .build(&builder.x509v3_context(None, None))
+            .unwrap();
+        builder.append_extension(san).unwrap();
+        builder.sign(&pkey, MessageDigest::sha256()).unwrap();
+        let cert = builder.build();
+
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let base = std::env::temp_dir().join(format!(
+            "librtmp2-test-{}-{}-{}",
+            std::process::id(),
+            n,
+            cn
+        ));
+        let cert_path = base.with_extension("cert.pem");
+        let key_path = base.with_extension("key.pem");
+        std::fs::write(&cert_path, cert.to_pem().unwrap()).unwrap();
+        std::fs::write(&key_path, pkey.private_key_to_pem_pkcs8().unwrap()).unwrap();
+        (cert_path, key_path)
+    }
+
+    /// Starts a one-shot TLS echo-free accept-and-drop server on `cert_file`
+    /// / `key_file`, returning its port. The handshake runs on a background
+    /// thread; the caller is responsible for connecting exactly once.
+    fn spawn_tls_server(cert_file: std::path::PathBuf, key_file: std::path::PathBuf) -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let ctx = TlsCtx::new_server(cert_file.to_str().unwrap(), key_file.to_str().unwrap())
+            .expect("valid self-signed cert/key");
+        std::thread::spawn(move || {
+            if let Ok((stream, _)) = listener.accept() {
+                let fd = stream.into_raw_fd();
+                // Blocking accept: run the handshake to completion, ignoring
+                // the outcome — the test only cares whether the *client*
+                // observed success/failure.
+                let _ = ctx.accept(fd);
+            }
+        });
+        port
+    }
+
+    #[test]
+    fn connect_tls_insecure_accepts_self_signed_cert_without_default_verify_paths() {
+        let (cert_path, key_path) = self_signed_cert_files("insecure.test");
+        let port = spawn_tls_server(cert_path.clone(), key_path.clone());
+
+        let stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let result = Transport::connect_tls(stream, "insecure.test", None, true);
+        assert!(result.is_ok(), "insecure connect should succeed: {:?}", result.err());
+
+        let _ = std::fs::remove_file(cert_path);
+        let _ = std::fs::remove_file(key_path);
+    }
+
+    #[test]
+    fn connect_tls_with_matching_ca_file_trusts_self_signed_cert() {
+        let (cert_path, key_path) = self_signed_cert_files("matching-ca.test");
+        let port = spawn_tls_server(cert_path.clone(), key_path.clone());
+
+        let stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let result = Transport::connect_tls(
+            stream,
+            "matching-ca.test",
+            Some(cert_path.to_str().unwrap()),
+            false,
+        );
+        assert!(
+            result.is_ok(),
+            "connect with the server's own cert as ca_file should succeed: {:?}",
+            result.err()
+        );
+
+        let _ = std::fs::remove_file(cert_path);
+        let _ = std::fs::remove_file(key_path);
+    }
+
+    #[test]
+    fn connect_tls_with_mismatched_ca_file_rejects_self_signed_cert() {
+        let (server_cert, server_key) = self_signed_cert_files("mismatched-server.test");
+        let (other_cert, other_key) = self_signed_cert_files("unrelated-ca.test");
+        let port = spawn_tls_server(server_cert.clone(), server_key.clone());
+
+        let stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        // `other_cert` is a valid CA file, just not one that issued the
+        // server's certificate: verification must fail, proving the
+        // replacement trust store isn't silently falling back to trusting
+        // everything (or the system store, which wouldn't contain either
+        // self-signed cert anyway).
+        let result = Transport::connect_tls(
+            stream,
+            "mismatched-server.test",
+            Some(other_cert.to_str().unwrap()),
+            false,
+        );
+        assert_eq!(result.err(), Some(ErrorCode::Handshake));
+
+        let _ = std::fs::remove_file(server_cert);
+        let _ = std::fs::remove_file(server_key);
+        let _ = std::fs::remove_file(other_cert);
+        let _ = std::fs::remove_file(other_key);
+    }
+
+    #[test]
+    fn connect_tls_default_mode_rejects_untrusted_self_signed_cert() {
+        let (cert_path, key_path) = self_signed_cert_files("default-mode.test");
+        let port = spawn_tls_server(cert_path.clone(), key_path.clone());
+
+        let stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        // No ca_file, not insecure: a self-signed cert absent from the
+        // system trust store must be rejected, same as before this change.
+        let result = Transport::connect_tls(stream, "default-mode.test", None, false);
+        assert_eq!(result.err(), Some(ErrorCode::Handshake));
+
+        let _ = std::fs::remove_file(cert_path);
+        let _ = std::fs::remove_file(key_path);
+    }
 }
