@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use crate::buffer::Buffer;
 use crate::chunk::reader::{ChunkMessage, chunk_read_owned};
-use crate::chunk::state::{ChunkRegistry, DEFAULT_CHUNK_SIZE};
+use crate::chunk::state::{ChunkRegistry, DEFAULT_CHUNK_SIZE, DEFAULT_MAX_MSG_LENGTH};
 use crate::chunk::writer::chunk_write;
 use crate::handshake::{self, Handshake, HandshakeState};
 use crate::message::command;
@@ -28,8 +28,12 @@ const MAX_MESSAGES_PER_RECV: usize = 256;
 /// Maximum bytes retained in the per-connection inbound staging buffer. When
 /// the per-call message budget stops draining faster than the peer sends,
 /// complete wire data can otherwise accumulate here up to `BUFFER_MAX_SIZE`
-/// (64 MiB) per connection.
-const MAX_RECV_BUFFER_BYTES: usize = 1024 * 1024;
+/// (64 MiB) per connection. Sized to comfortably hold one in-flight
+/// `DEFAULT_MAX_MSG_LENGTH` message even when reassembled from many small
+/// chunks (e.g. a peer that never raises chunk size above the 128-byte
+/// default) plus normal per-poll staging, while staying well below the
+/// original unbounded-growth risk this cap replaces.
+const MAX_RECV_BUFFER_BYTES: usize = 2 * DEFAULT_MAX_MSG_LENGTH as usize;
 
 const SERVER_WINDOW_ACK_SIZE: u32 = 2_500_000;
 const SERVER_PEER_BANDWIDTH: u32 = 2_500_000;
