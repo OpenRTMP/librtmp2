@@ -236,10 +236,26 @@ pub unsafe extern "C" fn lrtmp2_server_stop(server: *mut server::Server) {
     }
 }
 
-/// Create a client (FFI-compatible).
+/// Create a client (FFI-compatible). `config` may be NULL to use defaults
+/// (verify `rtmps://` peers against the system trust store). When non-NULL,
+/// `config.tls_ca_file` (a CA bundle to trust in addition to the system
+/// store) and `config.tls_insecure` (skip verification entirely, for
+/// testing only) control `rtmps://` verification for this client.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrtmp2_client_create(_config: *const ServerConfig) -> *mut client::Client {
-    let c = client::Client::new();
+pub unsafe extern "C" fn lrtmp2_client_create(config: *const ServerConfig) -> *mut client::Client {
+    let mut c = client::Client::new();
+    if !config.is_null() {
+        let cfg = unsafe { &*config };
+        let ca_file = if cfg.tls_ca_file.is_null() {
+            None
+        } else {
+            unsafe { std::ffi::CStr::from_ptr(cfg.tls_ca_file as *const std::ffi::c_char) }
+                .to_str()
+                .ok()
+                .map(String::from)
+        };
+        c.set_tls_client_config(ca_file, cfg.tls_insecure != 0);
+    }
     Box::into_raw(Box::new(c))
 }
 

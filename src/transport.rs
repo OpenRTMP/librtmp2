@@ -11,7 +11,7 @@ use crate::types::Result;
 #[cfg(feature = "tls")]
 use openssl::ssl::{
     HandshakeError, MidHandshakeSslStream, SslAcceptor, SslConnector, SslFiletype, SslMethod,
-    SslStream,
+    SslStream, SslVerifyMode,
 };
 use std::net::TcpStream;
 #[cfg(feature = "tls")]
@@ -147,7 +147,11 @@ impl Transport {
     /// Perform a blocking TLS client handshake over an already-connected
     /// `stream` (RTMPS). Validates the server certificate against the system
     /// trust store and checks `host` against the certificate (SNI + hostname
-    /// verification), matching standard TLS client behavior.
+    /// verification), matching standard TLS client behavior. Pass `ca_file`
+    /// to trust an additional PEM CA bundle instead of (well, in addition to)
+    /// the system trust store, or `insecure = true` to skip certificate
+    /// verification entirely (only for testing against self-signed
+    /// deployments; never use in production).
     ///
     /// `stream` must not already be set non-blocking; this performs a
     /// synchronous handshake, matching [`Client`](crate::client::Client)'s
@@ -156,16 +160,26 @@ impl Transport {
     /// stalls mid-handshake cannot hang the caller indefinitely (mirroring the
     /// bound `send()` places on writes post-handshake).
     #[cfg(feature = "tls")]
-    pub fn connect_tls(stream: TcpStream, host: &str) -> Result<Self> {
+    pub fn connect_tls(
+        stream: TcpStream,
+        host: &str,
+        ca_file: Option<&str>,
+        insecure: bool,
+    ) -> Result<Self> {
         stream
             .set_read_timeout(Some(Duration::from_secs(TLS_ACCEPT_TIMEOUT_SECS)))
             .map_err(|_| ErrorCode::Io)?;
         stream
             .set_write_timeout(Some(Duration::from_secs(TLS_ACCEPT_TIMEOUT_SECS)))
             .map_err(|_| ErrorCode::Io)?;
-        let connector = SslConnector::builder(SslMethod::tls())
-            .map_err(|_| ErrorCode::Internal)?
-            .build();
+        let mut builder =
+            SslConnector::builder(SslMethod::tls()).map_err(|_| ErrorCode::Internal)?;
+        if insecure {
+            builder.set_verify(SslVerifyMode::NONE);
+        } else if let Some(ca) = ca_file {
+            builder.set_ca_file(ca).map_err(|_| ErrorCode::Internal)?;
+        }
+        let connector = builder.build();
         let ssl_stream = connector
             .connect(host, stream)
             .map_err(|_| ErrorCode::Handshake)?;
@@ -174,7 +188,12 @@ impl Transport {
 
     /// TLS is not available in this build.
     #[cfg(not(feature = "tls"))]
-    pub fn connect_tls(_stream: TcpStream, _host: &str) -> Result<Self> {
+    pub fn connect_tls(
+        _stream: TcpStream,
+        _host: &str,
+        _ca_file: Option<&str>,
+        _insecure: bool,
+    ) -> Result<Self> {
         Err(ErrorCode::Unsupported)
     }
 

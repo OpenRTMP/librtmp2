@@ -13,6 +13,14 @@ begin at `1.0.0`.
 
 ## [Unreleased]
 
+### Fixed
+- `lrtmp2_client_create()` silently ignored `ServerConfig.tls_ca_file` and
+  `ServerConfig.tls_insecure` — the client always verified `rtmps://` peers
+  against only the system trust store regardless of what those fields were
+  set to, even though the ABI documented them as controlling client TLS
+  verification. `Client`/`Transport::connect_tls` now honor a caller-supplied
+  CA bundle or an explicit opt-out of verification.
+
 ## [0.2.1] — 2026-07-10
 
 ### Added
