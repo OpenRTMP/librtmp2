@@ -1,6 +1,6 @@
 # Bug scan progress
 
-Last scanned: flv (2026-07-10)
+Last scanned: ertmp (2026-07-11)
 
 ## Modules
 
@@ -10,10 +10,31 @@ Last scanned: flv (2026-07-10)
 - [x] message — Message reassembly, control, commands
 - [x] amf — AMF0 + AMF3
 - [x] flv — Audio/video/script tags
-- [ ] ertmp — E-RTMP v1/v2 extensions
+- [x] ertmp — E-RTMP v1/v2 extensions
 - [ ] session — State machine, publish/play flows
 - [ ] server — Server listener
 - [ ] client — Outbound client
+
+## Findings (2026-07-11 ertmp pass)
+
+- Reviewed all nine files under `src/ertmp/` (`exvideo.rs`, `exaudio.rs`,
+  `fourcc.rs`, `metadata.rs`, `connect_caps.rs`, `reconnect.rs`,
+  `multitrack.rs`, `modex.rs`, `mod.rs`). Traced parse/write paths for OOB
+  reads, stale-state reuse on caller-owned output structs, integer overflow,
+  and graceful degradation of unknown ModEx types.
+- **Bug:** `exvideo_parse()` and `exaudio_parse()` reused caller-owned
+  `VideoHeader`/`AudioHeader` without clearing prior fields. Re-parsing H264
+  CodedFrames (with composition time) then AV1 SequenceStart left a stale
+  `composition_time`; legacy AAC→enhanced Opus left stale `aac_packet_type`;
+  enhanced→legacy left stale `fourcc`/`packet_type`. Same class as the flv
+  reuse fix. Fixed by resetting `*hdr = Header::default()` at parse entry.
+  Added regression tests in `exvideo.rs` and `exaudio.rs`.
+- **Bug:** `multitrack_parse()` did not reset `Multitrack` on entry; a failed
+  parse after a prior descriptor left stale `track_type`/`track_name`. Fixed
+  with `*mt = Multitrack::default()` at entry plus regression test.
+- `modex.rs`, `reconnect.rs`, `connect_caps.rs`, `metadata.rs`, and
+  `fourcc.rs` already guard lengths, cap counts, or re-init output structs;
+  no further critical issues found.
 
 ## Findings (2026-07-10 flv pass)
 
