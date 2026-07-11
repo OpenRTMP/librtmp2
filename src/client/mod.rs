@@ -107,9 +107,10 @@ impl Client {
     /// `rtmps://host[:port]/app/streamKey`.
     ///
     /// Performs the real TCP connect (wrapped in a TLS client handshake for
-    /// `rtmps://`, verified against the system trust store), the legacy
-    /// C0/C1/C2 handshake, then the `connect` + `createStream` AMF0 command
-    /// exchange.
+    /// `rtmps://`, verified against the system trust store by default), the
+    /// legacy C0/C1/C2 handshake, then the `connect` + `createStream` AMF0
+    /// command exchange. Call [`Client::set_tls_client_config`] before
+    /// `connect()` to trust an additional CA bundle or disable verification.
     pub fn connect(&mut self, url: &str) -> Result<()> {
         let (use_tls, host, port, app, stream_key) = parse_rtmp_url(url)?;
         if use_tls && !crate::transport::tls_available() {

@@ -13,6 +13,8 @@ begin at `1.0.0`.
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-07-11
+
 ### Fixed
 - `lrtmp2_client_create()` silently ignored `ServerConfig.tls_ca_file` and
   `ServerConfig.tls_insecure` — the client always verified `rtmps://` peers
@@ -20,6 +22,12 @@ begin at `1.0.0`.
   set to, even though the ABI documented them as controlling client TLS
   verification. `Client`/`Transport::connect_tls` now honor a caller-supplied
   CA bundle or an explicit opt-out of verification.
+
+### Changed
+- `Transport::connect_tls()` (Rust-only API, not part of the FFI ABI) gained
+  two new parameters (`ca_file: Option<&str>`, `insecure: bool`) to support
+  the fix above. Bumped the minor version per this crate's pre-1.0
+  versioning policy (breaking Rust API change, ABI/FFI surface unaffected).
 
 ## [0.2.1] — 2026-07-10
 
