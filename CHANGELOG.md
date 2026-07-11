@@ -13,6 +13,20 @@ begin at `1.0.0`.
 
 ## [Unreleased]
 
+### Fixed
+- `Transport::connect_tls()`'s new `ca_file` option (see 0.3.0 below) now
+  *replaces* the trust store instead of adding the caller's CA bundle to the
+  system default trust store — a custom CA is meant to restrict which peers
+  are trusted, not merely extend the existing set. Previously a publicly
+  trusted certificate for the same hostname would still pass even with a
+  private CA configured.
+- `insecure = true` no longer loads the system's default CA verify paths at
+  all, so `rtmps://` connections with verification intentionally disabled no
+  longer fail on hosts without a usable default CA store.
+- `lrtmp2_client_create()` now rejects (returns NULL for) a non-UTF-8
+  `tls_ca_file` path instead of silently discarding it and falling back to
+  default verification.
+
 ## [0.3.0] — 2026-07-11
 
 ### Fixed
