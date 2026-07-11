@@ -4,7 +4,7 @@
 
 use std::net::{TcpStream, ToSocketAddrs};
 use std::os::unix::io::IntoRawFd;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::buffer::Buffer;
 use crate::chunk::reader::{chunk_read, ChunkMessage};
@@ -106,12 +106,28 @@ impl Client {
         let addrs = (host.as_str(), port)
             .to_socket_addrs()
             .map_err(|_| ErrorCode::Io)?;
-        let stream = addrs
-            .filter_map(|addr| {
-                TcpStream::connect_timeout(&addr, Duration::from_secs(TCP_CONNECT_TIMEOUT_SECS)).ok()
-            })
-            .next()
-            .ok_or(ErrorCode::Timeout)?;
+        let deadline = Instant::now() + Duration::from_secs(TCP_CONNECT_TIMEOUT_SECS);
+        let mut last_err_was_timeout = false;
+        let mut stream = None;
+        for addr in addrs {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                last_err_was_timeout = true;
+                break;
+            }
+            match TcpStream::connect_timeout(&addr, remaining) {
+                Ok(s) => {
+                    stream = Some(s);
+                    break;
+                }
+                Err(e) => last_err_was_timeout = e.kind() == std::io::ErrorKind::TimedOut,
+            }
+        }
+        let stream = stream.ok_or(if last_err_was_timeout {
+            ErrorCode::Timeout
+        } else {
+            ErrorCode::Io
+        })?;
         let mut transport = if use_tls {
             Transport::connect_tls(stream, &host)?
         } else {
@@ -662,6 +678,21 @@ mod tests {
     fn tcp_connect_timeout_is_bounded() {
         assert!(TCP_CONNECT_TIMEOUT_SECS > 0);
         assert!(TCP_CONNECT_TIMEOUT_SECS <= 30);
+    }
+
+    #[test]
+    fn connect_refused_reports_io_not_timeout() {
+        // Bind then immediately drop a listener to get a port nobody accepts
+        // on, so the OS replies with ECONNREFUSED rather than timing out.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let mut client = Client::new();
+        let err = client
+            .connect(&format!("rtmp://127.0.0.1:{port}/live/stream"))
+            .unwrap_err();
+        assert_eq!(err, ErrorCode::Io);
     }
 
     #[test]
