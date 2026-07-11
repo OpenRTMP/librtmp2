@@ -22,6 +22,18 @@ const MAX_STREAM_CACHE_ENTRIES: usize = 1024;
 /// Maximum total bytes retained across all stream_cache entries server-wide.
 const MAX_STREAM_CACHE_BYTES: usize = 64 * 1024 * 1024;
 
+/// Maximum payload size cached as a codec header. Real AVC/AAC sequence
+/// headers are small; larger payloads are relayed live but not stored for
+/// init-frame replay.
+const MAX_CACHED_INIT_FRAME_BYTES: usize = 64 * 1024;
+
+/// Maximum payload size cached as a keyframe. Unlike codec headers, a
+/// legitimate IDR frame (e.g. 1080p/4K H.264) can be several hundred KB to
+/// a few MB, so keyframes get a separate, larger cap than codec headers.
+/// Bounded by `DEFAULT_MAX_MSG_LENGTH` (the chunk layer's own hard ceiling
+/// on a single message) rather than left unbounded.
+const MAX_CACHED_KEYFRAME_BYTES: usize = 2 * 1024 * 1024;
+
 /// Maximum number of incomplete TLS handshakes retained when `max_connections`
 /// is unlimited. When `max_connections` is set, active connections and pending
 /// handshakes share that configured cap instead.
@@ -707,6 +719,33 @@ impl Server {
         }
 
         let key = (frame.app.clone(), frame.stream_name.clone());
+
+        let cap = if is_keyframe {
+            MAX_CACHED_KEYFRAME_BYTES
+        } else {
+            MAX_CACHED_INIT_FRAME_BYTES
+        };
+        if frame.payload.len() > cap {
+            // An oversized replacement still means the previously cached
+            // copy for this field is stale (the publisher has moved past
+            // it) -- drop it rather than keep replaying it to late joiners.
+            if let Some(cache) = self.stream_cache.get_mut(&key) {
+                if is_avc_header {
+                    cache.avc_header = None;
+                } else if is_keyframe {
+                    cache.last_keyframe = None;
+                } else {
+                    cache.aac_header = None;
+                }
+            }
+            if self.stream_cache.get(&key).is_some_and(|c| {
+                c.avc_header.is_none() && c.aac_header.is_none() && c.last_keyframe.is_none()
+            }) {
+                self.evict_stream_cache_key(&key);
+            }
+            return;
+        }
+
         let publisher_keys = self
             .publisher_cache_keys
             .entry(frame.publisher_conn_id)
@@ -855,6 +894,84 @@ mod tests {
     #[test]
     fn recv_budget_is_small_enough_for_fairness_across_connections() {
         assert!(MAX_RECV_BYTES_PER_CONN_PER_POLL <= 1024 * 1024);
+    }
+
+    fn test_server() -> Server {
+        Server::new(ServerConfig {
+            max_connections: 4,
+            chunk_size: 128,
+            tls_enabled: 0,
+            tls_cert_file: std::ptr::null(),
+            tls_key_file: std::ptr::null(),
+            tls_ca_file: std::ptr::null(),
+            tls_insecure: 0,
+        })
+        .unwrap()
+    }
+
+    fn relay_frame(frame_type: FrameType, payload: Vec<u8>) -> crate::session::conn::RelayFrame {
+        crate::session::conn::RelayFrame {
+            app: "live".to_string(),
+            stream_name: "stream".to_string(),
+            publisher_conn_id: 1,
+            frame_type,
+            timestamp: 0,
+            payload,
+        }
+    }
+
+    #[test]
+    fn oversized_codec_header_is_not_cached() {
+        let mut server = test_server();
+
+        let mut payload = vec![0x17, 0x00];
+        payload.resize(MAX_CACHED_INIT_FRAME_BYTES + 1, 0xAA);
+        server.cache_relay_frame(&relay_frame(FrameType::Video, payload));
+        assert!(server.stream_cache.is_empty());
+    }
+
+    #[test]
+    fn oversized_keyframe_is_not_cached() {
+        let mut server = test_server();
+
+        let mut payload = vec![0x17, 0x01];
+        payload.resize(MAX_CACHED_KEYFRAME_BYTES + 1, 0xAA);
+        server.cache_relay_frame(&relay_frame(FrameType::Video, payload));
+        assert!(server.stream_cache.is_empty());
+    }
+
+    #[test]
+    fn keyframe_within_larger_cap_is_still_cached() {
+        // A real IDR frame can comfortably exceed the codec-header cap while
+        // staying under the dedicated (larger) keyframe cap.
+        let mut server = test_server();
+
+        let mut payload = vec![0x17, 0x01];
+        payload.resize(MAX_CACHED_INIT_FRAME_BYTES + 1, 0xAA);
+        assert!(payload.len() <= MAX_CACHED_KEYFRAME_BYTES);
+        server.cache_relay_frame(&relay_frame(FrameType::Video, payload));
+
+        let key = ("live".to_string(), "stream".to_string());
+        assert!(server.stream_cache.get(&key).unwrap().last_keyframe.is_some());
+    }
+
+    #[test]
+    fn oversized_replacement_clears_stale_cached_header() {
+        let mut server = test_server();
+        let key = ("live".to_string(), "stream".to_string());
+
+        // Cache a normal-sized AVC header first.
+        server.cache_relay_frame(&relay_frame(FrameType::Video, vec![0x17, 0x00, 0xAA]));
+        assert!(server.stream_cache.get(&key).unwrap().avc_header.is_some());
+
+        // A later oversized "header" replacement must drop the stale cached
+        // copy instead of leaving late joiners with outdated codec data.
+        let mut oversized = vec![0x17, 0x00];
+        oversized.resize(MAX_CACHED_INIT_FRAME_BYTES + 1, 0xBB);
+        server.cache_relay_frame(&relay_frame(FrameType::Video, oversized));
+
+        // The whole entry is gone since it had no other cached fields.
+        assert!(server.stream_cache.get(&key).is_none());
     }
 
     #[test]
