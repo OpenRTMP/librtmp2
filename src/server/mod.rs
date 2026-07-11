@@ -22,6 +22,11 @@ const MAX_STREAM_CACHE_ENTRIES: usize = 1024;
 /// Maximum total bytes retained across all stream_cache entries server-wide.
 const MAX_STREAM_CACHE_BYTES: usize = 64 * 1024 * 1024;
 
+/// Maximum payload size cached as a codec header or keyframe. Real AVC/AAC
+/// sequence headers are small; larger payloads are relayed live but not stored
+/// for init-frame replay.
+const MAX_CACHED_INIT_FRAME_BYTES: usize = 64 * 1024;
+
 /// Maximum number of incomplete TLS handshakes retained when `max_connections`
 /// is unlimited. When `max_connections` is set, active connections and pending
 /// handshakes share that configured cap instead.
@@ -705,6 +710,9 @@ impl Server {
         if !is_avc_header && !is_keyframe && !is_aac_header {
             return;
         }
+        if frame.payload.len() > MAX_CACHED_INIT_FRAME_BYTES {
+            return;
+        }
 
         let key = (frame.app.clone(), frame.stream_name.clone());
         let publisher_keys = self
@@ -855,6 +863,33 @@ mod tests {
     #[test]
     fn recv_budget_is_small_enough_for_fairness_across_connections() {
         assert!(MAX_RECV_BYTES_PER_CONN_PER_POLL <= 1024 * 1024);
+    }
+
+    #[test]
+    fn oversized_init_frames_are_not_cached() {
+        let mut server = Server::new(ServerConfig {
+            max_connections: 4,
+            chunk_size: 128,
+            tls_enabled: 0,
+            tls_cert_file: std::ptr::null(),
+            tls_key_file: std::ptr::null(),
+            tls_ca_file: std::ptr::null(),
+            tls_insecure: 0,
+        })
+        .unwrap();
+
+        let mut payload = vec![0x17, 0x01];
+        payload.resize(MAX_CACHED_INIT_FRAME_BYTES + 1, 0xAA);
+        let frame = crate::session::conn::RelayFrame {
+            app: "live".to_string(),
+            stream_name: "stream".to_string(),
+            publisher_conn_id: 1,
+            frame_type: FrameType::Video,
+            timestamp: 0,
+            payload,
+        };
+        server.cache_relay_frame(&frame);
+        assert!(server.stream_cache.is_empty());
     }
 
     #[test]

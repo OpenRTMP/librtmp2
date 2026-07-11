@@ -2,8 +2,9 @@
 //!
 //! Mirrors `src/client/client.h` and `src/client/client.c`.
 
-use std::net::TcpStream;
+use std::net::{TcpStream, ToSocketAddrs};
 use std::os::unix::io::IntoRawFd;
+use std::time::Duration;
 
 use crate::buffer::Buffer;
 use crate::chunk::reader::{chunk_read, ChunkMessage};
@@ -36,6 +37,8 @@ const MAX_RECV_BYTES_PER_POLL: usize = 256 * 1024;
 /// forcing the client through dozens of max-size junk commands before the
 /// expected response.
 const MAX_RECV_BYTES_PER_COMMAND_WAIT: usize = 256 * 1024;
+/// Maximum time to wait for the initial TCP connect before failing.
+const TCP_CONNECT_TIMEOUT_SECS: u64 = 10;
 
 /// Client connection states.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,7 +103,15 @@ impl Client {
         }
         self.reset_session_state();
 
-        let stream = TcpStream::connect((host.as_str(), port)).map_err(|_| ErrorCode::Io)?;
+        let addrs = (host.as_str(), port)
+            .to_socket_addrs()
+            .map_err(|_| ErrorCode::Io)?;
+        let stream = addrs
+            .filter_map(|addr| {
+                TcpStream::connect_timeout(&addr, Duration::from_secs(TCP_CONNECT_TIMEOUT_SECS)).ok()
+            })
+            .next()
+            .ok_or(ErrorCode::Timeout)?;
         let mut transport = if use_tls {
             Transport::connect_tls(stream, &host)?
         } else {
@@ -645,6 +656,12 @@ mod tests {
         // 64 max-size AMF commands would be 256 MiB without a byte cap.
         assert!(MAX_RECV_BYTES_PER_COMMAND_WAIT < 64 * 4 * 1024 * 1024);
         assert!(MAX_RECV_BYTES_PER_COMMAND_WAIT >= 65536);
+    }
+
+    #[test]
+    fn tcp_connect_timeout_is_bounded() {
+        assert!(TCP_CONNECT_TIMEOUT_SECS > 0);
+        assert!(TCP_CONNECT_TIMEOUT_SECS <= 30);
     }
 
     #[test]

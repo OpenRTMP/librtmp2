@@ -25,6 +25,11 @@ const MAX_MESSAGES_PER_READ: usize = 256;
 /// single `recv` call. Without this, the outer `recv` loop (256 iterations)
 /// multiplies the per-pass cap into 65,536 message parses per recv batch.
 const MAX_MESSAGES_PER_RECV: usize = 256;
+/// Maximum bytes retained in the per-connection inbound staging buffer. When
+/// the per-call message budget stops draining faster than the peer sends,
+/// complete wire data can otherwise accumulate here up to `BUFFER_MAX_SIZE`
+/// (64 MiB) per connection.
+const MAX_RECV_BUFFER_BYTES: usize = 1024 * 1024;
 
 const SERVER_WINDOW_ACK_SIZE: u32 = 2_500_000;
 const SERVER_PEER_BANDWIDTH: u32 = 2_500_000;
@@ -425,6 +430,11 @@ impl Conn {
     }
 
     pub fn recv(&mut self, data: &[u8]) -> Result<()> {
+        if !data.is_empty()
+            && self.recv_buffer.available().saturating_add(data.len()) > MAX_RECV_BUFFER_BYTES
+        {
+            return Err(ErrorCode::Protocol);
+        }
         self.recv_buffer
             .write(data)
             .map_err(|_| ErrorCode::Internal)?;
@@ -1660,6 +1670,15 @@ mod tests {
         let _ = conn.read_messages(&mut budget);
         assert_eq!(budget, 0);
         assert!(conn.recv_buffer.available() > 0);
+    }
+
+    #[test]
+    fn recv_rejects_recv_buffer_growth_past_cap() {
+        let mut conn = Conn::new();
+        conn.recv_buffer
+            .write(&vec![0u8; MAX_RECV_BUFFER_BYTES])
+            .unwrap();
+        assert!(matches!(conn.recv(&[1]), Err(ErrorCode::Protocol)));
     }
 
     #[test]
