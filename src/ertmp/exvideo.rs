@@ -20,6 +20,8 @@ fn is_composition_time_codec(fourcc: &[u8]) -> bool {
 
 /// Parse an Enhanced RTMP v1 video tag header.
 pub fn exvideo_parse(data: &[u8], hdr: &mut VideoHeader) -> Result<()> {
+    *hdr = VideoHeader::default();
+
     if data.is_empty() {
         return Err(ErrorCode::Io);
     }
@@ -63,4 +65,37 @@ pub fn exvideo_parse(data: &[u8], hdr: &mut VideoHeader) -> Result<()> {
 /// Get the E-RTMP version string.
 pub fn version_string() -> &'static str {
     "E-RTMP v1 (ExVideoTagHeader/FourCC)"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::VideoHeader;
+
+    #[test]
+    fn parse_clears_composition_time_on_non_ct_packet_type_reuse() {
+        let h264_ct = [0x91, b'a', b'v', b'c', b'1', 0x00, 0x01, 0x2C];
+        let av1_seq = [0x90, b'a', b'v', b'0', b'1'];
+
+        let mut hdr = VideoHeader::default();
+        exvideo_parse(&h264_ct, &mut hdr).unwrap();
+        assert_eq!(hdr.composition_time, 0x00012C);
+        assert_eq!(hdr.header_size, 8);
+
+        exvideo_parse(&av1_seq, &mut hdr).unwrap();
+        assert_eq!(hdr.composition_time, 0);
+        assert_eq!(hdr.header_size, 5);
+        assert_eq!(&hdr.fourcc[..4], b"av01");
+    }
+
+    #[test]
+    fn parse_error_leaves_header_cleared() {
+        let h264_ct = [0x91, b'a', b'v', b'c', b'1', 0x00, 0x01, 0x2C];
+        let mut hdr = VideoHeader::default();
+        exvideo_parse(&h264_ct, &mut hdr).unwrap();
+
+        assert!(exvideo_parse(&[0x91, b'a', b'v'], &mut hdr).is_err());
+        assert_eq!(hdr.composition_time, 0);
+        assert_eq!(hdr.is_ex_header, 1);
+    }
 }

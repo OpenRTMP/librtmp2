@@ -6,6 +6,8 @@ use crate::types::{ErrorCode, Multitrack, Result};
 
 /// Parse a multitrack descriptor.
 pub fn multitrack_parse(mt: &mut Multitrack, data: &[u8]) -> Result<()> {
+    *mt = Multitrack::default();
+
     if data.len() < 9 {
         return Err(ErrorCode::Io);
     }
@@ -109,5 +111,20 @@ mod tests {
         let mut out = Multitrack::default();
         multitrack_parse(&mut out, &buf[..n]).unwrap();
         assert_eq!(out.track_type, MultitrackType::Audio);
+    }
+
+    #[test]
+    fn parse_error_leaves_descriptor_cleared() {
+        let mut mt = Multitrack {
+            track_type: MultitrackType::Video,
+            track_name: {
+                let mut name = [0u8; 64];
+                name[..7].copy_from_slice(b"stale-x");
+                name
+            },
+        };
+        assert!(multitrack_parse(&mut mt, &[0x00; 8]).is_err());
+        assert_eq!(mt.track_type, MultitrackType::Audio);
+        assert_eq!(mt.track_name[0], 0);
     }
 }
