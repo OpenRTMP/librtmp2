@@ -1,0 +1,40 @@
+Source: librtmp2
+Section: libs
+Priority: optional
+Maintainer: OpenRTMP <info@openrtmp.org>
+Build-Depends: debhelper-compat (= 13),
+               cargo,
+               rustc (>= 1.94),
+               libssl-dev,
+               pkg-config
+Standards-Version: 4.6.2
+Homepage: https://github.com/OpenRTMP/librtmp2
+Vcs-Git: https://github.com/OpenRTMP/librtmp2.git
+Vcs-Browser: https://github.com/OpenRTMP/librtmp2
+Rules-Requires-Root: no
+
+Package: librtmp2
+Architecture: any
+Multi-Arch: same
+Pre-Depends: ${misc:Pre-Depends}
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: RTMP/RTMPS protocol library
+ librtmp2 is a pure protocol library implementing RTMP and RTMPS
+ (via OpenSSL) for ingest and playback. It exposes an FFI-compatible
+ C API and does not implement any media-server or HTTP logic itself.
+ .
+ This package contains the shared library.
+
+Package: librtmp2-dev
+Section: libdevel
+Architecture: any
+Multi-Arch: same
+Depends: librtmp2 (= ${binary:Version}), libssl-dev, ${misc:Depends}
+Description: RTMP/RTMPS protocol library (development files)
+ librtmp2 is a pure protocol library implementing RTMP and RTMPS
+ (via OpenSSL) for ingest and playback. It exposes an FFI-compatible
+ C API and does not implement any media-server or HTTP logic itself.
+ .
+ This package contains the static library and the unversioned
+ symlink needed to link against librtmp2 from C/C++/other FFI
+ consumers.

@@ -35,6 +35,11 @@ scripts/abi-baseline.sh dump           # generate baseline ABI dump
 scripts/abi-baseline.sh compare HEAD   # compare current vs HEAD/tag
 ```
 
+**Packaging** — `debian/` holds Debian/Ubuntu packaging (`librtmp2` +
+`librtmp2-dev`); `.github/workflows/publish-ppa.yml` builds and uploads a
+signed source package to a Launchpad PPA on tag push. See
+`docs/publishing-ppa.md` for the one-time Launchpad/GPG account setup.
+
 ## Architecture
 
 `librtmp2` is a pure protocol library — no media server logic, no HTTP, no

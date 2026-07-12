@@ -1,0 +1,5 @@
+librtmp2 (0.3.0-1) UNRELEASED; urgency=medium
+
+  * Initial Debian packaging for PPA publishing.
+
+ -- OpenRTMP <info@openrtmp.org>  Sat, 11 Jul 2026 00:00:00 +0000

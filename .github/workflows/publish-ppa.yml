@@ -1,0 +1,142 @@
+name: Publish to Ubuntu PPA
+
+# Builds a signed Debian source package and uploads it to a Launchpad PPA
+# for each targeted Ubuntu series. Launchpad's own build farm then compiles
+# the binary .deb packages — this workflow never produces or uploads a
+# binary package itself.
+#
+# Requires (see docs/publishing-ppa.md for full setup):
+#   secrets.PPA_GPG_PRIVATE_KEY   - ASCII-armored private key, registered
+#                                    and confirmed on the Launchpad account
+#   secrets.PPA_GPG_KEY_ID        - the key's long key ID or fingerprint
+#   secrets.PPA_GPG_PASSPHRASE    - passphrase protecting that key
+#   vars.PPA_TARGET               - "launchpad-user/ppa-name", e.g.
+#                                    "openrtmp/librtmp2"
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Version tag to publish (e.g. v0.1.0)'
+        required: true
+      series:
+        description: 'Comma-separated Ubuntu series to target'
+        required: false
+        default: 'noble,jammy'
+
+permissions:
+  contents: read
+
+jobs:
+  resolve:
+    name: resolve inputs
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+      series: ${{ steps.ver.outputs.series }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.inputs.tag || github.ref_name }}
+
+      - name: Resolve version and series matrix
+        id: ver
+        env:
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_SERIES: ${{ github.event.inputs.series }}
+        run: |
+          REF="${INPUT_TAG:-$REF_NAME}"
+          VERSION="${REF#v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+          CARGO_VERSION=$(grep -m1 '^version' Cargo.toml | grep -oP '"\K[0-9]+\.[0-9]+\.[0-9]+')
+          if [ "$VERSION" != "$CARGO_VERSION" ]; then
+            echo "::error::Tag version ($VERSION) does not match Cargo.toml version ($CARGO_VERSION)"
+            exit 1
+          fi
+
+          SERIES_CSV="${INPUT_SERIES:-noble,jammy}"
+          SERIES_JSON=$(printf '%s' "$SERIES_CSV" | tr ',' '\n' | jq -R . | jq -sc .)
+          echo "series=$SERIES_JSON" >> "$GITHUB_OUTPUT"
+
+  publish:
+    name: build & upload (${{ matrix.series }})
+    needs: resolve
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        series: ${{ fromJson(needs.resolve.outputs.series) }}
+    env:
+      VERSION: ${{ needs.resolve.outputs.version }}
+      SERIES: ${{ matrix.series }}
+      DEBEMAIL: info@openrtmp.org
+      DEBFULLNAME: OpenRTMP
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.inputs.tag || github.ref_name }}
+
+      - name: Install packaging dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            devscripts debhelper dput lintian \
+            build-essential libssl-dev pkg-config
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Vendor cargo dependencies for an offline build
+        run: |
+          mkdir -p .cargo
+          cargo vendor vendor > .cargo/config.toml
+
+      - name: Add changelog entry for ${{ matrix.series }}
+        run: |
+          dch --package librtmp2 \
+              --newversion "${VERSION}~${SERIES}1" \
+              --distribution "${SERIES}" \
+              --force-distribution \
+              --force-bad-version \
+              "Automated build of ${VERSION} for ${SERIES}."
+
+      - name: Build source package (unsigned)
+        # -d: skip the Build-Depends check. cargo/rustc are installed via
+        # dtolnay/rust-toolchain (rustup), not apt, so dpkg doesn't see them
+        # as satisfying debian/control's Build-Depends.
+        run: dpkg-buildpackage -S -sa -us -uc -d
+
+      - name: Lintian (non-blocking sanity check)
+        run: lintian --pedantic "../librtmp2_${VERSION}~${SERIES}1_source.changes" || true
+
+      - name: Import signing key
+        run: |
+          mkdir -p ~/.gnupg && chmod 700 ~/.gnupg
+          printf 'allow-loopback-pinentry\n' >> ~/.gnupg/gpg-agent.conf
+          printf 'pinentry-mode loopback\n' >> ~/.gnupg/gpg.conf
+          gpgconf --kill gpg-agent
+          printf '%s' "${{ secrets.PPA_GPG_PRIVATE_KEY }}" | gpg --batch --import
+
+      - name: Sign source package
+        env:
+          PPA_GPG_PASSPHRASE: ${{ secrets.PPA_GPG_PASSPHRASE }}
+        run: |
+          PASSFILE=$(mktemp)
+          chmod 600 "$PASSFILE"
+          trap 'shred -u "$PASSFILE" 2>/dev/null' EXIT
+          printf '%s' "$PPA_GPG_PASSPHRASE" > "$PASSFILE"
+          debsign -k"${{ secrets.PPA_GPG_KEY_ID }}" \
+            -p"gpg --batch --pinentry-mode loopback --passphrase-file $PASSFILE" \
+            "../librtmp2_${VERSION}~${SERIES}1_source.changes"
+
+      - name: Upload to PPA
+        run: |
+          dput "ppa:${{ vars.PPA_TARGET }}" \
+            "../librtmp2_${VERSION}~${SERIES}1_source.changes"
