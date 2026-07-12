@@ -59,3 +59,6 @@ override_dh_clean:
 	# exactly what broke the Launchpad build with "failed to open file
 	# vendor/libc/Cargo.toml.orig". Exclude vendor/ from cleanup.
 	dh_clean -Xvendor/
+	# The PPA workflow performs an offline verification build before creating
+	# the source package. Remove its generated state without touching vendor/.
+	rm -rf target debian/cargo_home
