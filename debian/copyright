@@ -1,6 +1,6 @@
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: librtmp2
-Upstream-Contact: OpenRTMP <info@alexanderwagnerdev.com>
+Upstream-Contact: OpenRTMP <info@openrtmp.org>
 Source: https://github.com/OpenRTMP/librtmp2
 
 Files: *

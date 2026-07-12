@@ -75,7 +75,7 @@ jobs:
     env:
       VERSION: ${{ needs.resolve.outputs.version }}
       SERIES: ${{ matrix.series }}
-      DEBEMAIL: info@alexanderwagnerdev.com
+      DEBEMAIL: info@openrtmp.org
       DEBFULLNAME: OpenRTMP
     steps:
       - uses: actions/checkout@v7

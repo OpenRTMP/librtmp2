@@ -1,7 +1,7 @@
 Source: librtmp2
 Section: libs
 Priority: optional
-Maintainer: OpenRTMP <info@alexanderwagnerdev.com>
+Maintainer: OpenRTMP <info@openrtmp.org>
 Build-Depends: debhelper-compat (= 13),
                cargo,
                rustc (>= 1.94),
