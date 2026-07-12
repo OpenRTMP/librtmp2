@@ -1,10 +1,13 @@
 # Publishing to an Ubuntu PPA
 
 `.github/workflows/publish-ppa.yml` builds a signed Debian **source**
-package on tag push (`v*`) and uploads it to a Launchpad PPA with `dput`.
-Launchpad's own build farm then compiles the binary `.deb` for each
-targeted Ubuntu series (default `resolute`, `noble`, configurable via the
-workflow's `series` input). The workflow never builds or uploads a binary
+package and uploads it to a Launchpad PPA with `dput`. It runs as a job of
+`release.yml` (`publish-ppa`), so every tag push or manual `release.yml`
+run publishes to the PPA automatically alongside the GitHub Release and
+crates.io publish — there's nothing extra to trigger. Launchpad's own
+build farm then compiles the binary `.deb` for each targeted Ubuntu series
+(default `resolute` only, configurable via the workflow's `series` input
+when running it standalone). The workflow never builds or uploads a binary
 package itself.
 
 Because Rust crate downloads require network access, and Launchpad's
@@ -49,41 +52,27 @@ value the workflow uploads to via `dput ppa:<owner>/<ppa-name>`.
 If the PPA is team-owned, make sure your user is a member of that team
 with upload rights.
 
-### 4. Add a Rust-toolchain PPA dependency
+### 4. Rust toolchain availability (no extra setup currently needed)
 
-`debian/control` declares `Build-Depends: rustc (>= 1.94)`. Ubuntu's `noble`
-archive ships a much older `rustc` (~1.75, frozen at the 24.04 release), and
-`resolute` will similarly ship whatever `rustc` was current at its own
-freeze, which is not guaranteed to be new enough either as this crate's MSRV
-keeps moving. Launchpad's build chroots have no network access, so the
-builder can only satisfy `Build-Depends: rustc (>= 1.94)` from an apt source
-that's actually configured for the chroot. Without one, every upload will
-sit as "Dependency wait" and never build.
+`debian/control` declares `Build-Depends: rustc (>= 1.93)`, matching this
+crate's actual MSRV (`rust-version` in `Cargo.toml`) rather than whatever
+toolchain happened to be installed in CI. `resolute` (26.04, the current
+Ubuntu LTS) ships `rustc` up to `1.93` in its own archive as of this
+writing, so Launchpad's build chroot can satisfy this Build-Depends
+natively — no PPA dependency configuration is required right now.
 
-Fix this once per PPA, not per release: on your PPA's Launchpad page, go to
-**Admin -> Change details** and add a suitable Rust-toolchain PPA under
-**"PPA dependencies"** — this makes Launchpad's builders resolve
-`Build-Depends` against that PPA's packages too, in addition to the normal
-Ubuntu archive.
-
-There is no single Anthropic/Canonical-blessed PPA to point at here — pick
-one you trust (a well-maintained community Rust-toolchain PPA that tracks
-current stable releases for the series you target) or build/host your own
-if you want full control over supply chain (see the "self-hosted toolchain
-PPA" note below). Whichever you choose, verify its `rustc`/`cargo` version
-actually satisfies `>= 1.94` for each series you target before relying on
-it, since anything added here runs on Launchpad's builders with upload
-rights into your PPA's build environment.
-
-**Self-hosted toolchain PPA (no third-party trust required):** repackage
-the official prebuilt `rustc`/`cargo` tarballs from
-`https://static.rust-lang.org/dist/` as a small Debian source package (one
-per target architecture) with a version/epoch high enough that apt prefers
-it over the archive's `rustc`, and upload that to a second PPA of your own
-(e.g. `<owner>/rust-toolchain`). Since it just repackages upstream binaries
-rather than compiling from source, the build itself has no network or
-compiler-version requirement. Add that PPA as this PPA's dependency as
-above.
+This is worth re-checking whenever this crate's MSRV moves again (edition
+2024 itself already requires `rustc >= 1.85`, so anything below that is
+never an option without dropping the edition): if `rust-version` in
+`Cargo.toml` is bumped past what `resolute`'s archive offers, uploads will
+sit as "Dependency wait" on Launchpad until you either wait for Ubuntu to
+backport a newer `rustc` into the series (Ubuntu has been doing this
+periodically for `resolute`, per its multiple parallel `rustc` versions),
+add a trusted third-party Rust-toolchain PPA as a **PPA dependency** (PPA's
+Launchpad page -> **Admin -> Change details** -> **"PPA dependencies"**),
+or self-host one by repackaging the official prebuilt `rustc`/`cargo`
+tarballs from `https://static.rust-lang.org/dist/` as a small Debian source
+package with a version/epoch high enough that apt prefers it.
 
 ### 5. GitHub repository secrets/variables
 
@@ -104,13 +93,16 @@ your primary key, so it can be revoked independently.
 
 ## Releasing
 
-Publishing follows the same tag-driven flow as `release.yml` and
-`publish-crates-io.yml`: push a tag `vX.Y.Z` matching the version in
-`Cargo.toml`, or run the workflow manually via `workflow_dispatch` with
-that tag (and optionally a custom `series` list).
+Push a tag `vX.Y.Z` matching the version in `Cargo.toml` (or run
+`release.yml` manually via `workflow_dispatch` with that tag) and
+`release.yml`'s `publish-ppa` job calls this workflow automatically once
+the GitHub Release build succeeds. To publish to the PPA on its own — e.g.
+retrying just the PPA upload, or targeting a different `series` list
+without a full release — run `publish-ppa.yml` directly via its own
+`workflow_dispatch`.
 
 Each targeted series gets its own upload, versioned
-`X.Y.Z~<series>1` (e.g. `0.3.0~noble1` — no Debian revision, since
+`X.Y.Z~<series>1` (e.g. `0.3.0~resolute1` — no Debian revision, since
 `debian/source/format` is `3.0 (native)`), since binaries built for one
 Ubuntu series are generally not installable on another.
 

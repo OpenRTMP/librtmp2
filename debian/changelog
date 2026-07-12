@@ -1,5 +1,66 @@
 librtmp2 (0.3.0-1) UNRELEASED; urgency=medium
 
   * Initial Debian packaging for PPA publishing.
+  * Lower the rustc Build-Depends floor to 1.93, matching the crate's
+    actual MSRV (rust-version in Cargo.toml) instead of whatever
+    toolchain happened to be installed in CI.
+  * Client TLS verification now honors ServerConfig.tls_ca_file and
+    tls_insecure via Transport::connect_tls()'s new ca_file/insecure
+    parameters, which were previously silently ignored.
 
- -- OpenRTMP <info@openrtmp.org>  Sat, 11 Jul 2026 00:00:00 +0000
+ -- OpenRTMP <info@openrtmp.org>  Sun, 12 Jul 2026 00:00:00 +0000
+
+librtmp2 (0.2.1-1) UNRELEASED; urgency=medium
+
+  * lrtmp2_tls_supported() runtime capability check exported to FFI.
+  * Parse onMetaData from RTMP data messages into Conn fields (duration,
+    width, height, framerate, videodatarate, audiodatarate, codec info).
+  * Fix flv audio/video/script tag parsers not resetting the
+    caller-owned tag struct at the start of every parse() call.
+  * Fix CodeQL invalid-pointer alert in the FFI server_create test and
+    borrow-checker errors in AMF0 skip_value_depth.
+  * Security: cap and copy FFI frame payloads before sending; add
+    per-poll and per-command-wait recv byte budgets to the RTMP client;
+    substitute a safe default max_connections for a zero-initialized
+    ServerConfig instead of disabling connection limiting.
+
+ -- OpenRTMP <info@openrtmp.org>  Fri, 10 Jul 2026 00:00:00 +0000
+
+librtmp2 (0.2.0-1) UNRELEASED; urgency=medium
+
+  * RTMP Aggregate message (0x16) handling: aggregate-framed audio/video
+    is now unpacked and relayed through the normal media-frame path.
+  * Client::connect() now actually supports rtmps:// via the new
+    Transport::connect_tls(); parse_rtmp_url() recognizes the scheme
+    and defaults to port 443.
+  * Various client/server transport correctness fixes: recv budget
+    accounting no longer drops already-read bytes, poll(2) retries on
+    EINTR, bounded TLS handshake timeout, blocking read helpers poll
+    for write-readiness during TLS renegotiation, RTMPS pre-checks TLS
+    support before dialing.
+  * Security: cap and copy FFI frame payloads before sending; add
+    per-poll and per-command-wait recv byte budgets to the RTMP client;
+    substitute a safe default max_connections for a zero-initialized
+    ServerConfig instead of disabling connection limiting.
+
+ -- OpenRTMP <info@openrtmp.org>  Fri, 10 Jul 2026 00:00:00 +0000
+
+librtmp2 (0.1.1-1) UNRELEASED; urgency=medium
+
+  * Cap per-connection recv drain in process_connections() to 256 KiB
+    per poll pass, preventing a peer from starving other sessions in
+    the single-threaded poll loop.
+  * Update docs.rs badge to track the latest published version.
+
+ -- OpenRTMP <info@openrtmp.org>  Wed, 08 Jul 2026 00:00:00 +0000
+
+librtmp2 (0.1.0-1) UNRELEASED; urgency=medium
+
+  * First tagged pre-release: TLS/RTMPS support (OpenSSL, optional via
+    the "tls" Cargo feature), legacy RTMP and Enhanced RTMP v1/v2
+    protocol support, full server/client APIs with callbacks, frame API
+    for audio/video/script/metadata, H.264/H.265/AV1 and legacy video,
+    AAC/Opus/MP3/G.711 audio, bounds-checked parsers, constant-time
+    handshake RNG, and ABI baseline tooling.
+
+ -- OpenRTMP <info@openrtmp.org>  Wed, 08 Jul 2026 00:00:00 +0000
