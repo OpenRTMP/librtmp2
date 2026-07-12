@@ -74,7 +74,8 @@ Publishing follows the same tag-driven flow as `release.yml` and
 that tag (and optionally a custom `series` list).
 
 Each targeted series gets its own upload, versioned
-`X.Y.Z-1~<series>1` (e.g. `0.3.0-1~noble1`), since binaries built for one
+`X.Y.Z~<series>1` (e.g. `0.3.0~noble1` — no Debian revision, since
+`debian/source/format` is `3.0 (native)`), since binaries built for one
 Ubuntu series are generally not installable on another.
 
 After Launchpad accepts the upload (check **your PPA's page -> View
@@ -99,5 +100,5 @@ with:
 
 ```bash
 cargo vendor vendor > .cargo/config.toml
-dpkg-buildpackage -S -sa -us -uc
+dpkg-buildpackage -S -sa -us -uc -d
 ```

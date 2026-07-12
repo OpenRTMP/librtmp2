@@ -11,6 +11,16 @@ Files: debian/*
 Copyright: 2026 Alexander Wagner
 License: MIT
 
+Files: vendor/*
+Copyright: various upstream crates.io authors
+License: various
+Comment:
+ vendor/ is generated at build time by `cargo vendor` (see
+ .github/workflows/publish-ppa.yml) and is not part of upstream's source; it
+ is not tracked in this repository. Each vendored crate carries its own
+ license file under vendor/<crate>/, which dh_auto_install does not ship in
+ the binary packages.
+
 License: MIT
  Permission is hereby granted, free of charge, to any person obtaining a copy
  of this software and associated documentation files (the "Software"), to deal

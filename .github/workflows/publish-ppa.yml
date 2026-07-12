@@ -39,11 +39,18 @@ jobs:
       series: ${{ steps.ver.outputs.series }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.inputs.tag || github.ref_name }}
 
       - name: Resolve version and series matrix
         id: ver
+        env:
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_SERIES: ${{ github.event.inputs.series }}
         run: |
-          REF="${{ github.event.inputs.tag || github.ref_name }}"
+          REF="${INPUT_TAG:-$REF_NAME}"
           VERSION="${REF#v}"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
@@ -53,7 +60,7 @@ jobs:
             exit 1
           fi
 
-          SERIES_CSV="${{ github.event.inputs.series || 'noble,jammy' }}"
+          SERIES_CSV="${INPUT_SERIES:-noble,jammy}"
           SERIES_JSON=$(printf '%s' "$SERIES_CSV" | tr ',' '\n' | jq -R . | jq -sc .)
           echo "series=$SERIES_JSON" >> "$GITHUB_OUTPUT"
 
@@ -67,10 +74,14 @@ jobs:
         series: ${{ fromJson(needs.resolve.outputs.series) }}
     env:
       VERSION: ${{ needs.resolve.outputs.version }}
+      SERIES: ${{ matrix.series }}
       DEBEMAIL: info@alexanderwagnerdev.com
       DEBFULLNAME: OpenRTMP
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.inputs.tag || github.ref_name }}
 
       - name: Install packaging dependencies
         run: |
@@ -90,16 +101,20 @@ jobs:
       - name: Add changelog entry for ${{ matrix.series }}
         run: |
           dch --package librtmp2 \
-              --newversion "${VERSION}-1~${{ matrix.series }}1" \
-              --distribution "${{ matrix.series }}" \
+              --newversion "${VERSION}~${SERIES}1" \
+              --distribution "${SERIES}" \
               --force-distribution \
-              "Automated build of ${VERSION} for ${{ matrix.series }}."
+              --force-bad-version \
+              "Automated build of ${VERSION} for ${SERIES}."
 
       - name: Build source package (unsigned)
-        run: dpkg-buildpackage -S -sa -us -uc
+        # -d: skip the Build-Depends check. cargo/rustc are installed via
+        # dtolnay/rust-toolchain (rustup), not apt, so dpkg doesn't see them
+        # as satisfying debian/control's Build-Depends.
+        run: dpkg-buildpackage -S -sa -us -uc -d
 
       - name: Lintian (non-blocking sanity check)
-        run: lintian --pedantic "../librtmp2_${VERSION}-1~${{ matrix.series }}1_source.changes" || true
+        run: lintian --pedantic "../librtmp2_${VERSION}~${SERIES}1_source.changes" || true
 
       - name: Import signing key
         run: |
@@ -115,13 +130,13 @@ jobs:
         run: |
           PASSFILE=$(mktemp)
           chmod 600 "$PASSFILE"
+          trap 'shred -u "$PASSFILE" 2>/dev/null' EXIT
           printf '%s' "$PPA_GPG_PASSPHRASE" > "$PASSFILE"
           debsign -k"${{ secrets.PPA_GPG_KEY_ID }}" \
             -p"gpg --batch --pinentry-mode loopback --passphrase-file $PASSFILE" \
-            "../librtmp2_${VERSION}-1~${{ matrix.series }}1_source.changes"
-          shred -u "$PASSFILE"
+            "../librtmp2_${VERSION}~${SERIES}1_source.changes"
 
       - name: Upload to PPA
         run: |
           dput "ppa:${{ vars.PPA_TARGET }}" \
-            "../librtmp2_${VERSION}-1~${{ matrix.series }}1_source.changes"
+            "../librtmp2_${VERSION}~${SERIES}1_source.changes"

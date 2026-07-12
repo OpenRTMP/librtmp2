@@ -29,7 +29,7 @@ Package: librtmp2-dev
 Section: libdevel
 Architecture: any
 Multi-Arch: same
-Depends: librtmp2 (= ${binary:Version}), ${misc:Depends}
+Depends: librtmp2 (= ${binary:Version}), libssl-dev, ${misc:Depends}
 Description: RTMP/RTMPS protocol library (development files)
  librtmp2 is a pure protocol library implementing RTMP and RTMPS
  (via OpenSSL) for ingest and playback. It exposes an FFI-compatible

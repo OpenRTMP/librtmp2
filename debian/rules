@@ -9,6 +9,15 @@ export CARGO_NET_OFFLINE := true
 export DEB_BUILD_MAINT_OPTIONS := hardening=+all
 
 DEB_HOST_MULTIARCH ?= $(shell dpkg-architecture -qDEB_HOST_MULTIARCH)
+UPSTREAM_VERSION := $(shell dpkg-parsechangelog -SVersion | sed 's/-.*//')
+
+# Per docs/abi-policy.md the soname only bumps on a major (ABI-breaking)
+# release, not expected before 1.0.0 - so the soname major tracks "0" for
+# the whole 0.x series.
+SONAME_MAJOR := 0
+SONAME := liblibrtmp2.so.$(SONAME_MAJOR)
+
+export RUSTFLAGS := -C link-arg=-Wl,-soname,$(SONAME)
 
 %:
 	dh $@
@@ -21,10 +30,14 @@ override_dh_auto_test:
 
 override_dh_auto_install:
 	install -D -m0644 target/release/liblibrtmp2.so \
-		debian/librtmp2/usr/lib/$(DEB_HOST_MULTIARCH)/liblibrtmp2.so
+		debian/librtmp2/usr/lib/$(DEB_HOST_MULTIARCH)/liblibrtmp2.so.$(UPSTREAM_VERSION)
+	ln -s liblibrtmp2.so.$(UPSTREAM_VERSION) \
+		debian/librtmp2/usr/lib/$(DEB_HOST_MULTIARCH)/$(SONAME)
 	install -D -m0644 target/release/liblibrtmp2.a \
 		debian/librtmp2-dev/usr/lib/$(DEB_HOST_MULTIARCH)/liblibrtmp2.a
-	sed -e 's/@VERSION@/$(shell dpkg-parsechangelog -SVersion | sed 's/-.*//')/' \
+	ln -s $(SONAME) \
+		debian/librtmp2-dev/usr/lib/$(DEB_HOST_MULTIARCH)/liblibrtmp2.so
+	sed -e 's/@VERSION@/$(UPSTREAM_VERSION)/' \
 		-e 's/@MULTIARCH@/$(DEB_HOST_MULTIARCH)/' \
 		debian/librtmp2.pc.in > debian/librtmp2.pc
 	install -D -m0644 debian/librtmp2.pc \
