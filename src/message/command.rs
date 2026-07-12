@@ -300,7 +300,12 @@ pub fn read_onstatus(buf: &mut Buffer) -> Result<()> {
     amf0::read_object_begin(buf)?;
     let mut level = [0u8; 32];
     let mut level_len = 0usize;
+    let mut keys = 0usize;
     while !amf0::is_object_end(buf) {
+        keys += 1;
+        if keys > amf0::MAX_OBJECT_KEYS {
+            return Err(ErrorCode::Amf);
+        }
         let mut key = [0u8; 256];
         let key_len = amf0::read_object_key(buf, &mut key)?;
         let key_str = std::str::from_utf8(&key[..key_len]).unwrap_or("");
@@ -476,5 +481,24 @@ mod tests {
         .unwrap();
 
         assert!(read_onstatus(&mut buf).is_ok());
+    }
+
+    #[test]
+    fn read_onstatus_rejects_excessive_object_keys() {
+        let mut buf = Buffer::new();
+        amf0::write_string(&mut buf, "onStatus").unwrap();
+        amf0::write_number(&mut buf, 1.0).unwrap();
+        amf0::write_null(&mut buf).unwrap();
+        amf0::write_object_begin(&mut buf).unwrap();
+        for i in 0..=amf0::MAX_OBJECT_KEYS {
+            let key = format!("k{i}");
+            amf0::write_object_key(&mut buf, &key).unwrap();
+            amf0::write_boolean(&mut buf, false).unwrap();
+        }
+        amf0::write_object_key(&mut buf, "level").unwrap();
+        amf0::write_string(&mut buf, "status").unwrap();
+        amf0::write_object_end(&mut buf).unwrap();
+
+        assert_eq!(read_onstatus(&mut buf), Err(ErrorCode::Amf));
     }
 }
