@@ -48,3 +48,14 @@ override_dh_shlibdeps:
 
 override_dh_dwz:
 	# liblibrtmp2.so is a Rust cdylib; dwz on Rust debug info is unreliable.
+
+override_dh_clean:
+	# dh_clean's default patterns delete anything named *.orig / *.rej
+	# anywhere in the tree (leftover patch-reject cruft, historically) -
+	# including legitimate vendored files like vendor/libc/Cargo.toml.orig,
+	# which cargo vendor writes and cargo build --offline later verifies
+	# a checksum against. Losing it here (during dpkg-buildpackage -S's
+	# implicit "clean" pass, before the source tarball is packed) is
+	# exactly what broke the Launchpad build with "failed to open file
+	# vendor/libc/Cargo.toml.orig". Exclude vendor/ from cleanup.
+	dh_clean -Xvendor/
