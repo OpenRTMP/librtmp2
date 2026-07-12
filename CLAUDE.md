@@ -39,6 +39,11 @@ scripts/abi-baseline.sh compare HEAD   # compare current vs HEAD/tag
 `librtmp2-dev`); `.github/workflows/publish-ppa.yml` builds and uploads a
 signed source package to a Launchpad PPA on tag push. See
 `docs/publishing-ppa.md` for the one-time Launchpad/GPG account setup.
+`alpine/APKBUILD` holds the equivalent Alpine packaging;
+`.github/workflows/publish-apk.yml` builds signed `.apk` packages with
+`abuild` and publishes them to a self-hosted apk repository on this repo's
+`gh-pages` branch on tag push (Alpine has no hosted PPA-style service). See
+`docs/publishing-alpine.md` for the one-time signing-key/Pages setup.
 
 ## Architecture
 

@@ -13,6 +13,13 @@ begin at `1.0.0`.
 
 ## [Unreleased]
 
+### Added
+- Alpine (apk) packaging: `alpine/APKBUILD` plus
+  `.github/workflows/publish-apk.yml`, which builds signed `.apk` packages
+  with `abuild` and publishes them to a self-hosted apk repository on this
+  repo's `gh-pages` branch, wired into `release.yml` alongside the existing
+  Ubuntu PPA publish. See `docs/publishing-alpine.md` for setup.
+
 ### Fixed
 - `Transport::connect_tls()`'s new `ca_file` option (see 0.3.0 below) now
   *replaces* the trust store instead of adding the caller's CA bundle to the

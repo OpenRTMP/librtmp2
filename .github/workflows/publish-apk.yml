@@ -1,0 +1,205 @@
+name: Publish Alpine package
+
+# Builds a signed .apk with abuild inside an Alpine container and publishes
+# it to a self-hosted apk repository served from this repo's GitHub Pages
+# (branch "gh-pages", path /alpine/<arch>/). Alpine has no Launchpad-style
+# hosted PPA service, so "publishing" here means: build + sign + update the
+# repo's APKINDEX + push the static files that `apk add` fetches directly.
+#
+# Runs as part of release.yml's "publish-alpine" job on every tag push or
+# manual release run, so it has no push/tag trigger of its own (that would
+# double-publish alongside release.yml). workflow_dispatch below is only
+# for standalone/retry runs of just the apk publish step.
+#
+# Requires (see docs/publishing-alpine.md for full setup):
+#   secrets.ALPINE_PRIVATE_KEY  - abuild-keygen RSA private key (PEM)
+#   secrets.ALPINE_KEY_NAME     - the key's file name, e.g.
+#                                  "openrtmp@openrtmp.org-xxxxxxxx.rsa"
+#   vars.ALPINE_ARCHES          - optional, comma-separated arches to build
+#                                  (default "x86_64,aarch64")
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Version tag to publish (e.g. v0.1.0)'
+        required: true
+      arches:
+        description: 'Comma-separated arches to build'
+        required: false
+        default: 'x86_64,aarch64'
+  workflow_call:
+    inputs:
+      tag:
+        description: 'Version tag to publish (e.g. v0.1.0)'
+        required: false
+        type: string
+      arches:
+        description: 'Comma-separated arches to build'
+        required: false
+        type: string
+        default: 'x86_64,aarch64'
+    secrets:
+      ALPINE_PRIVATE_KEY:
+        required: true
+      ALPINE_KEY_NAME:
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  resolve:
+    name: resolve inputs
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+      arches: ${{ steps.ver.outputs.arches }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.tag || github.ref_name }}
+
+      - name: Resolve version and arch matrix
+        id: ver
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_ARCHES: ${{ inputs.arches }}
+        run: |
+          REF="${INPUT_TAG:-$REF_NAME}"
+          VERSION="${REF#v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+          CARGO_VERSION=$(grep -m1 '^version' Cargo.toml | grep -oP '"\K[0-9]+\.[0-9]+\.[0-9]+')
+          if [ "$VERSION" != "$CARGO_VERSION" ]; then
+            echo "::error::Tag version ($VERSION) does not match Cargo.toml version ($CARGO_VERSION)"
+            exit 1
+          fi
+
+          ARCHES_CSV="${INPUT_ARCHES:-x86_64,aarch64}"
+          ARCHES_JSON=$(printf '%s' "$ARCHES_CSV" | tr ',' '\n' | jq -R . | jq -sc .)
+          echo "arches=$ARCHES_JSON" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: build (${{ matrix.arch }})
+    needs: resolve
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: ${{ fromJson(needs.resolve.outputs.arches) }}
+    env:
+      VERSION: ${{ needs.resolve.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.tag || github.ref_name }}
+
+      - name: Set APKBUILD pkgver to the release version
+        run: sed -i "s/^pkgver=.*/pkgver=${VERSION}/" alpine/APKBUILD
+
+      - name: Vendor cargo dependencies for an offline build
+        run: |
+          mkdir -p .cargo
+          cargo vendor vendor > .cargo/config.toml
+
+      - name: Import signing key
+        env:
+          ALPINE_PRIVATE_KEY: ${{ secrets.ALPINE_PRIVATE_KEY }}
+          ALPINE_KEY_NAME: ${{ secrets.ALPINE_KEY_NAME }}
+        run: |
+          mkdir -p keys
+          printf '%s' "$ALPINE_PRIVATE_KEY" > "keys/${ALPINE_KEY_NAME}"
+          chmod 600 "keys/${ALPINE_KEY_NAME}"
+          # abuild derives the public key path by appending ".pub" to
+          # PACKAGER_PRIVKEY; it's not a secret, just re-derived here.
+          openssl rsa -in "keys/${ALPINE_KEY_NAME}" -pubout \
+            -out "keys/${ALPINE_KEY_NAME}.pub"
+
+      - name: Build & sign package with abuild (${{ matrix.arch }})
+        env:
+          ALPINE_KEY_NAME: ${{ secrets.ALPINE_KEY_NAME }}
+        run: |
+          docker run --rm \
+            --platform "linux/${{ matrix.arch == 'x86_64' && 'amd64' || matrix.arch }}" \
+            -v "$PWD:/repo" -w /repo/alpine \
+            -e PACKAGER_PRIVKEY="/repo/keys/${ALPINE_KEY_NAME}" \
+            -e ALPINE_KEY_NAME="${ALPINE_KEY_NAME}" \
+            alpine:3.22 sh -eu -c '
+              apk add --no-cache alpine-sdk cargo openssl-dev pkgconf sudo jq
+              adduser -D builder
+              addgroup builder abuild
+              mkdir -p /repo/packages /etc/apk/keys /tmp/repodest
+              cp "/repo/keys/${ALPINE_KEY_NAME}.pub" "/etc/apk/keys/${ALPINE_KEY_NAME}.pub"
+              chown -R builder:builder /repo/alpine /repo/keys /tmp/repodest
+              su builder -c "cd /repo/alpine && REPODEST=/tmp/repodest abuild -r"
+
+              # Collect the built .apk files into a flat, predictable
+              # packages/<arch>/ tree instead of relying on abuild -r own
+              # REPODEST layout (which nests under an aports-style repo
+              # name we do not have here), then rebuild + sign a clean
+              # index for that directory.
+              ARCH="$(apk --print-arch)"
+              APKDIR="/repo/packages/${ARCH}"
+              mkdir -p "$APKDIR"
+              find /tmp/repodest -name "*.apk" -exec cp {} "$APKDIR/" \;
+              apk index -o "$APKDIR/APKINDEX.tar.gz" "$APKDIR"/*.apk
+              abuild-sign -k "/repo/keys/${ALPINE_KEY_NAME}" "$APKDIR/APKINDEX.tar.gz"
+              chmod -R a+rwX /repo/packages
+            '
+          cp "keys/${ALPINE_KEY_NAME}.pub" "packages/${ALPINE_KEY_NAME}.pub"
+
+      - name: Upload built packages
+        uses: actions/upload-artifact@v7
+        with:
+          name: apk-${{ matrix.arch }}
+          path: packages/**
+
+  publish:
+    name: publish to GitHub Pages
+    needs: [resolve, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Download all built packages
+        uses: actions/download-artifact@v7
+        with:
+          pattern: apk-*
+          path: packages
+          merge-multiple: true
+
+      - name: Checkout gh-pages branch
+        run: |
+          git fetch origin gh-pages || true
+          if git show-ref --verify --quiet refs/remotes/origin/gh-pages; then
+            git worktree add gh-pages-out origin/gh-pages
+          else
+            git worktree add --detach gh-pages-out
+            git -C gh-pages-out checkout --orphan gh-pages
+            git -C gh-pages-out rm -rf . || true
+          fi
+
+      - name: Merge new packages into the published apk repo
+        run: |
+          mkdir -p gh-pages-out/alpine
+          cp -r packages/* gh-pages-out/alpine/
+          cat > gh-pages-out/alpine/README.md <<'EOF'
+          # librtmp2 Alpine (apk) repository
+
+          See docs/publishing-alpine.md in the main repository for how to
+          add this repository with `apk`.
+          EOF
+
+      - name: Commit and push
+        run: |
+          cd gh-pages-out
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add alpine
+          git diff --cached --quiet && exit 0
+          git commit -m "alpine: publish librtmp2 ${{ needs.resolve.outputs.version }}"
+          git push origin HEAD:gh-pages

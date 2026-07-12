@@ -153,6 +153,14 @@ jobs:
       tag: ${{ github.event.inputs.tag || github.ref_name }}
     secrets: inherit
 
+  publish-alpine:
+    name: publish Alpine package
+    needs: package
+    uses: ./.github/workflows/publish-apk.yml
+    with:
+      tag: ${{ github.event.inputs.tag || github.ref_name }}
+    secrets: inherit
+
   publish-crates-io:
     name: publish to crates.io
     needs: package
