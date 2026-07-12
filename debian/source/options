@@ -1,6 +1,0 @@
-# The 3.0 (native) source format normally enables dpkg-source's default
-# tar exclusions. Those exclusions drop files such as *.a, *.so and *.orig,
-# but cargo-vendored crates can legitimately contain and checksum such files
-# (for example vcpkg's test fixtures). Override the defaults with the minimal
-# VCS exclusion so the complete vendor/ tree reaches Launchpad unchanged.
-tar-ignore = .git
