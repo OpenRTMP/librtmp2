@@ -118,6 +118,13 @@ jobs:
           mkdir -p .cargo
           cargo vendor vendor > .cargo/config.toml
 
+      - name: Verify the vendored tree actually builds offline
+        # dpkg-buildpackage -S below only builds the *source* package - it
+        # never runs debian/rules, so a broken/incomplete vendor/ tree would
+        # otherwise go undetected until Launchpad's own (real) build fails,
+        # hours later. Run the same command debian/rules uses here first.
+        run: cargo build --release --offline --all-features --verbose
+
       - name: Add changelog entry for ${{ matrix.series }}
         run: |
           dch --package librtmp2 \
