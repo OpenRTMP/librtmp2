@@ -39,11 +39,25 @@ const MAX_RECV_BYTES_PER_POLL: usize = 256 * 1024;
 const MAX_RECV_BYTES_PER_COMMAND_WAIT: usize = 256 * 1024;
 /// Maximum time to wait for the initial TCP connect before failing.
 const TCP_CONNECT_TIMEOUT_SECS: u64 = 10;
+/// `recv_buffer` holds raw wire bytes, not just message payloads, so the
+/// staging cap must budget for chunk-header overhead on top of the payload
+/// bytes it is meant to bound.
+const MAX_RECV_BUFFER_PAYLOAD_BYTES: usize = 2 * DEFAULT_MAX_MSG_LENGTH as usize;
+/// Smallest chunk size a peer can realistically negotiate down to via
+/// `SetChunkSize` (128 is the RTMP default and the practical floor seen from
+/// real encoders). At this size, worst-case continuation-chunk framing is a
+/// 1-byte basic header plus a 4-byte extended timestamp field (RTMP spec
+/// 5.3.1.3) repeated on every chunk of a message.
+const MIN_PRACTICAL_CHUNK_SIZE: usize = 128;
+const MAX_CHUNK_HEADER_OVERHEAD_BYTES: usize = 5;
 /// Cap incomplete wire data staged in `recv_buffer` between chunk reads.
 /// Mirrors the server-side staging limit in `session::conn` so a malicious
 /// peer cannot retain up to `BUFFER_MAX_SIZE` (64 MiB) per client connection
-/// when message budgets defer draining.
-const MAX_RECV_BUFFER_BYTES: usize = 2 * DEFAULT_MAX_MSG_LENGTH as usize;
+/// when message budgets defer draining. Includes headroom for chunk-header
+/// overhead so two max-size messages at the minimum practical chunk size
+/// don't get rejected before they can be reassembled.
+const MAX_RECV_BUFFER_BYTES: usize = MAX_RECV_BUFFER_PAYLOAD_BYTES
+    + (MAX_RECV_BUFFER_PAYLOAD_BYTES / MIN_PRACTICAL_CHUNK_SIZE + 1) * MAX_CHUNK_HEADER_OVERHEAD_BYTES;
 
 /// Client connection states.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -313,6 +327,14 @@ impl Client {
             unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
         }
 
+        let mut messages_processed = 0usize;
+        // Drain any complete messages a prior poll() left staged in
+        // recv_buffer (it may have stopped at MAX_MESSAGES_PER_POLL) before
+        // reading more off the socket. Otherwise the staging-cap check below
+        // sees those leftover bytes plus newly read bytes and can reject a
+        // read that draining first would have made room for.
+        self.drain_ready_messages(&mut messages_processed)?;
+
         let mut buf = [0u8; 65536];
         let mut bytes_drained = 0usize;
         loop {
@@ -362,9 +384,17 @@ impl Client {
             }
         }
 
-        let mut messages_processed = 0usize;
+        self.drain_ready_messages(&mut messages_processed)?;
+
+        Ok(())
+    }
+
+    /// Process fully-reassembled messages already staged in `recv_buffer`,
+    /// up to `MAX_MESSAGES_PER_POLL` total across calls sharing
+    /// `messages_processed`. Stops as soon as the next message is incomplete.
+    fn drain_ready_messages(&mut self, messages_processed: &mut usize) -> Result<()> {
         loop {
-            if messages_processed >= MAX_MESSAGES_PER_POLL {
+            if *messages_processed >= MAX_MESSAGES_PER_POLL {
                 break;
             }
 
@@ -380,7 +410,7 @@ impl Client {
                 &mut payload_len,
             ) {
                 Ok(1) if msg.is_complete => {
-                    messages_processed += 1;
+                    *messages_processed += 1;
                     if msg.msg_type_id == msg_dispatch::RTMP_MSG_SET_CHUNK_SIZE {
                         let payload = if payload_ptr.is_null() || payload_len == 0 {
                             &[][..]
@@ -419,7 +449,6 @@ impl Client {
                 Err(_) => return Err(ErrorCode::Chunk),
             }
         }
-
         Ok(())
     }
 
@@ -709,11 +738,14 @@ mod tests {
     }
 
     #[test]
-    fn recv_buffer_staging_cap_matches_server_limit() {
-        assert_eq!(
-            MAX_RECV_BUFFER_BYTES,
-            2 * DEFAULT_MAX_MSG_LENGTH as usize
-        );
+    fn recv_buffer_staging_cap_covers_two_max_messages_at_min_chunk_size() {
+        // recv_buffer holds raw wire bytes, so the cap must have headroom for
+        // chunk-header overhead on top of two max-size message payloads, even
+        // at the smallest chunk size a peer can realistically negotiate.
+        let payload = 2 * DEFAULT_MAX_MSG_LENGTH as usize;
+        let chunks = payload.div_ceil(MIN_PRACTICAL_CHUNK_SIZE);
+        let worst_case_wire_bytes = payload + chunks * MAX_CHUNK_HEADER_OVERHEAD_BYTES;
+        assert!(MAX_RECV_BUFFER_BYTES >= worst_case_wire_bytes);
     }
 
     #[test]
@@ -730,12 +762,45 @@ mod tests {
         let mut client = Client::new();
         client.state = ClientState::Playing;
         client.transport = Some(Transport::new_plain(client_end.into_raw_fd()));
+        // More than one poll() worth of drain budget (MAX_MESSAGES_PER_POLL
+        // trivial 13-byte complete messages = 3328 bytes) can clear, so the
+        // cap must still reject growth once the budgeted drain isn't enough.
         client
             .recv_buffer
-            .write(&vec![0u8; MAX_RECV_BUFFER_BYTES])
+            .write(&vec![0u8; MAX_RECV_BUFFER_BYTES * 2])
             .unwrap();
 
         assert_eq!(client.poll(0), Err(ErrorCode::Protocol));
+    }
+
+    #[test]
+    fn poll_drains_leftover_messages_before_enforcing_staging_cap() {
+        use std::io::Write;
+        use std::os::unix::io::IntoRawFd;
+        use std::os::unix::net::UnixStream;
+
+        let (client_end, mut peer) = UnixStream::pair().unwrap();
+        client_end.set_nonblocking(true).unwrap();
+        peer.set_nonblocking(true).unwrap();
+        peer.write_all(&[0x01, 0x02, 0x03]).unwrap();
+
+        let mut client = Client::new();
+        client.state = ClientState::Playing;
+        client.transport = Some(Transport::new_plain(client_end.into_raw_fd()));
+        // Simulate a prior poll() that stopped at MAX_MESSAGES_PER_POLL:
+        // recv_buffer is staged right up to the cap with trivial 13-byte
+        // complete messages (2-byte extended-csid basic header + 11-byte
+        // zeroed fmt=0 message header, msg_length=0). Draining the first
+        // MAX_MESSAGES_PER_POLL of them frees enough room that the 3 new
+        // bytes read below should NOT be rejected -- rejecting them would
+        // mean the cap was checked before leftover messages were drained.
+        let msg_count = MAX_RECV_BUFFER_BYTES / 13;
+        client
+            .recv_buffer
+            .write(&vec![0u8; msg_count * 13])
+            .unwrap();
+
+        assert_eq!(client.poll(0), Ok(()));
     }
 
     #[test]
