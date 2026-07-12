@@ -102,9 +102,16 @@ without a full release — run `publish-ppa.yml` directly via its own
 `workflow_dispatch`.
 
 Each targeted series gets its own upload, versioned
-`X.Y.Z~<series>1` (e.g. `0.3.0~resolute1` — no Debian revision, since
-`debian/source/format` is `3.0 (native)`), since binaries built for one
-Ubuntu series are generally not installable on another.
+`X.Y.Z~<series><build-id>` (e.g. `0.3.0~resolute15r1` — no Debian
+revision, since `debian/source/format` is `3.0 (native)`), since binaries
+built for one Ubuntu series are generally not installable on another. The
+`<build-id>` suffix (`<run_number>r<run_attempt>`) makes every upload's
+filename unique: Launchpad permanently rejects re-uploading a
+filename+version whose contents differ from what it already has on
+record, and `cargo vendor`'s output isn't byte-reproducible across CI
+runs, so a fixed suffix would make any retry after a rejected/failed
+upload fail again with "already exists ... but uploaded version has
+different contents."
 
 After Launchpad accepts the upload (check **your PPA's page -> View
 package details** or the confirmation email), it queues the binary

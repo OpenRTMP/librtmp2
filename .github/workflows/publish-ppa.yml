@@ -95,6 +95,12 @@ jobs:
     env:
       VERSION: ${{ needs.resolve.outputs.version }}
       SERIES: ${{ matrix.series }}
+      # Launchpad permanently rejects re-uploading a filename+version whose
+      # contents differ from what it already has on record - and cargo
+      # vendor's output isn't byte-reproducible across runs, so every retry
+      # needs a fresh suffix. run_number is stable across "re-run failed
+      # jobs" on the *same* run, hence also folding in run_attempt.
+      BUILD_ID: ${{ github.run_number }}r${{ github.run_attempt }}
       DEBEMAIL: info@openrtmp.org
       DEBFULLNAME: OpenRTMP
     steps:
@@ -128,7 +134,7 @@ jobs:
       - name: Add changelog entry for ${{ matrix.series }}
         run: |
           dch --package librtmp2 \
-              --newversion "${VERSION}~${SERIES}1" \
+              --newversion "${VERSION}~${SERIES}${BUILD_ID}" \
               --distribution "${SERIES}" \
               --force-distribution \
               --force-bad-version \
@@ -141,7 +147,7 @@ jobs:
         run: dpkg-buildpackage -S -sa -us -uc -d
 
       - name: Lintian (non-blocking sanity check)
-        run: lintian --pedantic "../librtmp2_${VERSION}~${SERIES}1_source.changes" || true
+        run: lintian --pedantic "../librtmp2_${VERSION}~${SERIES}${BUILD_ID}_source.changes" || true
 
       - name: Import signing key
         run: |
@@ -161,9 +167,9 @@ jobs:
           printf '%s' "$PPA_GPG_PASSPHRASE" > "$PASSFILE"
           debsign -k"${{ secrets.PPA_GPG_KEY_ID }}" \
             -p"gpg --batch --pinentry-mode loopback --passphrase-file $PASSFILE" \
-            "../librtmp2_${VERSION}~${SERIES}1_source.changes"
+            "../librtmp2_${VERSION}~${SERIES}${BUILD_ID}_source.changes"
 
       - name: Upload to PPA
         run: |
           dput "ppa:${{ vars.PPA_TARGET }}" \
-            "../librtmp2_${VERSION}~${SERIES}1_source.changes"
+            "../librtmp2_${VERSION}~${SERIES}${BUILD_ID}_source.changes"
