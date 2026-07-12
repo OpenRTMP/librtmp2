@@ -1,5 +1,8 @@
 librtmp2 (0.3.0-1) UNRELEASED; urgency=medium
 
   * Initial Debian packaging for PPA publishing.
+  * Lower the rustc Build-Depends floor to 1.93, matching the crate's
+    actual MSRV (rust-version in Cargo.toml) instead of whatever
+    toolchain happened to be installed in CI.
 
- -- OpenRTMP <info@openrtmp.org>  Sat, 11 Jul 2026 00:00:00 +0000
+ -- OpenRTMP <info@openrtmp.org>  Sun, 12 Jul 2026 00:00:00 +0000
