@@ -50,14 +50,20 @@ const MAX_RECV_BUFFER_PAYLOAD_BYTES: usize = 2 * DEFAULT_MAX_MSG_LENGTH as usize
 /// 5.3.1.3) repeated on every chunk of a message.
 const MIN_PRACTICAL_CHUNK_SIZE: usize = 128;
 const MAX_CHUNK_HEADER_OVERHEAD_BYTES: usize = 5;
+/// Extra header bytes a message's first (fmt=0) chunk carries over a fmt=3
+/// continuation chunk: the 11-byte message header (timestamp + length +
+/// type id + stream id) that continuations omit.
+const FIRST_CHUNK_EXTRA_OVERHEAD_BYTES: usize = 11;
 /// Cap incomplete wire data staged in `recv_buffer` between chunk reads.
 /// Mirrors the server-side staging limit in `session::conn` so a malicious
 /// peer cannot retain up to `BUFFER_MAX_SIZE` (64 MiB) per client connection
 /// when message budgets defer draining. Includes headroom for chunk-header
-/// overhead so two max-size messages at the minimum practical chunk size
-/// don't get rejected before they can be reassembled.
+/// overhead (plus the two max-size messages' larger first-chunk headers) so
+/// two max-size messages at the minimum practical chunk size don't get
+/// rejected before they can be reassembled.
 const MAX_RECV_BUFFER_BYTES: usize = MAX_RECV_BUFFER_PAYLOAD_BYTES
-    + (MAX_RECV_BUFFER_PAYLOAD_BYTES / MIN_PRACTICAL_CHUNK_SIZE + 1) * MAX_CHUNK_HEADER_OVERHEAD_BYTES;
+    + (MAX_RECV_BUFFER_PAYLOAD_BYTES / MIN_PRACTICAL_CHUNK_SIZE + 1) * MAX_CHUNK_HEADER_OVERHEAD_BYTES
+    + 2 * FIRST_CHUNK_EXTRA_OVERHEAD_BYTES;
 
 /// Client connection states.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -744,7 +750,10 @@ mod tests {
         // at the smallest chunk size a peer can realistically negotiate.
         let payload = 2 * DEFAULT_MAX_MSG_LENGTH as usize;
         let chunks = payload.div_ceil(MIN_PRACTICAL_CHUNK_SIZE);
-        let worst_case_wire_bytes = payload + chunks * MAX_CHUNK_HEADER_OVERHEAD_BYTES;
+        // Each message's first chunk (fmt=0) carries the larger message
+        // header on top of the shared continuation-chunk overhead.
+        let worst_case_wire_bytes =
+            payload + chunks * MAX_CHUNK_HEADER_OVERHEAD_BYTES + 2 * FIRST_CHUNK_EXTRA_OVERHEAD_BYTES;
         assert!(MAX_RECV_BUFFER_BYTES >= worst_case_wire_bytes);
     }
 
