@@ -46,10 +46,11 @@ const MAX_RECV_BUFFER_PAYLOAD_BYTES: usize = 2 * DEFAULT_MAX_MSG_LENGTH as usize
 /// Smallest chunk size a peer can realistically negotiate down to via
 /// `SetChunkSize` (128 is the RTMP default and the practical floor seen from
 /// real encoders). At this size, worst-case continuation-chunk framing is a
-/// 1-byte basic header plus a 4-byte extended timestamp field (RTMP spec
-/// 5.3.1.3) repeated on every chunk of a message.
+/// 3-byte basic header (the extended 2-byte CSID form the reader accepts for
+/// csid >= 320, RTMP spec 5.3.1.1) plus a 4-byte extended timestamp field
+/// (RTMP spec 5.3.1.3) repeated on every chunk of a message.
 const MIN_PRACTICAL_CHUNK_SIZE: usize = 128;
-const MAX_CHUNK_HEADER_OVERHEAD_BYTES: usize = 5;
+const MAX_CHUNK_HEADER_OVERHEAD_BYTES: usize = 7;
 /// Extra header bytes a message's first (fmt=0) chunk carries over a fmt=3
 /// continuation chunk: the 11-byte message header (timestamp + length +
 /// type id + stream id) that continuations omit.
@@ -317,12 +318,28 @@ impl Client {
             };
             (t.fd(), t.pending() > 0)
         };
+
+        let mut messages_processed = 0usize;
+        // Drain any complete messages a prior poll() left staged in
+        // recv_buffer (it may have stopped at MAX_MESSAGES_PER_POLL) before
+        // reading more off the socket or blocking on socket readiness below.
+        // Otherwise (a) the staging-cap check further down sees those
+        // leftover bytes plus newly read bytes and can reject a read that
+        // draining first would have made room for, and (b) a caller with a
+        // long or infinite timeout would stall waiting on the socket instead
+        // of getting complete messages that were already sitting in the
+        // buffer.
+        self.drain_ready_messages(&mut messages_processed)?;
+
         // A prior poll() call may have stopped draining at
         // MAX_RECV_BYTES_PER_POLL while OpenSSL still held decrypted
         // plaintext internally. The kernel socket can then have nothing left
         // to report ready, so blocking in poll(2) here would wait out the
         // full timeout even though data is already available via recv().
-        if !has_buffered_tls_data {
+        // Likewise, skip the wait entirely if the drain above already made
+        // progress -- there is no need to block on socket readiness when
+        // complete messages were just delivered.
+        if messages_processed == 0 && !has_buffered_tls_data {
             let mut pfd = libc::pollfd {
                 fd: poll_fd,
                 events: libc::POLLIN,
@@ -332,14 +349,6 @@ impl Client {
             // (the POSIX idiom), so pass it through as-is instead of clamping to 0.
             unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
         }
-
-        let mut messages_processed = 0usize;
-        // Drain any complete messages a prior poll() left staged in
-        // recv_buffer (it may have stopped at MAX_MESSAGES_PER_POLL) before
-        // reading more off the socket. Otherwise the staging-cap check below
-        // sees those leftover bytes plus newly read bytes and can reject a
-        // read that draining first would have made room for.
-        self.drain_ready_messages(&mut messages_processed)?;
 
         let mut buf = [0u8; 65536];
         let mut bytes_drained = 0usize;
@@ -810,6 +819,35 @@ mod tests {
             .unwrap();
 
         assert_eq!(client.poll(0), Ok(()));
+    }
+
+    #[test]
+    fn poll_does_not_block_on_socket_readiness_when_messages_already_staged() {
+        use std::io::Write;
+        use std::os::unix::io::IntoRawFd;
+        use std::os::unix::net::UnixStream;
+        use std::time::Instant;
+
+        let (client_end, peer) = UnixStream::pair().unwrap();
+        client_end.set_nonblocking(true).unwrap();
+        // Keep `peer` alive but never send anything further, so the socket
+        // never becomes readable -- if poll() waited on readiness before
+        // draining, this call would block for the full timeout below.
+        let _peer = peer;
+
+        let mut client = Client::new();
+        client.state = ClientState::Playing;
+        client.transport = Some(Transport::new_plain(client_end.into_raw_fd()));
+        // One complete trivial message already staged: 2-byte extended-csid
+        // basic header + 11-byte zeroed fmt=0 message header (msg_length=0).
+        client.recv_buffer.write(&[0u8; 13]).unwrap();
+
+        let start = Instant::now();
+        assert_eq!(client.poll(5_000), Ok(()));
+        assert!(
+            start.elapsed() < Duration::from_millis(1_000),
+            "poll() blocked on socket readiness instead of draining the staged message first"
+        );
     }
 
     #[test]
