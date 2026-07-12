@@ -13,7 +13,21 @@ begin at `1.0.0`.
 
 ## [Unreleased]
 
-## [0.2.2] — 2026-07-12
+### Fixed
+- `Transport::connect_tls()`'s new `ca_file` option (see 0.3.0 below) now
+  *replaces* the trust store instead of adding the caller's CA bundle to the
+  system default trust store — a custom CA is meant to restrict which peers
+  are trusted, not merely extend the existing set. Previously a publicly
+  trusted certificate for the same hostname would still pass even with a
+  private CA configured.
+- `insecure = true` no longer loads the system's default CA verify paths at
+  all, so `rtmps://` connections with verification intentionally disabled no
+  longer fail on hosts without a usable default CA store.
+- `lrtmp2_client_create()` now rejects (returns NULL for) a non-UTF-8
+  `tls_ca_file` path instead of silently discarding it and falling back to
+  default verification.
+
+## [0.3.0] — 2026-07-11
 
 ### Fixed
 - `lrtmp2_client_create()` silently ignored `ServerConfig.tls_ca_file` and
@@ -22,23 +36,12 @@ begin at `1.0.0`.
   set to, even though the ABI documented them as controlling client TLS
   verification. `Client`/`Transport::connect_tls` now honor a caller-supplied
   CA bundle or an explicit opt-out of verification.
-- `Transport::connect_tls()`'s `ca_file` option now *replaces* the trust
-  store instead of adding the caller's CA bundle to the system default
-  trust store — a custom CA is meant to restrict which peers are trusted,
-  not merely extend the existing set. Previously a publicly trusted
-  certificate for the same hostname would still pass even with a private CA
-  configured.
-- `insecure = true` no longer loads the system's default CA verify paths at
-  all, so `rtmps://` connections with verification intentionally disabled no
-  longer fail on hosts without a usable default CA store.
-- `lrtmp2_client_create()` now rejects (returns NULL for) a non-UTF-8
-  `tls_ca_file` path instead of silently discarding it and falling back to
-  default verification.
 
 ### Changed
 - `Transport::connect_tls()` (Rust-only API, not part of the FFI ABI) gained
   two new parameters (`ca_file: Option<&str>`, `insecure: bool`) to support
-  the fix above.
+  the fix above. Bumped the minor version per this crate's pre-1.0
+  versioning policy (breaking Rust API change, ABI/FFI surface unaffected).
 
 ## [0.2.1] — 2026-07-10
 
@@ -186,8 +189,7 @@ and others.
 - Protocol mapping documents for legacy, E-RTMP v1, and E-RTMP v2
 - `CONTRIBUTING.md` guidelines
 
-[Unreleased]: https://github.com/OpenRTMP/librtmp2/compare/v0.2.2...HEAD
-[0.2.2]: https://github.com/OpenRTMP/librtmp2/compare/v0.2.1...v0.2.2
+[Unreleased]: https://github.com/OpenRTMP/librtmp2/compare/v0.2.1...HEAD
 [0.2.1]: https://github.com/OpenRTMP/librtmp2/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/OpenRTMP/librtmp2/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/OpenRTMP/librtmp2/compare/v0.1.0...v0.1.1

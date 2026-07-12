@@ -102,7 +102,7 @@ without a full release — run `publish-ppa.yml` directly via its own
 `workflow_dispatch`.
 
 Each targeted series gets its own upload, versioned
-`X.Y.Z~<series>1` (e.g. `0.2.2~resolute1` — no Debian revision, since
+`X.Y.Z~<series>1` (e.g. `0.3.0~resolute1` — no Debian revision, since
 `debian/source/format` is `3.0 (native)`), since binaries built for one
 Ubuntu series are generally not installable on another.
 
