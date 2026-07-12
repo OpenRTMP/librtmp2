@@ -1,0 +1,103 @@
+# Publishing to an Ubuntu PPA
+
+`.github/workflows/publish-ppa.yml` builds a signed Debian **source**
+package on tag push (`v*`) and uploads it to a Launchpad PPA with `dput`.
+Launchpad's own build farm then compiles the binary `.deb` for each
+targeted Ubuntu series (`noble`, `jammy`, ... — configurable via the
+workflow's `series` input). The workflow never builds or uploads a binary
+package itself.
+
+Because Rust crate downloads require network access, and Launchpad's
+builders run offline, the workflow runs `cargo vendor` before building the
+source package and ships the vendored dependencies inside it.
+
+## One-time setup
+
+### 1. Launchpad account
+
+1. Create an account at <https://launchpad.net/+login> (or sign in with
+   Ubuntu One).
+2. Complete the account: set a display name and, ideally, add and verify at
+   least one email address under **Personal details -> Change details ->
+   Add an email address**. Launchpad requires this before you can activate
+   a PPA.
+
+### 2. GPG signing key
+
+Launchpad identifies uploaders by their OpenPGP key, not by password —
+`dput` never authenticates with Launchpad credentials.
+
+```bash
+gpg --full-generate-key        # RSA, 4096 bit, no expiry or a long one
+gpg --list-secret-keys --keyid-format=long   # note the key ID / fingerprint
+gpg --armor --export <KEY_ID> > pubkey.asc
+```
+
+Upload `pubkey.asc` on Launchpad under **Personal details -> OpenPGP keys
+-> Import an OpenPGP key**, then confirm it: Launchpad emails an
+encrypted challenge to your registered address; decrypt it with
+`gpg --decrypt` and follow the link it contains. The key is unusable for
+uploads until this confirmation step is done.
+
+### 3. Create the PPA
+
+**Personal details -> Create a new PPA** (or on a team page, if the PPA
+should be owned by a team rather than your personal account). Note the
+resulting `<owner>/<ppa-name>` — e.g. `openrtmp/librtmp2` — this is the
+value the workflow uploads to via `dput ppa:<owner>/<ppa-name>`.
+
+If the PPA is team-owned, make sure your user is a member of that team
+with upload rights.
+
+### 4. GitHub repository secrets/variables
+
+In the repo's **Settings -> Secrets and variables -> Actions**, add:
+
+| Name | Type | Value |
+|---|---|---|
+| `PPA_GPG_PRIVATE_KEY` | secret | `gpg --armor --export-secret-keys <KEY_ID>` |
+| `PPA_GPG_KEY_ID` | secret | the key ID/fingerprint used above |
+| `PPA_GPG_PASSPHRASE` | secret | the key's passphrase |
+| `PPA_TARGET` | variable | `<owner>/<ppa-name>`, e.g. `openrtmp/librtmp2` |
+
+Export the private key with `gpg --armor --export-secret-keys`, not
+`--export` (which only exports the public key). Treat this secret as
+highly sensitive — anyone with it can sign uploads as you on Launchpad.
+Consider generating a dedicated subkey for CI use instead of exporting
+your primary key, so it can be revoked independently.
+
+## Releasing
+
+Publishing follows the same tag-driven flow as `release.yml` and
+`publish-crates-io.yml`: push a tag `vX.Y.Z` matching the version in
+`Cargo.toml`, or run the workflow manually via `workflow_dispatch` with
+that tag (and optionally a custom `series` list).
+
+Each targeted series gets its own upload, versioned
+`X.Y.Z-1~<series>1` (e.g. `0.3.0-1~noble1`), since binaries built for one
+Ubuntu series are generally not installable on another.
+
+After Launchpad accepts the upload (check **your PPA's page -> View
+package details** or the confirmation email), it queues the binary
+build for each configured architecture; that step is entirely on
+Launchpad's infrastructure and outside this repo's CI.
+
+## Local packaging files
+
+- `debian/control` — binary packages `librtmp2` (shared library) and
+  `librtmp2-dev` (static library + pkg-config file)
+- `debian/rules` — offline `cargo build --release --all-features`,
+  installs the multiarch-versioned library paths
+- `debian/changelog` — rewritten per-series/version by the workflow via
+  `dch`; the committed entry is only a placeholder
+- `debian/source/format` — `3.0 (native)`, so the whole working tree
+  (including the CI-generated `vendor/` directory) becomes the source
+  package with no separate upstream tarball to track
+
+You can build and inspect a source package locally (signing skipped)
+with:
+
+```bash
+cargo vendor vendor > .cargo/config.toml
+dpkg-buildpackage -S -sa -us -uc
+```

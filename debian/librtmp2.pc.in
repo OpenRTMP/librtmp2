@@ -1,0 +1,8 @@
+libdir=/usr/lib/@MULTIARCH@
+includedir=/usr/include
+
+Name: librtmp2
+Description: RTMP/RTMPS protocol library
+Version: @VERSION@
+Libs: -L${libdir} -llibrtmp2
+Libs.private: -lssl -lcrypto
