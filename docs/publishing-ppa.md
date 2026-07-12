@@ -49,7 +49,29 @@ value the workflow uploads to via `dput ppa:<owner>/<ppa-name>`.
 If the PPA is team-owned, make sure your user is a member of that team
 with upload rights.
 
-### 4. GitHub repository secrets/variables
+### 4. Add a Rust-toolchain PPA dependency
+
+`debian/control` declares `Build-Depends: rustc (>= 1.94)`. Ubuntu's own
+`noble`/`jammy` archives ship a much older `rustc` (~1.75), and Launchpad's
+build chroots have no network access, so the builder can only satisfy that
+Build-Depends from an apt source that's actually configured for the chroot.
+Without one, every upload will sit as "Dependency wait" and never build.
+
+Fix this once per PPA, not per release: on your PPA's Launchpad page, go to
+**Admin -> Change details** and add a suitable Rust-toolchain PPA under
+**"PPA dependencies"** — this makes Launchpad's builders resolve
+`Build-Depends` against that PPA's packages too, in addition to the normal
+Ubuntu archive.
+
+There is no single Anthropic/Canonical-blessed PPA to point at here — pick
+one you trust (a well-maintained community Rust-toolchain PPA that tracks
+current stable releases for `noble`/`jammy`) or build/host your own if you
+want full control over supply chain. Whichever you choose, verify its
+`rustc`/`cargo` version actually satisfies `>= 1.94` for each series you
+target before relying on it, since anything added here runs on Launchpad's
+builders with upload rights into your PPA's build environment.
+
+### 5. GitHub repository secrets/variables
 
 In the repo's **Settings -> Secrets and variables -> Actions**, add:
 
