@@ -39,6 +39,11 @@ const MAX_RECV_BYTES_PER_POLL: usize = 256 * 1024;
 const MAX_RECV_BYTES_PER_COMMAND_WAIT: usize = 256 * 1024;
 /// Maximum time to wait for the initial TCP connect before failing.
 const TCP_CONNECT_TIMEOUT_SECS: u64 = 10;
+/// Cap incomplete wire data staged in `recv_buffer` between chunk reads.
+/// Mirrors the server-side staging limit in `session::conn` so a malicious
+/// peer cannot retain up to `BUFFER_MAX_SIZE` (64 MiB) per client connection
+/// when message budgets defer draining.
+const MAX_RECV_BUFFER_BYTES: usize = 2 * DEFAULT_MAX_MSG_LENGTH as usize;
 
 /// Client connection states.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -324,6 +329,14 @@ impl Client {
             };
             if n > 0 {
                 let chunk_len = n as usize;
+                if self
+                    .recv_buffer
+                    .available()
+                    .saturating_add(chunk_len)
+                    > MAX_RECV_BUFFER_BYTES
+                {
+                    return Err(ErrorCode::Protocol);
+                }
                 self.recv_buffer
                     .write(&buf[..chunk_len])
                     .map_err(|_| ErrorCode::Internal)?;
@@ -562,6 +575,14 @@ impl Client {
             };
             if n > 0 {
                 let chunk_len = n as usize;
+                if self
+                    .recv_buffer
+                    .available()
+                    .saturating_add(chunk_len)
+                    > MAX_RECV_BUFFER_BYTES
+                {
+                    return Err(ErrorCode::Protocol);
+                }
                 *recv_budget -= chunk_len;
                 self.recv_buffer
                     .write(&tmp[..chunk_len])
@@ -685,6 +706,36 @@ mod tests {
     #[test]
     fn recv_budget_is_at_least_one_socket_read() {
         assert!(MAX_RECV_BYTES_PER_POLL >= 65536);
+    }
+
+    #[test]
+    fn recv_buffer_staging_cap_matches_server_limit() {
+        assert_eq!(
+            MAX_RECV_BUFFER_BYTES,
+            2 * DEFAULT_MAX_MSG_LENGTH as usize
+        );
+    }
+
+    #[test]
+    fn poll_rejects_recv_buffer_growth_past_staging_cap() {
+        use std::io::Write;
+        use std::os::unix::io::IntoRawFd;
+        use std::os::unix::net::UnixStream;
+
+        let (client_end, mut peer) = UnixStream::pair().unwrap();
+        client_end.set_nonblocking(true).unwrap();
+        peer.set_nonblocking(true).unwrap();
+        peer.write_all(&[0x01, 0x02, 0x03]).unwrap();
+
+        let mut client = Client::new();
+        client.state = ClientState::Playing;
+        client.transport = Some(Transport::new_plain(client_end.into_raw_fd()));
+        client
+            .recv_buffer
+            .write(&vec![0u8; MAX_RECV_BUFFER_BYTES])
+            .unwrap();
+
+        assert_eq!(client.poll(0), Err(ErrorCode::Protocol));
     }
 
     #[test]
