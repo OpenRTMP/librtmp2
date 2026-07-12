@@ -1,10 +1,13 @@
 # Publishing to an Ubuntu PPA
 
 `.github/workflows/publish-ppa.yml` builds a signed Debian **source**
-package on tag push (`v*`) and uploads it to a Launchpad PPA with `dput`.
-Launchpad's own build farm then compiles the binary `.deb` for each
-targeted Ubuntu series (default `resolute` only, configurable via the
-workflow's `series` input). The workflow never builds or uploads a binary
+package and uploads it to a Launchpad PPA with `dput`. It runs as a job of
+`release.yml` (`publish-ppa`), so every tag push or manual `release.yml`
+run publishes to the PPA automatically alongside the GitHub Release and
+crates.io publish — there's nothing extra to trigger. Launchpad's own
+build farm then compiles the binary `.deb` for each targeted Ubuntu series
+(default `resolute` only, configurable via the workflow's `series` input
+when running it standalone). The workflow never builds or uploads a binary
 package itself.
 
 Because Rust crate downloads require network access, and Launchpad's
@@ -90,13 +93,16 @@ your primary key, so it can be revoked independently.
 
 ## Releasing
 
-Publishing follows the same tag-driven flow as `release.yml` and
-`publish-crates-io.yml`: push a tag `vX.Y.Z` matching the version in
-`Cargo.toml`, or run the workflow manually via `workflow_dispatch` with
-that tag (and optionally a custom `series` list).
+Push a tag `vX.Y.Z` matching the version in `Cargo.toml` (or run
+`release.yml` manually via `workflow_dispatch` with that tag) and
+`release.yml`'s `publish-ppa` job calls this workflow automatically once
+the GitHub Release build succeeds. To publish to the PPA on its own — e.g.
+retrying just the PPA upload, or targeting a different `series` list
+without a full release — run `publish-ppa.yml` directly via its own
+`workflow_dispatch`.
 
 Each targeted series gets its own upload, versioned
-`X.Y.Z~<series>1` (e.g. `0.3.0~resolute1` — no Debian revision, since
+`X.Y.Z~<series>1` (e.g. `0.2.2~resolute1` — no Debian revision, since
 `debian/source/format` is `3.0 (native)`), since binaries built for one
 Ubuntu series are generally not installable on another.
 

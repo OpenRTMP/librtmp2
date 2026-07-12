@@ -1,4 +1,4 @@
-librtmp2 (0.3.0-1) UNRELEASED; urgency=medium
+librtmp2 (0.2.2-1) UNRELEASED; urgency=medium
 
   * Initial Debian packaging for PPA publishing.
   * Lower the rustc Build-Depends floor to 1.93, matching the crate's

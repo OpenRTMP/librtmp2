@@ -144,3 +144,11 @@ jobs:
           files: |
             dist/*.tar.gz
             dist/*.sha256
+
+  publish-ppa:
+    name: publish to Ubuntu PPA
+    needs: package
+    uses: ./.github/workflows/publish-ppa.yml
+    with:
+      tag: ${{ github.event.inputs.tag || github.ref_name }}
+    secrets: inherit
