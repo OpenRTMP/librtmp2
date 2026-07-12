@@ -124,12 +124,20 @@ jobs:
           mkdir -p .cargo
           cargo vendor vendor > .cargo/config.toml
 
-      - name: Verify the vendored tree actually builds offline
-        # dpkg-buildpackage -S below only builds the *source* package - it
-        # never runs debian/rules, so a broken/incomplete vendor/ tree would
-        # otherwise go undetected until Launchpad's own (real) build fails,
-        # hours later. Run the same command debian/rules uses here first.
+      - name: Verify the raw vendored tree builds offline
         run: cargo build --release --offline --all-features --verbose
+
+      - name: Archive the vendored tree for the Debian source package
+        # dpkg-source and debhelper intentionally filter many build-like file
+        # names. Vendored crates can legitimately checksum such files (for
+        # example vcpkg's empty *.a test fixtures), so transport vendor/ as one
+        # archive and unpack it only when the binary package is built.
+        run: |
+          tar --sort=name \
+              --mtime='@0' \
+              --owner=0 --group=0 --numeric-owner \
+              -cJf vendor.tar.xz -C vendor .
+          rm -rf vendor target debian/cargo_home
 
       - name: Add changelog entry for ${{ matrix.series }}
         run: |
@@ -145,6 +153,16 @@ jobs:
         # dtolnay/rust-toolchain (rustup), not apt, so dpkg doesn't see them
         # as satisfying debian/control's Build-Depends.
         run: dpkg-buildpackage -S -sa -us -uc -d
+
+      - name: Verify the generated source package builds offline
+        # Test the exact archive that will be uploaded, not the working tree.
+        # This catches files lost during debian/rules clean or dpkg-source.
+        run: |
+          VERIFY_DIR=$(mktemp -d)
+          trap 'rm -rf "$VERIFY_DIR"' EXIT
+          DSC="../librtmp2_${VERSION}~${SERIES}${BUILD_ID}.dsc"
+          dpkg-source -x "$DSC" "$VERIFY_DIR/source"
+          make -C "$VERIFY_DIR/source" -f debian/rules override_dh_auto_build
 
       - name: Lintian (non-blocking sanity check)
         run: lintian --pedantic "../librtmp2_${VERSION}~${SERIES}${BUILD_ID}_source.changes" || true
