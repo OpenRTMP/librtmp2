@@ -3,7 +3,7 @@
 `.github/workflows/publish-ppa.yml` builds a signed Debian **source**
 package on tag push (`v*`) and uploads it to a Launchpad PPA with `dput`.
 Launchpad's own build farm then compiles the binary `.deb` for each
-targeted Ubuntu series (`noble`, `jammy`, ... — configurable via the
+targeted Ubuntu series (default `resolute`, `noble`, configurable via the
 workflow's `series` input). The workflow never builds or uploads a binary
 package itself.
 
@@ -51,11 +51,14 @@ with upload rights.
 
 ### 4. Add a Rust-toolchain PPA dependency
 
-`debian/control` declares `Build-Depends: rustc (>= 1.94)`. Ubuntu's own
-`noble`/`jammy` archives ship a much older `rustc` (~1.75), and Launchpad's
-build chroots have no network access, so the builder can only satisfy that
-Build-Depends from an apt source that's actually configured for the chroot.
-Without one, every upload will sit as "Dependency wait" and never build.
+`debian/control` declares `Build-Depends: rustc (>= 1.94)`. Ubuntu's `noble`
+archive ships a much older `rustc` (~1.75, frozen at the 24.04 release), and
+`resolute` will similarly ship whatever `rustc` was current at its own
+freeze, which is not guaranteed to be new enough either as this crate's MSRV
+keeps moving. Launchpad's build chroots have no network access, so the
+builder can only satisfy `Build-Depends: rustc (>= 1.94)` from an apt source
+that's actually configured for the chroot. Without one, every upload will
+sit as "Dependency wait" and never build.
 
 Fix this once per PPA, not per release: on your PPA's Launchpad page, go to
 **Admin -> Change details** and add a suitable Rust-toolchain PPA under
@@ -65,11 +68,22 @@ Ubuntu archive.
 
 There is no single Anthropic/Canonical-blessed PPA to point at here — pick
 one you trust (a well-maintained community Rust-toolchain PPA that tracks
-current stable releases for `noble`/`jammy`) or build/host your own if you
-want full control over supply chain. Whichever you choose, verify its
-`rustc`/`cargo` version actually satisfies `>= 1.94` for each series you
-target before relying on it, since anything added here runs on Launchpad's
-builders with upload rights into your PPA's build environment.
+current stable releases for the series you target) or build/host your own
+if you want full control over supply chain (see the "self-hosted toolchain
+PPA" note below). Whichever you choose, verify its `rustc`/`cargo` version
+actually satisfies `>= 1.94` for each series you target before relying on
+it, since anything added here runs on Launchpad's builders with upload
+rights into your PPA's build environment.
+
+**Self-hosted toolchain PPA (no third-party trust required):** repackage
+the official prebuilt `rustc`/`cargo` tarballs from
+`https://static.rust-lang.org/dist/` as a small Debian source package (one
+per target architecture) with a version/epoch high enough that apt prefers
+it over the archive's `rustc`, and upload that to a second PPA of your own
+(e.g. `<owner>/rust-toolchain`). Since it just repackages upstream binaries
+rather than compiling from source, the build itself has no network or
+compiler-version requirement. Add that PPA as this PPA's dependency as
+above.
 
 ### 5. GitHub repository secrets/variables
 
