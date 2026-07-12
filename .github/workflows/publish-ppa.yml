@@ -25,7 +25,7 @@ on:
       series:
         description: 'Comma-separated Ubuntu series to target'
         required: false
-        default: 'resolute,noble'
+        default: 'resolute'
 
 permissions:
   contents: read
@@ -60,7 +60,7 @@ jobs:
             exit 1
           fi
 
-          SERIES_CSV="${INPUT_SERIES:-noble,jammy}"
+          SERIES_CSV="${INPUT_SERIES:-resolute}"
           SERIES_JSON=$(printf '%s' "$SERIES_CSV" | tr ',' '\n' | jq -R . | jq -sc .)
           echo "series=$SERIES_JSON" >> "$GITHUB_OUTPUT"
 
