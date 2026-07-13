@@ -78,7 +78,7 @@ fn resolve_socket_addrs(
     struct DnsJob {
         host: String,
         port: u16,
-        reply: mpsc::Sender<Result<Vec<std::net::SocketAddr>, ()>>,
+        reply: mpsc::Sender<std::result::Result<Vec<std::net::SocketAddr>, ()>>,
     }
 
     static DNS_TX: OnceLock<mpsc::Sender<DnsJob>> = OnceLock::new();
