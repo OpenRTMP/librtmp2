@@ -1683,7 +1683,7 @@ mod tests {
         conn.transport = None;
         conn.state = ConnState::AppConnected;
         conn.last_ping_sent = Some(Instant::now() - PING_INTERVAL - Duration::from_millis(1));
-        for token in 1..=MAX_PENDING_PINGS {
+        for token in 1..=MAX_PENDING_PINGS as u32 {
             conn.pending_pings
                 .insert(token, Instant::now() - Duration::from_millis(100));
         }
