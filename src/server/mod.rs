@@ -481,6 +481,11 @@ impl Server {
         // Drive recv/processing for every connection.
         self.drain_pending_cache_evictions();
         for (i, conn) in self.connections.iter_mut().enumerate() {
+            if conn.session_setup_timed_out() {
+                conn.transport = None;
+                closed.push(i);
+                continue;
+            }
             let mut bytes_drained = 0usize;
             loop {
                 if bytes_drained >= MAX_RECV_BYTES_PER_CONN_PER_POLL {
@@ -1013,5 +1018,48 @@ mod tests {
         let _third = std::net::TcpStream::connect(&addr).unwrap();
         server.accept_new_connections();
         assert_eq!(server.connections.len(), 2);
+    }
+
+    #[test]
+    fn stale_pre_connect_sessions_are_closed_during_poll() {
+        use std::time::{Duration, Instant};
+
+        let config = ServerConfig {
+            max_connections: 4,
+            chunk_size: 128,
+            tls_enabled: 0,
+            tls_cert_file: std::ptr::null(),
+            tls_key_file: std::ptr::null(),
+            tls_ca_file: std::ptr::null(),
+            tls_insecure: 0,
+        };
+        let mut server = Server::new(config).unwrap();
+        server.listen("127.0.0.1:0").unwrap();
+
+        let port = {
+            let mut addr: libc::sockaddr_in = unsafe { std::mem::zeroed() };
+            let mut len = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
+            let rc = unsafe {
+                libc::getsockname(
+                    server.server_fd,
+                    &mut addr as *mut _ as *mut libc::sockaddr,
+                    &mut len,
+                )
+            };
+            assert_eq!(rc, 0);
+            u16::from_be(addr.sin_port)
+        };
+        let addr = format!("127.0.0.1:{port}");
+
+        let _stream = std::net::TcpStream::connect(&addr).unwrap();
+        server.accept_new_connections();
+        assert_eq!(server.connections.len(), 1);
+
+        server.connections[0].state = ConnState::Handshake;
+        server.connections[0]
+            .set_session_setup_started_for_test(Instant::now() - Duration::from_secs(11));
+
+        server.process_connections().unwrap();
+        assert_eq!(server.connections.len(), 0);
     }
 }
