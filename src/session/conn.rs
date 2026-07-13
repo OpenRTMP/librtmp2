@@ -935,10 +935,17 @@ impl Conn {
             return Ok(());
         }
 
+        let had_stale_ping = self
+            .pending_pings
+            .values()
+            .any(|sent| now.duration_since(*sent) >= PING_TIMEOUT);
         self.pending_pings
             .retain(|_, sent| now.duration_since(*sent) < PING_TIMEOUT);
+        if had_stale_ping {
+            return Err(ErrorCode::Protocol);
+        }
         if self.pending_pings.len() >= MAX_PENDING_PINGS {
-            return Ok(());
+            return Err(ErrorCode::Protocol);
         }
 
         let token = self.next_ping_token;
@@ -1650,6 +1657,22 @@ mod tests {
         assert!(
             matches!(ping(99), Err(ErrorCode::Protocol)),
             "9th ping in one second must be rejected"
+        );
+    }
+
+    #[test]
+    fn unanswered_ping_timeouts_close_connection() {
+        let mut conn = Conn::new();
+        conn.client_fd = 0;
+        conn.transport = None;
+        conn.state = ConnState::AppConnected;
+        conn.last_ping_sent = Some(Instant::now() - PING_TIMEOUT - Duration::from_secs(1));
+        conn.pending_pings
+            .insert(42, Instant::now() - PING_TIMEOUT - Duration::from_secs(1));
+
+        assert!(
+            matches!(conn.maybe_send_ping(), Err(ErrorCode::Protocol)),
+            "stale unanswered pings must fail the connection"
         );
     }
 

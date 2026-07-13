@@ -37,7 +37,7 @@ const MAX_RECV_BYTES_PER_POLL: usize = 256 * 1024;
 /// forcing the client through dozens of max-size junk commands before the
 /// expected response.
 const MAX_RECV_BYTES_PER_COMMAND_WAIT: usize = 256 * 1024;
-/// Maximum time to wait for the initial TCP connect before failing.
+/// Maximum time to wait for the initial TCP connect (and DNS resolution) before failing.
 const TCP_CONNECT_TIMEOUT_SECS: u64 = 10;
 /// `recv_buffer` holds raw wire bytes, not just message payloads, so the
 /// staging cap must budget for chunk-header overhead on top of the payload
@@ -65,6 +65,30 @@ const FIRST_CHUNK_EXTRA_OVERHEAD_BYTES: usize = 11;
 const MAX_RECV_BUFFER_BYTES: usize = MAX_RECV_BUFFER_PAYLOAD_BYTES
     + (MAX_RECV_BUFFER_PAYLOAD_BYTES / MIN_PRACTICAL_CHUNK_SIZE + 1) * MAX_CHUNK_HEADER_OVERHEAD_BYTES
     + 2 * FIRST_CHUNK_EXTRA_OVERHEAD_BYTES;
+
+/// Resolve `host:port` with a wall-clock deadline so DNS cannot block longer
+/// than the TCP connect budget.
+fn resolve_socket_addrs(
+    host: &str,
+    port: u16,
+    deadline: Instant,
+) -> Result<Vec<std::net::SocketAddr>, ErrorCode> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let host = host.to_string();
+    std::thread::spawn(move || {
+        let result = (host.as_str(), port)
+            .to_socket_addrs()
+            .map(|iter| iter.collect::<Vec<_>>());
+        let _ = tx.send(result);
+    });
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    match rx.recv_timeout(remaining) {
+        Ok(Ok(addrs)) if !addrs.is_empty() => Ok(addrs),
+        Ok(Ok(_)) | Ok(Err(_)) => Err(ErrorCode::Io),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(ErrorCode::Timeout),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(ErrorCode::Io),
+    }
+}
 
 /// Client connection states.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -144,10 +168,8 @@ impl Client {
         }
         self.reset_session_state();
 
-        let addrs = (host.as_str(), port)
-            .to_socket_addrs()
-            .map_err(|_| ErrorCode::Io)?;
         let deadline = Instant::now() + Duration::from_secs(TCP_CONNECT_TIMEOUT_SECS);
+        let addrs = resolve_socket_addrs(&host, port, deadline)?;
         let mut last_err_was_timeout = false;
         let mut stream = None;
         for addr in addrs {
