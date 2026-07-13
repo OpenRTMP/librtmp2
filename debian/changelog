@@ -1,3 +1,12 @@
+librtmp2 (0.3.1-1) UNRELEASED; urgency=medium
+
+  * Harden DNS resolution, RTMP ping keepalive, and publishing send-path
+    flush behavior on the client and server.
+  * Close stale pre-connect sessions and cap the shared DNS resolver queue
+    to prevent connection-slot exhaustion and unbounded resolver threads.
+
+ -- OpenRTMP <info@openrtmp.org>  Sun, 13 Jul 2026 00:00:00 +0000
+
 librtmp2 (0.3.0-1) UNRELEASED; urgency=medium
 
   * Initial Debian packaging for PPA publishing.

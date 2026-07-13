@@ -13,6 +13,8 @@ begin at `1.0.0`.
 
 ## [Unreleased]
 
+## [0.3.1] — 2026-07-13
+
 ### Fixed
 - `Client::connect()` DNS resolution now respects the TCP connect deadline
   instead of blocking indefinitely in the system resolver; lookups run on a
@@ -41,18 +43,11 @@ begin at `1.0.0`.
 - Publishing clients now poll for socket writability (`POLLOUT`) when queued
   pong bytes remain after a transient `EAGAIN`, so idle publishers can flush
   keepalive responses without sitting out the full read timeout.
-- `Transport::connect_tls()`'s new `ca_file` option (see 0.3.0 below) now
-  *replaces* the trust store instead of adding the caller's CA bundle to the
-  system default trust store — a custom CA is meant to restrict which peers
-  are trusted, not merely extend the existing set. Previously a publicly
-  trusted certificate for the same hostname would still pass even with a
-  private CA configured.
-- `insecure = true` no longer loads the system's default CA verify paths at
-  all, so `rtmps://` connections with verification intentionally disabled no
-  longer fail on hosts without a usable default CA store.
-- `lrtmp2_client_create()` now rejects (returns NULL for) a non-UTF-8
-  `tls_ca_file` path instead of silently discarding it and falling back to
-  default verification.
+- Publishing clients also poll `POLLOUT` when the send queue backs up during
+  media upload, and preserve the correct TLS poll direction when flushing
+  queued pong bytes after a transient `EAGAIN`.
+- Nonblocking publish sends now propagate `try_flush_send_buffer()` errors
+  instead of dropping flush failures on the floor.
 
 ### Security
 - Inbound peers that open TCP but never complete the AMF connect exchange
@@ -65,7 +60,7 @@ begin at `1.0.0`.
   detached resolver threads, and the shared resolver job queue is capped so
   wedged lookups cannot grow heap usage without bound.
 
-## [0.3.0] — 2026-07-11
+## [0.3.0] — 2026-07-12
 
 ### Fixed
 - `lrtmp2_client_create()` silently ignored `ServerConfig.tls_ca_file` and
@@ -74,6 +69,16 @@ begin at `1.0.0`.
   set to, even though the ABI documented them as controlling client TLS
   verification. `Client`/`Transport::connect_tls` now honor a caller-supplied
   CA bundle or an explicit opt-out of verification.
+- `Transport::connect_tls()`'s `ca_file` option now *replaces* the trust
+  store instead of adding the caller's CA bundle to the system default trust
+  store — a custom CA is meant to restrict which peers are trusted, not
+  merely extend the existing set.
+- `insecure = true` no longer loads the system's default CA verify paths at
+  all, so `rtmps://` connections with verification intentionally disabled no
+  longer fail on hosts without a usable default CA store.
+- `lrtmp2_client_create()` now rejects (returns NULL for) a non-UTF-8
+  `tls_ca_file` path instead of silently discarding it and falling back to
+  default verification.
 
 ### Changed
 - `Transport::connect_tls()` (Rust-only API, not part of the FFI ABI) gained
@@ -227,7 +232,9 @@ and others.
 - Protocol mapping documents for legacy, E-RTMP v1, and E-RTMP v2
 - `CONTRIBUTING.md` guidelines
 
-[Unreleased]: https://github.com/OpenRTMP/librtmp2/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/OpenRTMP/librtmp2/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/OpenRTMP/librtmp2/compare/v0.3.0...v0.3.1
+[0.3.0]: https://github.com/OpenRTMP/librtmp2/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/OpenRTMP/librtmp2/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/OpenRTMP/librtmp2/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/OpenRTMP/librtmp2/compare/v0.1.0...v0.1.1
