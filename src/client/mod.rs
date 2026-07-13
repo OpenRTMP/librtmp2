@@ -367,15 +367,11 @@ impl Client {
     /// Poll for incoming control traffic and flush queued outbound bytes.
     pub fn poll(&mut self, timeout_ms: i32) -> Result<()> {
         if self.state == ClientState::Publishing {
-            self.try_flush_send_buffer()?;
+            let send_poll_again = self.try_flush_send_buffer()?;
             if self.send_buffer.available() > 0 {
                 if let Some(t) = self.transport.as_ref() {
-                    let mut pfd = libc::pollfd {
-                        fd: t.fd(),
-                        events: libc::POLLOUT,
-                        revents: 0,
-                    };
-                    unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
+                    let again = send_poll_again.unwrap_or(2);
+                    poll_for_transport_direction(t.fd(), again, timeout_ms)?;
                 }
                 self.try_flush_send_buffer()?;
             }
@@ -579,19 +575,32 @@ impl Client {
         Ok(())
     }
 
-    fn try_flush_send_buffer(&mut self) -> Result<()> {
+    /// Flush queued outbound bytes without blocking.
+    ///
+    /// Returns the poll direction reported by the last `try_send` when bytes
+    /// remain queued (1 = `POLLIN` for TLS WANT_READ, 2 = `POLLOUT`).
+    fn try_flush_send_buffer(&mut self) -> Result<Option<i32>> {
+        let mut poll_again = None;
         while self.send_buffer.available() > 0 {
             let Some(ref mut transport) = self.transport else {
                 break;
             };
             let pending = self.send_buffer.peek();
-            let n = transport.try_send(pending, &mut 0i32)?;
+            let mut again = 0i32;
+            let n = transport.try_send(pending, &mut again)?;
             if n == 0 {
+                if again != 0 {
+                    poll_again = Some(again);
+                }
                 break;
             }
             self.send_buffer.drain(n);
         }
-        Ok(())
+        Ok(if self.send_buffer.available() > 0 {
+            poll_again
+        } else {
+            None
+        })
     }
 
     fn send_user_control_message(&mut self, payload: &[u8]) -> Result<()> {
