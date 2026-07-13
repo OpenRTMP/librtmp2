@@ -4,7 +4,7 @@
 
 use std::net::{TcpStream, ToSocketAddrs};
 use std::os::unix::io::IntoRawFd;
-use std::sync::{mpsc, OnceLock};
+use std::sync::{mpsc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::buffer::Buffer;
@@ -84,9 +84,12 @@ fn resolve_socket_addrs(
         reply: mpsc::Sender<std::result::Result<Vec<std::net::SocketAddr>, ()>>,
     }
 
-    static DNS_TX: OnceLock<std::result::Result<mpsc::SyncSender<DnsJob>, ()>> = OnceLock::new();
-    let tx = DNS_TX
-        .get_or_init(|| {
+    static DNS_TX: Mutex<Option<mpsc::SyncSender<DnsJob>>> = Mutex::new(None);
+    let tx = {
+        let mut guard = DNS_TX.lock().map_err(|_| ErrorCode::Internal)?;
+        if let Some(tx) = guard.as_ref() {
+            tx.clone()
+        } else {
             let (job_tx, job_rx) = mpsc::sync_channel::<DnsJob>(MAX_DNS_QUEUE_DEPTH);
             std::thread::Builder::new()
                 .name("lrtmp2-dns".into())
@@ -99,11 +102,11 @@ fn resolve_socket_addrs(
                         let _ = job.reply.send(result);
                     }
                 })
-                .map(|_| job_tx)
-                .map_err(|_| ())
-        })
-        .as_ref()
-        .map_err(|_| ErrorCode::Internal)?;
+                .map_err(|_| ErrorCode::Internal)?;
+            *guard = Some(job_tx.clone());
+            job_tx
+        }
+    };
 
     let (reply_tx, reply_rx) = mpsc::channel();
     tx.try_send(DnsJob {
@@ -323,7 +326,8 @@ impl Client {
         if self.state != ClientState::Publishing {
             return Err(ErrorCode::Protocol);
         }
-        self.service_inbound_nonblocking()?;
+        self.try_flush_send_buffer()?;
+        self.service_inbound(0)?;
         if payload.len() > MAX_CLIENT_FRAME_BYTES {
             return Err(ErrorCode::Protocol);
         }
@@ -360,12 +364,19 @@ impl Client {
         Ok(())
     }
 
-    /// Poll for incoming data while playing.
+    /// Poll for incoming control traffic and flush queued outbound bytes.
     pub fn poll(&mut self, timeout_ms: i32) -> Result<()> {
+        if self.state == ClientState::Publishing {
+            self.try_flush_send_buffer()?;
+            self.service_inbound(timeout_ms)?;
+            self.try_flush_send_buffer()?;
+            return Ok(());
+        }
         if self.state != ClientState::Playing {
             return Err(ErrorCode::Protocol);
         }
 
+        self.try_flush_send_buffer()?;
         // Scope the mutable transport borrow to the recv phase only.
         let (poll_fd, has_buffered_tls_data) = {
             let Some(t) = self.transport.as_ref() else {
@@ -456,6 +467,7 @@ impl Client {
 
         self.drain_ready_messages(&mut messages_processed)?;
 
+        self.try_flush_send_buffer()?;
         Ok(())
     }
 
@@ -591,8 +603,8 @@ impl Client {
         Ok(())
     }
 
-    /// Drain inbound RTMP control messages (pings, chunk-size) without blocking.
-    fn service_inbound_nonblocking(&mut self) -> Result<()> {
+    /// Drain inbound RTMP control messages (pings, chunk-size).
+    fn service_inbound(&mut self, timeout_ms: i32) -> Result<()> {
         let Some(t) = self.transport.as_ref() else {
             return Ok(());
         };
@@ -607,7 +619,7 @@ impl Client {
                 events: libc::POLLIN,
                 revents: 0,
             };
-            let rc = unsafe { libc::poll(&mut pfd, 1, 0) };
+            let rc = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
             if rc <= 0 {
                 return Ok(());
             }
@@ -1163,6 +1175,35 @@ mod tests {
         assert!(
             out[..n].windows(2).any(|w| w == ping_response),
             "send_frame_payload should answer inbound pings before sending media"
+        );
+    }
+
+    #[test]
+    fn publishing_poll_services_inbound_pings() {
+        use std::io::{Read, Write};
+        use std::os::unix::io::IntoRawFd;
+        use std::os::unix::net::UnixStream;
+
+        let (client_end, mut peer) = UnixStream::pair().unwrap();
+        client_end.set_nonblocking(true).unwrap();
+
+        let mut client = Client::new();
+        client.chunk_reg.init();
+        client.state = ClientState::Publishing;
+        client.stream_id = 1;
+        client.transport = Some(Transport::new_plain(client_end.into_raw_fd()));
+
+        peer.write_all(&rtmp_user_control_ping_chunk(88)).unwrap();
+
+        client.poll(0).unwrap();
+
+        let mut out = [0u8; 512];
+        let n = peer.read(&mut out).unwrap();
+        assert!(n > 0);
+        let ping_response = control::UCTRL_PING_RESPONSE.to_be_bytes();
+        assert!(
+            out[..n].windows(2).any(|w| w == ping_response),
+            "publishing poll should answer inbound pings for idle publishers"
         );
     }
 

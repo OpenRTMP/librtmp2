@@ -31,7 +31,13 @@ begin at `1.0.0`.
 - Server-side ping RTT tracking starts only after the ping has fully left
   `send_buffer`; unflushed pings queued behind a slow reader no longer start
   the timeout early, and pings stuck unflushed longer than `PING_TIMEOUT`
-  now close the connection.
+  now close the connection. RTT timing now tracks the ping's own queued byte
+  range instead of waiting for the entire `send_buffer` to drain, so prompt
+  ping responses are not discarded when later media remains queued.
+- `Client::poll()` now works while publishing to service inbound pings and
+  retry queued ping responses after transient `EAGAIN`, and the shared DNS
+  worker is re-created after a transient thread-spawn failure instead of
+  permanently caching the error in a `OnceLock`.
 - `Transport::connect_tls()`'s new `ca_file` option (see 0.3.0 below) now
   *replaces* the trust store instead of adding the caller's CA bundle to the
   system default trust store — a custom CA is meant to restrict which peers
