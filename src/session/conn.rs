@@ -121,6 +121,8 @@ pub struct Conn {
     /// Last measured client↔server RTT in milliseconds (RTMP UserControl ping).
     pub rtt_ms: f64,
     pending_pings: HashMap<u32, Instant>,
+    /// Ping queued in `send_buffer` but not yet fully flushed; `(token, wire_len)`.
+    queued_ping: Option<(u32, usize)>,
     last_ping_sent: Option<Instant>,
     next_ping_token: u32,
     inbound_ping_responses: usize,
@@ -187,6 +189,7 @@ impl Conn {
             pending_cache_evictions: Vec::new(),
             rtt_ms: 0.0,
             pending_pings: HashMap::new(),
+            queued_ping: None,
             last_ping_sent: None,
             next_ping_token: 1,
             inbound_ping_responses: 0,
@@ -944,14 +947,16 @@ impl Conn {
         if had_stale_ping {
             return Err(ErrorCode::Protocol);
         }
-        if self.pending_pings.len() >= MAX_PENDING_PINGS {
+        if self.pending_pings.len() + usize::from(self.queued_ping.is_some()) >= MAX_PENDING_PINGS {
             return Err(ErrorCode::Protocol);
         }
 
         let token = self.next_ping_token;
         self.next_ping_token = self.next_ping_token.wrapping_add(1);
+        let before = self.send_buffer.available();
         self.send_user_control_ping_request(token)?;
-        self.pending_pings.insert(token, now);
+        let ping_len = self.send_buffer.available().saturating_sub(before);
+        self.queued_ping = Some((token, ping_len));
         self.last_ping_sent = Some(now);
         Ok(())
     }
@@ -1194,9 +1199,11 @@ impl Conn {
 
     pub fn flush(&mut self) -> Result<()> {
         if self.client_fd < 0 || self.send_buffer.available() == 0 {
+            self.commit_flushed_ping();
             return Ok(());
         }
         let Some(ref mut transport) = self.transport else {
+            self.commit_flushed_ping();
             return Ok(());
         };
         while self.send_buffer.available() > 0 {
@@ -1207,7 +1214,18 @@ impl Conn {
             }
             self.send_buffer.drain(n);
         }
+        self.commit_flushed_ping();
         Ok(())
+    }
+
+    fn commit_flushed_ping(&mut self) {
+        let Some((token, ping_len)) = self.queued_ping else {
+            return;
+        };
+        if self.send_buffer.available() < ping_len {
+            self.pending_pings.insert(token, Instant::now());
+            self.queued_ping = None;
+        }
     }
 
     pub fn send_frame(
@@ -1692,6 +1710,32 @@ mod tests {
             matches!(conn.maybe_send_ping(), Err(ErrorCode::Protocol)),
             "too many unanswered pings must fail the connection"
         );
+    }
+
+    #[test]
+    fn ping_timeout_starts_after_flush_not_queue() {
+        use std::os::unix::io::IntoRawFd;
+        use std::os::unix::net::UnixStream;
+
+        let (client_end, _peer) = UnixStream::pair().unwrap();
+        client_end.set_nonblocking(true).unwrap();
+
+        let mut conn = Conn::new();
+        conn.client_fd = 0;
+        conn.state = ConnState::AppConnected;
+        conn.transport = Some(Transport::new_plain(client_end.into_raw_fd()));
+        conn.send_buffer.write(b"backlog").unwrap();
+
+        conn.maybe_send_ping().unwrap();
+        assert!(
+            conn.pending_pings.is_empty(),
+            "unflushed ping must not start the RTT timeout"
+        );
+        assert!(conn.queued_ping.is_some());
+
+        conn.flush().unwrap();
+        assert_eq!(conn.pending_pings.len(), 1);
+        assert!(conn.queued_ping.is_none());
     }
 
     #[test]

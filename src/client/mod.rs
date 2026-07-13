@@ -303,7 +303,6 @@ impl Client {
         if self.state != ClientState::Publishing {
             return Err(ErrorCode::Protocol);
         }
-        self.service_inbound_nonblocking()?;
         let payload = self.frame_payload_slice(frame)?;
         self.send_frame_payload(frame.frame_type, frame.timestamp, payload)
     }
@@ -318,6 +317,7 @@ impl Client {
         if self.state != ClientState::Publishing {
             return Err(ErrorCode::Protocol);
         }
+        self.service_inbound_nonblocking()?;
         if payload.len() > MAX_CLIENT_FRAME_BYTES {
             return Err(ErrorCode::Protocol);
         }
@@ -583,7 +583,14 @@ impl Client {
         }
 
         let mut buf = [0u8; 4096];
+        let mut bytes_drained = 0usize;
         loop {
+            if bytes_drained >= MAX_RECV_BYTES_PER_POLL {
+                break;
+            }
+            if messages_processed >= MAX_MESSAGES_PER_POLL {
+                break;
+            }
             let (n, again) = {
                 let Some(t) = self.transport.as_mut() else {
                     return Ok(());
@@ -606,10 +613,13 @@ impl Client {
                     .recv_buffer
                     .write(&buf[..chunk_len])
                     .map_err(|_| ErrorCode::Internal)?;
+                bytes_drained += chunk_len;
                 self.drain_ready_messages(&mut messages_processed)?;
             } else if n == 0 {
                 return Err(ErrorCode::Io);
-            } else if again == 0 {
+            } else if again == 2 {
+                break;
+            } else {
                 break;
             }
         }
