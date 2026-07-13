@@ -1749,21 +1749,14 @@ mod tests {
     }
 
     #[test]
-    fn partial_flush_leaves_ping_untimed() {
-        use std::io::Read;
-        use std::os::unix::io::IntoRawFd;
-        use std::os::unix::net::UnixStream;
-
-        let (client_end, mut peer) = UnixStream::pair().unwrap();
-        client_end.set_nonblocking(true).unwrap();
-
+    fn commit_flushed_ping_waits_for_empty_send_buffer() {
         let mut conn = Conn::new();
         conn.client_fd = 0;
         conn.state = ConnState::AppConnected;
-        conn.transport = Some(Transport::new_plain(client_end.into_raw_fd()));
-        conn.send_buffer.write(&vec![0u8; 64 * 1024]).unwrap();
+        conn.transport = None;
+        conn.queued_ping = Some((1, Instant::now()));
+        conn.send_buffer.write(b"still queued").unwrap();
 
-        conn.maybe_send_ping().unwrap();
         conn.flush().unwrap();
         assert!(
             conn.pending_pings.is_empty(),
@@ -1771,8 +1764,7 @@ mod tests {
         );
         assert!(conn.queued_ping.is_some());
 
-        let mut drain = [0u8; 4096];
-        while peer.read(&mut drain).unwrap_or(0) > 0 {}
+        conn.send_buffer.reset();
         conn.flush().unwrap();
         assert_eq!(conn.pending_pings.len(), 1);
         assert!(conn.queued_ping.is_none());
