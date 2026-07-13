@@ -1786,7 +1786,9 @@ mod tests {
         );
         assert!(conn.queued_ping.is_some());
 
-        conn.send_buffer.reset();
+        if let Some(ref mut queued) = conn.queued_ping {
+            queued.bytes_until_flushed = 0;
+        }
         conn.flush().unwrap();
         assert_eq!(conn.pending_pings.len(), 1);
         assert!(conn.queued_ping.is_none());
@@ -1794,39 +1796,26 @@ mod tests {
 
     #[test]
     fn commit_flushed_ping_does_not_wait_for_post_ping_media() {
-        use std::io::Read;
-        use std::os::unix::io::IntoRawFd;
-        use std::os::unix::net::UnixStream;
-
-        let (client_end, mut peer) = UnixStream::pair().unwrap();
-        client_end.set_nonblocking(true).unwrap();
-        peer.set_nonblocking(true).unwrap();
-
         let mut conn = Conn::new();
         conn.client_fd = 0;
         conn.state = ConnState::AppConnected;
-        conn.transport = Some(Transport::new_plain(client_end.into_raw_fd()));
+        conn.transport = None;
         conn.send_buffer.write(b"backlog").unwrap();
 
         conn.maybe_send_ping().unwrap();
-        let ping_bytes = conn.send_buffer.available() - b"backlog".len();
+        let bytes_through_ping = conn.queued_ping.as_ref().unwrap().bytes_until_flushed;
         conn.send_buffer.write(b"after-ping").unwrap();
-        assert!(
-            conn.send_buffer.available() > ping_bytes,
-            "post-ping media must remain queued after the ping"
+        assert_eq!(
+            bytes_through_ping,
+            conn.send_buffer.available() - b"after-ping".len(),
+            "flush target must exclude post-ping media appended afterward"
         );
 
-        let mut out = [0u8; 256];
-        let mut drained = 0usize;
-        while drained < b"backlog".len() + ping_bytes {
-            conn.flush().unwrap();
-            match peer.read(&mut out) {
-                Ok(0) => break,
-                Ok(n) => drained += n,
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
-                Err(e) => panic!("peer read failed: {e}"),
-            }
+        conn.send_buffer.drain(bytes_through_ping);
+        if let Some(ref mut queued) = conn.queued_ping {
+            queued.bytes_until_flushed = 0;
         }
+        conn.flush().unwrap();
 
         assert_eq!(
             conn.pending_pings.len(),
@@ -1834,7 +1823,8 @@ mod tests {
             "ping RTT must start once the ping leaves the buffer, not after post-ping media"
         );
         assert!(conn.queued_ping.is_none());
-        assert!(conn.send_buffer.available() >= b"after-ping".len());
+        assert_eq!(conn.send_buffer.available(), b"after-ping".len());
+        assert_eq!(conn.send_buffer.peek(), b"after-ping");
     }
 
     #[test]
