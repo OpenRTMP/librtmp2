@@ -615,7 +615,8 @@ impl Client {
 
     fn send_user_control_message_nonblocking(&mut self, payload: &[u8]) -> Result<()> {
         self.queue_user_control_message(payload)?;
-        self.try_flush_send_buffer()
+        self.try_flush_send_buffer()?;
+        Ok(())
     }
 
     fn handle_user_control(&mut self, payload: &[u8]) -> Result<()> {
