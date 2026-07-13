@@ -45,6 +45,11 @@ const MAX_PENDING_PINGS: usize = 4;
 /// outbound bandwidth/CPU amplification from unauthenticated peers.
 const MAX_INBOUND_PING_RESPONSES: usize = 8;
 const INBOUND_PING_WINDOW: Duration = Duration::from_secs(1);
+/// Close inbound sessions that never complete the AMF `connect` exchange.
+/// Matches the RTMPS accept deadline so a peer cannot hold a connection slot
+/// indefinitely with a partial legacy handshake or an idle post-handshake TCP
+/// session.
+pub(crate) const RTMP_SESSION_SETUP_TIMEOUT: Duration = Duration::from_secs(10);
 /// Cap sub-tags unpacked from a single Aggregate message (mirrors
 /// `message::message::MAX_AGGREGATE_SUBTAGS`).
 const MAX_AGGREGATE_SUBTAGS: usize = 4096;
@@ -130,6 +135,9 @@ pub struct Conn {
     /// `recv(&[])`) until this clears, or a batch that exceeds the budget can
     /// sit unprocessed until the peer happens to send more bytes.
     budget_exhausted: bool,
+    /// When this inbound TCP session was accepted. Used to reap peers that
+    /// never progress past the legacy handshake / AMF connect setup.
+    session_setup_started: Instant,
 }
 
 impl Conn {
@@ -185,7 +193,20 @@ impl Conn {
             inbound_ping_window_start: None,
             frame_cb_scratch: Vec::new(),
             budget_exhausted: false,
+            session_setup_started: Instant::now(),
         }
+    }
+
+    /// True when an inbound peer has held a connection slot without reaching
+    /// `AppConnected` for longer than [`RTMP_SESSION_SETUP_TIMEOUT`].
+    pub fn session_setup_timed_out(&self) -> bool {
+        self.state < ConnState::AppConnected
+            && self.session_setup_started.elapsed() >= RTMP_SESSION_SETUP_TIMEOUT
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_session_setup_started_for_test(&mut self, started: Instant) {
+        self.session_setup_started = started;
     }
 
     /// True if the last `recv`/`process` pass stopped early because the
