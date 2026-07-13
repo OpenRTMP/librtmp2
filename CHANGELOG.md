@@ -14,6 +14,24 @@ begin at `1.0.0`.
 ## [Unreleased]
 
 ### Fixed
+- `Client::connect()` DNS resolution now respects the TCP connect deadline
+  instead of blocking indefinitely in the system resolver; lookups run on a
+  single shared worker thread with a bounded job queue, and worker startup
+  failures return `ErrorCode::Internal` instead of panicking.
+- `send_frame_payload()` and `lrtmp2_client_send_frame` now service inbound
+  RTMP UserControl ping requests before sending media, so in-tree clients
+  stay connected when the server enforces ping timeouts.
+- Ping responses issued while draining inbound messages during `poll()` or
+  publishing now use nonblocking `try_send` instead of blocking
+  `Transport::send()`, so a zero-timeout poll cannot stall for up to 10
+  seconds on a peer that stops reading.
+- `service_inbound_nonblocking()` now honors the same per-poll byte and
+  message budgets as `poll()`, and stops reading on transient EAGAIN instead
+  of spinning until the socket blocks.
+- Server-side ping RTT tracking starts only after the ping has fully left
+  `send_buffer`; unflushed pings queued behind a slow reader no longer start
+  the timeout early, and pings stuck unflushed longer than `PING_TIMEOUT`
+  now close the connection.
 - `Transport::connect_tls()`'s new `ca_file` option (see 0.3.0 below) now
   *replaces* the trust store instead of adding the caller's CA bundle to the
   system default trust store — a custom CA is meant to restrict which peers
@@ -26,6 +44,13 @@ begin at `1.0.0`.
 - `lrtmp2_client_create()` now rejects (returns NULL for) a non-UTF-8
   `tls_ca_file` path instead of silently discarding it and falling back to
   default verification.
+
+### Security
+- Server connections with unanswered or stale outbound RTMP pings are now
+  closed instead of accumulating indefinitely in `pending_pings`.
+- DNS lookups abandoned after the connect deadline no longer spawn unbounded
+  detached resolver threads, and the shared resolver job queue is capped so
+  wedged lookups cannot grow heap usage without bound.
 
 ## [0.3.0] — 2026-07-11
 

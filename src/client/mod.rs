@@ -4,6 +4,7 @@
 
 use std::net::{TcpStream, ToSocketAddrs};
 use std::os::unix::io::IntoRawFd;
+use std::sync::{mpsc, OnceLock};
 use std::time::{Duration, Instant};
 
 use crate::buffer::Buffer;
@@ -37,7 +38,7 @@ const MAX_RECV_BYTES_PER_POLL: usize = 256 * 1024;
 /// forcing the client through dozens of max-size junk commands before the
 /// expected response.
 const MAX_RECV_BYTES_PER_COMMAND_WAIT: usize = 256 * 1024;
-/// Maximum time to wait for the initial TCP connect before failing.
+/// Maximum time to wait for the initial TCP connect (and DNS resolution) before failing.
 const TCP_CONNECT_TIMEOUT_SECS: u64 = 10;
 /// `recv_buffer` holds raw wire bytes, not just message payloads, so the
 /// staging cap must budget for chunk-header overhead on top of the payload
@@ -65,6 +66,61 @@ const FIRST_CHUNK_EXTRA_OVERHEAD_BYTES: usize = 11;
 const MAX_RECV_BUFFER_BYTES: usize = MAX_RECV_BUFFER_PAYLOAD_BYTES
     + (MAX_RECV_BUFFER_PAYLOAD_BYTES / MIN_PRACTICAL_CHUNK_SIZE + 1) * MAX_CHUNK_HEADER_OVERHEAD_BYTES
     + 2 * FIRST_CHUNK_EXTRA_OVERHEAD_BYTES;
+
+/// Max DNS jobs waiting on the shared resolver thread.
+const MAX_DNS_QUEUE_DEPTH: usize = 32;
+
+/// Resolve `host:port` with a wall-clock deadline so DNS cannot block longer
+/// than the TCP connect budget. Lookups run on a single shared worker thread
+/// so timed-out requests do not spawn unbounded detached resolver threads.
+fn resolve_socket_addrs(
+    host: &str,
+    port: u16,
+    deadline: Instant,
+) -> Result<Vec<std::net::SocketAddr>> {
+    struct DnsJob {
+        host: String,
+        port: u16,
+        reply: mpsc::Sender<std::result::Result<Vec<std::net::SocketAddr>, ()>>,
+    }
+
+    static DNS_TX: OnceLock<std::result::Result<mpsc::SyncSender<DnsJob>, ()>> = OnceLock::new();
+    let tx = DNS_TX
+        .get_or_init(|| {
+            let (job_tx, job_rx) = mpsc::sync_channel::<DnsJob>(MAX_DNS_QUEUE_DEPTH);
+            std::thread::Builder::new()
+                .name("lrtmp2-dns".into())
+                .spawn(move || {
+                    while let Ok(job) = job_rx.recv() {
+                        let result = (job.host.as_str(), job.port)
+                            .to_socket_addrs()
+                            .map(|iter| iter.collect::<Vec<_>>())
+                            .map_err(|_| ());
+                        let _ = job.reply.send(result);
+                    }
+                })
+                .map(|_| job_tx)
+                .map_err(|_| ())
+        })
+        .as_ref()
+        .map_err(|_| ErrorCode::Internal)?;
+
+    let (reply_tx, reply_rx) = mpsc::channel();
+    tx.try_send(DnsJob {
+        host: host.to_string(),
+        port,
+        reply: reply_tx,
+    })
+    .map_err(|_| ErrorCode::Internal)?;
+
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    match reply_rx.recv_timeout(remaining) {
+        Ok(Ok(addrs)) if !addrs.is_empty() => Ok(addrs),
+        Ok(Ok(_)) | Ok(Err(_)) => Err(ErrorCode::Io),
+        Err(mpsc::RecvTimeoutError::Timeout) => Err(ErrorCode::Timeout),
+        Err(mpsc::RecvTimeoutError::Disconnected) => Err(ErrorCode::Io),
+    }
+}
 
 /// Client connection states.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -144,10 +200,8 @@ impl Client {
         }
         self.reset_session_state();
 
-        let addrs = (host.as_str(), port)
-            .to_socket_addrs()
-            .map_err(|_| ErrorCode::Io)?;
         let deadline = Instant::now() + Duration::from_secs(TCP_CONNECT_TIMEOUT_SECS);
+        let addrs = resolve_socket_addrs(&host, port, deadline)?;
         let mut last_err_was_timeout = false;
         let mut stream = None;
         for addr in addrs {
@@ -269,6 +323,7 @@ impl Client {
         if self.state != ClientState::Publishing {
             return Err(ErrorCode::Protocol);
         }
+        self.service_inbound_nonblocking()?;
         if payload.len() > MAX_CLIENT_FRAME_BYTES {
             return Err(ErrorCode::Protocol);
         }
@@ -435,6 +490,13 @@ impl Client {
                         if let Ok(cs) = control::read_set_chunk_size(payload) {
                             self.chunk_reg.set_all_chunk_size(cs);
                         }
+                    } else if msg.msg_type_id == msg_dispatch::RTMP_MSG_USER_CONTROL {
+                        let payload = if payload_ptr.is_null() || payload_len == 0 {
+                            &[][..]
+                        } else {
+                            unsafe { std::slice::from_raw_parts(payload_ptr, payload_len) }
+                        };
+                        self.handle_user_control(payload)?;
                     } else if msg.msg_type_id == msg_dispatch::RTMP_MSG_AUDIO
                         || msg.msg_type_id == msg_dispatch::RTMP_MSG_VIDEO
                     {
@@ -468,6 +530,132 @@ impl Client {
     }
 
     // ── Internal helpers ──
+
+    fn queue_user_control_message(&mut self, payload: &[u8]) -> Result<()> {
+        let mut cmsg = ChunkMessage::default();
+        cmsg.csid = 2;
+        cmsg.fmt = 0;
+        cmsg.msg_length = payload.len() as u32;
+        cmsg.msg_type_id = msg_dispatch::RTMP_MSG_USER_CONTROL;
+        cmsg.msg_stream_id = 0;
+        chunk_write(
+            &mut self.send_buffer,
+            &cmsg,
+            payload,
+            payload.len(),
+            128,
+        )?;
+        Ok(())
+    }
+
+    fn try_flush_send_buffer(&mut self) -> Result<()> {
+        while self.send_buffer.available() > 0 {
+            let Some(ref mut transport) = self.transport else {
+                break;
+            };
+            let pending = self.send_buffer.peek();
+            let n = transport.try_send(pending, &mut 0i32)?;
+            if n == 0 {
+                break;
+            }
+            self.send_buffer.drain(n);
+        }
+        Ok(())
+    }
+
+    fn send_user_control_message(&mut self, payload: &[u8]) -> Result<()> {
+        self.queue_user_control_message(payload)?;
+        let data = self.send_buffer.peek().to_vec();
+        if let Some(ref mut transport) = self.transport {
+            transport.send(&data)?;
+        }
+        self.send_buffer.reset();
+        Ok(())
+    }
+
+    fn send_user_control_message_nonblocking(&mut self, payload: &[u8]) -> Result<()> {
+        self.queue_user_control_message(payload)?;
+        self.try_flush_send_buffer()
+    }
+
+    fn handle_user_control(&mut self, payload: &[u8]) -> Result<()> {
+        if payload.len() < 6 {
+            return Ok(());
+        }
+        let (event_type, param1, _) = control::read_user_control(payload, false)?;
+        if event_type == control::UCTRL_PING_REQUEST {
+            let mut buf = Buffer::with_capacity(6);
+            control::write_user_control_ping_response(&mut buf, param1)?;
+            self.send_user_control_message_nonblocking(buf.as_slice())?;
+        }
+        Ok(())
+    }
+
+    /// Drain inbound RTMP control messages (pings, chunk-size) without blocking.
+    fn service_inbound_nonblocking(&mut self) -> Result<()> {
+        let Some(t) = self.transport.as_ref() else {
+            return Ok(());
+        };
+        let poll_fd = t.fd();
+        let has_buffered_tls_data = t.pending() > 0;
+        let mut messages_processed = 0usize;
+        self.drain_ready_messages(&mut messages_processed)?;
+
+        if messages_processed == 0 && !has_buffered_tls_data {
+            let mut pfd = libc::pollfd {
+                fd: poll_fd,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let rc = unsafe { libc::poll(&mut pfd, 1, 0) };
+            if rc <= 0 {
+                return Ok(());
+            }
+        }
+
+        let mut buf = [0u8; 4096];
+        let mut bytes_drained = 0usize;
+        loop {
+            if bytes_drained >= MAX_RECV_BYTES_PER_POLL {
+                break;
+            }
+            if messages_processed >= MAX_MESSAGES_PER_POLL {
+                break;
+            }
+            let (n, again) = {
+                let Some(t) = self.transport.as_mut() else {
+                    return Ok(());
+                };
+                let mut again = 0i32;
+                let n = t.recv(&mut buf, &mut again);
+                (n, again)
+            };
+            if n > 0 {
+                let chunk_len = n as usize;
+                if self
+                    .recv_buffer
+                    .available()
+                    .saturating_add(chunk_len)
+                    > MAX_RECV_BUFFER_BYTES
+                {
+                    return Err(ErrorCode::Protocol);
+                }
+                self
+                    .recv_buffer
+                    .write(&buf[..chunk_len])
+                    .map_err(|_| ErrorCode::Internal)?;
+                bytes_drained += chunk_len;
+                self.drain_ready_messages(&mut messages_processed)?;
+            } else if n == 0 {
+                return Err(ErrorCode::Io);
+            } else if again == 2 {
+                break;
+            } else {
+                break;
+            }
+        }
+        Ok(())
+    }
 
     fn frame_payload_slice<'a>(&self, frame: &'a Frame) -> Result<&'a [u8]> {
         if frame.size == 0 {
@@ -589,6 +777,10 @@ impl Client {
                         if let Ok(cs) = control::read_set_chunk_size(&payload) {
                             self.chunk_reg.set_all_chunk_size(cs);
                         }
+                        continue;
+                    }
+                    if msg.msg_type_id == msg_dispatch::RTMP_MSG_USER_CONTROL {
+                        self.handle_user_control(&payload)?;
                         continue;
                     }
                     return Ok((msg, payload));
@@ -747,6 +939,28 @@ impl Drop for Client {
 mod tests {
     use super::*;
 
+    fn rtmp_user_control_ping_chunk(token: u32) -> Vec<u8> {
+        let mut payload = Buffer::with_capacity(6);
+        control::write_user_control_ping_request(&mut payload, token).unwrap();
+        let payload_len = payload.available();
+        let mut wire = Buffer::new();
+        let mut cmsg = ChunkMessage::default();
+        cmsg.csid = 2;
+        cmsg.fmt = 0;
+        cmsg.msg_length = payload_len as u32;
+        cmsg.msg_type_id = msg_dispatch::RTMP_MSG_USER_CONTROL;
+        cmsg.msg_stream_id = 0;
+        chunk_write(
+            &mut wire,
+            &cmsg,
+            payload.as_slice(),
+            payload_len,
+            128,
+        )
+        .unwrap();
+        wire.peek().to_vec()
+    }
+
     #[test]
     fn recv_budget_is_at_least_one_socket_read() {
         assert!(MAX_RECV_BYTES_PER_POLL >= 65536);
@@ -891,6 +1105,65 @@ mod tests {
             .connect(&format!("rtmp://127.0.0.1:{port}/live/stream"))
             .unwrap_err();
         assert_eq!(err, ErrorCode::Io);
+    }
+
+    #[test]
+    fn inbound_ping_requests_are_answered() {
+        use std::io::Read;
+        use std::os::unix::io::IntoRawFd;
+        use std::os::unix::net::UnixStream;
+
+        let (client_end, mut peer) = UnixStream::pair().unwrap();
+        client_end.set_nonblocking(true).unwrap();
+        peer.set_nonblocking(true).unwrap();
+
+        let mut client = Client::new();
+        client.state = ClientState::AppConnected;
+        client.transport = Some(Transport::new_plain(client_end.into_raw_fd()));
+
+        let mut ping = Buffer::with_capacity(6);
+        control::write_user_control_ping_request(&mut ping, 99).unwrap();
+        client.handle_user_control(ping.as_slice()).unwrap();
+
+        let mut out = [0u8; 256];
+        let n = peer.read(&mut out).unwrap();
+        assert!(n > 0);
+        let ping_response = control::UCTRL_PING_RESPONSE.to_be_bytes();
+        assert!(
+            out[..n].windows(2).any(|w| w == ping_response),
+            "peer should receive a UserControl ping response"
+        );
+    }
+
+    #[test]
+    fn send_frame_payload_services_inbound_pings() {
+        use std::io::{Read, Write};
+        use std::os::unix::io::IntoRawFd;
+        use std::os::unix::net::UnixStream;
+
+        let (client_end, mut peer) = UnixStream::pair().unwrap();
+        client_end.set_nonblocking(true).unwrap();
+
+        let mut client = Client::new();
+        client.chunk_reg.init();
+        client.state = ClientState::Publishing;
+        client.stream_id = 1;
+        client.transport = Some(Transport::new_plain(client_end.into_raw_fd()));
+
+        peer.write_all(&rtmp_user_control_ping_chunk(77)).unwrap();
+
+        client
+            .send_frame_payload(FrameType::Video, 0, &[0x17, 0x00])
+            .unwrap();
+
+        let mut out = [0u8; 512];
+        let n = peer.read(&mut out).unwrap();
+        assert!(n > 0);
+        let ping_response = control::UCTRL_PING_RESPONSE.to_be_bytes();
+        assert!(
+            out[..n].windows(2).any(|w| w == ping_response),
+            "send_frame_payload should answer inbound pings before sending media"
+        );
     }
 
     #[test]

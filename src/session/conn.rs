@@ -121,6 +121,8 @@ pub struct Conn {
     /// Last measured client↔server RTT in milliseconds (RTMP UserControl ping).
     pub rtt_ms: f64,
     pending_pings: HashMap<u32, Instant>,
+    /// Ping queued in `send_buffer` but not yet fully flushed; `(token, queued_at)`.
+    queued_ping: Option<(u32, Instant)>,
     last_ping_sent: Option<Instant>,
     next_ping_token: u32,
     inbound_ping_responses: usize,
@@ -187,6 +189,7 @@ impl Conn {
             pending_cache_evictions: Vec::new(),
             rtt_ms: 0.0,
             pending_pings: HashMap::new(),
+            queued_ping: None,
             last_ping_sent: None,
             next_ping_token: 1,
             inbound_ping_responses: 0,
@@ -934,18 +937,30 @@ impl Conn {
         {
             return Ok(());
         }
+        if let Some((_, queued_at)) = self.queued_ping {
+            if now.duration_since(queued_at) >= PING_TIMEOUT {
+                return Err(ErrorCode::Protocol);
+            }
+            return Ok(());
+        }
 
+        let had_stale_ping = self
+            .pending_pings
+            .values()
+            .any(|sent| now.duration_since(*sent) >= PING_TIMEOUT);
         self.pending_pings
             .retain(|_, sent| now.duration_since(*sent) < PING_TIMEOUT);
-        if self.pending_pings.len() >= MAX_PENDING_PINGS {
-            return Ok(());
+        if had_stale_ping {
+            return Err(ErrorCode::Protocol);
+        }
+        if self.pending_pings.len() + usize::from(self.queued_ping.is_some()) >= MAX_PENDING_PINGS {
+            return Err(ErrorCode::Protocol);
         }
 
         let token = self.next_ping_token;
         self.next_ping_token = self.next_ping_token.wrapping_add(1);
         self.send_user_control_ping_request(token)?;
-        self.pending_pings.insert(token, now);
-        self.last_ping_sent = Some(now);
+        self.queued_ping = Some((token, now));
         Ok(())
     }
 
@@ -1187,9 +1202,11 @@ impl Conn {
 
     pub fn flush(&mut self) -> Result<()> {
         if self.client_fd < 0 || self.send_buffer.available() == 0 {
+            self.commit_flushed_ping();
             return Ok(());
         }
         let Some(ref mut transport) = self.transport else {
+            self.commit_flushed_ping();
             return Ok(());
         };
         while self.send_buffer.available() > 0 {
@@ -1200,7 +1217,20 @@ impl Conn {
             }
             self.send_buffer.drain(n);
         }
+        self.commit_flushed_ping();
         Ok(())
+    }
+
+    fn commit_flushed_ping(&mut self) {
+        let Some((token, _queued_at)) = self.queued_ping else {
+            return;
+        };
+        if self.send_buffer.available() == 0 {
+            let now = Instant::now();
+            self.pending_pings.insert(token, now);
+            self.last_ping_sent = Some(now);
+            self.queued_ping = None;
+        }
     }
 
     pub fn send_frame(
@@ -1650,6 +1680,107 @@ mod tests {
         assert!(
             matches!(ping(99), Err(ErrorCode::Protocol)),
             "9th ping in one second must be rejected"
+        );
+    }
+
+    #[test]
+    fn unanswered_ping_timeouts_close_connection() {
+        let mut conn = Conn::new();
+        conn.client_fd = 0;
+        conn.transport = None;
+        conn.state = ConnState::AppConnected;
+        conn.last_ping_sent = Some(Instant::now() - PING_TIMEOUT - Duration::from_secs(1));
+        conn.pending_pings
+            .insert(42, Instant::now() - PING_TIMEOUT - Duration::from_secs(1));
+
+        assert!(
+            matches!(conn.maybe_send_ping(), Err(ErrorCode::Protocol)),
+            "stale unanswered pings must fail the connection"
+        );
+    }
+
+    #[test]
+    fn excessive_pending_pings_close_connection() {
+        let mut conn = Conn::new();
+        conn.client_fd = 0;
+        conn.transport = None;
+        conn.state = ConnState::AppConnected;
+        conn.last_ping_sent = Some(Instant::now() - PING_INTERVAL - Duration::from_millis(1));
+        for token in 1..=MAX_PENDING_PINGS as u32 {
+            conn.pending_pings
+                .insert(token, Instant::now() - Duration::from_millis(100));
+        }
+
+        assert!(
+            matches!(conn.maybe_send_ping(), Err(ErrorCode::Protocol)),
+            "too many unanswered pings must fail the connection"
+        );
+    }
+
+    #[test]
+    fn ping_timeout_starts_after_flush_not_queue() {
+        use std::os::unix::io::IntoRawFd;
+        use std::os::unix::net::UnixStream;
+
+        let (client_end, _peer) = UnixStream::pair().unwrap();
+        client_end.set_nonblocking(true).unwrap();
+
+        let mut conn = Conn::new();
+        conn.client_fd = 0;
+        conn.state = ConnState::AppConnected;
+        conn.transport = Some(Transport::new_plain(client_end.into_raw_fd()));
+        conn.send_buffer.write(b"backlog").unwrap();
+
+        conn.maybe_send_ping().unwrap();
+        assert!(
+            conn.pending_pings.is_empty(),
+            "unflushed ping must not start the RTT timeout"
+        );
+        assert!(conn.queued_ping.is_some());
+        assert!(
+            conn.last_ping_sent.is_none(),
+            "ping interval must not advance until the ping is flushed"
+        );
+
+        conn.flush().unwrap();
+        assert_eq!(conn.pending_pings.len(), 1);
+        assert!(conn.queued_ping.is_none());
+        assert!(conn.last_ping_sent.is_some());
+    }
+
+    #[test]
+    fn commit_flushed_ping_waits_for_empty_send_buffer() {
+        let mut conn = Conn::new();
+        conn.client_fd = 0;
+        conn.state = ConnState::AppConnected;
+        conn.transport = None;
+        conn.queued_ping = Some((1, Instant::now()));
+        conn.send_buffer.write(b"still queued").unwrap();
+
+        conn.flush().unwrap();
+        assert!(
+            conn.pending_pings.is_empty(),
+            "ping must not be timed until every queued byte is flushed"
+        );
+        assert!(conn.queued_ping.is_some());
+
+        conn.send_buffer.reset();
+        conn.flush().unwrap();
+        assert_eq!(conn.pending_pings.len(), 1);
+        assert!(conn.queued_ping.is_none());
+    }
+
+    #[test]
+    fn stale_queued_ping_closes_connection() {
+        let mut conn = Conn::new();
+        conn.client_fd = 0;
+        conn.transport = None;
+        conn.state = ConnState::AppConnected;
+        conn.queued_ping = Some((7, Instant::now() - PING_TIMEOUT - Duration::from_secs(1)));
+
+        assert!(
+            matches!(conn.maybe_send_ping(), Err(ErrorCode::Protocol)),
+            "unflushed ping stuck longer than PING_TIMEOUT must close the connection"
         );
     }
 
