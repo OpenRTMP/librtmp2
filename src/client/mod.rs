@@ -67,6 +67,9 @@ const MAX_RECV_BUFFER_BYTES: usize = MAX_RECV_BUFFER_PAYLOAD_BYTES
     + (MAX_RECV_BUFFER_PAYLOAD_BYTES / MIN_PRACTICAL_CHUNK_SIZE + 1) * MAX_CHUNK_HEADER_OVERHEAD_BYTES
     + 2 * FIRST_CHUNK_EXTRA_OVERHEAD_BYTES;
 
+/// Max DNS jobs waiting on the shared resolver thread.
+const MAX_DNS_QUEUE_DEPTH: usize = 32;
+
 /// Resolve `host:port` with a wall-clock deadline so DNS cannot block longer
 /// than the TCP connect budget. Lookups run on a single shared worker thread
 /// so timed-out requests do not spawn unbounded detached resolver threads.
@@ -81,26 +84,29 @@ fn resolve_socket_addrs(
         reply: mpsc::Sender<std::result::Result<Vec<std::net::SocketAddr>, ()>>,
     }
 
-    static DNS_TX: OnceLock<mpsc::Sender<DnsJob>> = OnceLock::new();
-    let tx = DNS_TX.get_or_init(|| {
-        let (job_tx, job_rx) = mpsc::channel::<DnsJob>();
-        std::thread::Builder::new()
-            .name("lrtmp2-dns".into())
-            .spawn(move || {
-                while let Ok(job) = job_rx.recv() {
-                    let result = (job.host.as_str(), job.port)
-                        .to_socket_addrs()
-                        .map(|iter| iter.collect::<Vec<_>>())
-                        .map_err(|_| ());
-                    let _ = job.reply.send(result);
-                }
-            })
-            .expect("dns worker thread");
-        job_tx
-    });
+    static DNS_TX: OnceLock<std::result::Result<mpsc::SyncSender<DnsJob>, ()>> = OnceLock::new();
+    let tx = DNS_TX
+        .get_or_init(|| {
+            let (job_tx, job_rx) = mpsc::sync_channel::<DnsJob>(MAX_DNS_QUEUE_DEPTH);
+            std::thread::Builder::new()
+                .name("lrtmp2-dns".into())
+                .spawn(move || {
+                    while let Ok(job) = job_rx.recv() {
+                        let result = (job.host.as_str(), job.port)
+                            .to_socket_addrs()
+                            .map(|iter| iter.collect::<Vec<_>>())
+                            .map_err(|_| ());
+                        let _ = job.reply.send(result);
+                    }
+                })
+                .map(|_| job_tx)
+                .map_err(|_| ())
+        })
+        .as_ref()
+        .map_err(|_| ErrorCode::Internal)?;
 
     let (reply_tx, reply_rx) = mpsc::channel();
-    tx.send(DnsJob {
+    tx.try_send(DnsJob {
         host: host.to_string(),
         port,
         reply: reply_tx,
@@ -525,7 +531,7 @@ impl Client {
 
     // ── Internal helpers ──
 
-    fn send_user_control_message(&mut self, payload: &[u8]) -> Result<()> {
+    fn queue_user_control_message(&mut self, payload: &[u8]) -> Result<()> {
         let mut cmsg = ChunkMessage::default();
         cmsg.csid = 2;
         cmsg.fmt = 0;
@@ -539,12 +545,37 @@ impl Client {
             payload.len(),
             128,
         )?;
+        Ok(())
+    }
+
+    fn try_flush_send_buffer(&mut self) -> Result<()> {
+        while self.send_buffer.available() > 0 {
+            let Some(ref mut transport) = self.transport else {
+                break;
+            };
+            let pending = self.send_buffer.peek();
+            let n = transport.try_send(pending, &mut 0i32)?;
+            if n == 0 {
+                break;
+            }
+            self.send_buffer.drain(n);
+        }
+        Ok(())
+    }
+
+    fn send_user_control_message(&mut self, payload: &[u8]) -> Result<()> {
+        self.queue_user_control_message(payload)?;
         let data = self.send_buffer.peek().to_vec();
         if let Some(ref mut transport) = self.transport {
             transport.send(&data)?;
         }
         self.send_buffer.reset();
         Ok(())
+    }
+
+    fn send_user_control_message_nonblocking(&mut self, payload: &[u8]) -> Result<()> {
+        self.queue_user_control_message(payload)?;
+        self.try_flush_send_buffer()
     }
 
     fn handle_user_control(&mut self, payload: &[u8]) -> Result<()> {
@@ -555,7 +586,7 @@ impl Client {
         if event_type == control::UCTRL_PING_REQUEST {
             let mut buf = Buffer::with_capacity(6);
             control::write_user_control_ping_response(&mut buf, param1)?;
-            self.send_user_control_message(buf.as_slice())?;
+            self.send_user_control_message_nonblocking(buf.as_slice())?;
         }
         Ok(())
     }

@@ -121,8 +121,8 @@ pub struct Conn {
     /// Last measured client↔server RTT in milliseconds (RTMP UserControl ping).
     pub rtt_ms: f64,
     pending_pings: HashMap<u32, Instant>,
-    /// Ping queued in `send_buffer` but not yet fully flushed; `(token, wire_len)`.
-    queued_ping: Option<(u32, usize)>,
+    /// Ping queued in `send_buffer` but not yet fully flushed; `(token, queued_at)`.
+    queued_ping: Option<(u32, Instant)>,
     last_ping_sent: Option<Instant>,
     next_ping_token: u32,
     inbound_ping_responses: usize,
@@ -937,7 +937,10 @@ impl Conn {
         {
             return Ok(());
         }
-        if self.queued_ping.is_some() {
+        if let Some((_, queued_at)) = self.queued_ping {
+            if now.duration_since(queued_at) >= PING_TIMEOUT {
+                return Err(ErrorCode::Protocol);
+            }
             return Ok(());
         }
 
@@ -956,10 +959,8 @@ impl Conn {
 
         let token = self.next_ping_token;
         self.next_ping_token = self.next_ping_token.wrapping_add(1);
-        let before = self.send_buffer.available();
         self.send_user_control_ping_request(token)?;
-        let ping_len = self.send_buffer.available().saturating_sub(before);
-        self.queued_ping = Some((token, ping_len));
+        self.queued_ping = Some((token, now));
         Ok(())
     }
 
@@ -1221,10 +1222,10 @@ impl Conn {
     }
 
     fn commit_flushed_ping(&mut self) {
-        let Some((token, ping_len)) = self.queued_ping else {
+        let Some((token, _queued_at)) = self.queued_ping else {
             return;
         };
-        if self.send_buffer.available() < ping_len {
+        if self.send_buffer.available() == 0 {
             let now = Instant::now();
             self.pending_pings.insert(token, now);
             self.last_ping_sent = Some(now);
@@ -1745,6 +1746,50 @@ mod tests {
         assert_eq!(conn.pending_pings.len(), 1);
         assert!(conn.queued_ping.is_none());
         assert!(conn.last_ping_sent.is_some());
+    }
+
+    #[test]
+    fn partial_flush_leaves_ping_untimed() {
+        use std::io::Read;
+        use std::os::unix::io::IntoRawFd;
+        use std::os::unix::net::UnixStream;
+
+        let (client_end, mut peer) = UnixStream::pair().unwrap();
+        client_end.set_nonblocking(true).unwrap();
+
+        let mut conn = Conn::new();
+        conn.client_fd = 0;
+        conn.state = ConnState::AppConnected;
+        conn.transport = Some(Transport::new_plain(client_end.into_raw_fd()));
+        conn.send_buffer.write(&vec![0u8; 64 * 1024]).unwrap();
+
+        conn.maybe_send_ping().unwrap();
+        conn.flush().unwrap();
+        assert!(
+            conn.pending_pings.is_empty(),
+            "ping must not be timed until every queued byte is flushed"
+        );
+        assert!(conn.queued_ping.is_some());
+
+        let mut drain = [0u8; 4096];
+        while peer.read(&mut drain).unwrap_or(0) > 0 {}
+        conn.flush().unwrap();
+        assert_eq!(conn.pending_pings.len(), 1);
+        assert!(conn.queued_ping.is_none());
+    }
+
+    #[test]
+    fn stale_queued_ping_closes_connection() {
+        let mut conn = Conn::new();
+        conn.client_fd = 0;
+        conn.transport = None;
+        conn.state = ConnState::AppConnected;
+        conn.queued_ping = Some((7, Instant::now() - PING_TIMEOUT - Duration::from_secs(1)));
+
+        assert!(
+            matches!(conn.maybe_send_ping(), Err(ErrorCode::Protocol)),
+            "unflushed ping stuck longer than PING_TIMEOUT must close the connection"
+        );
     }
 
     #[test]
