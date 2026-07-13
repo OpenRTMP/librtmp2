@@ -1230,16 +1230,12 @@ impl Conn {
                 break;
             }
             self.send_buffer.drain(n);
-            self.mark_ping_bytes_drained(n);
+            if let Some(ref mut queued) = self.queued_ping {
+                queued.bytes_until_flushed = queued.bytes_until_flushed.saturating_sub(n);
+            }
         }
         self.commit_flushed_ping();
         Ok(())
-    }
-
-    fn mark_ping_bytes_drained(&mut self, nbytes: usize) {
-        if let Some(ref mut queued) = self.queued_ping {
-            queued.bytes_until_flushed = queued.bytes_until_flushed.saturating_sub(nbytes);
-        }
     }
 
     fn commit_flushed_ping(&mut self) {
