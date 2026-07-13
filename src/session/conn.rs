@@ -41,6 +41,16 @@ const PEER_BANDWIDTH_DYNAMIC: u8 = 2;
 const PING_INTERVAL: Duration = Duration::from_secs(5);
 const PING_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_PENDING_PINGS: usize = 4;
+
+#[derive(Debug, Clone)]
+struct QueuedPing {
+    token: u32,
+    queued_at: Instant,
+    /// Bytes that must drain from the front of `send_buffer` before this ping
+    /// is considered fully on the wire (bytes queued ahead of the ping at
+    /// queue time plus the ping itself, but not data appended afterward).
+    bytes_until_flushed: usize,
+}
 /// Cap inbound Ping-Request reflections per connection to prevent trivial
 /// outbound bandwidth/CPU amplification from unauthenticated peers.
 const MAX_INBOUND_PING_RESPONSES: usize = 8;
@@ -121,8 +131,8 @@ pub struct Conn {
     /// Last measured client↔server RTT in milliseconds (RTMP UserControl ping).
     pub rtt_ms: f64,
     pending_pings: HashMap<u32, Instant>,
-    /// Ping queued in `send_buffer` but not yet fully flushed; `(token, queued_at)`.
-    queued_ping: Option<(u32, Instant)>,
+    /// Ping queued in `send_buffer` but not yet fully flushed.
+    queued_ping: Option<QueuedPing>,
     last_ping_sent: Option<Instant>,
     next_ping_token: u32,
     inbound_ping_responses: usize,
@@ -937,8 +947,8 @@ impl Conn {
         {
             return Ok(());
         }
-        if let Some((_, queued_at)) = self.queued_ping {
-            if now.duration_since(queued_at) >= PING_TIMEOUT {
+        if let Some(queued) = &self.queued_ping {
+            if now.duration_since(queued.queued_at) >= PING_TIMEOUT {
                 return Err(ErrorCode::Protocol);
             }
             return Ok(());
@@ -960,7 +970,11 @@ impl Conn {
         let token = self.next_ping_token;
         self.next_ping_token = self.next_ping_token.wrapping_add(1);
         self.send_user_control_ping_request(token)?;
-        self.queued_ping = Some((token, now));
+        self.queued_ping = Some(QueuedPing {
+            token,
+            queued_at: now,
+            bytes_until_flushed: self.send_buffer.available(),
+        });
         Ok(())
     }
 
@@ -1216,21 +1230,25 @@ impl Conn {
                 break;
             }
             self.send_buffer.drain(n);
+            if let Some(ref mut queued) = self.queued_ping {
+                queued.bytes_until_flushed = queued.bytes_until_flushed.saturating_sub(n);
+            }
         }
         self.commit_flushed_ping();
         Ok(())
     }
 
     fn commit_flushed_ping(&mut self) {
-        let Some((token, _queued_at)) = self.queued_ping else {
+        let Some(queued) = self.queued_ping.as_ref() else {
             return;
         };
-        if self.send_buffer.available() == 0 {
-            let now = Instant::now();
-            self.pending_pings.insert(token, now);
-            self.last_ping_sent = Some(now);
-            self.queued_ping = None;
+        if queued.bytes_until_flushed > 0 {
+            return;
         }
+        let now = Instant::now();
+        self.pending_pings.insert(queued.token, now);
+        self.last_ping_sent = Some(now);
+        self.queued_ping = None;
     }
 
     pub fn send_frame(
@@ -1749,25 +1767,64 @@ mod tests {
     }
 
     #[test]
-    fn commit_flushed_ping_waits_for_empty_send_buffer() {
+    fn commit_flushed_ping_waits_for_ping_bytes_not_later_media() {
         let mut conn = Conn::new();
         conn.client_fd = 0;
         conn.state = ConnState::AppConnected;
         conn.transport = None;
-        conn.queued_ping = Some((1, Instant::now()));
         conn.send_buffer.write(b"still queued").unwrap();
+        conn.queued_ping = Some(QueuedPing {
+            token: 1,
+            queued_at: Instant::now(),
+            bytes_until_flushed: conn.send_buffer.available(),
+        });
 
         conn.flush().unwrap();
         assert!(
             conn.pending_pings.is_empty(),
-            "ping must not be timed until every queued byte is flushed"
+            "ping must not be timed until its own queued bytes are flushed"
         );
         assert!(conn.queued_ping.is_some());
 
-        conn.send_buffer.reset();
+        if let Some(ref mut queued) = conn.queued_ping {
+            queued.bytes_until_flushed = 0;
+        }
         conn.flush().unwrap();
         assert_eq!(conn.pending_pings.len(), 1);
         assert!(conn.queued_ping.is_none());
+    }
+
+    #[test]
+    fn commit_flushed_ping_does_not_wait_for_post_ping_media() {
+        let mut conn = Conn::new();
+        conn.client_fd = 0;
+        conn.state = ConnState::AppConnected;
+        conn.transport = None;
+        conn.send_buffer.write(b"backlog").unwrap();
+
+        conn.maybe_send_ping().unwrap();
+        let bytes_through_ping = conn.queued_ping.as_ref().unwrap().bytes_until_flushed;
+        conn.send_buffer.write(b"after-ping").unwrap();
+        assert_eq!(
+            bytes_through_ping,
+            conn.send_buffer.available() - b"after-ping".len(),
+            "flush target must exclude post-ping media appended afterward"
+        );
+
+        conn.send_buffer.drain(bytes_through_ping);
+        if let Some(ref mut queued) = conn.queued_ping {
+            queued.bytes_until_flushed = 0;
+        }
+        conn.flush().unwrap();
+
+        assert_eq!(
+            conn.pending_pings.len(),
+            1,
+            "ping RTT must start once the ping leaves the buffer, not after post-ping media"
+        );
+        assert!(conn.queued_ping.is_none());
+        assert_eq!(conn.send_buffer.available(), b"after-ping".len());
+        assert_eq!(conn.send_buffer.peek(), b"after-ping");
     }
 
     #[test]
@@ -1776,7 +1833,11 @@ mod tests {
         conn.client_fd = 0;
         conn.transport = None;
         conn.state = ConnState::AppConnected;
-        conn.queued_ping = Some((7, Instant::now() - PING_TIMEOUT - Duration::from_secs(1)));
+        conn.queued_ping = Some(QueuedPing {
+            token: 7,
+            queued_at: Instant::now() - PING_TIMEOUT - Duration::from_secs(1),
+            bytes_until_flushed: 1,
+        });
 
         assert!(
             matches!(conn.maybe_send_ping(), Err(ErrorCode::Protocol)),
