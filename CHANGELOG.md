@@ -38,6 +38,9 @@ begin at `1.0.0`.
   retry queued ping responses after transient `EAGAIN`, and the shared DNS
   worker is re-created after a transient thread-spawn failure instead of
   permanently caching the error in a `OnceLock`.
+- Publishing clients now poll for socket writability (`POLLOUT`) when queued
+  pong bytes remain after a transient `EAGAIN`, so idle publishers can flush
+  keepalive responses without sitting out the full read timeout.
 - `Transport::connect_tls()`'s new `ca_file` option (see 0.3.0 below) now
   *replaces* the trust store instead of adding the caller's CA bundle to the
   system default trust store — a custom CA is meant to restrict which peers
@@ -52,6 +55,10 @@ begin at `1.0.0`.
   default verification.
 
 ### Security
+- Inbound peers that open TCP but never complete the AMF connect exchange
+  (including partial legacy handshake bytes) are now closed after a 10-second
+  setup deadline instead of holding a connection slot until
+  `max_connections` is reached.
 - Server connections with unanswered or stale outbound RTMP pings are now
   closed instead of accumulating indefinitely in `pending_pings`.
 - DNS lookups abandoned after the connect deadline no longer spawn unbounded
