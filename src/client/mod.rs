@@ -908,6 +908,28 @@ impl Drop for Client {
 mod tests {
     use super::*;
 
+    fn rtmp_user_control_ping_chunk(token: u32) -> Vec<u8> {
+        let mut payload = Buffer::with_capacity(6);
+        control::write_user_control_ping_request(&mut payload, token).unwrap();
+        let payload_len = payload.available();
+        let mut wire = Buffer::new();
+        let mut cmsg = ChunkMessage::default();
+        cmsg.csid = 2;
+        cmsg.fmt = 0;
+        cmsg.msg_length = payload_len as u32;
+        cmsg.msg_type_id = msg_dispatch::RTMP_MSG_USER_CONTROL;
+        cmsg.msg_stream_id = 0;
+        chunk_write(
+            &mut wire,
+            &cmsg,
+            payload.as_slice(),
+            payload_len,
+            128,
+        )
+        .unwrap();
+        wire.peek().to_vec()
+    }
+
     #[test]
     fn recv_budget_is_at_least_one_socket_read() {
         assert!(MAX_RECV_BYTES_PER_POLL >= 65536);
@@ -1079,6 +1101,37 @@ mod tests {
         assert!(
             out[..n].windows(2).any(|w| w == ping_response),
             "peer should receive a UserControl ping response"
+        );
+    }
+
+    #[test]
+    fn send_frame_payload_services_inbound_pings() {
+        use std::io::{Read, Write};
+        use std::os::unix::io::IntoRawFd;
+        use std::os::unix::net::UnixStream;
+
+        let (client_end, mut peer) = UnixStream::pair().unwrap();
+        client_end.set_nonblocking(true).unwrap();
+
+        let mut client = Client::new();
+        client.chunk_reg.init();
+        client.state = ClientState::Publishing;
+        client.stream_id = 1;
+        client.transport = Some(Transport::new_plain(client_end.into_raw_fd()));
+
+        peer.write_all(&rtmp_user_control_ping_chunk(77)).unwrap();
+
+        client
+            .send_frame_payload(FrameType::Video, 0, &[0x17, 0x00])
+            .unwrap();
+
+        let mut out = [0u8; 512];
+        let n = peer.read(&mut out).unwrap();
+        assert!(n > 0);
+        let ping_response = control::UCTRL_PING_RESPONSE.to_be_bytes();
+        assert!(
+            out[..n].windows(2).any(|w| w == ping_response),
+            "send_frame_payload should answer inbound pings before sending media"
         );
     }
 

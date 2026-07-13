@@ -937,6 +937,9 @@ impl Conn {
         {
             return Ok(());
         }
+        if self.queued_ping.is_some() {
+            return Ok(());
+        }
 
         let had_stale_ping = self
             .pending_pings
@@ -957,7 +960,6 @@ impl Conn {
         self.send_user_control_ping_request(token)?;
         let ping_len = self.send_buffer.available().saturating_sub(before);
         self.queued_ping = Some((token, ping_len));
-        self.last_ping_sent = Some(now);
         Ok(())
     }
 
@@ -1223,7 +1225,9 @@ impl Conn {
             return;
         };
         if self.send_buffer.available() < ping_len {
-            self.pending_pings.insert(token, Instant::now());
+            let now = Instant::now();
+            self.pending_pings.insert(token, now);
+            self.last_ping_sent = Some(now);
             self.queued_ping = None;
         }
     }
@@ -1732,10 +1736,15 @@ mod tests {
             "unflushed ping must not start the RTT timeout"
         );
         assert!(conn.queued_ping.is_some());
+        assert!(
+            conn.last_ping_sent.is_none(),
+            "ping interval must not advance until the ping is flushed"
+        );
 
         conn.flush().unwrap();
         assert_eq!(conn.pending_pings.len(), 1);
         assert!(conn.queued_ping.is_none());
+        assert!(conn.last_ping_sent.is_some());
     }
 
     #[test]
