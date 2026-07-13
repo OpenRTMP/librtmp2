@@ -1794,6 +1794,7 @@ mod tests {
 
     #[test]
     fn commit_flushed_ping_does_not_wait_for_post_ping_media() {
+        use std::io::Read;
         use std::os::unix::io::IntoRawFd;
         use std::os::unix::net::UnixStream;
 
