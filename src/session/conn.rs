@@ -1798,7 +1798,7 @@ mod tests {
         use std::os::unix::io::IntoRawFd;
         use std::os::unix::net::UnixStream;
 
-        let (client_end, peer) = UnixStream::pair().unwrap();
+        let (client_end, mut peer) = UnixStream::pair().unwrap();
         client_end.set_nonblocking(true).unwrap();
         peer.set_nonblocking(true).unwrap();
 
