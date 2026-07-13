@@ -1677,6 +1677,24 @@ mod tests {
     }
 
     #[test]
+    fn excessive_pending_pings_close_connection() {
+        let mut conn = Conn::new();
+        conn.client_fd = 0;
+        conn.transport = None;
+        conn.state = ConnState::AppConnected;
+        conn.last_ping_sent = Some(Instant::now() - PING_INTERVAL - Duration::from_millis(1));
+        for token in 1..=MAX_PENDING_PINGS {
+            conn.pending_pings
+                .insert(token, Instant::now() - Duration::from_millis(100));
+        }
+
+        assert!(
+            matches!(conn.maybe_send_ping(), Err(ErrorCode::Protocol)),
+            "too many unanswered pings must fail the connection"
+        );
+    }
+
+    #[test]
     fn media_frames_on_wrong_msg_stream_id_are_ignored() {
         let mut conn = Conn::new();
         conn.relay_enabled = true;
