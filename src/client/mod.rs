@@ -368,7 +368,26 @@ impl Client {
     pub fn poll(&mut self, timeout_ms: i32) -> Result<()> {
         if self.state == ClientState::Publishing {
             self.try_flush_send_buffer()?;
-            self.service_inbound(timeout_ms)?;
+            if self.send_buffer.available() > 0 {
+                if let Some(t) = self.transport.as_ref() {
+                    let mut pfd = libc::pollfd {
+                        fd: t.fd(),
+                        events: libc::POLLOUT,
+                        revents: 0,
+                    };
+                    unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
+                }
+                self.try_flush_send_buffer()?;
+            }
+            // While outbound bytes remain queued (e.g. pong after EAGAIN), do
+            // not block on POLLIN-only service_inbound — that can delay the
+            // pong until the read timeout even after the socket is writable.
+            let inbound_timeout = if self.send_buffer.available() > 0 {
+                0
+            } else {
+                timeout_ms
+            };
+            self.service_inbound(inbound_timeout)?;
             self.try_flush_send_buffer()?;
             return Ok(());
         }
