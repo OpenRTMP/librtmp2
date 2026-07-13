@@ -72,7 +72,7 @@ fn resolve_socket_addrs(
     host: &str,
     port: u16,
     deadline: Instant,
-) -> Result<Vec<std::net::SocketAddr>, ErrorCode> {
+) -> Result<Vec<std::net::SocketAddr>> {
     let (tx, rx) = std::sync::mpsc::channel();
     let host = host.to_string();
     std::thread::spawn(move || {
