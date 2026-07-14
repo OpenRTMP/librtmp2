@@ -1182,7 +1182,18 @@ impl Conn {
                     self.send_onstatus(sid, "status", "NetStream.Play.Start", "Playing")?;
                 }
             }
-            "FCPublish" | "FCUnpublish" | "releaseStream" | "deleteStream" => {}
+            "FCUnpublish" | "deleteStream" => {
+                // The client is explicitly tearing down its publish role;
+                // release the claimed route now rather than holding it
+                // until the TCP connection eventually closes, so a
+                // different connection can immediately republish the same
+                // (app, stream) route.
+                self.evict_active_publish_route();
+                if let Some(ref mut stream) = self.current_stream {
+                    stream.is_publishing = false;
+                }
+            }
+            "FCPublish" | "releaseStream" => {}
             _ => {}
         }
         Ok(())

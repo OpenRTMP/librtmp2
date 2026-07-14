@@ -1216,4 +1216,60 @@ mod tests {
             "route \"a\" must stay claimed by the original publisher after a failed rename"
         );
     }
+
+    #[test]
+    fn delete_stream_releases_publish_route_for_next_publisher() {
+        let server = test_server();
+
+        let mut first = Conn::new();
+        first.conn_id = 1;
+        first.app = "live".to_string();
+        first.current_stream = Some(Box::new(crate::session::stream::Stream {
+            stream_id: 1,
+            name: String::new(),
+            is_publishing: false,
+            is_playing: false,
+        }));
+        first.publish_routes = Some(PublishRouteRegistry::new(Arc::clone(
+            &server.active_publish_routes,
+        )));
+
+        let mut create_first = crate::buffer::Buffer::with_capacity(128);
+        crate::message::command::build_create_stream(&mut create_first, 1.0).unwrap();
+        first.handle_command(create_first.as_slice()).unwrap();
+
+        let mut publish_a = crate::buffer::Buffer::with_capacity(128);
+        crate::message::command::build_publish(&mut publish_a, "victim", "live").unwrap();
+        first.handle_command(publish_a.as_slice()).unwrap();
+        assert!(first.relay_enabled);
+
+        // Client unpublishes but keeps the TCP connection open.
+        let mut delete_stream = crate::buffer::Buffer::with_capacity(128);
+        crate::message::command::build_deletestream(&mut delete_stream, 1.0, 1).unwrap();
+        first.handle_command(delete_stream.as_slice()).unwrap();
+
+        let mut second = Conn::new();
+        second.conn_id = 2;
+        second.app = "live".to_string();
+        second.current_stream = Some(Box::new(crate::session::stream::Stream {
+            stream_id: 1,
+            name: String::new(),
+            is_publishing: false,
+            is_playing: false,
+        }));
+        second.publish_routes = Some(PublishRouteRegistry::new(Arc::clone(
+            &server.active_publish_routes,
+        )));
+        let mut create_second = crate::buffer::Buffer::with_capacity(128);
+        crate::message::command::build_create_stream(&mut create_second, 1.0).unwrap();
+        second.handle_command(create_second.as_slice()).unwrap();
+
+        let mut publish_b = crate::buffer::Buffer::with_capacity(128);
+        crate::message::command::build_publish(&mut publish_b, "victim", "live").unwrap();
+        second.handle_command(publish_b.as_slice()).unwrap();
+        assert!(
+            second.relay_enabled,
+            "route must be free for a new publisher after deleteStream"
+        );
+    }
 }

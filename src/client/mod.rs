@@ -593,11 +593,15 @@ impl Client {
             }
             self.send_buffer.drain(n);
         }
-        Ok(if self.send_buffer.available() > 0 {
-            poll_again
+        if self.send_buffer.available() > 0 {
+            Ok(poll_again)
         } else {
-            None
-        })
+            // Fully drained: shrink a send_buffer that grew for a large
+            // frame (e.g. a multi-megabyte keyframe) back down instead of
+            // pinning that allocation for the rest of the connection.
+            self.send_buffer.reset();
+            Ok(None)
+        }
     }
 
     fn send_user_control_message(&mut self, payload: &[u8]) -> Result<()> {
@@ -1041,6 +1045,36 @@ mod tests {
             .unwrap();
 
         assert_eq!(client.poll(0), Err(ErrorCode::Protocol));
+    }
+
+    #[test]
+    fn try_flush_send_buffer_shrinks_after_full_drain() {
+        use crate::buffer::BUFFER_RESET_CAPACITY;
+        use std::os::unix::io::IntoRawFd;
+        use std::os::unix::net::UnixStream;
+
+        let (client_end, _peer) = UnixStream::pair().unwrap();
+        client_end.set_nonblocking(true).unwrap();
+
+        let mut client = Client::new();
+        client.transport = Some(Transport::new_plain(client_end.into_raw_fd()));
+
+        // Simulate a large keyframe having grown send_buffer well past its
+        // reset capacity. This is well within the unix socket's send buffer,
+        // so try_flush_send_buffer can fully drain it in one non-blocking
+        // write without the peer needing to read concurrently.
+        let big = vec![0u8; BUFFER_RESET_CAPACITY * 4];
+        client.send_buffer.write(&big).unwrap();
+        assert!(client.send_buffer.capacity() > BUFFER_RESET_CAPACITY);
+
+        client.try_flush_send_buffer().unwrap();
+
+        assert_eq!(client.send_buffer.available(), 0);
+        assert!(
+            client.send_buffer.capacity() <= BUFFER_RESET_CAPACITY,
+            "send_buffer should shrink back to {BUFFER_RESET_CAPACITY} after a full flush, got {}",
+            client.send_buffer.capacity()
+        );
     }
 
     #[test]
