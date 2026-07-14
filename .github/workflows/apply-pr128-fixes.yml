@@ -1,0 +1,57 @@
+name: Apply PR 128 fixes
+
+on:
+  push:
+    branches:
+      - feat/ertmp-v2-multitrack-0.4.0
+    paths:
+      - scripts/apply_pr128_fixes.py
+      - .github/workflows/apply-pr128-fixes.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: apply-pr128-fixes
+  cancel-in-progress: false
+
+jobs:
+  apply-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out PR branch
+        uses: actions/checkout@v4
+        with:
+          ref: feat/ertmp-v2-multitrack-0.4.0
+          fetch-depth: 0
+
+      - name: Install Rust 1.93
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.93.0
+          components: rustfmt, clippy
+
+      - name: Apply fixes
+        run: python3 scripts/apply_pr128_fixes.py
+
+      - name: Format
+        run: cargo fmt --all
+
+      - name: Test all targets
+        run: cargo test --all-targets
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Remove temporary automation
+        run: |
+          rm scripts/apply_pr128_fixes.py
+          rm .github/workflows/apply-pr128-fixes.yml
+
+      - name: Commit validated fixes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "fix: address E-RTMP v2 review findings"
+          git push origin HEAD:feat/ertmp-v2-multitrack-0.4.0
