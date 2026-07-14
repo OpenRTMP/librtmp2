@@ -1,0 +1,65 @@
+name: Apply ModEx multitrack gate fix
+
+on:
+  push:
+    branches:
+      - feat/ertmp-v2-multitrack-0.4.0
+    paths:
+      - scripts/apply_modex_multitrack_gate_fix.py
+      - .github/workflows/apply-modex-multitrack-gate-fix.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/ertmp-v2-multitrack-0.4.0
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.93.0
+          components: rustfmt, clippy
+
+      - name: Apply fix
+        run: python3 scripts/apply_modex_multitrack_gate_fix.py
+
+      - name: Format check
+        run: |
+          cargo fmt --all
+          git diff --check
+
+      - name: Unit and integration tests
+        run: cargo test --lib --tests
+
+      - name: Compile benchmarks
+        run: cargo check --benches
+
+      - name: Clippy
+        run: cargo clippy --lib --tests -- -D warnings
+
+      - name: Commit validated fix
+        run: |
+          rm scripts/apply_modex_multitrack_gate_fix.py
+          rm .github/workflows/apply-modex-multitrack-gate-fix.yml
+          rm -f modex-multitrack-gate-failure.log
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "fix: gate ModEx-wrapped multitrack relay"
+          git push origin HEAD:feat/ertmp-v2-multitrack-0.4.0
+
+      - name: Capture failure context
+        if: failure()
+        run: |
+          git reset --hard HEAD
+          printf '%s\n' "ModEx multitrack gate validation failed in run $GITHUB_RUN_ID" > modex-multitrack-gate-failure.log
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add modex-multitrack-gate-failure.log
+          git commit -m "ci: capture ModEx gate validation failure"
+          git push origin HEAD:feat/ertmp-v2-multitrack-0.4.0
