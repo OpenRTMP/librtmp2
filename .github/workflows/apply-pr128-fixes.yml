@@ -19,7 +19,7 @@ permissions:
 
 concurrency:
   group: apply-pr128-fixes
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   apply-and-test:
