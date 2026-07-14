@@ -1112,7 +1112,7 @@ mod tests {
 
     #[test]
     fn second_publisher_on_same_route_is_rejected() {
-        let mut server = test_server();
+        let server = test_server();
 
         let mut first = Conn::new();
         first.conn_id = 1;

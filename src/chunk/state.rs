@@ -167,9 +167,12 @@ impl ChunkRegistry {
         self.streams.iter_mut().find(|s| s.csid == csid && s.in_use)
     }
 
-    /// Set chunk size for all streams.
+    /// Set chunk size for all streams. Values outside the RTMP-valid inbound
+    /// range are ignored (peers must negotiate via `read_set_chunk_size`).
     pub fn set_all_chunk_size(&mut self, chunk_size: u32) {
-        let chunk_size = chunk_size.clamp(DEFAULT_CHUNK_SIZE, MAX_INBOUND_CHUNK_SIZE);
+        if chunk_size < DEFAULT_CHUNK_SIZE || chunk_size > MAX_INBOUND_CHUNK_SIZE {
+            return;
+        }
         self.default_chunk_size = chunk_size;
         for stream in &mut self.streams {
             if stream.in_use {
@@ -209,6 +212,17 @@ impl ChunkRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn set_all_chunk_size_ignores_out_of_range_values() {
+        let mut reg = ChunkRegistry::new();
+        reg.set_all_chunk_size(1);
+        assert_eq!(reg.default_chunk_size, DEFAULT_CHUNK_SIZE);
+        reg.set_all_chunk_size(MAX_INBOUND_CHUNK_SIZE + 1);
+        assert_eq!(reg.default_chunk_size, DEFAULT_CHUNK_SIZE);
+        reg.set_all_chunk_size(256);
+        assert_eq!(reg.default_chunk_size, 256);
+    }
 
     #[test]
     fn rejects_opening_too_many_active_csids() {

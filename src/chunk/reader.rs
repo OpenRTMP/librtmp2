@@ -619,7 +619,8 @@ mod tests {
         chunk_write(&mut wire_default, &msg, &payload, payload.len(), 128).unwrap();
 
         let mut reg_small = ChunkRegistry::new();
-        reg_small.set_all_chunk_size(1);
+        // Below the network-validated minimum; set directly to stress reader iteration.
+        reg_small.default_chunk_size = 1;
         let mut reg_default = ChunkRegistry::new();
 
         let mut iterations_small = 0usize;
