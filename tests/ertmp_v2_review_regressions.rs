@@ -4,9 +4,7 @@ use librtmp2::ertmp::connect_amf::{
     write_video_fourcc_info_map_amf,
 };
 use librtmp2::ertmp::multitrack_media::foreach_track;
-use librtmp2::types::{
-    FOUR_CC_INFO_CAN_FORWARD, FourCcList, FrameType, VideoFourCcInfoMap,
-};
+use librtmp2::types::{FOUR_CC_INFO_CAN_FORWARD, FourCcList, FrameType, VideoFourCcInfoMap};
 
 #[test]
 fn video_fourcc_info_map_round_trips_as_object_with_flags() {
@@ -43,13 +41,15 @@ fn fourcc_wildcard_survives_amf_round_trip() {
 #[test]
 fn many_tracks_many_codecs_reports_each_track_codec() {
     let payload = [
-        0x86, 0x20,
-        b'a', b'v', b'c', b'1', 0, 0, 0, 1, 0xAA,
-        b'h', b'v', b'c', b'1', 1, 0, 0, 1, 0xBB,
+        0x86, 0x20, b'a', b'v', b'c', b'1', 0, 0, 0, 1, 0xAA, b'h', b'v', b'c', b'1', 1, 0, 0, 1,
+        0xBB,
     ];
     let mut seen = Vec::new();
     assert!(foreach_track(FrameType::Video, &payload, |track| {
         seen.push((track.track_id, track.fourcc, track.payload.to_vec()));
     }));
-    assert_eq!(seen, vec![(0, *b"avc1", vec![0xAA]), (1, *b"hvc1", vec![0xBB])]);
+    assert_eq!(
+        seen,
+        vec![(0, *b"avc1", vec![0xAA]), (1, *b"hvc1", vec![0xBB])]
+    );
 }
