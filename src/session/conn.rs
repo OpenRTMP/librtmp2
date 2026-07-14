@@ -323,7 +323,7 @@ impl Conn {
             if let Some(cb) = self.on_frame_cb {
                 self.frame_cb_scratch.clear();
                 self.frame_cb_scratch.extend_from_slice(payload);
-                let mut frame = Frame {
+                let frame = Frame {
                     frame_type: FrameType::Script,
                     timestamp: 0,
                     size: self.frame_cb_scratch.len() as u32,

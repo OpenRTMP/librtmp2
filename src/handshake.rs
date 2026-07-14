@@ -99,6 +99,7 @@ fn get_time() -> u32 {
 }
 
 /// True when C1 advertises the Adobe digest/complex handshake schema.
+#[allow(dead_code)]
 fn c1_requests_complex_handshake(c1: &[u8]) -> bool {
     c1.len() >= HANDSHAKE_SIZE && (c1[4] != 0 || c1[5] != 0 || c1[6] != 0 || c1[7] != 0)
 }
@@ -134,10 +135,6 @@ pub fn server_read_c1(hs: &mut Handshake, buf: &mut Buffer) -> Result<()> {
 
     let mut c1 = vec![0u8; HANDSHAKE_SIZE];
     buf.read(&mut c1).map_err(|_| ErrorCode::Io)?;
-
-    if c1_requests_complex_handshake(&c1) {
-        return Err(ErrorCode::Unsupported);
-    }
 
     hs.peer_time = ntoh32(&c1[..4]);
 
@@ -349,7 +346,7 @@ mod tests {
     }
 
     #[test]
-    fn complex_c1_is_rejected_with_unsupported() {
+    fn complex_c1_still_gets_simple_s1s2_response() {
         let mut hs = Handshake::default();
         server_init(&mut hs);
         let mut c1 = vec![0u8; HANDSHAKE_SIZE];
@@ -357,7 +354,9 @@ mod tests {
         c1[4..8].copy_from_slice(&1u32.to_be_bytes());
         let mut buf = Buffer::new();
         buf.write(&c1).unwrap();
-        assert_eq!(server_read_c1(&mut hs, &mut buf), Err(ErrorCode::Unsupported));
+        server_read_c1(&mut hs, &mut buf).unwrap();
+        assert_eq!(hs.state, HandshakeState::ServerWaitC2);
+        assert!(hs.out.available() >= HANDSHAKE_SIZE * 2);
     }
 
     #[test]

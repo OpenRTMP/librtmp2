@@ -287,24 +287,8 @@ impl Client {
     fn do_amf_connect(&mut self, app: &str, host: &str, port: u16, use_tls: bool) -> Result<()> {
         let scheme = if use_tls { "rtmps" } else { "rtmp" };
         let tc_url = format!("{scheme}://{host}:{port}/{app}");
-        let client_caps = NegotiatedCaps {
-            has_caps_ex: true,
-            caps_ex_mask: CAPS_EX_MASK_SERVER_DEFAULT,
-            multitrack_enabled: true,
-            ..Default::default()
-        };
         let mut connect_amf = Buffer::with_capacity(512);
-        command::build_connect(
-            &mut connect_amf,
-            app,
-            &tc_url,
-            "",
-            "",
-            "FMLE/3.0",
-            0,
-            0,
-            Some(&client_caps),
-        )?;
+        command::build_connect(&mut connect_amf, app, &tc_url, "", "", "FMLE/3.0", 0, 0, None)?;
         self.send_command_msg(0, connect_amf.as_slice())?;
         let mut result = self.wait_for_command("_result")?;
         command::read_connect_result(&mut result)?;
@@ -566,7 +550,7 @@ impl Client {
                         };
                         if let Some(ref cb) = self.on_frame_cb {
                             self.frame_cb_scratch = data_payload;
-                            let mut frame = Frame {
+                            let frame = Frame {
                                 frame_type: FrameType::Script,
                                 timestamp: msg.timestamp,
                                 size: self.frame_cb_scratch.len() as u32,

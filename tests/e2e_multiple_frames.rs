@@ -26,9 +26,13 @@ fn server_observes_multiple_published_video_frames() {
         client.connect("rtmp://127.0.0.1:19667/live/multiframe")?;
         client.publish()?;
 
+        let mut frames = Vec::with_capacity(5);
         for i in 0..5u8 {
-            let (_data, frame) = make_video_frame(u32::from(i) * 40, i);
-            client.send_frame(&frame)?;
+            frames.push(make_video_frame(u32::from(i) * 40, i));
+        }
+        for (data, frame) in &frames {
+            let _ = data;
+            client.send_frame(frame)?;
         }
         Ok(())
     });

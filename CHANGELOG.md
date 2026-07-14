@@ -53,8 +53,8 @@ begin at `1.0.0`.
 - ModEx prefix bytes are stripped only when the ModEx capability was negotiated
   and the leading bytes are unambiguous ModEx extensions; enhanced ExVideo/ExAudio
   and multitrack tags are preserved. Relay always forwards the original payload.
-- Complex RTMP handshake (digest/HMAC) is detected and rejected with
-  `ErrorCode::Unsupported` instead of hanging or mis-parsing.
+- Complex RTMP handshake (digest/HMAC) is not implemented; peers requesting it
+  still receive a legacy simple S1/S2 response so ffmpeg and similar clients connect.
 
 ## [0.3.1] — 2026-07-13
 
