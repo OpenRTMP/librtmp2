@@ -1280,6 +1280,12 @@ impl Conn {
         Ok(())
     }
 
+    /// Drop the transport and clear the embedder-visible fd copy.
+    pub fn disconnect_transport(&mut self) {
+        self.transport = None;
+        self.client_fd = -1;
+    }
+
     fn commit_flushed_ping(&mut self) {
         let Some(queued) = self.queued_ping.as_ref() else {
             return;

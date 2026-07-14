@@ -501,7 +501,7 @@ impl Server {
         for (i, conn) in self.connections.iter_mut().enumerate() {
             let mut conn_closed_this_iteration = false;
             if conn.session_setup_timed_out() {
-                conn.transport = None;
+                conn.disconnect_transport();
                 closed.push(i);
                 conn_closed_this_iteration = true;
             }
@@ -626,7 +626,7 @@ impl Server {
                     // slow player. Close immediately just like live relay sends.
                     conn.relay_enabled = false;
                     conn.needs_init_frames = false;
-                    conn.transport = None;
+                    conn.disconnect_transport();
                     closed.push(i);
                 }
             }
@@ -663,7 +663,7 @@ impl Server {
                     // this poll batch skip it and no more socket work is done.
                     conn.relay_enabled = false;
                     conn.needs_init_frames = false;
-                    conn.transport = None;
+                    conn.disconnect_transport();
                     closed.push(i);
                 }
             }

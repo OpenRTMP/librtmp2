@@ -3,6 +3,7 @@
 //! Mirrors `src/chunk/chunk_state.h` and `src/chunk/chunk_state.c`.
 
 use crate::buffer::Buffer;
+use crate::message::control::MAX_INBOUND_CHUNK_SIZE;
 use crate::types::ErrorCode;
 use crate::types::Result;
 
@@ -168,6 +169,7 @@ impl ChunkRegistry {
 
     /// Set chunk size for all streams.
     pub fn set_all_chunk_size(&mut self, chunk_size: u32) {
+        let chunk_size = chunk_size.clamp(DEFAULT_CHUNK_SIZE, MAX_INBOUND_CHUNK_SIZE);
         self.default_chunk_size = chunk_size;
         for stream in &mut self.streams {
             if stream.in_use {

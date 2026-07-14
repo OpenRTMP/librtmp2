@@ -66,6 +66,10 @@ const FIRST_CHUNK_EXTRA_OVERHEAD_BYTES: usize = 11;
 const MAX_RECV_BUFFER_BYTES: usize = MAX_RECV_BUFFER_PAYLOAD_BYTES
     + (MAX_RECV_BUFFER_PAYLOAD_BYTES / MIN_PRACTICAL_CHUNK_SIZE + 1) * MAX_CHUNK_HEADER_OVERHEAD_BYTES
     + 2 * FIRST_CHUNK_EXTRA_OVERHEAD_BYTES;
+/// Cap inbound Ping-Request reflections to prevent trivial outbound
+/// bandwidth/CPU amplification from a malicious RTMP(S) server.
+const MAX_INBOUND_PING_RESPONSES: usize = 8;
+const INBOUND_PING_WINDOW: Duration = Duration::from_secs(1);
 
 /// Max DNS jobs waiting on the shared resolver thread.
 const MAX_DNS_QUEUE_DEPTH: usize = 32;
@@ -114,7 +118,7 @@ fn resolve_socket_addrs(
         port,
         reply: reply_tx,
     })
-    .map_err(|_| ErrorCode::Internal)?;
+    .map_err(|_| ErrorCode::Timeout)?;
 
     let remaining = deadline.saturating_duration_since(Instant::now());
     match reply_rx.recv_timeout(remaining) {
@@ -161,6 +165,8 @@ pub struct Client {
     /// Skip TLS certificate verification for `rtmps://` connections.
     /// Only for testing against self-signed deployments.
     tls_insecure: bool,
+    inbound_ping_window_start: Option<Instant>,
+    inbound_ping_responses: usize,
 }
 
 impl Client {
@@ -181,6 +187,8 @@ impl Client {
             frame_cb_scratch: Vec::new(),
             tls_ca_file: None,
             tls_insecure: false,
+            inbound_ping_window_start: None,
+            inbound_ping_responses: 0,
         }
     }
 
@@ -608,6 +616,19 @@ impl Client {
         }
         let (event_type, param1, _) = control::read_user_control(payload, false)?;
         if event_type == control::UCTRL_PING_REQUEST {
+            let now = Instant::now();
+            if let Some(start) = self.inbound_ping_window_start {
+                if now.duration_since(start) >= INBOUND_PING_WINDOW {
+                    self.inbound_ping_window_start = Some(now);
+                    self.inbound_ping_responses = 0;
+                }
+            } else {
+                self.inbound_ping_window_start = Some(now);
+            }
+            if self.inbound_ping_responses >= MAX_INBOUND_PING_RESPONSES {
+                return Err(ErrorCode::Protocol);
+            }
+            self.inbound_ping_responses += 1;
             let mut buf = Buffer::with_capacity(6);
             control::write_user_control_ping_response(&mut buf, param1)?;
             self.send_user_control_message_nonblocking(buf.as_slice())?;
@@ -709,6 +730,8 @@ impl Client {
         handshake::client_init(&mut self.handshake);
         self.state = ClientState::Disconnected;
         self.stream_id = 0;
+        self.inbound_ping_window_start = None;
+        self.inbound_ping_responses = 0;
     }
 
     /// Drive the legacy C0/C1/C2 client handshake to completion over `transport`.
@@ -1171,6 +1194,32 @@ mod tests {
             .connect(&format!("rtmp://127.0.0.1:{port}/live/stream"))
             .unwrap_err();
         assert_eq!(err, ErrorCode::Io);
+    }
+
+    #[test]
+    fn inbound_ping_rate_limit_rejects_flood() {
+        use std::os::unix::io::IntoRawFd;
+        use std::os::unix::net::UnixStream;
+
+        let (client_end, _peer) = UnixStream::pair().unwrap();
+        client_end.set_nonblocking(true).unwrap();
+
+        let mut client = Client::new();
+        client.state = ClientState::AppConnected;
+        client.transport = Some(Transport::new_plain(client_end.into_raw_fd()));
+
+        let mut ping = Buffer::with_capacity(6);
+        for i in 0..MAX_INBOUND_PING_RESPONSES {
+            ping.reset();
+            control::write_user_control_ping_request(&mut ping, i as u32).unwrap();
+            client.handle_user_control(ping.as_slice()).unwrap();
+        }
+        ping.reset();
+        control::write_user_control_ping_request(&mut ping, 99).unwrap();
+        assert_eq!(
+            client.handle_user_control(ping.as_slice()).unwrap_err(),
+            ErrorCode::Protocol
+        );
     }
 
     #[test]
