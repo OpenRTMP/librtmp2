@@ -1192,6 +1192,13 @@ impl Conn {
                 if let Some(ref mut stream) = self.current_stream {
                     stream.is_publishing = false;
                 }
+                // Clear relay_enabled along with the publish role: with
+                // `defer_media_relay`, the publish handler leaves it
+                // untouched on the next `publish` (the integrator must
+                // explicitly re-authorize it via on_publish_cb), so a stale
+                // `true` here would let a new publish on this connection
+                // relay before it's actually re-authorized.
+                self.relay_enabled = false;
             }
             "FCPublish" | "releaseStream" => {}
             _ => {}

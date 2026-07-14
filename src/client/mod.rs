@@ -8,7 +8,7 @@ use std::sync::{mpsc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::buffer::Buffer;
-use crate::chunk::reader::{chunk_read, ChunkMessage};
+use crate::chunk::reader::{chunk_read_owned, ChunkMessage};
 use crate::chunk::state::{ChunkRegistry, DEFAULT_MAX_MSG_LENGTH};
 use crate::chunk::writer::chunk_write;
 use crate::handshake::{self, Handshake};
@@ -151,8 +151,6 @@ pub struct Client {
     pub app: String,
     pub stream_key: String,
     pub on_frame_cb: Option<fn(&Frame)>,
-    /// Retains the last frame payload delivered through `on_frame_cb`.
-    frame_cb_scratch: Vec<u8>,
     /// PEM CA bundle used to verify `rtmps://` servers, in addition to the
     /// system trust store. `None` uses the system trust store only.
     tls_ca_file: Option<String>,
@@ -176,7 +174,6 @@ impl Client {
             app: String::new(),
             stream_key: String::new(),
             on_frame_cb: None,
-            frame_cb_scratch: Vec::new(),
             tls_ca_file: None,
             tls_insecure: false,
         }
@@ -493,44 +490,19 @@ impl Client {
             }
 
             let mut msg = ChunkMessage::default();
-            let mut payload_ptr: *const u8 = std::ptr::null();
-            let mut payload_len = 0;
-            match chunk_read(
-                &mut self.recv_buffer,
-                &mut self.chunk_reg,
-                None,
-                &mut msg,
-                &mut payload_ptr,
-                &mut payload_len,
-            ) {
-                Ok(1) if msg.is_complete => {
+            match chunk_read_owned(&mut self.recv_buffer, &mut self.chunk_reg, &mut msg) {
+                Ok((1, payload)) if msg.is_complete => {
                     *messages_processed += 1;
                     if msg.msg_type_id == msg_dispatch::RTMP_MSG_SET_CHUNK_SIZE {
-                        let payload = if payload_ptr.is_null() || payload_len == 0 {
-                            &[][..]
-                        } else {
-                            unsafe { std::slice::from_raw_parts(payload_ptr, payload_len) }
-                        };
-                        if let Ok(cs) = control::read_set_chunk_size(payload) {
+                        if let Ok(cs) = control::read_set_chunk_size(&payload) {
                             self.chunk_reg.set_all_chunk_size(cs);
                         }
                     } else if msg.msg_type_id == msg_dispatch::RTMP_MSG_USER_CONTROL {
-                        let payload = if payload_ptr.is_null() || payload_len == 0 {
-                            &[][..]
-                        } else {
-                            unsafe { std::slice::from_raw_parts(payload_ptr, payload_len) }
-                        };
-                        self.handle_user_control(payload)?;
+                        self.handle_user_control(&payload)?;
                     } else if msg.msg_type_id == msg_dispatch::RTMP_MSG_AUDIO
                         || msg.msg_type_id == msg_dispatch::RTMP_MSG_VIDEO
                     {
                         if let Some(ref cb) = self.on_frame_cb {
-                            self.frame_cb_scratch.clear();
-                            if !payload_ptr.is_null() && payload_len > 0 {
-                                self.frame_cb_scratch.extend_from_slice(unsafe {
-                                    std::slice::from_raw_parts(payload_ptr, payload_len)
-                                });
-                            }
                             let frame = Frame {
                                 frame_type: if msg.msg_type_id == msg_dispatch::RTMP_MSG_AUDIO {
                                     FrameType::Audio
@@ -538,8 +510,8 @@ impl Client {
                                     FrameType::Video
                                 },
                                 timestamp: msg.timestamp,
-                                size: self.frame_cb_scratch.len() as u32,
-                                data: self.frame_cb_scratch.as_ptr(),
+                                size: payload.len() as u32,
+                                data: payload.as_ptr(),
                                 ..Default::default()
                             };
                             cb(&frame);
@@ -799,22 +771,8 @@ impl Client {
     fn recv_message(&mut self, recv_budget: &mut usize) -> Result<(ChunkMessage, Vec<u8>)> {
         loop {
             let mut msg = ChunkMessage::default();
-            let mut payload_ptr: *const u8 = std::ptr::null();
-            let mut payload_len = 0;
-            match chunk_read(
-                &mut self.recv_buffer,
-                &mut self.chunk_reg,
-                None,
-                &mut msg,
-                &mut payload_ptr,
-                &mut payload_len,
-            ) {
-                Ok(1) if msg.is_complete => {
-                    let payload = if payload_ptr.is_null() || payload_len == 0 {
-                        Vec::new()
-                    } else {
-                        unsafe { std::slice::from_raw_parts(payload_ptr, payload_len) }.to_vec()
-                    };
+            match chunk_read_owned(&mut self.recv_buffer, &mut self.chunk_reg, &mut msg) {
+                Ok((1, payload)) if msg.is_complete => {
                     if msg.msg_type_id == msg_dispatch::RTMP_MSG_SET_CHUNK_SIZE {
                         if let Ok(cs) = control::read_set_chunk_size(&payload) {
                             self.chunk_reg.set_all_chunk_size(cs);

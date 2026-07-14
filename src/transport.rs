@@ -171,7 +171,7 @@ impl Transport {
         ca_file: Option<&str>,
         insecure: bool,
     ) -> Result<Self> {
-        use openssl::ssl::{Ssl, SslContextBuilder};
+        use openssl::ssl::{Ssl, SslContextBuilder, SslMode};
         use openssl::x509::store::X509StoreBuilder;
         use openssl::x509::verify::X509CheckFlags;
         use openssl::x509::X509;
@@ -186,6 +186,14 @@ impl Transport {
         let mut ctx = SslContextBuilder::new(SslMethod::tls()).map_err(|_| ErrorCode::Internal)?;
         ctx.set_cipher_list("DEFAULT:!aNULL:!eNULL:!MD5:!3DES:!DES:!RC4:!IDEA:!SEED:!aDSS:!SRP:!PSK")
             .map_err(|_| ErrorCode::Internal)?;
+        // The non-blocking publish path (Client::try_flush_send_buffer) may
+        // retry a WANT_READ/WANT_WRITE SSL_write() with a send_buffer that
+        // has grown (a new frame appended after the pending one) since the
+        // previous attempt. ACCEPT_MOVING_WRITE_BUFFER permits the retry
+        // buffer to differ in location/length as long as the previously
+        // unwritten bytes are still present at the front, which holds here
+        // since Buffer only ever appends after its unread portion.
+        ctx.set_mode(SslMode::ACCEPT_MOVING_WRITE_BUFFER);
         if insecure {
             // Verification is disabled outright, so don't touch the system
             // verify-path configuration at all: a minimal host without a
@@ -431,8 +439,15 @@ impl TlsCtx {
     /// certificate.
     #[cfg(feature = "tls")]
     pub fn new_server(cert_file: &str, key_file: &str) -> Result<Self> {
+        use openssl::ssl::SslMode;
+
         let mut builder =
             SslAcceptor::mozilla_intermediate(SslMethod::tls()).map_err(|_| ErrorCode::Internal)?;
+        // Non-blocking sends (Conn::flush) may retry a WANT_READ/WANT_WRITE
+        // SSL_write() with a send_buffer that grew (more queued output
+        // appended) since the previous attempt; see the matching client-side
+        // comment in Transport::connect_tls.
+        builder.set_mode(SslMode::ACCEPT_MOVING_WRITE_BUFFER);
         builder
             .set_certificate_chain_file(cert_file)
             .map_err(|_| ErrorCode::Internal)?;
