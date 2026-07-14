@@ -7,19 +7,9 @@ on:
     paths:
       - scripts/apply_pr128_fixes.py
       - .github/workflows/apply-pr128-fixes.yml
-  pull_request:
-    branches:
-      - main
-    paths:
-      - scripts/apply_pr128_fixes.py
-      - .github/workflows/apply-pr128-fixes.yml
 
 permissions:
   contents: write
-
-concurrency:
-  group: apply-pr128-fixes
-  cancel-in-progress: true
 
 jobs:
   apply-and-test:
@@ -37,27 +27,55 @@ jobs:
           toolchain: 1.93.0
           components: rustfmt, clippy
 
-      - name: Apply fixes
-        run: python3 scripts/apply_pr128_fixes.py
+      - name: Apply and validate fixes
+        id: validate
+        shell: bash
+        run: |
+          set +e
+          status=0
+          {
+            echo '== apply patch =='
+            python3 scripts/apply_pr128_fixes.py
+            status=$?
+            if [ "$status" -eq 0 ]; then
+              echo '== cargo fmt =='
+              cargo fmt --all
+              status=$?
+            fi
+            if [ "$status" -eq 0 ]; then
+              echo '== cargo test --all-targets =='
+              cargo test --all-targets
+              status=$?
+            fi
+            if [ "$status" -eq 0 ]; then
+              echo '== cargo clippy --all-targets -- -D warnings =='
+              cargo clippy --all-targets -- -D warnings
+              status=$?
+            fi
+            echo "== exit status: $status =="
+          } > /tmp/pr128-fix-results.log 2>&1
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          exit 0
 
-      - name: Format
-        run: cargo fmt --all
-
-      - name: Test all targets
-        run: cargo test --all-targets
-
-      - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
-
-      - name: Remove temporary automation
+      - name: Commit validated fixes
+        if: steps.validate.outputs.status == '0'
         run: |
           rm scripts/apply_pr128_fixes.py
           rm .github/workflows/apply-pr128-fixes.yml
-
-      - name: Commit validated fixes
-        run: |
+          rm -f pr128-fix-results.log
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A
           git commit -m "fix: address E-RTMP v2 review findings"
+          git push origin HEAD:feat/ertmp-v2-multitrack-0.4.0
+
+      - name: Commit failure diagnostics
+        if: steps.validate.outputs.status != '0'
+        run: |
+          git reset --hard HEAD
+          cp /tmp/pr128-fix-results.log pr128-fix-results.log
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add pr128-fix-results.log
+          git commit -m "ci: capture PR 128 fix failure"
           git push origin HEAD:feat/ertmp-v2-multitrack-0.4.0
