@@ -1,78 +1,79 @@
 == apply patch ==
 Applied PR #128 fixes
 Applied RelayFrame test-helper follow-up
+Applied wildcard and multicodec follow-up
 == cargo fmt ==
 == cargo test --all-targets ==
 [1m[92m    Updating[0m crates.io index
 [1m[92m     Locking[0m 94 packages to latest compatible versions
 [1m[92m Downloading[0m crates ...
-[1m[92m  Downloaded[0m lock_api v0.4.14
-[1m[92m  Downloaded[0m criterion-plot v0.8.2
 [1m[92m  Downloaded[0m anes v0.1.6
-[1m[92m  Downloaded[0m bitflags v2.13.0
-[1m[92m  Downloaded[0m alloca v0.4.0
-[1m[92m  Downloaded[0m openssl-macros v0.1.1
-[1m[92m  Downloaded[0m cfg-if v1.0.4
-[1m[92m  Downloaded[0m oorandom v11.1.5
-[1m[92m  Downloaded[0m itoa v1.0.18
-[1m[92m  Downloaded[0m autocfg v1.5.1
-[1m[92m  Downloaded[0m cast v0.3.0
-[1m[92m  Downloaded[0m plotters-svg v0.3.7
-[1m[92m  Downloaded[0m ciborium-ll v0.2.2
-[1m[92m  Downloaded[0m scopeguard v1.2.0
-[1m[92m  Downloaded[0m unicode-ident v1.0.24
-[1m[92m  Downloaded[0m walkdir v2.5.0
-[1m[92m  Downloaded[0m thiserror v2.0.18
-[1m[92m  Downloaded[0m smallvec v1.15.2
-[1m[92m  Downloaded[0m tinytemplate v1.2.1
-[1m[92m  Downloaded[0m num-traits v0.2.19
-[1m[92m  Downloaded[0m proc-macro2 v1.0.106
-[1m[92m  Downloaded[0m half v2.7.1
+[1m[92m  Downloaded[0m find-msvc-tools v0.1.9
 [1m[92m  Downloaded[0m zmij v1.0.23
-[1m[92m  Downloaded[0m memchr v2.8.3
-[1m[92m  Downloaded[0m zerocopy-derive v0.8.54
-[1m[92m  Downloaded[0m serde_derive v1.0.228
-[1m[92m  Downloaded[0m aho-corasick v1.1.4
-[1m[92m  Downloaded[0m rayon-core v1.13.0
-[1m[92m  Downloaded[0m serde_json v1.0.150
-[1m[92m  Downloaded[0m regex v1.13.0
+[1m[92m  Downloaded[0m cfg-if v1.0.4
+[1m[92m  Downloaded[0m crossbeam-utils v0.8.22
+[1m[92m  Downloaded[0m ciborium v0.2.2
+[1m[92m  Downloaded[0m openssl v0.10.81
+[1m[92m  Downloaded[0m tinytemplate v1.2.1
+[1m[92m  Downloaded[0m walkdir v2.5.0
 [1m[92m  Downloaded[0m rayon v1.12.0
+[1m[92m  Downloaded[0m oorandom v11.1.5
+[1m[92m  Downloaded[0m crossbeam-deque v0.8.7
+[1m[92m  Downloaded[0m ciborium-io v0.2.2
+[1m[92m  Downloaded[0m clap_lex v1.1.0
+[1m[92m  Downloaded[0m thiserror-impl v2.0.18
+[1m[92m  Downloaded[0m anstyle v1.0.14
+[1m[92m  Downloaded[0m shlex v2.0.1
+[1m[92m  Downloaded[0m plotters-svg v0.3.7
+[1m[92m  Downloaded[0m crossbeam-epoch v0.9.20
+[1m[92m  Downloaded[0m plotters-backend v0.3.7
+[1m[92m  Downloaded[0m parking_lot_core v0.9.12
+[1m[92m  Downloaded[0m thiserror v2.0.18
+[1m[92m  Downloaded[0m serde_core v1.0.228
+[1m[92m  Downloaded[0m quote v1.0.46
+[1m[92m  Downloaded[0m bitflags v2.13.0
+[1m[92m  Downloaded[0m lock_api v0.4.14
+[1m[92m  Downloaded[0m smallvec v1.15.2
+[1m[92m  Downloaded[0m unicode-ident v1.0.24
+[1m[92m  Downloaded[0m openssl-sys v0.9.117
+[1m[92m  Downloaded[0m half v2.7.1
+[1m[92m  Downloaded[0m cc v1.2.67
+[1m[92m  Downloaded[0m zerocopy-derive v0.8.54
+[1m[92m  Downloaded[0m plotters v0.3.7
+[1m[92m  Downloaded[0m criterion v0.8.2
+[1m[92m  Downloaded[0m ciborium-ll v0.2.2
+[1m[92m  Downloaded[0m itertools v0.13.0
+[1m[92m  Downloaded[0m regex v1.13.0
+[1m[92m  Downloaded[0m syn v2.0.118
+[1m[92m  Downloaded[0m clap_builder v4.6.0
+[1m[92m  Downloaded[0m aho-corasick v1.1.4
 [1m[92m  Downloaded[0m zerocopy v0.8.54
 [1m[92m  Downloaded[0m vcpkg v0.2.15
-[1m[92m  Downloaded[0m criterion v0.8.2
-[1m[92m  Downloaded[0m plotters v0.3.7
-[1m[92m  Downloaded[0m syn v2.0.118
-[1m[92m  Downloaded[0m regex-syntax v0.8.11
-[1m[92m  Downloaded[0m openssl v0.10.81
-[1m[92m  Downloaded[0m cc v1.2.67
-[1m[92m  Downloaded[0m serde_core v1.0.228
+[1m[92m  Downloaded[0m serde_json v1.0.150
 [1m[92m  Downloaded[0m serde v1.0.228
-[1m[92m  Downloaded[0m parking_lot v0.12.5
-[1m[92m  Downloaded[0m openssl-sys v0.9.117
-[1m[92m  Downloaded[0m crossbeam-epoch v0.9.20
-[1m[92m  Downloaded[0m either v1.16.0
+[1m[92m  Downloaded[0m memchr v2.8.3
+[1m[92m  Downloaded[0m serde_derive v1.0.228
+[1m[92m  Downloaded[0m rayon-core v1.13.0
+[1m[92m  Downloaded[0m scopeguard v1.2.0
+[1m[92m  Downloaded[0m proc-macro2 v1.0.106
+[1m[92m  Downloaded[0m regex-syntax v0.8.11
 [1m[92m  Downloaded[0m clap v4.6.1
-[1m[92m  Downloaded[0m page_size v0.6.0
-[1m[92m  Downloaded[0m ciborium-io v0.2.2
+[1m[92m  Downloaded[0m parking_lot v0.12.5
 [1m[92m  Downloaded[0m foreign-types v0.3.2
-[1m[92m  Downloaded[0m same-file v1.0.6
-[1m[92m  Downloaded[0m plotters-backend v0.3.7
-[1m[92m  Downloaded[0m clap_lex v1.1.0
-[1m[92m  Downloaded[0m parking_lot_core v0.9.12
-[1m[92m  Downloaded[0m crossbeam-utils v0.8.22
-[1m[92m  Downloaded[0m crossbeam-deque v0.8.7
-[1m[92m  Downloaded[0m ciborium v0.2.2
-[1m[92m  Downloaded[0m find-msvc-tools v0.1.9
-[1m[92m  Downloaded[0m thiserror-impl v2.0.18
-[1m[92m  Downloaded[0m regex-automata v0.4.15
-[1m[92m  Downloaded[0m shlex v2.0.1
-[1m[92m  Downloaded[0m pkg-config v0.3.33
-[1m[92m  Downloaded[0m clap_builder v4.6.0
-[1m[92m  Downloaded[0m libc v0.2.186
-[1m[92m  Downloaded[0m anstyle v1.0.14
-[1m[92m  Downloaded[0m quote v1.0.46
+[1m[92m  Downloaded[0m page_size v0.6.0
+[1m[92m  Downloaded[0m openssl-macros v0.1.1
+[1m[92m  Downloaded[0m itoa v1.0.18
 [1m[92m  Downloaded[0m foreign-types-shared v0.1.1
-[1m[92m  Downloaded[0m itertools v0.13.0
+[1m[92m  Downloaded[0m criterion-plot v0.8.2
+[1m[92m  Downloaded[0m pkg-config v0.3.33
+[1m[92m  Downloaded[0m either v1.16.0
+[1m[92m  Downloaded[0m regex-automata v0.4.15
+[1m[92m  Downloaded[0m cast v0.3.0
+[1m[92m  Downloaded[0m autocfg v1.5.1
+[1m[92m  Downloaded[0m same-file v1.0.6
+[1m[92m  Downloaded[0m num-traits v0.2.19
+[1m[92m  Downloaded[0m alloca v0.4.0
+[1m[92m  Downloaded[0m libc v0.2.186
 [1m[92m   Compiling[0m proc-macro2 v1.0.106
 [1m[92m   Compiling[0m quote v1.0.46
 [1m[92m   Compiling[0m unicode-ident v1.0.24
@@ -81,45 +82,45 @@ Applied RelayFrame test-helper follow-up
 [1m[92m   Compiling[0m cc v1.2.67
 [1m[92m   Compiling[0m libc v0.2.186
 [1m[92m   Compiling[0m cfg-if v1.0.4
-[1m[92m   Compiling[0m serde_core v1.0.228
 [1m[92m   Compiling[0m crossbeam-utils v0.8.22
-[1m[92m   Compiling[0m vcpkg v0.2.15
-[1m[92m   Compiling[0m syn v2.0.118
-[1m[92m   Compiling[0m pkg-config v0.3.33
+[1m[92m   Compiling[0m serde_core v1.0.228
 [1m[92m   Compiling[0m crossbeam-epoch v0.9.20
+[1m[92m   Compiling[0m pkg-config v0.3.33
+[1m[92m   Compiling[0m syn v2.0.118
+[1m[92m   Compiling[0m vcpkg v0.2.15
 [1m[92m   Compiling[0m zerocopy v0.8.54
 [1m[92m   Compiling[0m openssl-sys v0.9.117
+[1m[92m   Compiling[0m crossbeam-deque v0.8.7
 [1m[92m   Compiling[0m autocfg v1.5.1
 [1m[92m   Compiling[0m zmij v1.0.23
 [1m[92m   Compiling[0m serde v1.0.228
-[1m[92m   Compiling[0m crossbeam-deque v0.8.7
 [1m[92m   Compiling[0m num-traits v0.2.19
+[1m[92m   Compiling[0m serde_json v1.0.150
+[1m[92m   Compiling[0m either v1.16.0
 [1m[92m   Compiling[0m rayon-core v1.13.0
 [1m[92m   Compiling[0m parking_lot_core v0.9.12
-[1m[92m   Compiling[0m either v1.16.0
-[1m[92m   Compiling[0m serde_json v1.0.150
 [1m[92m   Compiling[0m alloca v0.4.0
-[1m[92m   Compiling[0m foreign-types-shared v0.1.1
+[1m[92m   Compiling[0m anstyle v1.0.14
 [1m[92m   Compiling[0m plotters-backend v0.3.7
-[1m[92m   Compiling[0m thiserror v2.0.18
-[1m[92m   Compiling[0m itoa v1.0.18
-[1m[92m   Compiling[0m scopeguard v1.2.0
 [1m[92m   Compiling[0m smallvec v1.15.2
 [1m[92m   Compiling[0m openssl v0.10.81
-[1m[92m   Compiling[0m memchr v2.8.3
-[1m[92m   Compiling[0m anstyle v1.0.14
-[1m[92m   Compiling[0m regex-syntax v0.8.11
 [1m[92m   Compiling[0m clap_lex v1.1.0
 [1m[92m   Compiling[0m ciborium-io v0.2.2
+[1m[92m   Compiling[0m foreign-types-shared v0.1.1
+[1m[92m   Compiling[0m regex-syntax v0.8.11
+[1m[92m   Compiling[0m itoa v1.0.18
+[1m[92m   Compiling[0m scopeguard v1.2.0
+[1m[92m   Compiling[0m memchr v2.8.3
+[1m[92m   Compiling[0m thiserror v2.0.18
+[1m[92m   Compiling[0m lock_api v0.4.14
 [1m[92m   Compiling[0m clap_builder v4.6.0
+[1m[92m   Compiling[0m regex-automata v0.4.15
 [1m[92m   Compiling[0m zerocopy-derive v0.8.54
 [1m[92m   Compiling[0m serde_derive v1.0.228
-[1m[92m   Compiling[0m thiserror-impl v2.0.18
 [1m[92m   Compiling[0m openssl-macros v0.1.1
-[1m[92m   Compiling[0m regex-automata v0.4.15
-[1m[92m   Compiling[0m lock_api v0.4.14
-[1m[92m   Compiling[0m plotters-svg v0.3.7
+[1m[92m   Compiling[0m thiserror-impl v2.0.18
 [1m[92m   Compiling[0m foreign-types v0.3.2
+[1m[92m   Compiling[0m plotters-svg v0.3.7
 [1m[92m   Compiling[0m itertools v0.13.0
 [1m[92m   Compiling[0m half v2.7.1
 [1m[92m   Compiling[0m ciborium-ll v0.2.2
@@ -129,16 +130,16 @@ Applied RelayFrame test-helper follow-up
 [1m[92m   Compiling[0m bitflags v2.13.0
 [1m[92m   Compiling[0m walkdir v2.5.0
 [1m[92m   Compiling[0m ciborium v0.2.2
-[1m[92m   Compiling[0m criterion-plot v0.8.2
 [1m[92m   Compiling[0m rayon v1.12.0
 [1m[92m   Compiling[0m plotters v0.3.7
+[1m[92m   Compiling[0m criterion-plot v0.8.2
 [1m[92m   Compiling[0m tinytemplate v1.2.1
-[1m[92m   Compiling[0m regex v1.13.0
 [1m[92m   Compiling[0m parking_lot v0.12.5
+[1m[92m   Compiling[0m regex v1.13.0
 [1m[92m   Compiling[0m clap v4.6.1
 [1m[92m   Compiling[0m page_size v0.6.0
-[1m[92m   Compiling[0m anes v0.1.6
 [1m[92m   Compiling[0m oorandom v11.1.5
+[1m[92m   Compiling[0m anes v0.1.6
 [1m[92m   Compiling[0m criterion v0.8.2
 [1m[33mwarning[0m[1m: use of deprecated function `criterion::black_box`: use `std::hint::black_box()` instead[0m
  [1m[94m--> [0mbenches/protocol.rs:1:40
@@ -218,32 +219,31 @@ Applied RelayFrame test-helper follow-up
 
 [1m[33mwarning[0m: `librtmp2` (bench "protocol") generated 10 warnings
 [1m[33mwarning[0m: `librtmp2` (bench "relay") generated 2 warnings
-[1m[92m    Finished[0m `test` profile [unoptimized + debuginfo] target(s) in 19.28s
+[1m[92m    Finished[0m `test` profile [unoptimized + debuginfo] target(s) in 18.72s
 [1m[92m     Running[0m unittests src/lib.rs (target/debug/deps/librtmp2-8b516025b5491647)
 
 running 253 tests
 test amf::amf0::tests::boolean_round_trips ... ok
 test amf::amf0::tests::ecma_array_begin_wire_format_is_big_endian ... ok
-test amf::amf0::tests::long_string_wire_format_is_big_endian ... ok
 test amf::amf0::tests::number_round_trips ... ok
 test amf::amf0::tests::is_object_end_detects_marker ... ok
 test amf::amf0::tests::object_key_wire_format_is_big_endian ... ok
 test amf::amf0::tests::read_long_string_rejects_truncated_payload ... ok
+test amf::amf0::tests::long_string_wire_format_is_big_endian ... ok
 test amf::amf0::tests::read_object_key_rejects_truncated_key_bytes ... ok
 test amf::amf0::tests::read_string_rejects_truncated_payload ... ok
-test amf::amf0::tests::skip_value_rejects_excessive_strict_array_count ... ok
 test amf::amf0::tests::skip_value_rejects_excessive_nesting_depth ... ok
+test amf::amf0::tests::skip_value_rejects_excessive_strict_array_count ... ok
+test amf::amf0::tests::skip_value_rejects_object_with_too_many_keys ... ok
 test amf::amf0::tests::skip_value_rejects_truncated_date ... ok
 test amf::amf0::tests::skip_value_rejects_truncated_long_string_length ... ok
 test amf::amf0::tests::skip_value_rejects_truncated_string_length ... ok
 test amf::amf0::tests::skip_value_skips_nested_object ... ok
-test amf::amf0::tests::strict_array_can_be_skipped ... ok
-test amf::amf0::tests::skip_value_rejects_object_with_too_many_keys ... ok
+test amf::amf0::tests::string_round_trips_through_read_string ... ok
 test amf::amf0::tests::string_wire_format_is_big_endian ... ok
 test amf::amf3::tests::boolean_round_trips ... ok
-test amf::amf0::tests::string_round_trips_through_read_string ... ok
-test amf::amf3::tests::integer_round_trips_multi_byte_u29 ... ok
 test amf::amf3::tests::double_round_trips ... ok
+test amf::amf3::tests::integer_round_trips_multi_byte_u29 ... ok
 test amf::amf3::tests::integer_round_trips_small_value ... ok
 test amf::amf3::tests::null_round_trips ... ok
 test amf::amf3::tests::read_double_rejects_truncated_payload ... ok
@@ -253,10 +253,11 @@ test amf::amf3::tests::read_string_rejects_truncated_payload ... ok
 test amf::amf3::tests::string_round_trips ... ok
 test buffer::tests::drain_skips_unread_bytes ... ok
 test buffer::tests::read_past_available_errors ... ok
-test buffer::tests::reset_clears_buffer ... ok
+test amf::amf0::tests::strict_array_can_be_skipped ... ok
 test buffer::tests::grows_past_initial_capacity ... ok
-test buffer::tests::write_then_read_round_trips ... ok
+test buffer::tests::reset_clears_buffer ... ok
 test buffer::tests::write_over_max_size_errors ... ok
+test buffer::tests::write_then_read_round_trips ... ok
 test bytes::tests::hton24_writes_big_endian_24_bit ... ok
 test bytes::tests::byteswap_round_trips ... ok
 test bytes::tests::hton32_then_to_ne_bytes_matches_ntoh32 ... ok
@@ -264,8 +265,8 @@ test bytes::tests::ntoh16_reads_big_endian_16_bit ... ok
 test bytes::tests::ntoh24_reads_big_endian_24_bit ... ok
 test bytes::tests::ntoh32_reads_big_endian_32_bit ... ok
 test chunk::reader::tests::fmt1_and_fmt2_timestamps_accumulate_as_deltas_not_absolutes ... ok
-test chunk::reader::tests::fmt2_without_prior_header_state_is_rejected ... ok
 test chunk::reader::tests::fmt2_after_complete_message_can_start_new_message_with_inherited_header ... ok
+test chunk::reader::tests::fmt2_without_prior_header_state_is_rejected ... ok
 test chunk::reader::tests::fmt3_after_complete_message_can_start_new_message_with_inherited_header ... ok
 test chunk::reader::tests::rejects_message_length_above_registry_cap ... ok
 test chunk::reader::tests::tiny_chunk_size_multiplies_chunk_read_iterations ... ok
@@ -300,7 +301,7 @@ test client::tests::try_flush_send_buffer_shrinks_after_full_drain ... ok
 test ertmp::connect_amf::tests::caps_ex_binary_round_trip ... ok
 test ertmp::connect_amf::tests::caps_ex_mask_round_trip ... ok
 test ertmp::connect_amf::tests::caps_ex_object_parses_legacy_codec_fields ... ok
-test ertmp::connect_amf::tests::four_cc_list_preserves_wildcard ... FAILED
+test ertmp::connect_amf::tests::four_cc_list_preserves_wildcard ... ok
 test ertmp::connect_amf::tests::four_cc_list_strict_array_round_trip ... ok
 test ertmp::connect_amf::tests::negotiate_caps_honors_explicit_zero_caps_ex ... ok
 test ertmp::connect_amf::tests::negotiate_caps_legacy_object_caps_ex_uses_defaults ... ok
@@ -332,7 +333,7 @@ test ertmp::multitrack::tests::parse_error_leaves_descriptor_cleared ... ok
 test ertmp::multitrack::tests::video_track_type_round_trips_as_amf0_double ... ok
 test ertmp::multitrack_media::tests::coded_frames_x_keyframe_is_detected ... ok
 test ertmp::multitrack_media::tests::detects_multitrack_container ... ok
-test ertmp::multitrack_media::tests::iterates_many_tracks_many_codecs ... FAILED
+test ertmp::multitrack_media::tests::iterates_many_tracks_many_codecs ... ok
 test ertmp::multitrack_media::tests::iterates_subtracks_with_shared_codec ... ok
 test ertmp::multitrack_media::tests::malformed_message_delivers_no_partial_tracks ... ok
 test ertmp::reconnect::tests::parse_rejects_long_input ... ok
@@ -463,41 +464,68 @@ test session::conn::tests::publish_rename_without_relay_key_evicts_old_route_key
 test session::conn::tests::publish_then_play_then_publish_does_not_evict_played_stream_key ... ok
 test session::conn::tests::read_messages_respects_recv_level_message_budget ... ok
 test session::conn::tests::receive_video_reenable_requests_cached_replay ... ok
-test client::tests::poll_drains_leftover_messages_before_enforcing_staging_cap ... ok
+test session::conn::tests::recv_rejects_recv_buffer_growth_past_cap ... ok
 test session::conn::tests::relay_route_key_falls_back_to_rtmp_stream_name ... ok
 test session::conn::tests::relay_route_key_prefers_relay_key_over_rtmp_name ... ok
 test session::conn::tests::stale_queued_ping_closes_connection ... ok
 test session::conn::tests::unanswered_ping_timeouts_close_connection ... ok
-test session::conn::tests::recv_rejects_recv_buffer_growth_past_cap ... ok
+test client::tests::poll_drains_leftover_messages_before_enforcing_staging_cap ... ok
 test client::tests::poll_rejects_recv_buffer_growth_past_staging_cap ... ok
+test transport::client_tls_tests::connect_tls_with_matching_ca_file_trusts_self_signed_cert ... ok
 test transport::client_tls_tests::connect_tls_default_mode_rejects_untrusted_self_signed_cert ... ok
 test transport::client_tls_tests::connect_tls_insecure_accepts_self_signed_cert_without_default_verify_paths ... ok
-test transport::client_tls_tests::connect_tls_with_matching_ca_file_trusts_self_signed_cert ... ok
 test transport::client_tls_tests::connect_tls_with_mismatched_ca_file_rejects_self_signed_cert ... ok
 test chunk::reader::tests::chunk_read_owned_releases_last_payload_after_copy ... ok
 
-failures:
+test result: ok. 253 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.19s
 
----- ertmp::connect_amf::tests::four_cc_list_preserves_wildcard stdout ----
+[1m[92m     Running[0m tests/e2e_audio_frames.rs (target/debug/deps/e2e_audio_frames-2ee1c4bf0da1b543)
 
-thread 'ertmp::connect_amf::tests::four_cc_list_preserves_wildcard' (3965) panicked at src/ertmp/connect_amf.rs:510:9:
-assertion `left == right` failed
-  left: 0
- right: 1
+running 1 test
+test server_observes_published_audio_frames ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.34s
+
+[1m[92m     Running[0m tests/e2e_multiple_frames.rs (target/debug/deps/e2e_multiple_frames-f7c9cd0d20ae6083)
+
+running 1 test
+test server_observes_multiple_published_video_frames ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.34s
+
+[1m[92m     Running[0m tests/e2e_publish_play_same_listener.rs (target/debug/deps/e2e_publish_play_same_listener-4676aff2d6996e13)
+
+running 1 test
+test publisher_and_player_relay_on_same_listener ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.54s
+
+[1m[92m     Running[0m tests/e2e_publish_rejection.rs (target/debug/deps/e2e_publish_rejection-7d6da04b0e3e3a4c)
+
+running 1 test
+test publish_rejected_by_callback_does_not_deliver_frames ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 12.02s
+
+[1m[92m     Running[0m tests/server_client_loopback.rs (target/debug/deps/server_client_loopback-2245b327050f9907)
+
+running 6 tests
+test listener_fds_exposes_every_bound_listener_and_stop_clears_them ... ok
+test set_conn_id_base_rejects_exhausted_counter - should panic ... ok
+test set_conn_id_base_rejects_zero - should panic ... ok
+test server_client_publish_over_real_sockets ... ok
+test set_conn_id_base_offsets_first_assigned_conn_id ... ok
+test publisher_and_player_relay_across_different_listeners ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.36s
+
+[1m[92m     Running[0m benches/protocol.rs (target/debug/deps/protocol-bd1cb7910086485e)
+Gnuplot not found, using plotters backend
+Testing chunk/write_read_roundtrip
+
+thread 'main' (4228) panicked at benches/protocol.rs:46:30:
+chunk_read needs more data
 note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
 
----- ertmp::multitrack_media::tests::iterates_many_tracks_many_codecs stdout ----
-
-thread 'ertmp::multitrack_media::tests::iterates_many_tracks_many_codecs' (3997) panicked at src/ertmp/multitrack_media.rs:200:9:
-assertion failed: foreach_track(FrameType::Video, &payload,
-    |track| { codecs.push(track.fourcc); })
-
-
-failures:
-    ertmp::connect_amf::tests::four_cc_list_preserves_wildcard
-    ertmp::multitrack_media::tests::iterates_many_tracks_many_codecs
-
-test result: FAILED. 251 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.10s
-
-[1m[91merror[0m: test failed, to rerun pass `--lib`
+[1m[91merror[0m: test failed, to rerun pass `--bench protocol`
 == exit status: 101 ==
