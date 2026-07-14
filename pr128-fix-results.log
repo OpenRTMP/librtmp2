@@ -1,158 +1,145 @@
 == apply patch ==
 Applied PR #128 fixes
+Applied RelayFrame test-helper follow-up
 == cargo fmt ==
 == cargo test --all-targets ==
 [1m[92m    Updating[0m crates.io index
 [1m[92m     Locking[0m 94 packages to latest compatible versions
 [1m[92m Downloading[0m crates ...
+[1m[92m  Downloaded[0m lock_api v0.4.14
+[1m[92m  Downloaded[0m criterion-plot v0.8.2
 [1m[92m  Downloaded[0m anes v0.1.6
-[1m[92m  Downloaded[0m alloca v0.4.0
-[1m[92m  Downloaded[0m cast v0.3.0
-[1m[92m  Downloaded[0m cfg-if v1.0.4
-[1m[92m  Downloaded[0m aho-corasick v1.1.4
-[1m[92m  Downloaded[0m autocfg v1.5.1
 [1m[92m  Downloaded[0m bitflags v2.13.0
-[1m[92m  Downloaded[0m anstyle v1.0.14
+[1m[92m  Downloaded[0m alloca v0.4.0
 [1m[92m  Downloaded[0m openssl-macros v0.1.1
-[1m[92m  Downloaded[0m foreign-types v0.3.2
-[1m[92m  Downloaded[0m clap_lex v1.1.0
-[1m[92m  Downloaded[0m scopeguard v1.2.0
+[1m[92m  Downloaded[0m cfg-if v1.0.4
 [1m[92m  Downloaded[0m oorandom v11.1.5
 [1m[92m  Downloaded[0m itoa v1.0.18
-[1m[92m  Downloaded[0m lock_api v0.4.14
+[1m[92m  Downloaded[0m autocfg v1.5.1
+[1m[92m  Downloaded[0m cast v0.3.0
+[1m[92m  Downloaded[0m plotters-svg v0.3.7
+[1m[92m  Downloaded[0m ciborium-ll v0.2.2
+[1m[92m  Downloaded[0m scopeguard v1.2.0
 [1m[92m  Downloaded[0m unicode-ident v1.0.24
-[1m[92m  Downloaded[0m clap v4.6.1
-[1m[92m  Downloaded[0m zmij v1.0.23
-[1m[92m  Downloaded[0m either v1.16.0
-[1m[92m  Downloaded[0m criterion-plot v0.8.2
-[1m[92m  Downloaded[0m shlex v2.0.1
-[1m[92m  Downloaded[0m quote v1.0.46
-[1m[92m  Downloaded[0m parking_lot v0.12.5
-[1m[92m  Downloaded[0m serde_derive v1.0.228
-[1m[92m  Downloaded[0m serde_json v1.0.150
-[1m[92m  Downloaded[0m zerocopy v0.8.54
-[1m[92m  Downloaded[0m syn v2.0.118
-[1m[92m  Downloaded[0m zerocopy-derive v0.8.54
-[1m[92m  Downloaded[0m parking_lot_core v0.9.12
-[1m[92m  Downloaded[0m serde_core v1.0.228
 [1m[92m  Downloaded[0m walkdir v2.5.0
-[1m[92m  Downloaded[0m vcpkg v0.2.15
-[1m[92m  Downloaded[0m itertools v0.13.0
-[1m[92m  Downloaded[0m regex-syntax v0.8.11
-[1m[92m  Downloaded[0m rayon-core v1.13.0
-[1m[92m  Downloaded[0m openssl-sys v0.9.117
-[1m[92m  Downloaded[0m criterion v0.8.2
-[1m[92m  Downloaded[0m same-file v1.0.6
-[1m[92m  Downloaded[0m plotters v0.3.7
-[1m[92m  Downloaded[0m rayon v1.12.0
-[1m[92m  Downloaded[0m regex-automata v0.4.15
-[1m[92m  Downloaded[0m regex v1.13.0
-[1m[92m  Downloaded[0m ciborium-io v0.2.2
-[1m[92m  Downloaded[0m memchr v2.8.3
-[1m[92m  Downloaded[0m crossbeam-deque v0.8.7
 [1m[92m  Downloaded[0m thiserror v2.0.18
 [1m[92m  Downloaded[0m smallvec v1.15.2
-[1m[92m  Downloaded[0m openssl v0.10.81
-[1m[92m  Downloaded[0m plotters-backend v0.3.7
-[1m[92m  Downloaded[0m foreign-types-shared v0.1.1
-[1m[92m  Downloaded[0m libc v0.2.186
-[1m[92m  Downloaded[0m clap_builder v4.6.0
-[1m[92m  Downloaded[0m find-msvc-tools v0.1.9
-[1m[92m  Downloaded[0m crossbeam-utils v0.8.22
-[1m[92m  Downloaded[0m proc-macro2 v1.0.106
-[1m[92m  Downloaded[0m plotters-svg v0.3.7
-[1m[92m  Downloaded[0m pkg-config v0.3.33
-[1m[92m  Downloaded[0m cc v1.2.67
-[1m[92m  Downloaded[0m serde v1.0.228
-[1m[92m  Downloaded[0m num-traits v0.2.19
 [1m[92m  Downloaded[0m tinytemplate v1.2.1
-[1m[92m  Downloaded[0m page_size v0.6.0
+[1m[92m  Downloaded[0m num-traits v0.2.19
+[1m[92m  Downloaded[0m proc-macro2 v1.0.106
 [1m[92m  Downloaded[0m half v2.7.1
-[1m[92m  Downloaded[0m thiserror-impl v2.0.18
+[1m[92m  Downloaded[0m zmij v1.0.23
+[1m[92m  Downloaded[0m memchr v2.8.3
+[1m[92m  Downloaded[0m zerocopy-derive v0.8.54
+[1m[92m  Downloaded[0m serde_derive v1.0.228
+[1m[92m  Downloaded[0m aho-corasick v1.1.4
+[1m[92m  Downloaded[0m rayon-core v1.13.0
+[1m[92m  Downloaded[0m serde_json v1.0.150
+[1m[92m  Downloaded[0m regex v1.13.0
+[1m[92m  Downloaded[0m rayon v1.12.0
+[1m[92m  Downloaded[0m zerocopy v0.8.54
+[1m[92m  Downloaded[0m vcpkg v0.2.15
+[1m[92m  Downloaded[0m criterion v0.8.2
+[1m[92m  Downloaded[0m plotters v0.3.7
+[1m[92m  Downloaded[0m syn v2.0.118
+[1m[92m  Downloaded[0m regex-syntax v0.8.11
+[1m[92m  Downloaded[0m openssl v0.10.81
+[1m[92m  Downloaded[0m cc v1.2.67
+[1m[92m  Downloaded[0m serde_core v1.0.228
+[1m[92m  Downloaded[0m serde v1.0.228
+[1m[92m  Downloaded[0m parking_lot v0.12.5
+[1m[92m  Downloaded[0m openssl-sys v0.9.117
 [1m[92m  Downloaded[0m crossbeam-epoch v0.9.20
+[1m[92m  Downloaded[0m either v1.16.0
+[1m[92m  Downloaded[0m clap v4.6.1
+[1m[92m  Downloaded[0m page_size v0.6.0
+[1m[92m  Downloaded[0m ciborium-io v0.2.2
+[1m[92m  Downloaded[0m foreign-types v0.3.2
+[1m[92m  Downloaded[0m same-file v1.0.6
+[1m[92m  Downloaded[0m plotters-backend v0.3.7
+[1m[92m  Downloaded[0m clap_lex v1.1.0
+[1m[92m  Downloaded[0m parking_lot_core v0.9.12
+[1m[92m  Downloaded[0m crossbeam-utils v0.8.22
+[1m[92m  Downloaded[0m crossbeam-deque v0.8.7
 [1m[92m  Downloaded[0m ciborium v0.2.2
-[1m[92m  Downloaded[0m ciborium-ll v0.2.2
+[1m[92m  Downloaded[0m find-msvc-tools v0.1.9
+[1m[92m  Downloaded[0m thiserror-impl v2.0.18
+[1m[92m  Downloaded[0m regex-automata v0.4.15
+[1m[92m  Downloaded[0m shlex v2.0.1
+[1m[92m  Downloaded[0m pkg-config v0.3.33
+[1m[92m  Downloaded[0m clap_builder v4.6.0
+[1m[92m  Downloaded[0m libc v0.2.186
+[1m[92m  Downloaded[0m anstyle v1.0.14
+[1m[92m  Downloaded[0m quote v1.0.46
+[1m[92m  Downloaded[0m foreign-types-shared v0.1.1
+[1m[92m  Downloaded[0m itertools v0.13.0
 [1m[92m   Compiling[0m proc-macro2 v1.0.106
-[1m[92m   Compiling[0m unicode-ident v1.0.24
 [1m[92m   Compiling[0m quote v1.0.46
-[1m[92m   Compiling[0m shlex v2.0.1
+[1m[92m   Compiling[0m unicode-ident v1.0.24
 [1m[92m   Compiling[0m find-msvc-tools v0.1.9
-[1m[92m   Compiling[0m libc v0.2.186
+[1m[92m   Compiling[0m shlex v2.0.1
 [1m[92m   Compiling[0m cc v1.2.67
+[1m[92m   Compiling[0m libc v0.2.186
 [1m[92m   Compiling[0m cfg-if v1.0.4
 [1m[92m   Compiling[0m serde_core v1.0.228
 [1m[92m   Compiling[0m crossbeam-utils v0.8.22
-[1m[92m   Compiling[0m pkg-config v0.3.33
-[1m[92m   Compiling[0m syn v2.0.118
-[1m[92m   Compiling[0m zerocopy v0.8.54
-[1m[92m   Compiling[0m crossbeam-epoch v0.9.20
 [1m[92m   Compiling[0m vcpkg v0.2.15
-[1m[92m   Compiling[0m autocfg v1.5.1
+[1m[92m   Compiling[0m syn v2.0.118
+[1m[92m   Compiling[0m pkg-config v0.3.33
+[1m[92m   Compiling[0m crossbeam-epoch v0.9.20
+[1m[92m   Compiling[0m zerocopy v0.8.54
 [1m[92m   Compiling[0m openssl-sys v0.9.117
+[1m[92m   Compiling[0m autocfg v1.5.1
 [1m[92m   Compiling[0m zmij v1.0.23
-[1m[92m   Compiling[0m crossbeam-deque v0.8.7
 [1m[92m   Compiling[0m serde v1.0.228
+[1m[92m   Compiling[0m crossbeam-deque v0.8.7
 [1m[92m   Compiling[0m num-traits v0.2.19
-[1m[92m   Compiling[0m parking_lot_core v0.9.12
 [1m[92m   Compiling[0m rayon-core v1.13.0
-[1m[92m   Compiling[0m serde_json v1.0.150
+[1m[92m   Compiling[0m parking_lot_core v0.9.12
 [1m[92m   Compiling[0m either v1.16.0
+[1m[92m   Compiling[0m serde_json v1.0.150
 [1m[92m   Compiling[0m alloca v0.4.0
-[1m[92m   Compiling[0m openssl v0.10.81
-[1m[92m   Compiling[0m memchr v2.8.3
-[1m[92m   Compiling[0m clap_lex v1.1.0
-[1m[92m   Compiling[0m smallvec v1.15.2
-[1m[92m   Compiling[0m itoa v1.0.18
-[1m[92m   Compiling[0m anstyle v1.0.14
-[1m[92m   Compiling[0m ciborium-io v0.2.2
 [1m[92m   Compiling[0m foreign-types-shared v0.1.1
 [1m[92m   Compiling[0m plotters-backend v0.3.7
 [1m[92m   Compiling[0m thiserror v2.0.18
+[1m[92m   Compiling[0m itoa v1.0.18
 [1m[92m   Compiling[0m scopeguard v1.2.0
+[1m[92m   Compiling[0m smallvec v1.15.2
+[1m[92m   Compiling[0m openssl v0.10.81
+[1m[92m   Compiling[0m memchr v2.8.3
+[1m[92m   Compiling[0m anstyle v1.0.14
 [1m[92m   Compiling[0m regex-syntax v0.8.11
-[1m[92m   Compiling[0m lock_api v0.4.14
-[1m[92m   Compiling[0m plotters-svg v0.3.7
+[1m[92m   Compiling[0m clap_lex v1.1.0
+[1m[92m   Compiling[0m ciborium-io v0.2.2
 [1m[92m   Compiling[0m clap_builder v4.6.0
-[1m[92m   Compiling[0m foreign-types v0.3.2
 [1m[92m   Compiling[0m zerocopy-derive v0.8.54
 [1m[92m   Compiling[0m serde_derive v1.0.228
-[1m[92m   Compiling[0m regex-automata v0.4.15
 [1m[92m   Compiling[0m thiserror-impl v2.0.18
 [1m[92m   Compiling[0m openssl-macros v0.1.1
+[1m[92m   Compiling[0m regex-automata v0.4.15
+[1m[92m   Compiling[0m lock_api v0.4.14
+[1m[92m   Compiling[0m plotters-svg v0.3.7
+[1m[92m   Compiling[0m foreign-types v0.3.2
 [1m[92m   Compiling[0m itertools v0.13.0
 [1m[92m   Compiling[0m half v2.7.1
 [1m[92m   Compiling[0m ciborium-ll v0.2.2
 [1m[92m   Compiling[0m librtmp2 v0.4.0 (/home/runner/work/librtmp2/librtmp2)
+[1m[92m   Compiling[0m same-file v1.0.6
 [1m[92m   Compiling[0m cast v0.3.0
 [1m[92m   Compiling[0m bitflags v2.13.0
-[1m[92m   Compiling[0m same-file v1.0.6
 [1m[92m   Compiling[0m walkdir v2.5.0
 [1m[92m   Compiling[0m ciborium v0.2.2
 [1m[92m   Compiling[0m criterion-plot v0.8.2
-[1m[92m   Compiling[0m plotters v0.3.7
 [1m[92m   Compiling[0m rayon v1.12.0
-[1m[92m   Compiling[0m parking_lot v0.12.5
+[1m[92m   Compiling[0m plotters v0.3.7
 [1m[92m   Compiling[0m tinytemplate v1.2.1
 [1m[92m   Compiling[0m regex v1.13.0
+[1m[92m   Compiling[0m parking_lot v0.12.5
 [1m[92m   Compiling[0m clap v4.6.1
 [1m[92m   Compiling[0m page_size v0.6.0
-[1m[92m   Compiling[0m oorandom v11.1.5
 [1m[92m   Compiling[0m anes v0.1.6
+[1m[92m   Compiling[0m oorandom v11.1.5
 [1m[92m   Compiling[0m criterion v0.8.2
-[1m[33mwarning[0m[1m: use of deprecated function `criterion::black_box`: use `std::hint::black_box()` instead[0m
- [1m[94m--> [0mbenches/relay.rs:5:53
-  [1m[94m|[0m
-[1m[94m5[0m [1m[94m|[0m use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
-  [1m[94m|[0m                                                     [1m[33m^^^^^^^^^[0m
-  [1m[94m|[0m
-  [1m[94m= [0m[1mnote[0m: `#[warn(deprecated)]` on by default
-
-[1m[33mwarning[0m[1m: use of deprecated function `criterion::black_box`: use `std::hint::black_box()` instead[0m
-   [1m[94m--> [0mbenches/relay.rs:101:42
-    [1m[94m|[0m
-[1m[94m101[0m [1m[94m|[0m                 b.iter(|| relay_n_frames(black_box(count)));
-    [1m[94m|[0m                                          [1m[33m^^^^^^^^^[0m
-
 [1m[33mwarning[0m[1m: use of deprecated function `criterion::black_box`: use `std::hint::black_box()` instead[0m
  [1m[94m--> [0mbenches/protocol.rs:1:40
   [1m[94m|[0m
@@ -215,14 +202,302 @@ Applied PR #128 fixes
 [1m[94m114[0m [1m[94m|[0m             black_box(hs.out.write_pos())
     [1m[94m|[0m             [1m[33m^^^^^^^^^[0m
 
-[1m[91merror[E0063][0m[1m: missing field `cache_payload` in initializer of `RelayFrame`[0m
-    [1m[94m--> [0msrc/server/mod.rs:1177:9
-     [1m[94m|[0m
-[1m[94m1177[0m [1m[94m|[0m         crate::session::conn::RelayFrame {
-     [1m[94m|[0m         [1m[91m^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^[0m [1m[91mmissing `cache_payload`[0m
+[1m[33mwarning[0m[1m: use of deprecated function `criterion::black_box`: use `std::hint::black_box()` instead[0m
+ [1m[94m--> [0mbenches/relay.rs:5:53
+  [1m[94m|[0m
+[1m[94m5[0m [1m[94m|[0m use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+  [1m[94m|[0m                                                     [1m[33m^^^^^^^^^[0m
+  [1m[94m|[0m
+  [1m[94m= [0m[1mnote[0m: `#[warn(deprecated)]` on by default
 
-[1m[33mwarning[0m: `librtmp2` (bench "relay") generated 2 warnings
+[1m[33mwarning[0m[1m: use of deprecated function `criterion::black_box`: use `std::hint::black_box()` instead[0m
+   [1m[94m--> [0mbenches/relay.rs:101:42
+    [1m[94m|[0m
+[1m[94m101[0m [1m[94m|[0m                 b.iter(|| relay_n_frames(black_box(count)));
+    [1m[94m|[0m                                          [1m[33m^^^^^^^^^[0m
+
 [1m[33mwarning[0m: `librtmp2` (bench "protocol") generated 10 warnings
-[1mFor more information about this error, try `rustc --explain E0063`.[0m
-[1m[91merror[0m: could not compile `librtmp2` (lib test) due to 1 previous error
+[1m[33mwarning[0m: `librtmp2` (bench "relay") generated 2 warnings
+[1m[92m    Finished[0m `test` profile [unoptimized + debuginfo] target(s) in 19.28s
+[1m[92m     Running[0m unittests src/lib.rs (target/debug/deps/librtmp2-8b516025b5491647)
+
+running 253 tests
+test amf::amf0::tests::boolean_round_trips ... ok
+test amf::amf0::tests::ecma_array_begin_wire_format_is_big_endian ... ok
+test amf::amf0::tests::long_string_wire_format_is_big_endian ... ok
+test amf::amf0::tests::number_round_trips ... ok
+test amf::amf0::tests::is_object_end_detects_marker ... ok
+test amf::amf0::tests::object_key_wire_format_is_big_endian ... ok
+test amf::amf0::tests::read_long_string_rejects_truncated_payload ... ok
+test amf::amf0::tests::read_object_key_rejects_truncated_key_bytes ... ok
+test amf::amf0::tests::read_string_rejects_truncated_payload ... ok
+test amf::amf0::tests::skip_value_rejects_excessive_strict_array_count ... ok
+test amf::amf0::tests::skip_value_rejects_excessive_nesting_depth ... ok
+test amf::amf0::tests::skip_value_rejects_truncated_date ... ok
+test amf::amf0::tests::skip_value_rejects_truncated_long_string_length ... ok
+test amf::amf0::tests::skip_value_rejects_truncated_string_length ... ok
+test amf::amf0::tests::skip_value_skips_nested_object ... ok
+test amf::amf0::tests::strict_array_can_be_skipped ... ok
+test amf::amf0::tests::skip_value_rejects_object_with_too_many_keys ... ok
+test amf::amf0::tests::string_wire_format_is_big_endian ... ok
+test amf::amf3::tests::boolean_round_trips ... ok
+test amf::amf0::tests::string_round_trips_through_read_string ... ok
+test amf::amf3::tests::integer_round_trips_multi_byte_u29 ... ok
+test amf::amf3::tests::double_round_trips ... ok
+test amf::amf3::tests::integer_round_trips_small_value ... ok
+test amf::amf3::tests::null_round_trips ... ok
+test amf::amf3::tests::read_double_rejects_truncated_payload ... ok
+test amf::amf3::tests::read_integer_rejects_truncated_u29 ... ok
+test amf::amf3::tests::read_string_rejects_string_reference ... ok
+test amf::amf3::tests::read_string_rejects_truncated_payload ... ok
+test amf::amf3::tests::string_round_trips ... ok
+test buffer::tests::drain_skips_unread_bytes ... ok
+test buffer::tests::read_past_available_errors ... ok
+test buffer::tests::reset_clears_buffer ... ok
+test buffer::tests::grows_past_initial_capacity ... ok
+test buffer::tests::write_then_read_round_trips ... ok
+test buffer::tests::write_over_max_size_errors ... ok
+test bytes::tests::hton24_writes_big_endian_24_bit ... ok
+test bytes::tests::byteswap_round_trips ... ok
+test bytes::tests::hton32_then_to_ne_bytes_matches_ntoh32 ... ok
+test bytes::tests::ntoh16_reads_big_endian_16_bit ... ok
+test bytes::tests::ntoh24_reads_big_endian_24_bit ... ok
+test bytes::tests::ntoh32_reads_big_endian_32_bit ... ok
+test chunk::reader::tests::fmt1_and_fmt2_timestamps_accumulate_as_deltas_not_absolutes ... ok
+test chunk::reader::tests::fmt2_without_prior_header_state_is_rejected ... ok
+test chunk::reader::tests::fmt2_after_complete_message_can_start_new_message_with_inherited_header ... ok
+test chunk::reader::tests::fmt3_after_complete_message_can_start_new_message_with_inherited_header ... ok
+test chunk::reader::tests::rejects_message_length_above_registry_cap ... ok
+test chunk::reader::tests::tiny_chunk_size_multiplies_chunk_read_iterations ... ok
+test chunk::state::tests::rejects_opening_too_many_active_csids ... ok
+test chunk::state::tests::reset_releases_last_payload_capacity ... ok
+test chunk::state::tests::set_all_chunk_size_ignores_out_of_range_values ... ok
+test chunk::writer::tests::extended_timestamp_round_trips_big_endian ... ok
+test chunk::writer::tests::fragmented_chunks_round_trip_through_reader ... ok
+test chunk::writer::tests::single_chunk_round_trips_through_reader ... ok
+test client::tests::command_wait_recv_budget_bounds_connect_handshake_amplification ... ok
+test client::tests::connect_refused_reports_io_not_timeout ... ok
+test client::tests::drain_ready_messages_splits_multitrack_video ... ok
+test client::tests::frame_cb_scratch_retains_payload_after_delivery ... ok
+test client::tests::inbound_ping_rate_limit_rejects_flood ... ok
+test client::tests::inbound_ping_requests_are_answered ... ok
+test client::tests::parse_rtmp_url_defaults_to_plaintext_and_port_1935 ... ok
+test client::tests::parse_rtmp_url_rejects_missing_stream_key ... ok
+test client::tests::parse_rtmp_url_rejects_unknown_scheme ... ok
+test client::tests::parse_rtmp_url_rtmps_defaults_to_tls_and_port_443 ... ok
+test client::tests::parse_rtmp_url_rtmps_respects_explicit_port ... ok
+test client::tests::poll_does_not_block_on_socket_readiness_when_messages_already_staged ... ok
+test buffer::tests::reset_shrinks_oversized_capacity ... ok
+test chunk::state::tests::completed_messages_do_not_pin_multi_megabyte_reassembly_capacity ... ok
+test client::tests::publishing_poll_services_inbound_pings ... ok
+test client::tests::recv_budget_is_at_least_one_socket_read ... ok
+test client::tests::recv_buffer_staging_cap_covers_two_max_messages_at_min_chunk_size ... ok
+test client::tests::send_frame_payload_services_inbound_pings ... ok
+test client::tests::tcp_connect_timeout_is_bounded ... ok
+test client::tests::tls_client_config_defaults_to_verified ... ok
+test client::tests::tls_client_config_is_stored ... ok
+test client::tests::try_flush_send_buffer_shrinks_after_full_drain ... ok
+test ertmp::connect_amf::tests::caps_ex_binary_round_trip ... ok
+test ertmp::connect_amf::tests::caps_ex_mask_round_trip ... ok
+test ertmp::connect_amf::tests::caps_ex_object_parses_legacy_codec_fields ... ok
+test ertmp::connect_amf::tests::four_cc_list_preserves_wildcard ... FAILED
+test ertmp::connect_amf::tests::four_cc_list_strict_array_round_trip ... ok
+test ertmp::connect_amf::tests::negotiate_caps_honors_explicit_zero_caps_ex ... ok
+test ertmp::connect_amf::tests::negotiate_caps_legacy_object_caps_ex_uses_defaults ... ok
+test ertmp::connect_amf::tests::string_fourcc_value_is_read_after_consumed_marker ... ok
+test ertmp::connect_amf::tests::video_fourcc_info_map_object_parses_fourcc_keys ... ok
+test ertmp::connect_amf::tests::video_info_map_writes_object_with_numeric_masks ... ok
+test ertmp::connect_caps::tests::fourcc_list_add_accepts_exactly_four_bytes ... ok
+test ertmp::connect_caps::tests::fourcc_list_add_rejects_short_input_instead_of_panicking ... ok
+test ertmp::connect_caps::video_map_tests::fourcc_list_round_trips_wildcard ... ok
+test ertmp::connect_caps::video_map_tests::video_info_map_round_trips_flags ... ok
+test ertmp::exaudio::tests::parse_clears_aac_packet_type_on_enhanced_reuse ... ok
+test ertmp::exaudio::tests::parse_error_leaves_header_cleared ... ok
+test ertmp::exvideo::tests::parse_clears_composition_time_on_non_ct_packet_type_reuse ... ok
+test ertmp::exvideo::tests::parse_error_leaves_header_cleared ... ok
+test ertmp::fourcc::tests::audio_fourcc_roundtrip ... ok
+test ertmp::fourcc::tests::fourcc_names ... ok
+test ertmp::fourcc::tests::unknown_fourcc_returns_error ... ok
+test ertmp::fourcc::tests::video_fourcc_roundtrip ... ok
+test ertmp::modex::tests::nop_round_trips_through_write_and_parse ... ok
+test ertmp::modex::tests::parse_degrades_unknown_type_to_nop_instead_of_erroring ... ok
+test ertmp::modex::tests::parse_rejects_empty_input ... ok
+test ertmp::modex::tests::parse_rejects_marker_without_high_bit_set ... ok
+test ertmp::modex::tests::parse_rejects_short_timestamp_payload ... ok
+test ertmp::modex::tests::parse_unknown_type_after_timestamp_clears_stale_offset ... ok
+test ertmp::modex::tests::timestamp_round_trips_through_write_and_parse ... ok
+test ertmp::modex::tests::write_rejects_short_buffer ... ok
+test ertmp::multitrack::tests::audio_track_type_round_trips ... ok
+test ertmp::multitrack::tests::parse_error_leaves_descriptor_cleared ... ok
+test ertmp::multitrack::tests::video_track_type_round_trips_as_amf0_double ... ok
+test ertmp::multitrack_media::tests::coded_frames_x_keyframe_is_detected ... ok
+test ertmp::multitrack_media::tests::detects_multitrack_container ... ok
+test ertmp::multitrack_media::tests::iterates_many_tracks_many_codecs ... FAILED
+test ertmp::multitrack_media::tests::iterates_subtracks_with_shared_codec ... ok
+test ertmp::multitrack_media::tests::malformed_message_delivers_no_partial_tracks ... ok
+test ertmp::reconnect::tests::parse_rejects_long_input ... ok
+test ertmp::reconnect::tests::parse_rejects_short_input ... ok
+test ertmp::reconnect::tests::round_trips_through_write_and_parse ... ok
+test ertmp::reconnect::tests::write_rejects_short_buffer ... ok
+test ffi_tests::server_create_applies_default_max_connections_for_zero_config ... ok
+test ffi_tests::server_create_preserves_negative_max_connections_as_unlimited ... ok
+test ffi_tests::server_new_preserves_zero_max_connections_for_rust_api ... ok
+test flv::audio_tag::tests::parse_aac_sets_codec_and_packet_type ... ok
+test flv::audio_tag::tests::parse_clears_aac_packet_type_on_non_aac_reuse ... ok
+test flv::audio_tag::tests::parse_error_leaves_tag_cleared ... ok
+test flv::audio_tag::tests::parse_extracts_sample_rate_channels ... ok
+test flv::audio_tag::tests::parse_mp3_codec_nibble ... ok
+test flv::audio_tag::tests::parse_rejects_empty_payload ... ok
+test flv::script_tag::tests::parse_clears_name_suffix_on_shorter_reuse ... ok
+test flv::script_tag::tests::parse_error_leaves_tag_cleared ... ok
+test flv::script_tag::tests::parse_on_metadata_string_name ... ok
+test flv::script_tag::tests::parse_rejects_too_short_payload ... ok
+test flv::video_tag::tests::parse_clears_avc_fields_on_non_h264_reuse ... ok
+test flv::video_tag::tests::parse_error_leaves_tag_cleared ... ok
+test flv::video_tag::tests::parse_h264_keyframe_sets_codec_and_cts ... ok
+test flv::video_tag::tests::parse_rejects_empty_payload ... ok
+test flv::video_tag::tests::parse_rejects_enhanced_header ... ok
+test flv::video_tag::tests::parse_rejects_unknown_codec_nibble ... ok
+test handshake::tests::c2_echoes_s1_time1_and_carries_client_time_in_time2 ... ok
+test handshake::tests::complex_c1_still_gets_simple_s1s2_response ... ok
+test handshake::tests::full_client_server_handshake_completes ... ok
+test handshake::tests::s1_time_field_matches_wall_clock_in_big_endian ... ok
+test handshake::tests::s2_echoes_c1_time1_and_carries_server_time_in_time2 ... ok
+test handshake::tests::server_read_c0_rejects_wrong_version ... ok
+test media::init_cache::tests::enhanced_av1_keyframe_is_cached ... ok
+test media::init_cache::tests::enhanced_coded_frames_x_keyframe_is_cached ... ok
+test media::init_cache::tests::enhanced_hevc_sequence_start_is_cached ... ok
+test media::init_cache::tests::enhanced_opus_sequence_start_is_cached ... ok
+test media::init_cache::tests::legacy_avc_header_still_cached ... ok
+test media::init_cache::tests::multitrack_video_keyframe_is_cached_from_outer_header ... ok
+test media::init_cache::tests::multitrack_video_sequence_start_is_cached ... ok
+test media::modex::tests::legacy_aac_is_unchanged ... ok
+test media::modex::tests::malformed_modex_is_left_opaque ... ok
+test media::modex::tests::normalizes_timestamp_modex_video_wrapper ... ok
+test message::command::tests::publish_command_round_trips_publish_type ... ok
+test message::command::tests::read_close_stream_accepts_explicit_stream_id ... ok
+test message::command::tests::read_close_stream_accepts_three_argument_form ... ok
+test message::command::tests::read_connect_parses_four_cc_list_strict_array ... ok
+test message::command::tests::read_onstatus_accepts_status_level ... ok
+test message::command::tests::read_onstatus_rejects_error_level ... ok
+test message::command::tests::read_onstatus_rejects_excessive_object_keys ... ok
+test message::command::tests::read_publish_rejects_stream_names_longer_than_routing_buffer ... ok
+test message::command::tests::read_string_checked_accepts_values_up_to_buffer_capacity_minus_nul ... ok
+test message::command::tests::read_string_checked_rejects_values_that_do_not_fit_output_buffer ... ok
+test message::command::tests::read_string_checked_with_empty_output_buffer_does_not_panic ... ok
+test message::control::tests::abort_message_rejects_short_input ... ok
+test message::control::tests::acknowledgement_size_rejects_short_input ... ok
+test message::control::tests::set_chunk_size_rejects_zero_and_clamps_large_values ... ok
+test message::control::tests::set_chunk_size_round_trips_and_is_big_endian ... ok
+test message::control::tests::set_peer_bandwidth_round_trips ... ok
+test message::control::tests::user_control_ping_round_trips ... ok
+test message::control::tests::user_control_set_buffer_length_round_trips_both_params ... ok
+test message::control::tests::user_control_stream_begin_wire_format_is_big_endian ... ok
+test message::control::tests::window_ack_size_rejects_amplification_values ... ok
+test message::control::tests::window_ack_size_rejects_short_input ... ok
+test message::control::tests::window_ack_size_round_trips ... ok
+test message::message::tests::abort_message_resets_chunk_stream ... ok
+test message::message::tests::amf0_command_is_dispatched_to_handle_command ... ok
+test message::message::tests::amf3_command_is_dispatched_to_handle_command ... ok
+test message::message::tests::set_chunk_size_updates_connection ... ok
+test message::message::tests::unknown_message_type_is_ignored ... ok
+test message::message::tests::window_ack_size_updates_connection ... ok
+test server::tests::closed_connections_release_routes_before_later_publish_in_same_batch ... ok
+test server::tests::delete_stream_releases_publish_route_for_next_publisher ... ok
+test server::tests::enhanced_hevc_sequence_header_is_cached ... ok
+test server::tests::keyframe_within_larger_cap_is_still_cached ... ok
+test server::tests::max_connections_limit_is_enforced_when_configured ... ok
+test server::tests::multitrack_per_track_video_inits_are_retained ... ok
+test server::tests::multitrack_video_sequence_header_is_cached ... ok
+test server::tests::on_metadata_script_is_cached ... ok
+test server::tests::oversized_codec_header_is_not_cached ... ok
+test server::tests::oversized_keyframe_is_not_cached ... ok
+test server::tests::oversized_replacement_clears_stale_cached_header ... ok
+test server::tests::publish_rename_onto_occupied_route_keeps_old_route_claimed ... ok
+test server::tests::recv_budget_is_at_least_one_socket_read ... ok
+test server::tests::recv_budget_is_small_enough_for_fairness_across_connections ... ok
+test server::tests::second_publisher_on_same_route_is_rejected ... ok
+test server::tests::stale_pre_connect_sessions_are_closed_during_poll ... ok
+test session::conn::tests::aggregate_dispatch_reaches_handle_aggregate_via_handle_message ... ok
+test session::conn::tests::aggregate_message_rejects_subtag_size_overrunning_payload ... ok
+test session::conn::tests::aggregate_message_unpacks_audio_and_video_subtags_into_relay ... ok
+test session::conn::tests::aggregate_script_subtag_populates_metadata ... ok
+test session::conn::tests::amf3_data_message_strips_leading_zero_byte ... ok
+test session::conn::tests::apply_chunk_size_updates_outbound_and_inbound ... ok
+test session::conn::tests::commit_flushed_ping_does_not_wait_for_post_ping_media ... ok
+test session::conn::tests::commit_flushed_ping_waits_for_ping_bytes_not_later_media ... ok
+test session::conn::tests::connect_after_app_connected_does_not_repoint_app_namespace ... ok
+test session::conn::tests::connect_rejects_app_names_longer_than_routing_buffer ... ok
+test session::conn::tests::connect_with_caps_ex_enables_multitrack ... ok
+test session::conn::tests::connect_with_caps_sets_negotiated_state_and_caps ... ok
+test session::conn::tests::create_stream_evicts_active_publish_route ... ok
+test session::conn::tests::enhanced_av1_media_frames_accepted_while_publishing ... ok
+test session::conn::tests::excessive_pending_pings_close_connection ... ok
+test session::conn::tests::handle_control_peer_set_chunk_size_updates_inbound_only ... ok
+test session::conn::tests::inbound_ping_requests_are_rate_limited ... ok
+test session::conn::tests::later_on_metadata_replaces_stale_values ... ok
+test session::conn::tests::malformed_pause_command_leaves_stream_unpaused ... ok
+test session::conn::tests::media_frames_on_wrong_msg_stream_id_are_ignored ... ok
+test session::conn::tests::modex_is_normalized_for_callbacks_and_cache_but_relayed_opaque ... ok
+test session::conn::tests::multitrack_codec_is_detected_before_authorization ... ok
+test session::conn::tests::multitrack_invokes_on_frame_cb_per_track ... ok
+test session::conn::tests::multitrack_on_frame_cb_scratch_retains_last_track_payload ... ok
+test session::conn::tests::new_connection_starts_at_rtmp_default_chunk_size ... ok
+test session::conn::tests::on_frame_cb_scratch_retains_payload_after_delivery ... ok
+test session::conn::tests::on_metadata_ignored_on_wrong_stream_id ... ok
+test session::conn::tests::on_metadata_ignored_while_not_publishing ... ok
+test session::conn::tests::on_metadata_ignores_oversized_leading_event_name ... ok
+test session::conn::tests::on_metadata_ignores_oversized_set_data_frame_inner_name ... ok
+test session::conn::tests::on_metadata_is_queued_for_relay_while_publishing ... ok
+test session::conn::tests::on_metadata_keeps_partial_fields_when_unknown_value_cannot_be_skipped ... ok
+test session::conn::tests::on_metadata_missing_keys_leave_fields_none ... ok
+test session::conn::tests::on_metadata_populates_conn_fields ... ok
+test session::conn::tests::on_metadata_rejects_out_of_range_dimensions ... ok
+test session::conn::tests::on_metadata_skips_unknown_extra_keys ... ok
+test session::conn::tests::on_metadata_tolerates_excess_keys ... ok
+test session::conn::tests::on_metadata_with_set_data_frame_prefix ... ok
+test session::conn::tests::ping_timeout_starts_after_flush_not_queue ... ok
+test session::conn::tests::play_then_publish_does_not_evict_foreign_cache_key ... ok
+test session::conn::tests::publish_rename_with_relay_key_does_not_evict_stale_rtmp_name ... ok
+test session::conn::tests::publish_rename_without_relay_key_evicts_old_route_key ... ok
+test session::conn::tests::publish_then_play_then_publish_does_not_evict_played_stream_key ... ok
+test session::conn::tests::read_messages_respects_recv_level_message_budget ... ok
+test session::conn::tests::receive_video_reenable_requests_cached_replay ... ok
+test client::tests::poll_drains_leftover_messages_before_enforcing_staging_cap ... ok
+test session::conn::tests::relay_route_key_falls_back_to_rtmp_stream_name ... ok
+test session::conn::tests::relay_route_key_prefers_relay_key_over_rtmp_name ... ok
+test session::conn::tests::stale_queued_ping_closes_connection ... ok
+test session::conn::tests::unanswered_ping_timeouts_close_connection ... ok
+test session::conn::tests::recv_rejects_recv_buffer_growth_past_cap ... ok
+test client::tests::poll_rejects_recv_buffer_growth_past_staging_cap ... ok
+test transport::client_tls_tests::connect_tls_default_mode_rejects_untrusted_self_signed_cert ... ok
+test transport::client_tls_tests::connect_tls_insecure_accepts_self_signed_cert_without_default_verify_paths ... ok
+test transport::client_tls_tests::connect_tls_with_matching_ca_file_trusts_self_signed_cert ... ok
+test transport::client_tls_tests::connect_tls_with_mismatched_ca_file_rejects_self_signed_cert ... ok
+test chunk::reader::tests::chunk_read_owned_releases_last_payload_after_copy ... ok
+
+failures:
+
+---- ertmp::connect_amf::tests::four_cc_list_preserves_wildcard stdout ----
+
+thread 'ertmp::connect_amf::tests::four_cc_list_preserves_wildcard' (3965) panicked at src/ertmp/connect_amf.rs:510:9:
+assertion `left == right` failed
+  left: 0
+ right: 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- ertmp::multitrack_media::tests::iterates_many_tracks_many_codecs stdout ----
+
+thread 'ertmp::multitrack_media::tests::iterates_many_tracks_many_codecs' (3997) panicked at src/ertmp/multitrack_media.rs:200:9:
+assertion failed: foreach_track(FrameType::Video, &payload,
+    |track| { codecs.push(track.fourcc); })
+
+
+failures:
+    ertmp::connect_amf::tests::four_cc_list_preserves_wildcard
+    ertmp::multitrack_media::tests::iterates_many_tracks_many_codecs
+
+test result: FAILED. 251 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.10s
+
+[1m[91merror[0m: test failed, to rerun pass `--lib`
 == exit status: 101 ==
