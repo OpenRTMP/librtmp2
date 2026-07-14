@@ -80,7 +80,7 @@ The client path mirrors this in reverse for outbound connections.
 ## Design Principles
 
 - **Strict core / thin host** — the library moves bytes and state; policy is the
-  host's job (see `concept/librtmp2-core.md`).
+  host's job.
 - **Deterministic, bounds-checked parsers** — every parser is bounds-checked
   and never trusts a length field from the network.
 - **Graceful degradation** — unknown E-RTMP v2 ModEx types and capability fields

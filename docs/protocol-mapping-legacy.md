@@ -2,8 +2,7 @@
 
 This document maps the Adobe *RTMP Specification 1.0* onto the `librtmp2`
 source tree, so contributors can find the code that implements each part of the
-spec. Section numbers refer to the Adobe RTMP 1.0 spec (see References in
-[`concept/librtmp2-core.md`](../concept/librtmp2-core.md)).
+spec. Section numbers refer to the Adobe RTMP 1.0 spec.
 
 ## Handshake (spec §5.2)
 

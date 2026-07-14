@@ -1,10 +1,8 @@
 # Roadmap
 
-This roadmap tracks the phased plan from
-[`concept/librtmp2-core.md`](../concept/librtmp2-core.md) against the actual
-state of the code. The concept document holds the authoritative,
-continuously-updated implementation-status tracker; this file is the
-release-oriented summary.
+This roadmap tracks the phased implementation plan against the actual
+state of the code. It is the release-oriented summary; see also
+[`architecture.md`](architecture.md) for design principles.
 
 ## Release Strategy
 
@@ -72,7 +70,7 @@ These are the remaining gaps tracked for future releases:
 - **Release automation** — `.github/workflows/release.yml` builds and packages
   tagged releases (added). ABI checks via `abi-compliance-checker` are still
   manual (see `abi-policy.md`).
-- **`dump_frames` example** — listed in the concept; `minimal_server` and
+- **`dump_frames` example** — planned but not yet added; `minimal_server` and
   `minimal_client` exist, `dump_frames` is not yet added.
 - **Project docs** — `CHANGELOG.md` and `CONTRIBUTING.md` are not yet present.
 - **ABI freeze** — once the FFI surface is stable, cut `1.0.0` and begin
@@ -80,7 +78,7 @@ These are the remaining gaps tracked for future releases:
 
 ## Out of Scope (Non-Goals)
 
-Per the concept, the following will **not** be added to `librtmp2`: HTTP server,
+The following will **not** be added to `librtmp2`: HTTP server,
 web UI, stats page, REST API, persistence/database, Docker product logic,
 third-party push targets, FFmpeg wrapper, or full media-server business logic.
 Those belong in a separate downstream product.
