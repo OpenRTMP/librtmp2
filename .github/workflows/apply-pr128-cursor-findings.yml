@@ -1,0 +1,255 @@
+name: Apply PR 128 Cursor findings
+
+on:
+  push:
+    branches:
+      - feat/ertmp-v2-multitrack-0.4.0
+    paths:
+      - .github/workflows/apply-pr128-cursor-findings.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply-fixes:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out PR branch
+        uses: actions/checkout@v4
+        with:
+          ref: feat/ertmp-v2-multitrack-0.4.0
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Apply Cursor finding fixes
+        shell: bash
+        run: |
+          cat > /tmp/pr128-cursor-findings.patch <<'PATCH'
+          diff --git a/src/client/mod.rs b/src/client/mod.rs
+          index d87bb40..0000000 100644
+          --- a/src/client/mod.rs
+          +++ b/src/client/mod.rs
+          @@ -15,7 +15,7 @@ use crate::chunk::state::{ChunkRegistry, DEFAULT_MAX_MSG_LENGTH};
+           use crate::chunk::writer::chunk_write;
+           use crate::ertmp::multitrack_media::foreach_track;
+           use crate::handshake::{self, Handshake};
+          -use crate::media::populate_av_frame;
+          +use crate::media::{is_on_metadata_payload, populate_av_frame};
+           use crate::message::command;
+           use crate::message::control;
+           use crate::message::message as msg_dispatch;
+          @@ -542,17 +542,8 @@ impl Client {
+                           } else {
+                               payload
+                           };
+          -                if let Some(ref cb) = self.on_frame_cb {
+          -                    self.frame_cb_scratch = data_payload;
+          -                    let frame = Frame {
+          -                        frame_type: FrameType::Script,
+          -                        timestamp: msg.timestamp,
+          -                        size: self.frame_cb_scratch.len() as u32,
+          -                        data: self.frame_cb_scratch.as_ptr(),
+          -                        is_metadata: 1,
+          -                        ..Default::default()
+          -                    };
+          -                    cb(&frame);
+          +                if let Some(cb) = self.on_frame_cb {
+          +                    self.deliver_script_frame_cb(cb, msg.timestamp, &data_payload);
+                           }
+                       } else if msg.msg_type_id == msg_dispatch::RTMP_MSG_AGGREGATE {
+                           self.handle_aggregate_message(msg.timestamp, &payload)?;
+          @@ -616,16 +607,7 @@ impl Client {
+                               );
+                           }
+                           msg_dispatch::RTMP_MSG_AMF0_DATA => {
+          -                    self.frame_cb_scratch = tag_payload.to_vec();
+          -                    let frame = Frame {
+          -                        frame_type: FrameType::Script,
+          -                        timestamp: out_ts,
+          -                        size: self.frame_cb_scratch.len() as u32,
+          -                        data: self.frame_cb_scratch.as_ptr(),
+          -                        is_metadata: 1,
+          -                        ..Default::default()
+          -                    };
+          -                    cb(&frame);
+          +                    self.deliver_script_frame_cb(cb, out_ts, tag_payload);
+                           }
+                           _ => {
+                               pos = body + data_size + 4;
+          @@ -678,6 +660,25 @@ impl Client {
+                   cb(&frame);
+               }
+           }
+          +
+          +    fn deliver_script_frame_cb(
+          +        &mut self,
+          +        cb: fn(&Frame),
+          +        timestamp: u32,
+          +        payload: &[u8],
+          +    ) {
+          +        let is_metadata = u8::from(is_on_metadata_payload(payload));
+          +        self.frame_cb_scratch.clear();
+          +        self.frame_cb_scratch.extend_from_slice(payload);
+          +        let frame = Frame {
+          +            frame_type: FrameType::Script,
+          +            timestamp,
+          +            size: self.frame_cb_scratch.len() as u32,
+          +            data: self.frame_cb_scratch.as_ptr(),
+          +            is_metadata,
+          +            ..Default::default()
+          +        };
+          +        cb(&frame);
+          +    }
+           
+               fn queue_user_control_message(&mut self, payload: &[u8]) -> Result<()> {
+                   let mut cmsg = ChunkMessage::default();
+          @@ -1232,6 +1233,35 @@ mod tests {
+                   assert_eq!(client.frame_cb_scratch.as_slice(), &video_payload[..]);
+               }
+          +
+          +    #[test]
+          +    fn script_callbacks_only_mark_on_metadata_events() {
+          +        use std::sync::{LazyLock, Mutex};
+          +
+          +        static FLAGS: LazyLock<Mutex<Vec<u8>>> = LazyLock::new(|| Mutex::new(Vec::new()));
+          +
+          +        let mut client = Client::new();
+          +        FLAGS.lock().unwrap().clear();
+          +
+          +        let mut cue_point = Buffer::new();
+          +        crate::amf::amf0::write_string(&mut cue_point, "onCuePoint").unwrap();
+          +        client.deliver_script_frame_cb(
+          +            |frame| FLAGS.lock().unwrap().push(frame.is_metadata),
+          +            10,
+          +            cue_point.as_slice(),
+          +        );
+          +
+          +        let mut metadata = Buffer::new();
+          +        crate::amf::amf0::write_string(&mut metadata, "@setDataFrame").unwrap();
+          +        crate::amf::amf0::write_string(&mut metadata, "onMetaData").unwrap();
+          +        client.deliver_script_frame_cb(
+          +            |frame| FLAGS.lock().unwrap().push(frame.is_metadata),
+          +            20,
+          +            metadata.as_slice(),
+          +        );
+          +
+          +        assert_eq!(*FLAGS.lock().unwrap(), vec![0, 1]);
+          +    }
+           
+               #[test]
+               fn drain_ready_messages_splits_multitrack_video() {
+          diff --git a/src/ertmp/connect_amf.rs b/src/ertmp/connect_amf.rs
+          index d8e2fa2..0000000 100644
+          --- a/src/ertmp/connect_amf.rs
+          +++ b/src/ertmp/connect_amf.rs
+          @@ -109,7 +109,13 @@ pub fn read_caps_ex_amf(buf: &mut Buffer, caps: &mut CapsExit, mask: &mut u32)
+               let ty = amf0::read_type(buf)?;
+               match ty {
+                   Amf0Type::Number => {
+          -            *mask = amf0::read_number(buf)? as u32;
+          +            let value = amf0::read_number(buf)?;
+          +            if !value.is_finite()
+          +                || value < 0.0
+          +                || value > u32::MAX as f64
+          +                || value.fract() != 0.0
+          +            {
+          +                return Err(ErrorCode::Amf);
+          +            }
+          +            *mask = value as u32;
+                       Ok(())
+                   }
+                   Amf0Type::LongString => {
+          @@ -409,6 +415,23 @@ mod tests {
+                   assert_eq!(mask, CAPS_EX_MASK_MULTITRACK | CAPS_EX_MASK_MODEX);
+               }
+          +
+          +    #[test]
+          +    fn caps_ex_number_rejects_non_integral_or_out_of_range_values() {
+          +        for value in [
+          +            f64::NAN,
+          +            f64::INFINITY,
+          +            -1.0,
+          +            1.5,
+          +            u32::MAX as f64 + 1.0,
+          +        ] {
+          +            let mut buf = Buffer::new();
+          +            amf0::write_number(&mut buf, value).unwrap();
+          +            let mut parsed = CapsExit::default();
+          +            let mut mask = 0u32;
+          +            assert_eq!(
+          +                read_caps_ex_amf(&mut buf, &mut parsed, &mut mask),
+          +                Err(ErrorCode::Amf),
+          +                "value {value:?} must be rejected"
+          +            );
+          +        }
+          +    }
+           
+               #[test]
+               fn caps_ex_binary_round_trip() {
+          diff --git a/src/session/conn.rs b/src/session/conn.rs
+          index e6eed6d..0000000 100644
+          --- a/src/session/conn.rs
+          +++ b/src/session/conn.rs
+          @@ -1107,7 +1107,15 @@ impl Conn {
+                       return Ok(());
+                   }
+                   let mut info = ConnectInfo::default();
+          -        command::read_connect(&mut buf, &mut info)?;
+          +        if command::read_connect(&mut buf, &mut info).is_err() {
+          +            self.send_command_error(
+          +                info.transaction_id,
+          +                "NetConnection.Connect.Rejected",
+          +                "Invalid connect command or capability negotiation.",
+          +            )?;
+          +            return Ok(());
+          +        }
+                   let app_len = info.app.iter().position(|&b| b == 0).unwrap_or(0);
+                   self.app = std::str::from_utf8(&info.app[..app_len])
+                       .unwrap_or("")
+          @@ -1798,7 +1806,7 @@ mod tests {
+               }
+           
+               #[test]
+          -fn connect_rejects_app_names_longer_than_routing_buffer() {
+          +fn connect_parse_failure_sends_error_response() {
+                   let mut conn = Conn::new();
+                   let mut buf = Buffer::with_capacity(512);
+                   let long_app = "a".repeat(256);
+          @@ -1816,8 +1824,14 @@ mod tests {
+                   )
+                   .unwrap();
+          -        assert_eq!(conn.handle_command(buf.as_slice()), Err(ErrorCode::Amf));
+          +        assert_eq!(conn.handle_command(buf.as_slice()), Ok(()));
+                   assert!(conn.app.is_empty());
+          +        assert_ne!(conn.state, ConnState::AppConnected);
+          +        assert!(
+          +            conn.send_buffer
+          +                .peek()
+          +                .windows(b"_error".len())
+          +                .any(|window| window == b"_error")
+          +        );
+               }
+          PATCH
+
+          git apply --check /tmp/pr128-cursor-findings.patch
+          git apply /tmp/pr128-cursor-findings.patch
+          cargo fmt --all
+          git diff --check
+
+      - name: Run tests
+        run: cargo test --all-targets
+
+      - name: Commit fixes
+        shell: bash
+        run: |
+          rm .github/workflows/apply-pr128-cursor-findings.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "fix: address Cursor findings on PR 128"
+          git push origin HEAD:feat/ertmp-v2-multitrack-0.4.0
