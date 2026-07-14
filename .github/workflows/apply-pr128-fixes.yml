@@ -7,6 +7,12 @@ on:
     paths:
       - scripts/apply_pr128_fixes.py
       - .github/workflows/apply-pr128-fixes.yml
+  pull_request:
+    branches:
+      - main
+    paths:
+      - scripts/apply_pr128_fixes.py
+      - .github/workflows/apply-pr128-fixes.yml
 
 permissions:
   contents: write
