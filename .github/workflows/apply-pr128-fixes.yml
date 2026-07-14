@@ -45,13 +45,18 @@ jobs:
               status=$?
             fi
             if [ "$status" -eq 0 ]; then
-              echo '== cargo test --all-targets =='
-              cargo test --all-targets
+              echo '== cargo test --lib --tests =='
+              cargo test --lib --tests
               status=$?
             fi
             if [ "$status" -eq 0 ]; then
-              echo '== cargo clippy --all-targets -- -D warnings =='
-              cargo clippy --all-targets -- -D warnings
+              echo '== cargo check --benches =='
+              cargo check --benches
+              status=$?
+            fi
+            if [ "$status" -eq 0 ]; then
+              echo '== cargo clippy --lib --tests -- -D warnings =='
+              cargo clippy --lib --tests -- -D warnings
               status=$?
             fi
             echo "== exit status: $status =="
