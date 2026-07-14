@@ -38,12 +38,22 @@ Targets: `chunk_read`, `handshake_server`, `amf0_skip`, `ertmp_parse`,
 
 ### Sanitizer builds (Linux)
 
+AddressSanitizer (nightly + `-Zbuild-std`):
+
 ```bash
 RUSTFLAGS="-Zsanitizer=address" cargo +nightly test --lib -Zbuild-std \
   --target x86_64-unknown-linux-gnu --all-features
 ```
 
-CI runs equivalent ASan/UBSan jobs via `.github/workflows/sanitizers.yml`.
+Integer overflow checks (stable):
+
+```bash
+RUSTFLAGS="-C overflow-checks=on" cargo test --lib --all-features
+```
+
+CI runs ASan via `.github/workflows/sanitizers.yml`. Full UBSan
+(`-Zsanitizer=undefined`) is no longer supported by current `rustc` on Linux;
+overflow checks cover the most common arithmetic UB in safe Rust tests.
 
 ## License
 Source code is under the [MIT license](LICENSE). Additional assets have their own license information.

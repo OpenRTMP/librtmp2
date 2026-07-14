@@ -35,8 +35,8 @@ jobs:
           cargo +nightly test --lib --all-features --verbose \
             -Zbuild-std --target x86_64-unknown-linux-gnu
 
-  undefined-behavior-sanitizer:
-    name: UBSan (unit tests)
+  overflow-checks:
+    name: Overflow checks (unit tests)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -46,19 +46,15 @@ jobs:
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
 
-      - name: Install nightly Rust
-        uses: dtolnay/rust-toolchain@nightly
-        with:
-          components: rust-src
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Run unit tests under UndefinedBehaviorSanitizer
+      - name: Run unit tests with integer overflow checks
         env:
-          RUSTFLAGS: "-Zsanitizer=undefined -Cdebuginfo=1 -Copt-level=0"
-        run: |
-          cargo +nightly test --lib --all-features --verbose \
-            -Zbuild-std --target x86_64-unknown-linux-gnu
+          RUSTFLAGS: "-C overflow-checks=on"
+        run: cargo test --lib --all-features --verbose
 
   examples-asan:
     name: ASan (examples)

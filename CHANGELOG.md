@@ -18,8 +18,9 @@ begin at `1.0.0`.
   (type, timestamp, size, codec details) for debugging live publishers.
 - libFuzzer harnesses under `fuzz/` for chunk reading, handshake parsing, AMF0
   skipping, E-RTMP parsers, and RTMP control-message decoders.
-- CI jobs: `.github/workflows/sanitizers.yml` (ASan/UBSan unit tests + example
-  builds) and `.github/workflows/fuzz.yml` (scheduled libFuzzer smoke runs).
+- CI jobs: `.github/workflows/sanitizers.yml` (ASan unit tests, overflow-check
+  unit tests, ASan example builds) and `.github/workflows/fuzz.yml` (scheduled
+  libFuzzer smoke runs).
 
 ### Changed
 - Removed `docs/roadmap.md`; release status lives in `README.md` and
