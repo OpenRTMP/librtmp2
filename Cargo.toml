@@ -8,6 +8,10 @@ description = "librtmp2 — RTMP/RTMPS protocol library"
 license = "MIT"
 repository = "https://github.com/OpenRTMP/librtmp2"
 
+[workspace]
+members = ["fuzz"]
+resolver = "2"
+
 [lib]
 name = "librtmp2"
 crate-type = ["cdylib", "staticlib", "lib"]

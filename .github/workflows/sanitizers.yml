@@ -1,0 +1,87 @@
+name: Sanitizers
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  address-sanitizer:
+    name: ASan (unit tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
+
+      - name: Install nightly Rust
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Run unit tests under AddressSanitizer
+        env:
+          RUSTFLAGS: "-Zsanitizer=address -Cdebuginfo=1 -Copt-level=0"
+          ASAN_OPTIONS: "detect_odr_violation=0"
+        run: |
+          cargo +nightly test --lib --all-features --verbose \
+            -Zbuild-std --target x86_64-unknown-linux-gnu
+
+  undefined-behavior-sanitizer:
+    name: UBSan (unit tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
+
+      - name: Install nightly Rust
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Run unit tests under UndefinedBehaviorSanitizer
+        env:
+          RUSTFLAGS: "-Zsanitizer=undefined -Cdebuginfo=1 -Copt-level=0"
+        run: |
+          cargo +nightly test --lib --all-features --verbose \
+            -Zbuild-std --target x86_64-unknown-linux-gnu
+
+  examples-asan:
+    name: ASan (examples)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
+
+      - name: Install nightly Rust
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build examples under AddressSanitizer
+        env:
+          RUSTFLAGS: "-Zsanitizer=address -Cdebuginfo=1 -Copt-level=0"
+          ASAN_OPTIONS: "detect_odr_violation=0"
+        run: |
+          cargo +nightly build --examples --all-features --verbose \
+            -Zbuild-std --target x86_64-unknown-linux-gnu

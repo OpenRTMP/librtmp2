@@ -1,0 +1,47 @@
+[package]
+name = "librtmp2-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+librtmp2 = { path = "..", default-features = false }
+
+[[bin]]
+name = "chunk_read"
+path = "fuzz_targets/chunk_read.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "handshake_server"
+path = "fuzz_targets/handshake_server.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "amf0_skip"
+path = "fuzz_targets/amf0_skip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ertmp_parse"
+path = "fuzz_targets/ertmp_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "control_decode"
+path = "fuzz_targets/control_decode.rs"
+test = false
+doc = false
+bench = false

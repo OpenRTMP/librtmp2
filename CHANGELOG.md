@@ -13,6 +13,18 @@ begin at `1.0.0`.
 
 ## [Unreleased]
 
+### Added
+- `examples/dump_frames.rs` — play a stream and print one line per received frame
+  (type, timestamp, size, codec details) for debugging live publishers.
+- libFuzzer harnesses under `fuzz/` for chunk reading, handshake parsing, AMF0
+  skipping, E-RTMP parsers, and RTMP control-message decoders.
+- CI jobs: `.github/workflows/sanitizers.yml` (ASan/UBSan unit tests + example
+  builds) and `.github/workflows/fuzz.yml` (scheduled libFuzzer smoke runs).
+
+### Changed
+- Removed `docs/roadmap.md`; release status lives in `README.md` and
+  `CHANGELOG.md`.
+
 ## [0.3.1] — 2026-07-13
 
 ### Fixed

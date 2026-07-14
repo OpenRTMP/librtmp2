@@ -1,0 +1,47 @@
+name: Fuzz
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 4 * * 0"
+
+permissions:
+  contents: read
+
+env:
+  FUZZ_SECONDS: "45"
+
+jobs:
+  libfuzzer:
+    name: cargo-fuzz (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - chunk_read
+          - handshake_server
+          - amf0_skip
+          - ertmp_parse
+          - control_decode
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install nightly Rust
+        uses: dtolnay/rust-toolchain@nightly
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      - name: Run fuzz target
+        run: |
+          cargo fuzz run "${{ matrix.target }}" -- \
+            -max_total_time=${{ env.FUZZ_SECONDS }} \
+            -reload=0 \
+            -print_final_stats=1

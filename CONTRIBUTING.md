@@ -23,5 +23,27 @@ TLS/RTMPS is enabled by default via the `tls` feature (OpenSSL). Use
 build. Before any release, run `scripts/abi-baseline.sh compare` against the
 previous release tag — see `docs/abi-policy.md` for the full checklist.
 
+### Parser fuzzing (libFuzzer)
+
+Requires nightly Rust and `cargo-fuzz`:
+
+```bash
+rustup toolchain install nightly
+cargo install cargo-fuzz --locked
+cargo fuzz run chunk_read -- -max_total_time=30
+```
+
+Targets: `chunk_read`, `handshake_server`, `amf0_skip`, `ertmp_parse`,
+`control_decode`.
+
+### Sanitizer builds (Linux)
+
+```bash
+RUSTFLAGS="-Zsanitizer=address" cargo +nightly test --lib -Zbuild-std \
+  --target x86_64-unknown-linux-gnu --all-features
+```
+
+CI runs equivalent ASan/UBSan jobs via `.github/workflows/sanitizers.yml`.
+
 ## License
 Source code is under the [MIT license](LICENSE). Additional assets have their own license information.

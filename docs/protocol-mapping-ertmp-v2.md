@@ -63,4 +63,4 @@ protocol-compliantly.
 
 - v2 structures parse and serialize correctly, but full v2 negotiation has not
   yet been verified against an external peer (OBS / SRS / HaishinKit). See
-  [`roadmap.md`](roadmap.md).
+  `tests/interop/` for the in-tree interop coverage that exists today.
