@@ -24,6 +24,23 @@ fn video_fourcc_info_map_round_trips_as_object_with_flags() {
 }
 
 #[test]
+fn video_fourcc_info_map_preserves_wildcard_flags() {
+    let mut offered = VideoFourCcInfoMap::default();
+    offered.entries[0].cc[0] = b'*';
+    offered.masks[0] = FOUR_CC_INFO_CAN_FORWARD;
+    offered.count = 1;
+
+    let mut wire = Buffer::new();
+    write_video_fourcc_info_map_amf(&mut wire, &offered).unwrap();
+
+    let mut parsed = VideoFourCcInfoMap::default();
+    read_video_fourcc_info_map_amf(&mut wire, &mut parsed).unwrap();
+    assert_eq!(parsed.count, 1);
+    assert_eq!(parsed.entries[0].cc[0], b'*');
+    assert_eq!(parsed.masks[0], FOUR_CC_INFO_CAN_FORWARD);
+}
+
+#[test]
 fn fourcc_wildcard_survives_amf_round_trip() {
     let mut offered = FourCcList::default();
     offered.entries[0].cc[0] = b'*';
