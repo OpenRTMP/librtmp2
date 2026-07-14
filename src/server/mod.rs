@@ -5,12 +5,14 @@
 use std::collections::HashMap;
 use std::net::TcpListener;
 use std::os::unix::io::{AsRawFd, IntoRawFd};
+use std::sync::{Arc, Mutex};
 #[cfg(feature = "tls")]
 use std::time::{Duration, Instant};
 
 use crate::chunk::state::DEFAULT_CHUNK_SIZE;
 use crate::net;
 use crate::session::conn::Conn;
+use crate::session::publish_route::PublishRouteRegistry;
 #[cfg(feature = "tls")]
 use crate::transport::{PendingTlsAccept, TlsAcceptOutcome};
 use crate::transport::{TlsCtx, Transport};
@@ -131,6 +133,8 @@ pub struct Server {
     conn_ids_issued: bool,
     /// Hold media relay until the integrator enables it per connection.
     pub defer_media_relay: bool,
+    /// Active publish routes: (app, stream_name) -> owning conn_id.
+    pub(crate) active_publish_routes: Arc<Mutex<HashMap<(String, String), u64>>>,
 }
 
 impl Server {
@@ -176,7 +180,14 @@ impl Server {
             next_conn_id: 1,
             conn_ids_issued: false,
             defer_media_relay: false,
+            active_publish_routes: Arc::new(Mutex::new(HashMap::new())),
         })
+    }
+
+    fn release_all_publish_routes(&self, conn_id: u64) {
+        if let Ok(mut routes) = self.active_publish_routes.lock() {
+            routes.retain(|_, owner| *owner != conn_id);
+        }
     }
 
     /// Set the starting value used for auto-generated connection IDs.
@@ -363,6 +374,9 @@ impl Server {
         conn.on_connect_cb = self.on_connect_cb;
         conn.on_publish_cb = self.on_publish_cb;
         conn.on_play_cb = self.on_play_cb;
+        conn.publish_routes = Some(PublishRouteRegistry::new(Arc::clone(
+            &self.active_publish_routes,
+        )));
         self.connections.push(conn);
         true
     }
@@ -480,19 +494,25 @@ impl Server {
 
         // Drive recv/processing for every connection.
         self.drain_pending_cache_evictions();
+        // Cloned so a closed connection's publish route can be released
+        // immediately (below) without conflicting with the mutable borrow
+        // of `self.connections` this loop holds via `iter_mut()`.
+        let active_publish_routes = Arc::clone(&self.active_publish_routes);
         for (i, conn) in self.connections.iter_mut().enumerate() {
+            let mut conn_closed_this_iteration = false;
             if conn.session_setup_timed_out() {
                 conn.transport = None;
                 closed.push(i);
-                continue;
+                conn_closed_this_iteration = true;
             }
             let mut bytes_drained = 0usize;
-            loop {
+            while !conn_closed_this_iteration {
                 if bytes_drained >= MAX_RECV_BYTES_PER_CONN_PER_POLL {
                     break;
                 }
                 let Some(transport) = conn.transport.as_mut() else {
                     closed.push(i);
+                    conn_closed_this_iteration = true;
                     break;
                 };
                 let mut again = 0i32;
@@ -501,16 +521,19 @@ impl Server {
                     let chunk_len = n as usize;
                     if conn.recv(&buf[..chunk_len]).is_err() {
                         closed.push(i);
+                        conn_closed_this_iteration = true;
                         break;
                     }
                     bytes_drained += chunk_len;
                 } else if n == 0 {
                     closed.push(i);
+                    conn_closed_this_iteration = true;
                     break;
                 } else if again != 0 {
                     break;
                 } else {
                     closed.push(i);
+                    conn_closed_this_iteration = true;
                     break;
                 }
             }
@@ -521,12 +544,23 @@ impl Server {
             // so one connection with a huge batch can't monopolize this poll
             // tick -- any remainder is picked up on the next poll() call.
             for _ in 0..MAX_BUDGET_DRAIN_PASSES_PER_CONN_PER_POLL {
-                if !conn.has_buffered_messages() {
+                if conn_closed_this_iteration || !conn.has_buffered_messages() {
                     break;
                 }
                 if conn.recv(&[]).is_err() {
                     closed.push(i);
+                    conn_closed_this_iteration = true;
                     break;
+                }
+            }
+            // Release this connection's claimed publish route(s) right away
+            // rather than deferring to the end-of-batch cleanup below: a
+            // later connection processed in this same loop may try to
+            // publish the same (app, stream) route, and PublishRouteRegistry
+            // must not see this now-closed connection as the stale owner.
+            if conn_closed_this_iteration {
+                if let Ok(mut routes) = active_publish_routes.lock() {
+                    routes.retain(|_, owner| *owner != conn.conn_id);
                 }
             }
         }
@@ -620,7 +654,10 @@ impl Server {
                 if !is_player || conn.app != frame.app {
                     continue;
                 }
-                if conn.send_frame(frame.frame_type, frame.timestamp, &frame.payload).is_err() {
+                if conn
+                    .send_frame(frame.frame_type, frame.timestamp, &frame.payload)
+                    .is_err()
+                {
                     // Player stopped reading; outbound send_buffer is full.
                     // Drop the connection immediately so later relay frames in
                     // this poll batch skip it and no more socket work is done.
@@ -653,6 +690,7 @@ impl Server {
         closed.dedup();
         for i in closed.into_iter().rev() {
             let conn = &self.connections[i];
+            self.release_all_publish_routes(conn.conn_id);
             // Tracking must be cleared unconditionally: a publisher can issue
             // another createStream after publishing, replacing current_stream
             // and leaving is_publishing false even though this conn_id still
@@ -839,7 +877,9 @@ impl Server {
     /// eviction is only honored when this conn_id is a confirmed owner of
     /// the key in `publisher_cache_keys`; otherwise it would delete a cache
     /// entry that belongs to a different, still-active publisher.
-    fn drain_pending_cache_evictions(&mut self) -> std::collections::HashSet<(String, String, u64)> {
+    fn drain_pending_cache_evictions(
+        &mut self,
+    ) -> std::collections::HashSet<(String, String, u64)> {
         let mut abandoned = std::collections::HashSet::new();
         for conn in &mut self.connections {
             for key in conn.pending_cache_evictions.drain(..) {
@@ -957,7 +997,14 @@ mod tests {
         server.cache_relay_frame(&relay_frame(FrameType::Video, payload));
 
         let key = ("live".to_string(), "stream".to_string());
-        assert!(server.stream_cache.get(&key).unwrap().last_keyframe.is_some());
+        assert!(
+            server
+                .stream_cache
+                .get(&key)
+                .unwrap()
+                .last_keyframe
+                .is_some()
+        );
     }
 
     #[test]
@@ -1061,5 +1108,277 @@ mod tests {
 
         server.process_connections().unwrap();
         assert_eq!(server.connections.len(), 0);
+    }
+
+    #[test]
+    fn second_publisher_on_same_route_is_rejected() {
+        let mut server = test_server();
+
+        let mut first = Conn::new();
+        first.conn_id = 1;
+        first.app = "live".to_string();
+        first.current_stream = Some(Box::new(crate::session::stream::Stream {
+            stream_id: 1,
+            name: String::new(),
+            is_publishing: false,
+            is_playing: false,
+        }));
+        first.publish_routes = Some(PublishRouteRegistry::new(Arc::clone(
+            &server.active_publish_routes,
+        )));
+
+        let mut second = Conn::new();
+        second.conn_id = 2;
+        second.app = "live".to_string();
+        second.current_stream = Some(Box::new(crate::session::stream::Stream {
+            stream_id: 1,
+            name: String::new(),
+            is_publishing: false,
+            is_playing: false,
+        }));
+        second.publish_routes = Some(PublishRouteRegistry::new(Arc::clone(
+            &server.active_publish_routes,
+        )));
+
+        let mut buf = crate::buffer::Buffer::with_capacity(128);
+        crate::message::command::build_create_stream(&mut buf, 1.0).unwrap();
+        first.handle_command(buf.as_slice()).unwrap();
+        second.handle_command(buf.as_slice()).unwrap();
+
+        let mut publish_a = crate::buffer::Buffer::with_capacity(128);
+        crate::message::command::build_publish(&mut publish_a, "victim", "live").unwrap();
+        first.handle_command(publish_a.as_slice()).unwrap();
+        assert!(first.relay_enabled);
+
+        let mut publish_b = crate::buffer::Buffer::with_capacity(128);
+        crate::message::command::build_publish(&mut publish_b, "victim", "live").unwrap();
+        second.handle_command(publish_b.as_slice()).unwrap();
+        assert!(
+            !second.relay_enabled,
+            "second publisher on the same route must be rejected"
+        );
+    }
+
+    #[test]
+    fn publish_rename_onto_occupied_route_keeps_old_route_claimed() {
+        let server = test_server();
+
+        let mut first = Conn::new();
+        first.conn_id = 1;
+        first.app = "live".to_string();
+        first.current_stream = Some(Box::new(crate::session::stream::Stream {
+            stream_id: 1,
+            name: String::new(),
+            is_publishing: false,
+            is_playing: false,
+        }));
+        first.publish_routes = Some(PublishRouteRegistry::new(Arc::clone(
+            &server.active_publish_routes,
+        )));
+
+        let mut second = Conn::new();
+        second.conn_id = 2;
+        second.app = "live".to_string();
+        second.current_stream = Some(Box::new(crate::session::stream::Stream {
+            stream_id: 1,
+            name: String::new(),
+            is_publishing: false,
+            is_playing: false,
+        }));
+        second.publish_routes = Some(PublishRouteRegistry::new(Arc::clone(
+            &server.active_publish_routes,
+        )));
+
+        let mut buf = crate::buffer::Buffer::with_capacity(128);
+        crate::message::command::build_create_stream(&mut buf, 1.0).unwrap();
+        first.handle_command(buf.as_slice()).unwrap();
+        second.handle_command(buf.as_slice()).unwrap();
+
+        // `first` claims "a", `second` claims "b".
+        let mut publish_a = crate::buffer::Buffer::with_capacity(128);
+        crate::message::command::build_publish(&mut publish_a, "a", "live").unwrap();
+        first.handle_command(publish_a.as_slice()).unwrap();
+        assert!(first.relay_enabled);
+
+        let mut publish_b = crate::buffer::Buffer::with_capacity(128);
+        crate::message::command::build_publish(&mut publish_b, "b", "live").unwrap();
+        second.handle_command(publish_b.as_slice()).unwrap();
+        assert!(second.relay_enabled);
+
+        // `first` tries to re-publish onto "b", which `second` already owns.
+        // The rename must be rejected, and "a" must remain claimed by `first`
+        // so a third connection cannot hijack it.
+        let mut publish_rename = crate::buffer::Buffer::with_capacity(128);
+        crate::message::command::build_publish(&mut publish_rename, "b", "live").unwrap();
+        first.handle_command(publish_rename.as_slice()).unwrap();
+
+        let mut third = Conn::new();
+        third.conn_id = 3;
+        third.app = "live".to_string();
+        third.current_stream = Some(Box::new(crate::session::stream::Stream {
+            stream_id: 1,
+            name: String::new(),
+            is_publishing: false,
+            is_playing: false,
+        }));
+        third.publish_routes = Some(PublishRouteRegistry::new(Arc::clone(
+            &server.active_publish_routes,
+        )));
+        let mut create_third = crate::buffer::Buffer::with_capacity(128);
+        crate::message::command::build_create_stream(&mut create_third, 1.0).unwrap();
+        third.handle_command(create_third.as_slice()).unwrap();
+
+        let mut publish_hijack = crate::buffer::Buffer::with_capacity(128);
+        crate::message::command::build_publish(&mut publish_hijack, "a", "live").unwrap();
+        third.handle_command(publish_hijack.as_slice()).unwrap();
+        assert!(
+            !third.relay_enabled,
+            "route \"a\" must stay claimed by the original publisher after a failed rename"
+        );
+    }
+
+    #[test]
+    fn delete_stream_releases_publish_route_for_next_publisher() {
+        let server = test_server();
+
+        let mut first = Conn::new();
+        first.conn_id = 1;
+        first.app = "live".to_string();
+        first.current_stream = Some(Box::new(crate::session::stream::Stream {
+            stream_id: 1,
+            name: String::new(),
+            is_publishing: false,
+            is_playing: false,
+        }));
+        first.publish_routes = Some(PublishRouteRegistry::new(Arc::clone(
+            &server.active_publish_routes,
+        )));
+
+        let mut create_first = crate::buffer::Buffer::with_capacity(128);
+        crate::message::command::build_create_stream(&mut create_first, 1.0).unwrap();
+        first.handle_command(create_first.as_slice()).unwrap();
+
+        let mut publish_a = crate::buffer::Buffer::with_capacity(128);
+        crate::message::command::build_publish(&mut publish_a, "victim", "live").unwrap();
+        first.handle_command(publish_a.as_slice()).unwrap();
+        assert!(first.relay_enabled);
+
+        // Client unpublishes but keeps the TCP connection open.
+        let mut delete_stream = crate::buffer::Buffer::with_capacity(128);
+        crate::message::command::build_deletestream(&mut delete_stream, 1.0, 1).unwrap();
+        first.handle_command(delete_stream.as_slice()).unwrap();
+        assert!(
+            !first.relay_enabled,
+            "relay_enabled must be cleared along with the publish role, so a later \
+             publish under defer_media_relay can't relay before being re-authorized"
+        );
+
+        let mut second = Conn::new();
+        second.conn_id = 2;
+        second.app = "live".to_string();
+        second.current_stream = Some(Box::new(crate::session::stream::Stream {
+            stream_id: 1,
+            name: String::new(),
+            is_publishing: false,
+            is_playing: false,
+        }));
+        second.publish_routes = Some(PublishRouteRegistry::new(Arc::clone(
+            &server.active_publish_routes,
+        )));
+        let mut create_second = crate::buffer::Buffer::with_capacity(128);
+        crate::message::command::build_create_stream(&mut create_second, 1.0).unwrap();
+        second.handle_command(create_second.as_slice()).unwrap();
+
+        let mut publish_b = crate::buffer::Buffer::with_capacity(128);
+        crate::message::command::build_publish(&mut publish_b, "victim", "live").unwrap();
+        second.handle_command(publish_b.as_slice()).unwrap();
+        assert!(
+            second.relay_enabled,
+            "route must be free for a new publisher after deleteStream"
+        );
+    }
+
+    #[test]
+    fn closed_connections_release_routes_before_later_publish_in_same_batch() {
+        use crate::chunk::reader::ChunkMessage;
+        use crate::chunk::writer::chunk_write;
+        use crate::message::message::RTMP_MSG_AMF0_COMMAND;
+        use crate::session::stream::Stream;
+        use crate::types::ConnState;
+        use crate::transport::Transport;
+        use std::os::unix::io::IntoRawFd;
+        use std::os::unix::net::UnixStream;
+
+        let mut server = test_server();
+
+        // Connection A already owns the "victim" route and is about to be
+        // detected as closed (peer hung up) during this same
+        // process_connections() pass.
+        let mut conn_a = Conn::new();
+        conn_a.conn_id = 1;
+        conn_a.app = "live".to_string();
+        conn_a.current_stream = Some(Box::new(Stream {
+            stream_id: 1,
+            name: "victim".to_string(),
+            is_publishing: true,
+            is_playing: false,
+        }));
+        conn_a.publish_routes = Some(PublishRouteRegistry::new(Arc::clone(
+            &server.active_publish_routes,
+        )));
+        server
+            .active_publish_routes
+            .lock()
+            .unwrap()
+            .insert(("live".to_string(), "victim".to_string()), conn_a.conn_id);
+        let (a_end, a_peer) = UnixStream::pair().unwrap();
+        a_end.set_nonblocking(true).unwrap();
+        conn_a.transport = Some(Transport::new_plain(a_end.into_raw_fd()));
+        // Drop the peer side so conn_a's transport.recv() observes EOF (n == 0)
+        // when process_connections() reads it, simulating the publisher
+        // disconnecting.
+        drop(a_peer);
+
+        // Connection B is a second, already-connected client publishing the
+        // same route later in the same connections vector.
+        let mut conn_b = Conn::new();
+        conn_b.conn_id = 2;
+        conn_b.app = "live".to_string();
+        conn_b.state = ConnState::StreamCreated;
+        conn_b.current_stream = Some(Box::new(Stream {
+            stream_id: 1,
+            name: String::new(),
+            is_publishing: false,
+            is_playing: false,
+        }));
+        conn_b.publish_routes = Some(PublishRouteRegistry::new(Arc::clone(
+            &server.active_publish_routes,
+        )));
+        let (b_end, mut b_peer) = UnixStream::pair().unwrap();
+        b_end.set_nonblocking(true).unwrap();
+        conn_b.transport = Some(Transport::new_plain(b_end.into_raw_fd()));
+
+        let mut publish_cmd = crate::buffer::Buffer::with_capacity(128);
+        crate::message::command::build_publish(&mut publish_cmd, "victim", "live").unwrap();
+        let payload_len = publish_cmd.available();
+        let mut wire = crate::buffer::Buffer::new();
+        let mut cmsg = ChunkMessage::default();
+        cmsg.csid = 3;
+        cmsg.fmt = 0;
+        cmsg.msg_length = payload_len as u32;
+        cmsg.msg_type_id = RTMP_MSG_AMF0_COMMAND;
+        cmsg.msg_stream_id = 1;
+        chunk_write(&mut wire, &cmsg, publish_cmd.as_slice(), payload_len, 128).unwrap();
+        use std::io::Write;
+        b_peer.write_all(wire.peek()).unwrap();
+
+        server.connections = vec![conn_a, conn_b];
+        server.process_connections().unwrap();
+
+        assert_eq!(server.connections.len(), 1, "conn_a should have been removed");
+        assert!(
+            server.connections[0].relay_enabled,
+            "conn_b's publish must succeed in the same batch conn_a's route was freed in"
+        );
     }
 }

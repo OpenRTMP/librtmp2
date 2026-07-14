@@ -10,6 +10,7 @@ use crate::handshake::{self, Handshake, HandshakeState};
 use crate::message::command;
 use crate::message::control::{self, UCTRL_PING_REQUEST, UCTRL_PING_RESPONSE};
 use crate::message::message as msg_dispatch;
+use crate::session::publish_route::PublishRouteRegistry;
 use crate::session::state_machine;
 use crate::session::stream::Stream;
 use crate::transport::Transport;
@@ -126,6 +127,8 @@ pub struct Conn {
     pub on_connect_cb: Option<fn()>,
     pub on_publish_cb: Option<fn(conn_id: u64, app: &str, stream_name: &str) -> bool>,
     pub on_play_cb: Option<fn(conn_id: u64, app: &str, stream_name: &str) -> bool>,
+    /// When set by the built-in server, enforces single-publisher-per-route.
+    pub(crate) publish_routes: Option<PublishRouteRegistry>,
     /// Cache keys to evict after the publisher renames its stream.
     pub pending_cache_evictions: Vec<(String, String)>,
     /// Last measured client↔server RTT in milliseconds (RTMP UserControl ping).
@@ -196,6 +199,7 @@ impl Conn {
             on_connect_cb: None,
             on_publish_cb: None,
             on_play_cb: None,
+            publish_routes: None,
             pending_cache_evictions: Vec::new(),
             rtt_ms: 0.0,
             pending_pings: HashMap::new(),
@@ -263,10 +267,17 @@ impl Conn {
         }
         let route_key = self.relay_route_key();
         if !route_key.is_empty() {
+            self.release_publish_route(&route_key);
             self.pending_cache_evictions
                 .push((self.app.clone(), route_key));
         }
         self.clear_detected_stream_metadata();
+    }
+
+    fn release_publish_route(&mut self, stream: &str) {
+        if let Some(routes) = self.publish_routes.as_ref() {
+            routes.release(self.conn_id, &self.app, stream);
+        }
     }
 
     fn clear_detected_stream_metadata(&mut self) {
@@ -1085,8 +1096,21 @@ impl Conn {
                 } else {
                     name_str.clone()
                 };
-                if was_publishing && !prev_route_key.is_empty() && prev_route_key != next_route_key
-                {
+                let renaming_route = was_publishing
+                    && !prev_route_key.is_empty()
+                    && prev_route_key != next_route_key;
+                if let Some(routes) = self.publish_routes.as_ref() {
+                    if !routes.claim(self.conn_id, &self.app, &next_route_key) {
+                        return self.send_onstatus(
+                            0,
+                            "error",
+                            "NetStream.Publish.BadName",
+                            "Route already publishing",
+                        );
+                    }
+                }
+                if renaming_route {
+                    self.release_publish_route(&prev_route_key);
                     self.pending_cache_evictions
                         .push((self.app.clone(), prev_route_key));
                 }
@@ -1158,7 +1182,25 @@ impl Conn {
                     self.send_onstatus(sid, "status", "NetStream.Play.Start", "Playing")?;
                 }
             }
-            "FCPublish" | "FCUnpublish" | "releaseStream" | "deleteStream" => {}
+            "FCUnpublish" | "deleteStream" => {
+                // The client is explicitly tearing down its publish role;
+                // release the claimed route now rather than holding it
+                // until the TCP connection eventually closes, so a
+                // different connection can immediately republish the same
+                // (app, stream) route.
+                self.evict_active_publish_route();
+                if let Some(ref mut stream) = self.current_stream {
+                    stream.is_publishing = false;
+                }
+                // Clear relay_enabled along with the publish role: with
+                // `defer_media_relay`, the publish handler leaves it
+                // untouched on the next `publish` (the integrator must
+                // explicitly re-authorize it via on_publish_cb), so a stale
+                // `true` here would let a new publish on this connection
+                // relay before it's actually re-authorized.
+                self.relay_enabled = false;
+            }
+            "FCPublish" | "releaseStream" => {}
             _ => {}
         }
         Ok(())

@@ -8,7 +8,7 @@ use std::sync::{mpsc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::buffer::Buffer;
-use crate::chunk::reader::{chunk_read, ChunkMessage};
+use crate::chunk::reader::{chunk_read_owned, ChunkMessage};
 use crate::chunk::state::{ChunkRegistry, DEFAULT_MAX_MSG_LENGTH};
 use crate::chunk::writer::chunk_write;
 use crate::handshake::{self, Handshake};
@@ -151,7 +151,9 @@ pub struct Client {
     pub app: String,
     pub stream_key: String,
     pub on_frame_cb: Option<fn(&Frame)>,
-    /// Retains the last frame payload delivered through `on_frame_cb`.
+    /// Retains the last frame payload delivered through `on_frame_cb` so
+    /// `Frame.data` stays valid until the next callback on this connection
+    /// (mirrors `Conn::frame_cb_scratch` on the server side).
     frame_cb_scratch: Vec<u8>,
     /// PEM CA bundle used to verify `rtmps://` servers, in addition to the
     /// system trust store. `None` uses the system trust store only.
@@ -354,12 +356,9 @@ impl Client {
             128,
         )?;
 
-        // Flush
-        let data = self.send_buffer.peek().to_vec();
-        if let Some(ref mut transport) = self.transport {
-            transport.send(&data)?;
-        }
-        self.send_buffer.reset();
+        // Non-blocking flush: a malicious server that stops reading must not
+        // stall the embedder's thread for up to 10s per frame via blocking send.
+        self.try_flush_send_buffer()?;
 
         Ok(())
     }
@@ -496,44 +495,24 @@ impl Client {
             }
 
             let mut msg = ChunkMessage::default();
-            let mut payload_ptr: *const u8 = std::ptr::null();
-            let mut payload_len = 0;
-            match chunk_read(
-                &mut self.recv_buffer,
-                &mut self.chunk_reg,
-                None,
-                &mut msg,
-                &mut payload_ptr,
-                &mut payload_len,
-            ) {
-                Ok(1) if msg.is_complete => {
+            match chunk_read_owned(&mut self.recv_buffer, &mut self.chunk_reg, &mut msg) {
+                Ok((1, payload)) if msg.is_complete => {
                     *messages_processed += 1;
                     if msg.msg_type_id == msg_dispatch::RTMP_MSG_SET_CHUNK_SIZE {
-                        let payload = if payload_ptr.is_null() || payload_len == 0 {
-                            &[][..]
-                        } else {
-                            unsafe { std::slice::from_raw_parts(payload_ptr, payload_len) }
-                        };
-                        if let Ok(cs) = control::read_set_chunk_size(payload) {
+                        if let Ok(cs) = control::read_set_chunk_size(&payload) {
                             self.chunk_reg.set_all_chunk_size(cs);
                         }
                     } else if msg.msg_type_id == msg_dispatch::RTMP_MSG_USER_CONTROL {
-                        let payload = if payload_ptr.is_null() || payload_len == 0 {
-                            &[][..]
-                        } else {
-                            unsafe { std::slice::from_raw_parts(payload_ptr, payload_len) }
-                        };
-                        self.handle_user_control(payload)?;
+                        self.handle_user_control(&payload)?;
                     } else if msg.msg_type_id == msg_dispatch::RTMP_MSG_AUDIO
                         || msg.msg_type_id == msg_dispatch::RTMP_MSG_VIDEO
                     {
                         if let Some(ref cb) = self.on_frame_cb {
-                            self.frame_cb_scratch.clear();
-                            if !payload_ptr.is_null() && payload_len > 0 {
-                                self.frame_cb_scratch.extend_from_slice(unsafe {
-                                    std::slice::from_raw_parts(payload_ptr, payload_len)
-                                });
-                            }
+                            // Move the already-owned payload into the
+                            // connection-scoped scratch buffer so Frame.data
+                            // stays valid until the next callback, not just
+                            // for the duration of this call.
+                            self.frame_cb_scratch = payload;
                             let frame = Frame {
                                 frame_type: if msg.msg_type_id == msg_dispatch::RTMP_MSG_AUDIO {
                                     FrameType::Audio
@@ -596,11 +575,15 @@ impl Client {
             }
             self.send_buffer.drain(n);
         }
-        Ok(if self.send_buffer.available() > 0 {
-            poll_again
+        if self.send_buffer.available() > 0 {
+            Ok(poll_again)
         } else {
-            None
-        })
+            // Fully drained: shrink a send_buffer that grew for a large
+            // frame (e.g. a multi-megabyte keyframe) back down instead of
+            // pinning that allocation for the rest of the connection.
+            self.send_buffer.reset();
+            Ok(None)
+        }
     }
 
     fn send_user_control_message(&mut self, payload: &[u8]) -> Result<()> {
@@ -798,22 +781,8 @@ impl Client {
     fn recv_message(&mut self, recv_budget: &mut usize) -> Result<(ChunkMessage, Vec<u8>)> {
         loop {
             let mut msg = ChunkMessage::default();
-            let mut payload_ptr: *const u8 = std::ptr::null();
-            let mut payload_len = 0;
-            match chunk_read(
-                &mut self.recv_buffer,
-                &mut self.chunk_reg,
-                None,
-                &mut msg,
-                &mut payload_ptr,
-                &mut payload_len,
-            ) {
-                Ok(1) if msg.is_complete => {
-                    let payload = if payload_ptr.is_null() || payload_len == 0 {
-                        Vec::new()
-                    } else {
-                        unsafe { std::slice::from_raw_parts(payload_ptr, payload_len) }.to_vec()
-                    };
+            match chunk_read_owned(&mut self.recv_buffer, &mut self.chunk_reg, &mut msg) {
+                Ok((1, payload)) if msg.is_complete => {
                     if msg.msg_type_id == msg_dispatch::RTMP_MSG_SET_CHUNK_SIZE {
                         if let Ok(cs) = control::read_set_chunk_size(&payload) {
                             self.chunk_reg.set_all_chunk_size(cs);
@@ -1044,6 +1013,62 @@ mod tests {
             .unwrap();
 
         assert_eq!(client.poll(0), Err(ErrorCode::Protocol));
+    }
+
+    #[test]
+    fn try_flush_send_buffer_shrinks_after_full_drain() {
+        use crate::buffer::BUFFER_RESET_CAPACITY;
+        use std::os::unix::io::IntoRawFd;
+        use std::os::unix::net::UnixStream;
+
+        let (client_end, _peer) = UnixStream::pair().unwrap();
+        client_end.set_nonblocking(true).unwrap();
+
+        let mut client = Client::new();
+        client.transport = Some(Transport::new_plain(client_end.into_raw_fd()));
+
+        // Simulate a large keyframe having grown send_buffer well past its
+        // reset capacity. This is well within the unix socket's send buffer,
+        // so try_flush_send_buffer can fully drain it in one non-blocking
+        // write without the peer needing to read concurrently.
+        let big = vec![0u8; BUFFER_RESET_CAPACITY * 4];
+        client.send_buffer.write(&big).unwrap();
+        assert!(client.send_buffer.capacity() > BUFFER_RESET_CAPACITY);
+
+        client.try_flush_send_buffer().unwrap();
+
+        assert_eq!(client.send_buffer.available(), 0);
+        assert!(
+            client.send_buffer.capacity() <= BUFFER_RESET_CAPACITY,
+            "send_buffer should shrink back to {BUFFER_RESET_CAPACITY} after a full flush, got {}",
+            client.send_buffer.capacity()
+        );
+    }
+
+    #[test]
+    fn frame_cb_scratch_retains_payload_after_delivery() {
+        let mut client = Client::new();
+
+        let video_payload = [0x17u8, 0x01, 0x02, 0x03];
+        let mut wire = Buffer::new();
+        let mut cmsg = ChunkMessage::default();
+        cmsg.csid = 6;
+        cmsg.fmt = 0;
+        cmsg.msg_length = video_payload.len() as u32;
+        cmsg.msg_type_id = msg_dispatch::RTMP_MSG_VIDEO;
+        cmsg.msg_stream_id = 1;
+        chunk_write(&mut wire, &cmsg, &video_payload, video_payload.len(), 128).unwrap();
+        client.recv_buffer.write(wire.peek()).unwrap();
+
+        client.on_frame_cb = Some(|_| {});
+        let mut messages_processed = 0;
+        client.drain_ready_messages(&mut messages_processed).unwrap();
+
+        // Frame.data must still be valid (i.e. frame_cb_scratch must still
+        // hold the delivered payload) after the callback has returned, not
+        // just for the duration of the call itself -- matching the
+        // server-side Conn::frame_cb_scratch contract.
+        assert_eq!(client.frame_cb_scratch.as_slice(), &video_payload[..]);
     }
 
     #[test]
