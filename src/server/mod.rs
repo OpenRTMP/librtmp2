@@ -1138,4 +1138,82 @@ mod tests {
             "second publisher on the same route must be rejected"
         );
     }
+
+    #[test]
+    fn publish_rename_onto_occupied_route_keeps_old_route_claimed() {
+        let server = test_server();
+
+        let mut first = Conn::new();
+        first.conn_id = 1;
+        first.app = "live".to_string();
+        first.current_stream = Some(Box::new(crate::session::stream::Stream {
+            stream_id: 1,
+            name: String::new(),
+            is_publishing: false,
+            is_playing: false,
+        }));
+        first.publish_routes = Some(PublishRouteRegistry::new(Arc::clone(
+            &server.active_publish_routes,
+        )));
+
+        let mut second = Conn::new();
+        second.conn_id = 2;
+        second.app = "live".to_string();
+        second.current_stream = Some(Box::new(crate::session::stream::Stream {
+            stream_id: 1,
+            name: String::new(),
+            is_publishing: false,
+            is_playing: false,
+        }));
+        second.publish_routes = Some(PublishRouteRegistry::new(Arc::clone(
+            &server.active_publish_routes,
+        )));
+
+        let mut buf = crate::buffer::Buffer::with_capacity(128);
+        crate::message::command::build_create_stream(&mut buf, 1.0).unwrap();
+        first.handle_command(buf.as_slice()).unwrap();
+        second.handle_command(buf.as_slice()).unwrap();
+
+        // `first` claims "a", `second` claims "b".
+        let mut publish_a = crate::buffer::Buffer::with_capacity(128);
+        crate::message::command::build_publish(&mut publish_a, "a", "live").unwrap();
+        first.handle_command(publish_a.as_slice()).unwrap();
+        assert!(first.relay_enabled);
+
+        let mut publish_b = crate::buffer::Buffer::with_capacity(128);
+        crate::message::command::build_publish(&mut publish_b, "b", "live").unwrap();
+        second.handle_command(publish_b.as_slice()).unwrap();
+        assert!(second.relay_enabled);
+
+        // `first` tries to re-publish onto "b", which `second` already owns.
+        // The rename must be rejected, and "a" must remain claimed by `first`
+        // so a third connection cannot hijack it.
+        let mut publish_rename = crate::buffer::Buffer::with_capacity(128);
+        crate::message::command::build_publish(&mut publish_rename, "b", "live").unwrap();
+        first.handle_command(publish_rename.as_slice()).unwrap();
+
+        let mut third = Conn::new();
+        third.conn_id = 3;
+        third.app = "live".to_string();
+        third.current_stream = Some(Box::new(crate::session::stream::Stream {
+            stream_id: 1,
+            name: String::new(),
+            is_publishing: false,
+            is_playing: false,
+        }));
+        third.publish_routes = Some(PublishRouteRegistry::new(Arc::clone(
+            &server.active_publish_routes,
+        )));
+        let mut create_third = crate::buffer::Buffer::with_capacity(128);
+        crate::message::command::build_create_stream(&mut create_third, 1.0).unwrap();
+        third.handle_command(create_third.as_slice()).unwrap();
+
+        let mut publish_hijack = crate::buffer::Buffer::with_capacity(128);
+        crate::message::command::build_publish(&mut publish_hijack, "a", "live").unwrap();
+        third.handle_command(publish_hijack.as_slice()).unwrap();
+        assert!(
+            !third.relay_enabled,
+            "route \"a\" must stay claimed by the original publisher after a failed rename"
+        );
+    }
 }

@@ -1096,12 +1096,9 @@ impl Conn {
                 } else {
                     name_str.clone()
                 };
-                if was_publishing && !prev_route_key.is_empty() && prev_route_key != next_route_key
-                {
-                    self.release_publish_route(&prev_route_key);
-                    self.pending_cache_evictions
-                        .push((self.app.clone(), prev_route_key));
-                }
+                let renaming_route = was_publishing
+                    && !prev_route_key.is_empty()
+                    && prev_route_key != next_route_key;
                 if let Some(routes) = self.publish_routes.as_ref() {
                     if !routes.claim(self.conn_id, &self.app, &next_route_key) {
                         return self.send_onstatus(
@@ -1111,6 +1108,11 @@ impl Conn {
                             "Route already publishing",
                         );
                     }
+                }
+                if renaming_route {
+                    self.release_publish_route(&prev_route_key);
+                    self.pending_cache_evictions
+                        .push((self.app.clone(), prev_route_key));
                 }
                 if !self.defer_media_relay || self.on_publish_cb.is_none() {
                     self.relay_enabled = true;
