@@ -6,6 +6,7 @@ on:
       - feat/ertmp-v2-multitrack-0.4.0
     paths:
       - scripts/apply_pr128_fixes.py
+      - scripts/apply_pr128_followup.py
       - .github/workflows/apply-pr128-fixes.yml
 
 permissions:
@@ -35,7 +36,7 @@ jobs:
           status=0
           {
             echo '== apply patch =='
-            python3 scripts/apply_pr128_fixes.py
+            python3 scripts/apply_pr128_followup.py
             status=$?
             if [ "$status" -eq 0 ]; then
               echo '== cargo fmt =='
@@ -61,6 +62,7 @@ jobs:
         if: steps.validate.outputs.status == '0'
         run: |
           rm scripts/apply_pr128_fixes.py
+          rm scripts/apply_pr128_followup.py
           rm .github/workflows/apply-pr128-fixes.yml
           rm -f pr128-fix-results.log
           git config user.name "github-actions[bot]"
