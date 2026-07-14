@@ -1,0 +1,228 @@
+== apply patch ==
+Applied PR #128 fixes
+== cargo fmt ==
+== cargo test --all-targets ==
+[1m[92m    Updating[0m crates.io index
+[1m[92m     Locking[0m 94 packages to latest compatible versions
+[1m[92m Downloading[0m crates ...
+[1m[92m  Downloaded[0m anes v0.1.6
+[1m[92m  Downloaded[0m alloca v0.4.0
+[1m[92m  Downloaded[0m cast v0.3.0
+[1m[92m  Downloaded[0m cfg-if v1.0.4
+[1m[92m  Downloaded[0m aho-corasick v1.1.4
+[1m[92m  Downloaded[0m autocfg v1.5.1
+[1m[92m  Downloaded[0m bitflags v2.13.0
+[1m[92m  Downloaded[0m anstyle v1.0.14
+[1m[92m  Downloaded[0m openssl-macros v0.1.1
+[1m[92m  Downloaded[0m foreign-types v0.3.2
+[1m[92m  Downloaded[0m clap_lex v1.1.0
+[1m[92m  Downloaded[0m scopeguard v1.2.0
+[1m[92m  Downloaded[0m oorandom v11.1.5
+[1m[92m  Downloaded[0m itoa v1.0.18
+[1m[92m  Downloaded[0m lock_api v0.4.14
+[1m[92m  Downloaded[0m unicode-ident v1.0.24
+[1m[92m  Downloaded[0m clap v4.6.1
+[1m[92m  Downloaded[0m zmij v1.0.23
+[1m[92m  Downloaded[0m either v1.16.0
+[1m[92m  Downloaded[0m criterion-plot v0.8.2
+[1m[92m  Downloaded[0m shlex v2.0.1
+[1m[92m  Downloaded[0m quote v1.0.46
+[1m[92m  Downloaded[0m parking_lot v0.12.5
+[1m[92m  Downloaded[0m serde_derive v1.0.228
+[1m[92m  Downloaded[0m serde_json v1.0.150
+[1m[92m  Downloaded[0m zerocopy v0.8.54
+[1m[92m  Downloaded[0m syn v2.0.118
+[1m[92m  Downloaded[0m zerocopy-derive v0.8.54
+[1m[92m  Downloaded[0m parking_lot_core v0.9.12
+[1m[92m  Downloaded[0m serde_core v1.0.228
+[1m[92m  Downloaded[0m walkdir v2.5.0
+[1m[92m  Downloaded[0m vcpkg v0.2.15
+[1m[92m  Downloaded[0m itertools v0.13.0
+[1m[92m  Downloaded[0m regex-syntax v0.8.11
+[1m[92m  Downloaded[0m rayon-core v1.13.0
+[1m[92m  Downloaded[0m openssl-sys v0.9.117
+[1m[92m  Downloaded[0m criterion v0.8.2
+[1m[92m  Downloaded[0m same-file v1.0.6
+[1m[92m  Downloaded[0m plotters v0.3.7
+[1m[92m  Downloaded[0m rayon v1.12.0
+[1m[92m  Downloaded[0m regex-automata v0.4.15
+[1m[92m  Downloaded[0m regex v1.13.0
+[1m[92m  Downloaded[0m ciborium-io v0.2.2
+[1m[92m  Downloaded[0m memchr v2.8.3
+[1m[92m  Downloaded[0m crossbeam-deque v0.8.7
+[1m[92m  Downloaded[0m thiserror v2.0.18
+[1m[92m  Downloaded[0m smallvec v1.15.2
+[1m[92m  Downloaded[0m openssl v0.10.81
+[1m[92m  Downloaded[0m plotters-backend v0.3.7
+[1m[92m  Downloaded[0m foreign-types-shared v0.1.1
+[1m[92m  Downloaded[0m libc v0.2.186
+[1m[92m  Downloaded[0m clap_builder v4.6.0
+[1m[92m  Downloaded[0m find-msvc-tools v0.1.9
+[1m[92m  Downloaded[0m crossbeam-utils v0.8.22
+[1m[92m  Downloaded[0m proc-macro2 v1.0.106
+[1m[92m  Downloaded[0m plotters-svg v0.3.7
+[1m[92m  Downloaded[0m pkg-config v0.3.33
+[1m[92m  Downloaded[0m cc v1.2.67
+[1m[92m  Downloaded[0m serde v1.0.228
+[1m[92m  Downloaded[0m num-traits v0.2.19
+[1m[92m  Downloaded[0m tinytemplate v1.2.1
+[1m[92m  Downloaded[0m page_size v0.6.0
+[1m[92m  Downloaded[0m half v2.7.1
+[1m[92m  Downloaded[0m thiserror-impl v2.0.18
+[1m[92m  Downloaded[0m crossbeam-epoch v0.9.20
+[1m[92m  Downloaded[0m ciborium v0.2.2
+[1m[92m  Downloaded[0m ciborium-ll v0.2.2
+[1m[92m   Compiling[0m proc-macro2 v1.0.106
+[1m[92m   Compiling[0m unicode-ident v1.0.24
+[1m[92m   Compiling[0m quote v1.0.46
+[1m[92m   Compiling[0m shlex v2.0.1
+[1m[92m   Compiling[0m find-msvc-tools v0.1.9
+[1m[92m   Compiling[0m libc v0.2.186
+[1m[92m   Compiling[0m cc v1.2.67
+[1m[92m   Compiling[0m cfg-if v1.0.4
+[1m[92m   Compiling[0m serde_core v1.0.228
+[1m[92m   Compiling[0m crossbeam-utils v0.8.22
+[1m[92m   Compiling[0m pkg-config v0.3.33
+[1m[92m   Compiling[0m syn v2.0.118
+[1m[92m   Compiling[0m zerocopy v0.8.54
+[1m[92m   Compiling[0m crossbeam-epoch v0.9.20
+[1m[92m   Compiling[0m vcpkg v0.2.15
+[1m[92m   Compiling[0m autocfg v1.5.1
+[1m[92m   Compiling[0m openssl-sys v0.9.117
+[1m[92m   Compiling[0m zmij v1.0.23
+[1m[92m   Compiling[0m crossbeam-deque v0.8.7
+[1m[92m   Compiling[0m serde v1.0.228
+[1m[92m   Compiling[0m num-traits v0.2.19
+[1m[92m   Compiling[0m parking_lot_core v0.9.12
+[1m[92m   Compiling[0m rayon-core v1.13.0
+[1m[92m   Compiling[0m serde_json v1.0.150
+[1m[92m   Compiling[0m either v1.16.0
+[1m[92m   Compiling[0m alloca v0.4.0
+[1m[92m   Compiling[0m openssl v0.10.81
+[1m[92m   Compiling[0m memchr v2.8.3
+[1m[92m   Compiling[0m clap_lex v1.1.0
+[1m[92m   Compiling[0m smallvec v1.15.2
+[1m[92m   Compiling[0m itoa v1.0.18
+[1m[92m   Compiling[0m anstyle v1.0.14
+[1m[92m   Compiling[0m ciborium-io v0.2.2
+[1m[92m   Compiling[0m foreign-types-shared v0.1.1
+[1m[92m   Compiling[0m plotters-backend v0.3.7
+[1m[92m   Compiling[0m thiserror v2.0.18
+[1m[92m   Compiling[0m scopeguard v1.2.0
+[1m[92m   Compiling[0m regex-syntax v0.8.11
+[1m[92m   Compiling[0m lock_api v0.4.14
+[1m[92m   Compiling[0m plotters-svg v0.3.7
+[1m[92m   Compiling[0m clap_builder v4.6.0
+[1m[92m   Compiling[0m foreign-types v0.3.2
+[1m[92m   Compiling[0m zerocopy-derive v0.8.54
+[1m[92m   Compiling[0m serde_derive v1.0.228
+[1m[92m   Compiling[0m regex-automata v0.4.15
+[1m[92m   Compiling[0m thiserror-impl v2.0.18
+[1m[92m   Compiling[0m openssl-macros v0.1.1
+[1m[92m   Compiling[0m itertools v0.13.0
+[1m[92m   Compiling[0m half v2.7.1
+[1m[92m   Compiling[0m ciborium-ll v0.2.2
+[1m[92m   Compiling[0m librtmp2 v0.4.0 (/home/runner/work/librtmp2/librtmp2)
+[1m[92m   Compiling[0m cast v0.3.0
+[1m[92m   Compiling[0m bitflags v2.13.0
+[1m[92m   Compiling[0m same-file v1.0.6
+[1m[92m   Compiling[0m walkdir v2.5.0
+[1m[92m   Compiling[0m ciborium v0.2.2
+[1m[92m   Compiling[0m criterion-plot v0.8.2
+[1m[92m   Compiling[0m plotters v0.3.7
+[1m[92m   Compiling[0m rayon v1.12.0
+[1m[92m   Compiling[0m parking_lot v0.12.5
+[1m[92m   Compiling[0m tinytemplate v1.2.1
+[1m[92m   Compiling[0m regex v1.13.0
+[1m[92m   Compiling[0m clap v4.6.1
+[1m[92m   Compiling[0m page_size v0.6.0
+[1m[92m   Compiling[0m oorandom v11.1.5
+[1m[92m   Compiling[0m anes v0.1.6
+[1m[92m   Compiling[0m criterion v0.8.2
+[1m[33mwarning[0m[1m: use of deprecated function `criterion::black_box`: use `std::hint::black_box()` instead[0m
+ [1m[94m--> [0mbenches/relay.rs:5:53
+  [1m[94m|[0m
+[1m[94m5[0m [1m[94m|[0m use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+  [1m[94m|[0m                                                     [1m[33m^^^^^^^^^[0m
+  [1m[94m|[0m
+  [1m[94m= [0m[1mnote[0m: `#[warn(deprecated)]` on by default
+
+[1m[33mwarning[0m[1m: use of deprecated function `criterion::black_box`: use `std::hint::black_box()` instead[0m
+   [1m[94m--> [0mbenches/relay.rs:101:42
+    [1m[94m|[0m
+[1m[94m101[0m [1m[94m|[0m                 b.iter(|| relay_n_frames(black_box(count)));
+    [1m[94m|[0m                                          [1m[33m^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: use of deprecated function `criterion::black_box`: use `std::hint::black_box()` instead[0m
+ [1m[94m--> [0mbenches/protocol.rs:1:40
+  [1m[94m|[0m
+[1m[94m1[0m [1m[94m|[0m use criterion::{Criterion, Throughput, black_box, criterion_group, criterion_main};
+  [1m[94m|[0m                                        [1m[33m^^^^^^^^^[0m
+  [1m[94m|[0m
+  [1m[94m= [0m[1mnote[0m: `#[warn(deprecated)]` on by default
+
+[1m[33mwarning[0m[1m: use of deprecated function `criterion::black_box`: use `std::hint::black_box()` instead[0m
+  [1m[94m--> [0mbenches/protocol.rs:51:13
+   [1m[94m|[0m
+[1m[94m51[0m [1m[94m|[0m             black_box(payload_len)
+   [1m[94m|[0m             [1m[33m^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: use of deprecated function `criterion::black_box`: use `std::hint::black_box()` instead[0m
+  [1m[94m--> [0mbenches/protocol.rs:73:13
+   [1m[94m|[0m
+[1m[94m73[0m [1m[94m|[0m             black_box(buf.write_pos())
+   [1m[94m|[0m             [1m[33m^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: use of deprecated function `criterion::black_box`: use `std::hint::black_box()` instead[0m
+  [1m[94m--> [0mbenches/protocol.rs:86:30
+   [1m[94m|[0m
+[1m[94m86[0m [1m[94m|[0m             video_tag::parse(black_box(&video_payload), &mut tag).unwrap();
+   [1m[94m|[0m                              [1m[33m^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: use of deprecated function `criterion::black_box`: use `std::hint::black_box()` instead[0m
+  [1m[94m--> [0mbenches/protocol.rs:87:13
+   [1m[94m|[0m
+[1m[94m87[0m [1m[94m|[0m             black_box(tag.codec)
+   [1m[94m|[0m             [1m[33m^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: use of deprecated function `criterion::black_box`: use `std::hint::black_box()` instead[0m
+  [1m[94m--> [0mbenches/protocol.rs:93:30
+   [1m[94m|[0m
+[1m[94m93[0m [1m[94m|[0m             audio_tag::parse(black_box(&audio_payload), &mut tag).unwrap();
+   [1m[94m|[0m                              [1m[33m^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: use of deprecated function `criterion::black_box`: use `std::hint::black_box()` instead[0m
+  [1m[94m--> [0mbenches/protocol.rs:94:13
+   [1m[94m|[0m
+[1m[94m94[0m [1m[94m|[0m             black_box(tag.codec)
+   [1m[94m|[0m             [1m[33m^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: use of deprecated function `criterion::black_box`: use `std::hint::black_box()` instead[0m
+   [1m[94m--> [0mbenches/protocol.rs:102:19
+    [1m[94m|[0m
+[1m[94m102[0m [1m[94m|[0m         b.iter(|| black_box(fourcc::fourcc_to_video_codec(b"avc1").unwrap()));
+    [1m[94m|[0m                   [1m[33m^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: use of deprecated function `criterion::black_box`: use `std::hint::black_box()` instead[0m
+   [1m[94m--> [0mbenches/protocol.rs:112:46
+    [1m[94m|[0m
+[1m[94m112[0m [1m[94m|[0m             let mut buf = Buffer::from_slice(black_box(&c1));
+    [1m[94m|[0m                                              [1m[33m^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: use of deprecated function `criterion::black_box`: use `std::hint::black_box()` instead[0m
+   [1m[94m--> [0mbenches/protocol.rs:114:13
+    [1m[94m|[0m
+[1m[94m114[0m [1m[94m|[0m             black_box(hs.out.write_pos())
+    [1m[94m|[0m             [1m[33m^^^^^^^^^[0m
+
+[1m[91merror[E0063][0m[1m: missing field `cache_payload` in initializer of `RelayFrame`[0m
+    [1m[94m--> [0msrc/server/mod.rs:1177:9
+     [1m[94m|[0m
+[1m[94m1177[0m [1m[94m|[0m         crate::session::conn::RelayFrame {
+     [1m[94m|[0m         [1m[91m^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^[0m [1m[91mmissing `cache_payload`[0m
+
+[1m[33mwarning[0m: `librtmp2` (bench "relay") generated 2 warnings
+[1m[33mwarning[0m: `librtmp2` (bench "protocol") generated 10 warnings
+[1mFor more information about this error, try `rustc --explain E0063`.[0m
+[1m[91merror[0m: could not compile `librtmp2` (lib test) due to 1 previous error
+== exit status: 101 ==
