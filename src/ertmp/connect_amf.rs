@@ -243,16 +243,12 @@ pub fn negotiate_caps(client: &crate::types::ConnectInfo) -> NegotiatedCaps {
     }
 
     if client.has_caps_ex {
-        let requested = if client.caps_ex_mask != 0 {
-            client.caps_ex_mask
-        } else {
-            CAPS_EX_MASK_MULTITRACK | CAPS_EX_MASK_MODEX | CAPS_EX_MASK_TIMESTAMP_NANO
-        };
+        let requested = client.caps_ex_mask;
         out.caps_ex_mask = requested & CAPS_EX_MASK_SERVER_DEFAULT;
         if client.has_reconnect {
             out.caps_ex_mask |= CAPS_EX_MASK_RECONNECT & requested;
         }
-        out.has_caps_ex = out.caps_ex_mask != 0;
+        out.has_caps_ex = true;
         out.multitrack_enabled = (out.caps_ex_mask & CAPS_EX_MASK_MULTITRACK) != 0;
     } else {
         // Legacy clients without capsEx still get multitrack relay when publishing
@@ -329,5 +325,19 @@ mod tests {
         read_caps_ex_amf(&mut buf, &mut parsed, &mut mask).unwrap();
         assert_eq!(parsed.video_codec_32, caps.video_codec_32);
         assert_eq!(parsed.audio_codec_32, caps.audio_codec_32);
+    }
+
+    #[test]
+    fn negotiate_caps_honors_explicit_zero_caps_ex() {
+        use crate::types::ConnectInfo;
+
+        let mut client = ConnectInfo::default();
+        client.has_caps_ex = true;
+        client.caps_ex_mask = 0;
+
+        let caps = negotiate_caps(&client);
+        assert!(caps.has_caps_ex);
+        assert_eq!(caps.caps_ex_mask, 0);
+        assert!(!caps.multitrack_enabled);
     }
 }

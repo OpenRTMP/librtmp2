@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use crate::buffer::Buffer;
 use crate::chunk::reader::{chunk_read_owned, ChunkMessage};
+use crate::ertmp::multitrack_media::foreach_track;
 use crate::chunk::state::{ChunkRegistry, DEFAULT_MAX_MSG_LENGTH};
 use crate::chunk::writer::chunk_write;
 use crate::handshake::{self, Handshake};
@@ -516,26 +517,13 @@ impl Client {
                     } else if msg.msg_type_id == msg_dispatch::RTMP_MSG_AUDIO
                         || msg.msg_type_id == msg_dispatch::RTMP_MSG_VIDEO
                     {
-                        if let Some(ref cb) = self.on_frame_cb {
-                            // Move the already-owned payload into the
-                            // connection-scoped scratch buffer so Frame.data
-                            // stays valid until the next callback, not just
-                            // for the duration of this call.
-                            self.frame_cb_scratch = payload;
+                        if let Some(cb) = self.on_frame_cb {
                             let frame_type = if msg.msg_type_id == msg_dispatch::RTMP_MSG_AUDIO {
                                 FrameType::Audio
                             } else {
                                 FrameType::Video
                             };
-                            let mut frame = Frame {
-                                frame_type,
-                                timestamp: msg.timestamp,
-                                size: self.frame_cb_scratch.len() as u32,
-                                data: self.frame_cb_scratch.as_ptr(),
-                                ..Default::default()
-                            };
-                            populate_av_frame(&mut frame, &self.frame_cb_scratch);
-                            cb(&frame);
+                            self.deliver_av_frame_cb(cb, frame_type, msg.timestamp, payload);
                         }
                     } else if msg.msg_type_id == msg_dispatch::RTMP_MSG_AMF0_DATA
                         || msg.msg_type_id == msg_dispatch::RTMP_MSG_AMF3_DATA
@@ -598,40 +586,41 @@ impl Client {
             let out_ts = base_timestamp.wrapping_add(ts.wrapping_sub(sub_base_ts));
             let tag_payload = &payload[body..body + data_size];
 
-            if let Some(ref cb) = self.on_frame_cb {
-                self.frame_cb_scratch = tag_payload.to_vec();
-                let mut frame = match tag_type {
-                    msg_dispatch::RTMP_MSG_AUDIO => Frame {
-                        frame_type: FrameType::Audio,
-                        timestamp: out_ts,
-                        size: self.frame_cb_scratch.len() as u32,
-                        data: self.frame_cb_scratch.as_ptr(),
-                        ..Default::default()
-                    },
-                    msg_dispatch::RTMP_MSG_VIDEO => Frame {
-                        frame_type: FrameType::Video,
-                        timestamp: out_ts,
-                        size: self.frame_cb_scratch.len() as u32,
-                        data: self.frame_cb_scratch.as_ptr(),
-                        ..Default::default()
-                    },
-                    msg_dispatch::RTMP_MSG_AMF0_DATA => Frame {
-                        frame_type: FrameType::Script,
-                        timestamp: out_ts,
-                        size: self.frame_cb_scratch.len() as u32,
-                        data: self.frame_cb_scratch.as_ptr(),
-                        is_metadata: 1,
-                        ..Default::default()
-                    },
+            if let Some(cb) = self.on_frame_cb {
+                match tag_type {
+                    msg_dispatch::RTMP_MSG_AUDIO => {
+                        self.deliver_av_frame_cb(
+                            cb,
+                            FrameType::Audio,
+                            out_ts,
+                            tag_payload.to_vec(),
+                        );
+                    }
+                    msg_dispatch::RTMP_MSG_VIDEO => {
+                        self.deliver_av_frame_cb(
+                            cb,
+                            FrameType::Video,
+                            out_ts,
+                            tag_payload.to_vec(),
+                        );
+                    }
+                    msg_dispatch::RTMP_MSG_AMF0_DATA => {
+                        self.frame_cb_scratch = tag_payload.to_vec();
+                        let frame = Frame {
+                            frame_type: FrameType::Script,
+                            timestamp: out_ts,
+                            size: self.frame_cb_scratch.len() as u32,
+                            data: self.frame_cb_scratch.as_ptr(),
+                            is_metadata: 1,
+                            ..Default::default()
+                        };
+                        cb(&frame);
+                    }
                     _ => {
                         pos = body + data_size + 4;
                         continue;
                     }
-                };
-                if frame.frame_type == FrameType::Audio || frame.frame_type == FrameType::Video {
-                    populate_av_frame(&mut frame, &self.frame_cb_scratch);
                 }
-                cb(&frame);
             }
 
             pos = body + data_size + 4;
@@ -640,6 +629,55 @@ impl Client {
     }
 
     // ── Internal helpers ──
+
+    fn deliver_av_frame_cb(
+        &mut self,
+        cb: fn(&Frame),
+        frame_type: FrameType,
+        timestamp: u32,
+        payload: Vec<u8>,
+    ) {
+        let mut track_ranges: Vec<(u8, usize, usize)> = Vec::new();
+        foreach_track(frame_type, &payload, |track| {
+            let start = track.payload.as_ptr() as usize - payload.as_ptr() as usize;
+            track_ranges.push((track.track_id, start, track.payload.len()));
+        });
+        if track_ranges.is_empty() {
+            self.invoke_on_frame_cb(cb, frame_type, timestamp, u8::MAX, &payload);
+        } else {
+            for (track_id, start, len) in track_ranges {
+                self.invoke_on_frame_cb(
+                    cb,
+                    frame_type,
+                    timestamp,
+                    track_id,
+                    &payload[start..start + len],
+                );
+            }
+        }
+    }
+
+    fn invoke_on_frame_cb(
+        &mut self,
+        cb: fn(&Frame),
+        frame_type: FrameType,
+        timestamp: u32,
+        track_id: u8,
+        payload: &[u8],
+    ) {
+        self.frame_cb_scratch.clear();
+        self.frame_cb_scratch.extend_from_slice(payload);
+        let mut frame = Frame {
+            frame_type,
+            timestamp,
+            size: self.frame_cb_scratch.len() as u32,
+            data: self.frame_cb_scratch.as_ptr(),
+            track_id,
+            ..Default::default()
+        };
+        populate_av_frame(&mut frame, &self.frame_cb_scratch);
+        cb(&frame);
+    }
 
     fn queue_user_control_message(&mut self, payload: &[u8]) -> Result<()> {
         let mut cmsg = ChunkMessage::default();
@@ -1202,6 +1240,47 @@ mod tests {
         // just for the duration of the call itself -- matching the
         // server-side Conn::frame_cb_scratch contract.
         assert_eq!(client.frame_cb_scratch.as_slice(), &video_payload[..]);
+    }
+
+    #[test]
+    fn drain_ready_messages_splits_multitrack_video() {
+        use std::sync::{LazyLock, Mutex};
+
+        static SEEN: LazyLock<Mutex<Vec<(u8, Vec<u8>)>>> =
+            LazyLock::new(|| Mutex::new(Vec::new()));
+
+        let payload = vec![
+            0x86, 0x11, b'a', b'v', b'c', b'1', 0x00, 0x00, 0x00, 0x03, 0xAA, 0xBB, 0xCC, 0x01,
+            0x00, 0x00, 0x02, 0xDD, 0xEE,
+        ];
+        let mut wire = Buffer::new();
+        let mut cmsg = ChunkMessage::default();
+        cmsg.csid = 6;
+        cmsg.fmt = 0;
+        cmsg.msg_length = payload.len() as u32;
+        cmsg.msg_type_id = msg_dispatch::RTMP_MSG_VIDEO;
+        cmsg.msg_stream_id = 1;
+        chunk_write(&mut wire, &cmsg, &payload, payload.len(), 128).unwrap();
+
+        let mut client = Client::new();
+        client.recv_buffer.write(wire.peek()).unwrap();
+        SEEN.lock().unwrap().clear();
+        client.on_frame_cb = Some(|frame| {
+            let data = unsafe {
+                std::slice::from_raw_parts(frame.data, frame.size as usize).to_vec()
+            };
+            SEEN.lock().unwrap().push((frame.track_id, data));
+        });
+
+        let mut messages_processed = 0;
+        client.drain_ready_messages(&mut messages_processed).unwrap();
+
+        let seen = SEEN.lock().unwrap().clone();
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen[0].0, 0);
+        assert_eq!(seen[0].1, vec![0xAA, 0xBB, 0xCC]);
+        assert_eq!(seen[1].0, 1);
+        assert_eq!(seen[1].1, vec![0xDD, 0xEE]);
     }
 
     #[test]
