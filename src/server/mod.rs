@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 use crate::chunk::state::DEFAULT_CHUNK_SIZE;
 use crate::net;
 use crate::session::conn::Conn;
+use crate::session::publish_route::PublishRouteRegistry;
 #[cfg(feature = "tls")]
 use crate::transport::{PendingTlsAccept, TlsAcceptOutcome};
 use crate::transport::{TlsCtx, Transport};
@@ -373,29 +374,9 @@ impl Server {
         conn.on_connect_cb = self.on_connect_cb;
         conn.on_publish_cb = self.on_publish_cb;
         conn.on_play_cb = self.on_play_cb;
-        let routes = Arc::clone(&self.active_publish_routes);
-        conn.publish_route_claim = Some(Box::new(move |conn_id, app, stream| {
-            let key = (app.to_string(), stream.to_string());
-            let Ok(mut map) = routes.lock() else {
-                return false;
-            };
-            match map.get(&key) {
-                Some(&owner) if owner != conn_id => false,
-                _ => {
-                    map.insert(key, conn_id);
-                    true
-                }
-            }
-        }));
-        let routes = Arc::clone(&self.active_publish_routes);
-        conn.publish_route_release = Some(Box::new(move |conn_id, app, stream| {
-            let key = (app.to_string(), stream.to_string());
-            if let Ok(mut map) = routes.lock() {
-                if map.get(&key) == Some(&conn_id) {
-                    map.remove(&key);
-                }
-            }
-        }));
+        conn.publish_routes = Some(PublishRouteRegistry::new(Arc::clone(
+            &self.active_publish_routes,
+        )));
         self.connections.push(conn);
         true
     }
@@ -653,7 +634,10 @@ impl Server {
                 if !is_player || conn.app != frame.app {
                     continue;
                 }
-                if conn.send_frame(frame.frame_type, frame.timestamp, &frame.payload).is_err() {
+                if conn
+                    .send_frame(frame.frame_type, frame.timestamp, &frame.payload)
+                    .is_err()
+                {
                     // Player stopped reading; outbound send_buffer is full.
                     // Drop the connection immediately so later relay frames in
                     // this poll batch skip it and no more socket work is done.
@@ -873,7 +857,9 @@ impl Server {
     /// eviction is only honored when this conn_id is a confirmed owner of
     /// the key in `publisher_cache_keys`; otherwise it would delete a cache
     /// entry that belongs to a different, still-active publisher.
-    fn drain_pending_cache_evictions(&mut self) -> std::collections::HashSet<(String, String, u64)> {
+    fn drain_pending_cache_evictions(
+        &mut self,
+    ) -> std::collections::HashSet<(String, String, u64)> {
         let mut abandoned = std::collections::HashSet::new();
         for conn in &mut self.connections {
             for key in conn.pending_cache_evictions.drain(..) {
@@ -991,7 +977,14 @@ mod tests {
         server.cache_relay_frame(&relay_frame(FrameType::Video, payload));
 
         let key = ("live".to_string(), "stream".to_string());
-        assert!(server.stream_cache.get(&key).unwrap().last_keyframe.is_some());
+        assert!(
+            server
+                .stream_cache
+                .get(&key)
+                .unwrap()
+                .last_keyframe
+                .is_some()
+        );
     }
 
     #[test]
@@ -1110,20 +1103,9 @@ mod tests {
             is_publishing: false,
             is_playing: false,
         }));
-        let routes = Arc::clone(&server.active_publish_routes);
-        first.publish_route_claim = Some(Box::new(move |conn_id, app, stream| {
-            let key = (app.to_string(), stream.to_string());
-            let Ok(mut map) = routes.lock() else {
-                return false;
-            };
-            match map.get(&key) {
-                Some(&owner) if owner != conn_id => false,
-                _ => {
-                    map.insert(key, conn_id);
-                    true
-                }
-            }
-        }));
+        first.publish_routes = Some(PublishRouteRegistry::new(Arc::clone(
+            &server.active_publish_routes,
+        )));
 
         let mut second = Conn::new();
         second.conn_id = 2;
@@ -1134,20 +1116,9 @@ mod tests {
             is_publishing: false,
             is_playing: false,
         }));
-        let routes = Arc::clone(&server.active_publish_routes);
-        second.publish_route_claim = Some(Box::new(move |conn_id, app, stream| {
-            let key = (app.to_string(), stream.to_string());
-            let Ok(mut map) = routes.lock() else {
-                return false;
-            };
-            match map.get(&key) {
-                Some(&owner) if owner != conn_id => false,
-                _ => {
-                    map.insert(key, conn_id);
-                    true
-                }
-            }
-        }));
+        second.publish_routes = Some(PublishRouteRegistry::new(Arc::clone(
+            &server.active_publish_routes,
+        )));
 
         let mut buf = crate::buffer::Buffer::with_capacity(128);
         crate::message::command::build_create_stream(&mut buf, 1.0).unwrap();

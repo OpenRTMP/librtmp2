@@ -10,6 +10,7 @@ use crate::handshake::{self, Handshake, HandshakeState};
 use crate::message::command;
 use crate::message::control::{self, UCTRL_PING_REQUEST, UCTRL_PING_RESPONSE};
 use crate::message::message as msg_dispatch;
+use crate::session::publish_route::PublishRouteRegistry;
 use crate::session::state_machine;
 use crate::session::stream::Stream;
 use crate::transport::Transport;
@@ -127,10 +128,7 @@ pub struct Conn {
     pub on_publish_cb: Option<fn(conn_id: u64, app: &str, stream_name: &str) -> bool>,
     pub on_play_cb: Option<fn(conn_id: u64, app: &str, stream_name: &str) -> bool>,
     /// When set by the built-in server, enforces single-publisher-per-route.
-    pub(crate) publish_route_claim:
-        Option<Box<dyn Fn(u64, &str, &str) -> bool + Send>>,
-    /// Release a publish route previously claimed by this connection.
-    pub(crate) publish_route_release: Option<Box<dyn Fn(u64, &str, &str) + Send>>,
+    pub(crate) publish_routes: Option<PublishRouteRegistry>,
     /// Cache keys to evict after the publisher renames its stream.
     pub pending_cache_evictions: Vec<(String, String)>,
     /// Last measured client↔server RTT in milliseconds (RTMP UserControl ping).
@@ -201,8 +199,7 @@ impl Conn {
             on_connect_cb: None,
             on_publish_cb: None,
             on_play_cb: None,
-            publish_route_claim: None,
-            publish_route_release: None,
+            publish_routes: None,
             pending_cache_evictions: Vec::new(),
             rtt_ms: 0.0,
             pending_pings: HashMap::new(),
@@ -278,8 +275,8 @@ impl Conn {
     }
 
     fn release_publish_route(&mut self, stream: &str) {
-        if let Some(release) = self.publish_route_release.as_ref() {
-            release(self.conn_id, &self.app, stream);
+        if let Some(routes) = self.publish_routes.as_ref() {
+            routes.release(self.conn_id, &self.app, stream);
         }
     }
 
@@ -1105,8 +1102,8 @@ impl Conn {
                     self.pending_cache_evictions
                         .push((self.app.clone(), prev_route_key));
                 }
-                if let Some(claim) = self.publish_route_claim.as_ref() {
-                    if !claim(self.conn_id, &self.app, &next_route_key) {
+                if let Some(routes) = self.publish_routes.as_ref() {
+                    if !routes.claim(self.conn_id, &self.app, &next_route_key) {
                         return self.send_onstatus(
                             0,
                             "error",
