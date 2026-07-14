@@ -419,8 +419,7 @@ impl Conn {
             .saturating_add(payload.len() as u64);
 
         if let Some(cb) = self.on_frame_cb {
-            let mut delivered = false;
-            delivered = foreach_track(frame_type, payload, |track| {
+            if !foreach_track(frame_type, payload, |track| {
                 let mut frame = Frame {
                     frame_type,
                     timestamp,
@@ -431,8 +430,7 @@ impl Conn {
                 };
                 populate_av_frame(&mut frame, track.payload);
                 cb(&frame);
-            });
-            if !delivered {
+            }) {
                 self.frame_cb_scratch.clear();
                 self.frame_cb_scratch.extend_from_slice(payload);
                 let mut frame = Frame {

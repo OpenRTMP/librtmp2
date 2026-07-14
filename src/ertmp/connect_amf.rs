@@ -3,7 +3,7 @@
 use crate::amf::amf0::{self, Amf0Type};
 use crate::buffer::Buffer;
 use crate::types::{
-    CapsExit, ErrorCode, FourCcList, NegotiatedCaps, Result, VideoFourCcInfoMap,
+    CapsExit, ErrorCode, FourCcList, NegotiatedCaps, Reconnect, Result, VideoFourCcInfoMap,
     CAPS_EX_MASK_MULTITRACK, CAPS_EX_MASK_MODEX, CAPS_EX_MASK_RECONNECT,
     CAPS_EX_MASK_SERVER_DEFAULT, CAPS_EX_MASK_TIMESTAMP_NANO,
 };
@@ -13,7 +13,6 @@ use super::connect_caps::{
     fourcc_list_write, video_fourcc_info_map_parse, video_fourcc_info_map_write,
 };
 use super::reconnect::{reconnect_parse, reconnect_write};
-use super::Reconnect;
 
 const MAX_CAPS_BLOB_BYTES: usize = 4096;
 

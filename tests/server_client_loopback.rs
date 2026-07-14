@@ -70,6 +70,7 @@ fn server_client_publish_over_real_sockets() {
                 video_fourcc: FourCc::default(),
                 video_frame_type: 1,
                 is_metadata: 0,
+                track_id: u8::MAX,
             };
             client.send_frame(&frame)?;
             Ok(())
@@ -238,6 +239,7 @@ fn publisher_and_player_relay_across_different_listeners() {
                 video_fourcc: FourCc::default(),
                 video_frame_type: 1,
                 is_metadata: 0,
+                track_id: u8::MAX,
             };
             publisher.send_frame(&frame)?;
 

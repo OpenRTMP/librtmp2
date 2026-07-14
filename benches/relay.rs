@@ -74,6 +74,7 @@ fn relay_n_frames(frame_count: u32) {
                 video_fourcc: FourCc::default(),
                 video_frame_type: 1,
                 is_metadata: 0,
+                track_id: u8::MAX,
             };
             publisher.send_frame(&frame).unwrap();
         }
