@@ -371,6 +371,18 @@ pub fn chunk_read_owned(
     } else {
         Vec::new()
     };
+    // Production callers use this owned path exclusively. Release the per-CSID
+    // `last_payload` copy immediately so a peer cannot pin up to
+    // `max_active_csids * max_msg_length` bytes of completed message bodies on
+    // one connection.
+    if rc == 1 && msg.is_complete {
+        if let Some(stream) = reg.get_mut(msg.csid) {
+            stream.last_payload.clear();
+            if stream.last_payload.capacity() > crate::buffer::BUFFER_RESET_CAPACITY {
+                stream.last_payload.shrink_to_fit();
+            }
+        }
+    }
     Ok((rc, payload))
 }
 
@@ -656,6 +668,51 @@ mod tests {
         assert!(
             iterations_small > iterations_default * 10,
             "chunk_size=1 took {iterations_small} iterations vs {iterations_default} at 128"
+        );
+    }
+
+    #[test]
+    fn chunk_read_owned_releases_last_payload_after_copy() {
+        use crate::chunk::state::DEFAULT_MAX_ACTIVE_CSIDS;
+
+        let payload = vec![0xCD_u8; 64 * 1024];
+        let mut reg = ChunkRegistry::new();
+        reg.max_active_csids = DEFAULT_MAX_ACTIVE_CSIDS;
+
+        for csid in 3..(3 + DEFAULT_MAX_ACTIVE_CSIDS as u32) {
+            let msg = ChunkMessage {
+                csid,
+                fmt: 0,
+                timestamp: 0,
+                msg_length: payload.len() as u32,
+                msg_type_id: 0x09,
+                msg_stream_id: 1,
+                is_complete: false,
+            };
+            let mut wire = Buffer::new();
+            chunk_write(&mut wire, &msg, &payload, payload.len(), 128).unwrap();
+
+            let mut out_msg = ChunkMessage::default();
+            loop {
+                let (rc, owned) =
+                    chunk_read_owned(&mut wire, &mut reg, &mut out_msg).unwrap();
+                if rc == 1 {
+                    assert_eq!(owned.len(), payload.len());
+                    break;
+                }
+                assert_eq!(rc, 0);
+            }
+        }
+
+        let retained: usize = reg
+            .streams
+            .iter()
+            .filter(|s| s.in_use)
+            .map(|s| s.last_payload.len())
+            .sum();
+        assert_eq!(
+            retained, 0,
+            "chunk_read_owned must not retain completed payloads in last_payload"
         );
     }
 }

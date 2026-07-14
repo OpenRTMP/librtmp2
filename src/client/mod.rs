@@ -354,12 +354,9 @@ impl Client {
             128,
         )?;
 
-        // Flush
-        let data = self.send_buffer.peek().to_vec();
-        if let Some(ref mut transport) = self.transport {
-            transport.send(&data)?;
-        }
-        self.send_buffer.reset();
+        // Non-blocking flush: a malicious server that stops reading must not
+        // stall the embedder's thread for up to 10s per frame via blocking send.
+        self.try_flush_send_buffer()?;
 
         Ok(())
     }

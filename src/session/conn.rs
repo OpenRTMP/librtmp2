@@ -126,6 +126,11 @@ pub struct Conn {
     pub on_connect_cb: Option<fn()>,
     pub on_publish_cb: Option<fn(conn_id: u64, app: &str, stream_name: &str) -> bool>,
     pub on_play_cb: Option<fn(conn_id: u64, app: &str, stream_name: &str) -> bool>,
+    /// When set by the built-in server, enforces single-publisher-per-route.
+    pub(crate) publish_route_claim:
+        Option<Box<dyn Fn(u64, &str, &str) -> bool + Send>>,
+    /// Release a publish route previously claimed by this connection.
+    pub(crate) publish_route_release: Option<Box<dyn Fn(u64, &str, &str) + Send>>,
     /// Cache keys to evict after the publisher renames its stream.
     pub pending_cache_evictions: Vec<(String, String)>,
     /// Last measured client↔server RTT in milliseconds (RTMP UserControl ping).
@@ -196,6 +201,8 @@ impl Conn {
             on_connect_cb: None,
             on_publish_cb: None,
             on_play_cb: None,
+            publish_route_claim: None,
+            publish_route_release: None,
             pending_cache_evictions: Vec::new(),
             rtt_ms: 0.0,
             pending_pings: HashMap::new(),
@@ -263,10 +270,17 @@ impl Conn {
         }
         let route_key = self.relay_route_key();
         if !route_key.is_empty() {
+            self.release_publish_route(&route_key);
             self.pending_cache_evictions
                 .push((self.app.clone(), route_key));
         }
         self.clear_detected_stream_metadata();
+    }
+
+    fn release_publish_route(&mut self, stream: &str) {
+        if let Some(release) = self.publish_route_release.as_ref() {
+            release(self.conn_id, &self.app, stream);
+        }
     }
 
     fn clear_detected_stream_metadata(&mut self) {
@@ -1087,8 +1101,19 @@ impl Conn {
                 };
                 if was_publishing && !prev_route_key.is_empty() && prev_route_key != next_route_key
                 {
+                    self.release_publish_route(&prev_route_key);
                     self.pending_cache_evictions
                         .push((self.app.clone(), prev_route_key));
+                }
+                if let Some(claim) = self.publish_route_claim.as_ref() {
+                    if !claim(self.conn_id, &self.app, &next_route_key) {
+                        return self.send_onstatus(
+                            0,
+                            "error",
+                            "NetStream.Publish.BadName",
+                            "Route already publishing",
+                        );
+                    }
                 }
                 if !self.defer_media_relay || self.on_publish_cb.is_none() {
                     self.relay_enabled = true;

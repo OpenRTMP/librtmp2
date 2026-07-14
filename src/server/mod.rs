@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 use std::net::TcpListener;
 use std::os::unix::io::{AsRawFd, IntoRawFd};
+use std::sync::{Arc, Mutex};
 #[cfg(feature = "tls")]
 use std::time::{Duration, Instant};
 
@@ -131,6 +132,8 @@ pub struct Server {
     conn_ids_issued: bool,
     /// Hold media relay until the integrator enables it per connection.
     pub defer_media_relay: bool,
+    /// Active publish routes: (app, stream_name) -> owning conn_id.
+    pub(crate) active_publish_routes: Arc<Mutex<HashMap<(String, String), u64>>>,
 }
 
 impl Server {
@@ -176,7 +179,14 @@ impl Server {
             next_conn_id: 1,
             conn_ids_issued: false,
             defer_media_relay: false,
+            active_publish_routes: Arc::new(Mutex::new(HashMap::new())),
         })
+    }
+
+    fn release_all_publish_routes(&self, conn_id: u64) {
+        if let Ok(mut routes) = self.active_publish_routes.lock() {
+            routes.retain(|_, owner| *owner != conn_id);
+        }
     }
 
     /// Set the starting value used for auto-generated connection IDs.
@@ -363,6 +373,29 @@ impl Server {
         conn.on_connect_cb = self.on_connect_cb;
         conn.on_publish_cb = self.on_publish_cb;
         conn.on_play_cb = self.on_play_cb;
+        let routes = Arc::clone(&self.active_publish_routes);
+        conn.publish_route_claim = Some(Box::new(move |conn_id, app, stream| {
+            let key = (app.to_string(), stream.to_string());
+            let Ok(mut map) = routes.lock() else {
+                return false;
+            };
+            match map.get(&key) {
+                Some(&owner) if owner != conn_id => false,
+                _ => {
+                    map.insert(key, conn_id);
+                    true
+                }
+            }
+        }));
+        let routes = Arc::clone(&self.active_publish_routes);
+        conn.publish_route_release = Some(Box::new(move |conn_id, app, stream| {
+            let key = (app.to_string(), stream.to_string());
+            if let Ok(mut map) = routes.lock() {
+                if map.get(&key) == Some(&conn_id) {
+                    map.remove(&key);
+                }
+            }
+        }));
         self.connections.push(conn);
         true
     }
@@ -653,6 +686,7 @@ impl Server {
         closed.dedup();
         for i in closed.into_iter().rev() {
             let conn = &self.connections[i];
+            self.release_all_publish_routes(conn.conn_id);
             // Tracking must be cleared unconditionally: a publisher can issue
             // another createStream after publishing, replacing current_stream
             // and leaving is_publishing false even though this conn_id still
@@ -1061,5 +1095,76 @@ mod tests {
 
         server.process_connections().unwrap();
         assert_eq!(server.connections.len(), 0);
+    }
+
+    #[test]
+    fn second_publisher_on_same_route_is_rejected() {
+        let mut server = test_server();
+
+        let mut first = Conn::new();
+        first.conn_id = 1;
+        first.app = "live".to_string();
+        first.current_stream = Some(Box::new(crate::session::stream::Stream {
+            stream_id: 1,
+            name: String::new(),
+            is_publishing: false,
+            is_playing: false,
+        }));
+        let routes = Arc::clone(&server.active_publish_routes);
+        first.publish_route_claim = Some(Box::new(move |conn_id, app, stream| {
+            let key = (app.to_string(), stream.to_string());
+            let Ok(mut map) = routes.lock() else {
+                return false;
+            };
+            match map.get(&key) {
+                Some(&owner) if owner != conn_id => false,
+                _ => {
+                    map.insert(key, conn_id);
+                    true
+                }
+            }
+        }));
+
+        let mut second = Conn::new();
+        second.conn_id = 2;
+        second.app = "live".to_string();
+        second.current_stream = Some(Box::new(crate::session::stream::Stream {
+            stream_id: 1,
+            name: String::new(),
+            is_publishing: false,
+            is_playing: false,
+        }));
+        let routes = Arc::clone(&server.active_publish_routes);
+        second.publish_route_claim = Some(Box::new(move |conn_id, app, stream| {
+            let key = (app.to_string(), stream.to_string());
+            let Ok(mut map) = routes.lock() else {
+                return false;
+            };
+            match map.get(&key) {
+                Some(&owner) if owner != conn_id => false,
+                _ => {
+                    map.insert(key, conn_id);
+                    true
+                }
+            }
+        }));
+
+        let mut buf = crate::buffer::Buffer::with_capacity(128);
+        crate::message::command::build_create_stream(&mut buf, 1.0).unwrap();
+        first.handle_command(buf.as_slice()).unwrap();
+        second.handle_command(buf.as_slice()).unwrap();
+
+        let mut publish_a = crate::buffer::Buffer::with_capacity(128);
+        crate::message::command::build_publish(&mut publish_a, "victim", "live").unwrap();
+        first.handle_command(publish_a.as_slice()).unwrap();
+        assert!(first.relay_enabled);
+
+        let mut publish_b = crate::buffer::Buffer::with_capacity(128);
+        crate::message::command::build_publish(&mut publish_b, "victim", "live").unwrap();
+        second.handle_command(publish_b.as_slice()).unwrap();
+        assert!(
+            !second.relay_enabled,
+            "second publisher on the same route must be rejected"
+        );
     }
 }
