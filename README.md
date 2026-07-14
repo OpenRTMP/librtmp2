@@ -13,22 +13,20 @@ A modern, open-source **Rust library** for Legacy RTMP and Enhanced RTMP v1/v2.
 
 ## Overview
 
-`librtmp2` implements the lowest protocol layer of RTMP: handshake, chunking, AMF, commands, audio/video tags, Enhanced RTMP extensions, state machine, and a clean callback API.
+`librtmp2` is a Rust RTMP protocol library: handshake, chunking, AMF commands, live publish/play relay, and an `extern "C"` FFI layer. It is meant to be embedded in custom servers, clients, and relay tools.
 
-It is designed to be embedded into custom servers, clients, relay tools, OBS/FFmpeg integrations, or any future product that needs a solid RTMP foundation.
-
-**What it is:**
-- A complete Legacy RTMP implementation (handshake, chunk streams, message reassembly, commands, control messages)
-- E-RTMP v1 support: ExVideoTagHeader, FourCC codecs (`hvc1`, `av01`, `vp09`), HDR metadata
-- E-RTMP v2 support: capability negotiation (`capsEx`, `videoFourCcInfoMap`), reconnect, multitrack, ModEx
-- An idiomatic Rust API plus an `extern "C"` FFI layer for use from C, Go, Python, PHP, and others
+**What it is good at today:**
+- Live ingest and relay for OBS/FFmpeg-style workflows (H.264/AAC and Enhanced-RTMP passthrough for HEVC/AV1)
+- Minimal RTMP server and client (`connect` → `createStream` → `publish` / `play`)
 - RTMPS (RTMP over TLS) via the optional `tls` Cargo feature (OpenSSL), enabled by default
+- Parser/serializer modules for E-RTMP v1/v2 structures (usable from embedders; not all are wired into the session layer yet)
 
 **What it is not:**
-- Not an HTTP server or web UI
-- Not a media server with business logic
-- Not a push-relay to third-party platforms
-- Not an FFmpeg wrapper
+- Not a complete Adobe RTMP 1.0 implementation (no VOD commands, shared objects, encrypted handshake, etc.)
+- Not a full E-RTMP v2 session stack (`capsEx` negotiation, reconnect, multitrack, ModEx are library code only today)
+- Not an HTTP server, media policy layer, or FFmpeg wrapper
+
+See [Implementation status](#implementation-status) for the code-accurate breakdown.
 
 ---
 
@@ -39,15 +37,14 @@ OBS / FFmpeg / App
         │
         ▼
       librtmp2          ← this library
-      ├── Handshake
-      ├── Chunking
-      ├── AMF (AMF0 / AMF3)
-      ├── RTMP Commands
-      ├── E-RTMP v1
-      └── E-RTMP v2
+      ├── Handshake / Chunking / Control
+      ├── AMF0 commands (connect, publish, play, …)
+      ├── Session relay (publisher → players)
+      ├── ertmp/ + flv/ parsers (library modules)
+      └── RTMPS transport (optional)
 ```
 
-The library processes bytes, frames, commands, and protocol states. What a host program does with them is decided entirely via callbacks and configuration structures.
+The live path is implemented in `session/conn.rs` and `server/mod.rs`. Parser modules under `ertmp/` and `flv/` can be used directly by embedders even when they are not yet called from the default session flow.
 
 ---
 
@@ -57,13 +54,14 @@ The library processes bytes, frames, commands, and protocol states. What a host 
 TCP_ACCEPTED
   → HANDSHAKE
   → CONNECTED
-  → CAPS_NEGOTIATED     (E-RTMP v2)
-  → APP_CONNECTED
+  → APP_CONNECTED          ← connect today skips CAPS_NEGOTIATED
   → STREAM_CREATED
   → PUBLISHING | PLAYING
   → CLOSING
   → CLOSED
 ```
+
+`CAPS_NEGOTIATED` exists in `ConnState` for a future E-RTMP v2 capability exchange but is not entered by the current session code.
 
 ---
 
@@ -168,16 +166,14 @@ librtmp2/
 │   ├── buffer.rs           Growable byte buffers
 │   ├── bytes.rs            Big-endian byte helpers
 │   ├── chunk.rs            Chunk reader/writer/state (per-csid)
-│   ├── client.rs           Outbound client: connect → publish/play
-│   ├── ertmp.rs            E-RTMP v1/v2 extensions
-│   ├── flv.rs              FLV audio/video/script tag parsing
+│   ├── client/             Outbound client: connect → publish/play
+│   ├── ertmp/              E-RTMP v1/v2 parsers (see Implementation status)
+│   ├── flv/                FLV tag parsers (library; not used in live relay path)
 │   ├── handshake.rs        C0/C1/C2 ↔ S0/S1/S2
-│   ├── log.rs              Logging
-│   ├── message.rs          Message reassembly, control, commands
-│   ├── net.rs              Network helpers
-│   ├── server.rs           Listening socket, accept loop, per-connection poll
-│   ├── session.rs          Connection state machine, stream bookkeeping
-│   ├── transport.rs        TLS/plaintext transport abstraction
+│   ├── message/            Message reassembly, control, commands
+│   ├── server/             Listening socket, accept loop, relay
+│   ├── session/            Connection state, publish/play handling
+│   ├── transport.rs        TLS/plaintext transport
 │   └── types.rs            Shared types
 ├── tests/
 │   ├── interop/
@@ -189,19 +185,58 @@ librtmp2/
 
 ---
 
-## Roadmap
+## Implementation status
 
-| Feature | Status |
-|---------|--------|
-| Legacy RTMP server — minimal | Implemented |
-| Legacy RTMP client — minimal | Implemented |
-| E-RTMP v1 receive (HEVC/AV1 detection) | Implemented |
-| E-RTMP v1 send | Implemented |
-| E-RTMP v2 capability layer | Implemented |
-| Multitrack / reconnect / ModEx | Implemented |
-| RTMPS (TLS) | Implemented |
-| End-to-end test suites | In progress |
-| Performance benchmarks | Planned |
+Status reflects what is **wired into the live session path** (`conn.rs`, `server/mod.rs`, `client/mod.rs`), not merely what exists as parser code elsewhere in the repo.
+
+### Legacy RTMP — live path
+
+| Area | Status |
+|------|--------|
+| Standard handshake (C0–C2) | Done |
+| Encrypted / Adobe-digest handshake | Not implemented |
+| Chunking, control messages, ping | Done |
+| Commands `connect`, `createStream`, `publish`, `play` | Done |
+| Commands `pause`, `seek`, `receiveAudio`, `receiveVideo`, `closeStream` | Not implemented |
+| `FCPublish` / `releaseStream` | Ignored (no-op) |
+| `FCUnpublish` / `deleteStream` | Partial (publish route cleanup only) |
+| Audio / video ingest and relay | Done |
+| Aggregate messages | Done (unpack → relay) |
+| Publisher `onMetaData` parsing (stats) | Done — not relayed to players |
+| AMF3 shared objects | Not implemented |
+| User Control `StreamBegin` / `StreamEOF` / `SetBufferLength` | Encode/decode helpers only — not sent or handled in session |
+| One stream per connection (`current_stream`) | By design today |
+| Init-frame cache for late joiners | Legacy H.264 (`0x17`) + AAC only |
+
+### E-RTMP v1
+
+| Area | Status |
+|------|--------|
+| Enhanced A/V passthrough (HEVC/AV1/Opus from FFmpeg/OBS) | Done (opaque byte relay) |
+| `exvideo_parse` / `exaudio_parse` in session hot path | Not wired — codec detection uses lightweight heuristics |
+| `fourCcList` in `connect` | Skipped on read; not sent on connect |
+| HDR / `colorInfo` (`metadata.rs`) | Parser only |
+| Enhanced sequence-start cache for players | Not implemented (see init-frame cache above) |
+| `exvideo_write` / `exaudio_write` helpers | Not present — send raw enhanced payloads via `send_frame` |
+
+### E-RTMP v2
+
+| Area | Status |
+|------|--------|
+| `capsEx`, `videoFourCcInfoMap`, `reconnect`, `multitrack`, `modex` parse/write | Library code + unit tests |
+| v2 capability negotiation in session | Not implemented |
+| Reconnect / multitrack / ModEx in session | Not implemented |
+
+### Client, TLS, tests
+
+| Area | Status |
+|------|--------|
+| Minimal publish client | Done |
+| Minimal play client (A/V receive callback) | Done — no metadata/aggregate on play |
+| RTMPS | Done |
+| Loopback + FFmpeg interop tests | Present (`tests/`, `tests/interop/`) |
+
+Parser-level details and spec mappings: [`docs/protocol-mapping-legacy.md`](docs/protocol-mapping-legacy.md), [`docs/protocol-mapping-ertmp-v1.md`](docs/protocol-mapping-ertmp-v1.md), [`docs/protocol-mapping-ertmp-v2.md`](docs/protocol-mapping-ertmp-v2.md).
 
 ---
 
