@@ -2226,19 +2226,22 @@ mod tests {
 
     #[test]
     fn multitrack_invokes_on_frame_cb_per_track() {
-        use std::sync::{Arc, Mutex};
+        use std::sync::{LazyLock, Mutex};
 
-        let seen = Arc::new(Mutex::new(Vec::new()));
-        let seen_cb = seen.clone();
+        static SEEN_TRACK_IDS: LazyLock<Mutex<Vec<u8>>> = LazyLock::new(|| Mutex::new(Vec::new()));
+
+        fn record_track_id(frame: &Frame) {
+            SEEN_TRACK_IDS.lock().unwrap().push(frame.track_id);
+        }
+
+        SEEN_TRACK_IDS.lock().unwrap().clear();
         let mut conn = Conn::new();
         conn.relay_enabled = true;
         conn.current_stream = Some(Box::new(Stream::new(1)));
         if let Some(s) = conn.current_stream.as_mut() {
             s.is_publishing = true;
         }
-        conn.on_frame_cb = Some(move |frame| {
-            seen_cb.lock().unwrap().push(frame.track_id);
-        });
+        conn.on_frame_cb = Some(record_track_id);
 
         let payload = vec![
             0x86, 0x11, b'a', b'v', b'c', b'1', 0x00, 0x00, 0x00, 0x03, 0xAA, 0xBB, 0xCC, 0x01,
@@ -2247,7 +2250,7 @@ mod tests {
         conn.handle_media_frame(1, FrameType::Video, 0, &payload)
             .unwrap();
 
-        assert_eq!(*seen.lock().unwrap(), vec![0, 1]);
+        assert_eq!(*SEEN_TRACK_IDS.lock().unwrap(), vec![0, 1]);
         assert_eq!(conn.pending_relay.len(), 1);
         assert_eq!(conn.pending_relay[0].payload, payload);
     }

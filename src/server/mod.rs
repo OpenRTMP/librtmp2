@@ -1211,6 +1211,9 @@ mod tests {
             name: String::new(),
             is_publishing: false,
             is_playing: false,
+            paused: false,
+            receive_audio: true,
+            receive_video: true,
         }));
         first.publish_routes = Some(PublishRouteRegistry::new(Arc::clone(
             &server.active_publish_routes,
@@ -1224,6 +1227,9 @@ mod tests {
             name: String::new(),
             is_publishing: false,
             is_playing: false,
+            paused: false,
+            receive_audio: true,
+            receive_video: true,
         }));
         second.publish_routes = Some(PublishRouteRegistry::new(Arc::clone(
             &server.active_publish_routes,
@@ -1260,6 +1266,9 @@ mod tests {
             name: String::new(),
             is_publishing: false,
             is_playing: false,
+            paused: false,
+            receive_audio: true,
+            receive_video: true,
         }));
         first.publish_routes = Some(PublishRouteRegistry::new(Arc::clone(
             &server.active_publish_routes,
@@ -1273,6 +1282,9 @@ mod tests {
             name: String::new(),
             is_publishing: false,
             is_playing: false,
+            paused: false,
+            receive_audio: true,
+            receive_video: true,
         }));
         second.publish_routes = Some(PublishRouteRegistry::new(Arc::clone(
             &server.active_publish_routes,
@@ -1309,6 +1321,9 @@ mod tests {
             name: String::new(),
             is_publishing: false,
             is_playing: false,
+            paused: false,
+            receive_audio: true,
+            receive_video: true,
         }));
         third.publish_routes = Some(PublishRouteRegistry::new(Arc::clone(
             &server.active_publish_routes,
@@ -1338,6 +1353,9 @@ mod tests {
             name: String::new(),
             is_publishing: false,
             is_playing: false,
+            paused: false,
+            receive_audio: true,
+            receive_video: true,
         }));
         first.publish_routes = Some(PublishRouteRegistry::new(Arc::clone(
             &server.active_publish_routes,
@@ -1370,6 +1388,9 @@ mod tests {
             name: String::new(),
             is_publishing: false,
             is_playing: false,
+            paused: false,
+            receive_audio: true,
+            receive_video: true,
         }));
         second.publish_routes = Some(PublishRouteRegistry::new(Arc::clone(
             &server.active_publish_routes,
@@ -1411,6 +1432,9 @@ mod tests {
             name: "victim".to_string(),
             is_publishing: true,
             is_playing: false,
+            paused: false,
+            receive_audio: true,
+            receive_video: true,
         }));
         conn_a.publish_routes = Some(PublishRouteRegistry::new(Arc::clone(
             &server.active_publish_routes,
@@ -1439,6 +1463,9 @@ mod tests {
             name: String::new(),
             is_publishing: false,
             is_playing: false,
+            paused: false,
+            receive_audio: true,
+            receive_video: true,
         }));
         conn_b.publish_routes = Some(PublishRouteRegistry::new(Arc::clone(
             &server.active_publish_routes,
