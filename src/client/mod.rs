@@ -13,7 +13,7 @@ use crate::chunk::state::{ChunkRegistry, DEFAULT_MAX_MSG_LENGTH};
 use crate::chunk::writer::chunk_write;
 use crate::ertmp::multitrack_media::foreach_track;
 use crate::handshake::{self, Handshake};
-use crate::media::populate_av_frame;
+use crate::media::{is_on_metadata_payload, populate_av_frame};
 use crate::message::command;
 use crate::message::control;
 use crate::message::message as msg_dispatch;
@@ -539,17 +539,8 @@ impl Client {
                         } else {
                             payload
                         };
-                        if let Some(ref cb) = self.on_frame_cb {
-                            self.frame_cb_scratch = data_payload;
-                            let frame = Frame {
-                                frame_type: FrameType::Script,
-                                timestamp: msg.timestamp,
-                                size: self.frame_cb_scratch.len() as u32,
-                                data: self.frame_cb_scratch.as_ptr(),
-                                is_metadata: 1,
-                                ..Default::default()
-                            };
-                            cb(&frame);
+                        if let Some(cb) = self.on_frame_cb {
+                            self.deliver_script_frame_cb(cb, msg.timestamp, &data_payload);
                         }
                     } else if msg.msg_type_id == msg_dispatch::RTMP_MSG_AGGREGATE {
                         self.handle_aggregate_message(msg.timestamp, &payload)?;
@@ -614,16 +605,7 @@ impl Client {
                         );
                     }
                     msg_dispatch::RTMP_MSG_AMF0_DATA => {
-                        self.frame_cb_scratch = tag_payload.to_vec();
-                        let frame = Frame {
-                            frame_type: FrameType::Script,
-                            timestamp: out_ts,
-                            size: self.frame_cb_scratch.len() as u32,
-                            data: self.frame_cb_scratch.as_ptr(),
-                            is_metadata: 1,
-                            ..Default::default()
-                        };
-                        cb(&frame);
+                        self.deliver_script_frame_cb(cb, out_ts, tag_payload);
                     }
                     _ => {
                         pos = body + data_size + 4;
@@ -685,6 +667,21 @@ impl Client {
             ..Default::default()
         };
         populate_av_frame(&mut frame, &self.frame_cb_scratch);
+        cb(&frame);
+    }
+
+    fn deliver_script_frame_cb(&mut self, cb: fn(&Frame), timestamp: u32, payload: &[u8]) {
+        let is_metadata = u8::from(is_on_metadata_payload(payload));
+        self.frame_cb_scratch.clear();
+        self.frame_cb_scratch.extend_from_slice(payload);
+        let frame = Frame {
+            frame_type: FrameType::Script,
+            timestamp,
+            size: self.frame_cb_scratch.len() as u32,
+            data: self.frame_cb_scratch.as_ptr(),
+            is_metadata,
+            ..Default::default()
+        };
         cb(&frame);
     }
 
@@ -1231,6 +1228,35 @@ mod tests {
         // just for the duration of the call itself -- matching the
         // server-side Conn::frame_cb_scratch contract.
         assert_eq!(client.frame_cb_scratch.as_slice(), &video_payload[..]);
+    }
+
+    #[test]
+    fn script_callbacks_only_mark_on_metadata_events() {
+        use std::sync::{LazyLock, Mutex};
+
+        static FLAGS: LazyLock<Mutex<Vec<u8>>> = LazyLock::new(|| Mutex::new(Vec::new()));
+
+        let mut client = Client::new();
+        FLAGS.lock().unwrap().clear();
+
+        let mut cue_point = Buffer::new();
+        crate::amf::amf0::write_string(&mut cue_point, "onCuePoint").unwrap();
+        client.deliver_script_frame_cb(
+            |frame| FLAGS.lock().unwrap().push(frame.is_metadata),
+            10,
+            cue_point.as_slice(),
+        );
+
+        let mut metadata = Buffer::new();
+        crate::amf::amf0::write_string(&mut metadata, "@setDataFrame").unwrap();
+        crate::amf::amf0::write_string(&mut metadata, "onMetaData").unwrap();
+        client.deliver_script_frame_cb(
+            |frame| FLAGS.lock().unwrap().push(frame.is_metadata),
+            20,
+            metadata.as_slice(),
+        );
+
+        assert_eq!(*FLAGS.lock().unwrap(), vec![0, 1]);
     }
 
     #[test]

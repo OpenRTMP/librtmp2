@@ -1105,7 +1105,14 @@ impl Conn {
                     return Ok(());
                 }
                 let mut info = ConnectInfo::default();
-                command::read_connect(&mut buf, &mut info)?;
+                if command::read_connect(&mut buf, &mut info).is_err() {
+                    self.send_command_error(
+                        info.transaction_id,
+                        "NetConnection.Connect.Rejected",
+                        "Invalid connect command or capability negotiation.",
+                    )?;
+                    return Ok(());
+                }
                 let app_len = info.app.iter().position(|&b| b == 0).unwrap_or(0);
                 self.app = std::str::from_utf8(&info.app[..app_len])
                     .unwrap_or("")
@@ -1795,7 +1802,7 @@ mod tests {
     }
 
     #[test]
-    fn connect_rejects_app_names_longer_than_routing_buffer() {
+    fn connect_parse_failure_sends_error_response() {
         let mut conn = Conn::new();
         let mut buf = Buffer::with_capacity(512);
         let long_app = "a".repeat(256);
@@ -1811,8 +1818,15 @@ mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(conn.handle_command(buf.as_slice()), Err(ErrorCode::Amf));
+        assert_eq!(conn.handle_command(buf.as_slice()), Ok(()));
         assert!(conn.app.is_empty());
+        assert_ne!(conn.state, ConnState::AppConnected);
+        assert!(
+            conn.send_buffer
+                .peek()
+                .windows(b"_error".len())
+                .any(|window| window == b"_error")
+        );
     }
 
     #[test]

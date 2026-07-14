@@ -107,7 +107,12 @@ pub fn read_caps_ex_amf(buf: &mut Buffer, caps: &mut CapsExit, mask: &mut u32) -
     let ty = amf0::read_type(buf)?;
     match ty {
         Amf0Type::Number => {
-            *mask = amf0::read_number(buf)? as u32;
+            let value = amf0::read_number(buf)?;
+            if !value.is_finite() || value < 0.0 || value > u32::MAX as f64 || value.fract() != 0.0
+            {
+                return Err(ErrorCode::Amf);
+            }
+            *mask = value as u32;
             Ok(())
         }
         Amf0Type::LongString => {
@@ -410,6 +415,21 @@ mod tests {
         let mut mask = 0u32;
         read_caps_ex_amf(&mut buf, &mut parsed, &mut mask).unwrap();
         assert_eq!(mask, CAPS_EX_MASK_MULTITRACK | CAPS_EX_MASK_MODEX);
+    }
+
+    #[test]
+    fn caps_ex_number_rejects_non_integral_or_out_of_range_values() {
+        for value in [f64::NAN, f64::INFINITY, -1.0, 1.5, u32::MAX as f64 + 1.0] {
+            let mut buf = Buffer::new();
+            amf0::write_number(&mut buf, value).unwrap();
+            let mut parsed = CapsExit::default();
+            let mut mask = 0u32;
+            assert_eq!(
+                read_caps_ex_amf(&mut buf, &mut parsed, &mut mask),
+                Err(ErrorCode::Amf),
+                "value {value:?} must be rejected"
+            );
+        }
     }
 
     #[test]
