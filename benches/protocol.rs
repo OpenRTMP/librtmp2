@@ -1,6 +1,6 @@
 use criterion::{Criterion, Throughput, black_box, criterion_group, criterion_main};
 use librtmp2::buffer::Buffer;
-use librtmp2::chunk::reader::{chunk_read, ChunkMessage};
+use librtmp2::chunk::reader::{ChunkMessage, chunk_read};
 use librtmp2::chunk::state::ChunkRegistry;
 use librtmp2::chunk::writer::chunk_write;
 use librtmp2::ertmp::fourcc;

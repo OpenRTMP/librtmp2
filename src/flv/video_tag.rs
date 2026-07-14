@@ -97,10 +97,7 @@ mod tests {
     fn parse_error_leaves_tag_cleared() {
         let mut tag = VideoTag::default();
         parse(&[0x17, 0x01, 0x00, 0x01, 0x2C], &mut tag).unwrap();
-        assert_eq!(
-            parse(&[0x18, 0x00], &mut tag),
-            Err(ErrorCode::Unsupported)
-        );
+        assert_eq!(parse(&[0x18, 0x00], &mut tag), Err(ErrorCode::Unsupported));
         assert_eq!(tag.codec, VideoCodec::Jpeg);
         assert_eq!(tag.avc_packet_type, 0);
         assert_eq!(tag.composition_time, 0);

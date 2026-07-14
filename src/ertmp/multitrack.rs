@@ -91,7 +91,10 @@ mod tests {
 
         // A spec-compliant AMF0 encoding of 1.0 is the IEEE-754 bit pattern
         // 0x3FF0000000000000, not the raw integer 1.
-        assert_eq!(&buf[1..9], &[0x3F, 0xF0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+        assert_eq!(
+            &buf[1..9],
+            &[0x3F, 0xF0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
+        );
 
         let mut out = Multitrack::default();
         multitrack_parse(&mut out, &buf[..n]).unwrap();

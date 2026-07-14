@@ -4,9 +4,7 @@ use crate::ertmp::multitrack_media::{
     is_multitrack_container, multitrack_has_keyframe, multitrack_has_sequence_start,
 };
 use crate::ertmp::{exaudio, exvideo, fourcc};
-use crate::types::{
-    AudioCodec, AudioHeader, Frame, FrameType, FourCc, VideoCodec, VideoHeader,
-};
+use crate::types::{AudioCodec, AudioHeader, FourCc, Frame, FrameType, VideoCodec, VideoHeader};
 
 /// How a relayed media frame should be treated by the init-frame cache.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,7 +41,7 @@ fn classify_video(payload: &[u8]) -> CacheFrameKind {
     if hdr.is_ex_header != 0 {
         return match hdr.packet_type {
             0 => CacheFrameKind::VideoSequenceHeader,
-            1 if hdr.frame_type == 1 => CacheFrameKind::VideoKeyframe,
+            1 | 3 if hdr.frame_type == 1 => CacheFrameKind::VideoKeyframe,
             _ => CacheFrameKind::LiveOnly,
         };
     }
@@ -99,9 +97,7 @@ fn populate_video_frame(frame: &mut Frame, payload: &[u8]) {
     }
     frame.composition_time = hdr.composition_time;
     frame.video_frame_type = hdr.frame_type;
-    frame.video_fourcc = FourCc {
-        cc: hdr.fourcc,
-    };
+    frame.video_fourcc = FourCc { cc: hdr.fourcc };
     frame.video_codec = if hdr.is_ex_header != 0 {
         fourcc::fourcc_to_video_codec(&hdr.fourcc).unwrap_or(VideoCodec::H264)
     } else {
@@ -118,9 +114,7 @@ fn populate_audio_frame(frame: &mut Frame, payload: &[u8]) {
     frame.audio_sample_rate = hdr.sample_rate as u32;
     frame.audio_channels = hdr.channels;
     frame.audio_bit_depth = if hdr.sample_size != 0 { 16 } else { 8 };
-    frame.audio_fourcc = FourCc {
-        cc: hdr.fourcc,
-    };
+    frame.audio_fourcc = FourCc { cc: hdr.fourcc };
 }
 
 fn legacy_video_codec(codec_id: u8) -> VideoCodec {
@@ -183,7 +177,11 @@ pub fn is_on_metadata_payload(payload: &[u8]) -> bool {
     }
 }
 
-fn read_data_event_name(buf: &mut crate::buffer::Buffer, is_string: bool, out: &mut [u8; 64]) -> Option<usize> {
+fn read_data_event_name(
+    buf: &mut crate::buffer::Buffer,
+    is_string: bool,
+    out: &mut [u8; 64],
+) -> Option<usize> {
     match if is_string {
         crate::amf::amf0::read_string(buf, out)
     } else {
@@ -210,6 +208,15 @@ mod tests {
     #[test]
     fn enhanced_av1_keyframe_is_cached() {
         let payload = [0x91, b'a', b'v', b'0', b'1', 0xDE, 0xAD];
+        assert_eq!(
+            classify_cache_frame(FrameType::Video, &payload),
+            CacheFrameKind::VideoKeyframe
+        );
+    }
+
+    #[test]
+    fn enhanced_coded_frames_x_keyframe_is_cached() {
+        let payload = [0x93, b'a', b'v', b'c', b'1', 0xDE, 0xAD];
         assert_eq!(
             classify_cache_frame(FrameType::Video, &payload),
             CacheFrameKind::VideoKeyframe

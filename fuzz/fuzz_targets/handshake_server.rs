@@ -2,7 +2,7 @@
 
 use libfuzzer_sys::fuzz_target;
 use librtmp2::buffer::Buffer;
-use librtmp2::handshake::{server_init, server_read_c0, server_read_c1, server_read_c2, Handshake};
+use librtmp2::handshake::{Handshake, server_init, server_read_c0, server_read_c1, server_read_c2};
 
 fuzz_target!(|data: &[u8]| {
     let mut hs = Handshake::default();

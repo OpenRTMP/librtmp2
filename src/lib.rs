@@ -332,17 +332,9 @@ pub unsafe extern "C" fn lrtmp2_client_send_frame(
     let payload = if frame_ref.size == 0 || frame_ref.data.is_null() {
         Vec::new()
     } else {
-        unsafe {
-            std::slice::from_raw_parts(frame_ref.data, frame_ref.size as usize).to_vec()
-        }
+        unsafe { std::slice::from_raw_parts(frame_ref.data, frame_ref.size as usize).to_vec() }
     };
-    match unsafe {
-        (*c).send_frame_payload(
-            frame_ref.frame_type,
-            frame_ref.timestamp,
-            &payload,
-        )
-    } {
+    match unsafe { (*c).send_frame_payload(frame_ref.frame_type, frame_ref.timestamp, &payload) } {
         Ok(()) => 0,
         Err(e) => e as i32,
     }
@@ -369,11 +361,7 @@ pub unsafe extern "C" fn lrtmp2_conn_get_fd(_conn: *const session::conn::Conn) -
 /// Check TLS support (FFI-compatible).
 #[unsafe(no_mangle)]
 pub extern "C" fn lrtmp2_tls_supported() -> i32 {
-    if tls_supported() {
-        1
-    } else {
-        0
-    }
+    if tls_supported() { 1 } else { 0 }
 }
 
 /// Get version string (FFI-compatible).

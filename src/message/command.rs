@@ -5,11 +5,11 @@
 use crate::amf::amf0;
 use crate::buffer::Buffer;
 use crate::ertmp::connect_amf;
+use crate::types::CAPS_EX_MASK_MULTITRACK;
 use crate::types::ConnectInfo;
 use crate::types::ErrorCode;
 use crate::types::NegotiatedCaps;
 use crate::types::Result;
-use crate::types::CAPS_EX_MASK_MULTITRACK;
 
 /// Maximum key/value pairs in a connect object
 const MAX_CONNECT_OBJECT_KEYS: usize = 256;
@@ -273,18 +273,16 @@ pub fn read_connect(buf: &mut Buffer, info: &mut ConnectInfo) -> Result<()> {
         buf.set_read_pos(type_pos); // restore
 
         match value_type {
-            amf0::Amf0Type::String => {
-                match key_str {
-                    "app" => read_string_checked(buf, &mut info.app)?,
-                    "tcUrl" => read_string_checked(buf, &mut info.tc_url)?,
-                    "pageUrl" => read_string_checked(buf, &mut info.page_url)?,
-                    "swfUrl" => read_string_checked(buf, &mut info.swf_url)?,
-                    "flashVer" => read_string_checked(buf, &mut info.flash_ver)?,
-                    _ => {
-                        amf0::skip_value(buf)?;
-                    }
+            amf0::Amf0Type::String => match key_str {
+                "app" => read_string_checked(buf, &mut info.app)?,
+                "tcUrl" => read_string_checked(buf, &mut info.tc_url)?,
+                "pageUrl" => read_string_checked(buf, &mut info.page_url)?,
+                "swfUrl" => read_string_checked(buf, &mut info.swf_url)?,
+                "flashVer" => read_string_checked(buf, &mut info.flash_ver)?,
+                _ => {
+                    amf0::skip_value(buf)?;
                 }
-            }
+            },
             amf0::Amf0Type::Number => {
                 let value = read_number_value(buf)?;
                 match key_str {
@@ -385,7 +383,7 @@ pub fn read_close_stream(buf: &mut Buffer) -> Result<Option<u32>> {
     let type_pos = buf.read_pos();
     let ty = amf0::read_type(buf)?;
     if ty == amf0::Amf0Type::Number {
-        Ok(Some(read_number_value(buf)? as u32))
+        Ok(Some(amf0::read_number(buf)? as u32))
     } else {
         buf.set_read_pos(type_pos);
         Ok(None)
@@ -464,16 +462,18 @@ fn parse_connect_result_caps(buf: &mut Buffer, caps: &mut NegotiatedCaps) -> Res
                     .is_ok()
                 {
                     caps.has_caps_ex = true;
-                    caps.multitrack_enabled =
-                        (caps.caps_ex_mask & CAPS_EX_MASK_MULTITRACK) != 0;
+                    caps.multitrack_enabled = (caps.caps_ex_mask & CAPS_EX_MASK_MULTITRACK) != 0;
                 } else {
                     buf.set_read_pos(type_pos);
                     amf0::skip_value(buf)?;
                 }
             }
             "videoFourCcInfoMap" => {
-                if connect_amf::read_video_fourcc_info_map_amf(buf, &mut caps.video_four_cc_info_map)
-                    .is_ok()
+                if connect_amf::read_video_fourcc_info_map_amf(
+                    buf,
+                    &mut caps.video_four_cc_info_map,
+                )
+                .is_ok()
                 {
                     caps.has_video_four_cc_info_map = true;
                 } else {
@@ -703,13 +703,7 @@ mod tests {
     #[test]
     fn read_onstatus_accepts_status_level() {
         let mut buf = Buffer::new();
-        build_onstatus(
-            &mut buf,
-            "status",
-            "NetStream.Publish.Start",
-            "Publishing",
-        )
-        .unwrap();
+        build_onstatus(&mut buf, "status", "NetStream.Publish.Start", "Publishing").unwrap();
 
         assert!(read_onstatus(&mut buf).is_ok());
     }
@@ -741,5 +735,16 @@ mod tests {
         amf0::write_null(&mut buf).unwrap();
 
         assert_eq!(read_close_stream(&mut buf).unwrap(), None);
+    }
+
+    #[test]
+    fn read_close_stream_accepts_explicit_stream_id() {
+        let mut buf = Buffer::new();
+        amf0::write_string(&mut buf, "closeStream").unwrap();
+        amf0::write_number(&mut buf, 2.0).unwrap();
+        amf0::write_null(&mut buf).unwrap();
+        amf0::write_number(&mut buf, 7.0).unwrap();
+
+        assert_eq!(read_close_stream(&mut buf).unwrap(), Some(7));
     }
 }

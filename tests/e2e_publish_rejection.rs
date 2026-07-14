@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use librtmp2::client::Client;
 use librtmp2::server::Server;
 
-use common::{deny_publish, plain_config, poll_until, SENT_FRAME_LEN};
+use common::{SENT_FRAME_LEN, deny_publish, plain_config, poll_until};
 
 static SERVER_FRAMES: AtomicUsize = AtomicUsize::new(0);
 
@@ -41,11 +41,9 @@ fn publish_rejected_by_callback_does_not_deliver_frames() {
         "publish should fail when on_publish_cb returns false"
     );
 
-    poll_until(
-        &mut server,
-        Instant::now() + Duration::from_secs(2),
-        || false,
-    );
+    poll_until(&mut server, Instant::now() + Duration::from_secs(2), || {
+        false
+    });
 
     assert_eq!(
         SERVER_FRAMES.load(Ordering::SeqCst),

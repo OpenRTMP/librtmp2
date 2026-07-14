@@ -3,9 +3,10 @@
 use crate::amf::amf0::{self, Amf0Type};
 use crate::buffer::Buffer;
 use crate::types::{
-    CapsExit, ErrorCode, FourCcList, NegotiatedCaps, Reconnect, Result, VideoFourCcInfoMap,
-    CAPS_EX_MASK_MULTITRACK, CAPS_EX_MASK_MODEX, CAPS_EX_MASK_RECONNECT,
-    CAPS_EX_MASK_SERVER_DEFAULT, CAPS_EX_MASK_TIMESTAMP_NANO,
+    CAPS_EX_MASK_MODEX, CAPS_EX_MASK_MULTITRACK, CAPS_EX_MASK_RECONNECT,
+    CAPS_EX_MASK_SERVER_DEFAULT, CAPS_EX_MASK_TIMESTAMP_NANO, CapsExit, ErrorCode,
+    FOUR_CC_INFO_ALL, FOUR_CC_INFO_CAN_FORWARD, FourCcList, NegotiatedCaps, Reconnect, Result,
+    VideoFourCcInfoMap,
 };
 
 use super::connect_caps::{
@@ -31,8 +32,11 @@ pub fn read_four_cc_list_amf(buf: &mut Buffer, list: &mut FourCcList) -> Result<
 }
 
 /// Read a `videoFourCcInfoMap` AMF value.
-pub fn read_video_fourcc_info_map_amf(buf: &mut Buffer, map: &mut VideoFourCcInfoMap) -> Result<()> {
-    map.count = 0;
+pub fn read_video_fourcc_info_map_amf(
+    buf: &mut Buffer,
+    map: &mut VideoFourCcInfoMap,
+) -> Result<()> {
+    *map = VideoFourCcInfoMap::default();
     let ty = amf0::read_type(buf)?;
     match ty {
         Amf0Type::StrictArray => {
@@ -43,10 +47,7 @@ pub fn read_video_fourcc_info_map_amf(buf: &mut Buffer, map: &mut VideoFourCcInf
             for _ in 0..count {
                 let mut cc = [0u8; 8];
                 let n = amf0::read_string(buf, &mut cc)?;
-                if n >= 4 {
-                    map.entries[map.count].cc[..4].copy_from_slice(&cc[..4]);
-                    map.count += 1;
-                }
+                add_video_map_entry(map, &cc[..n], FOUR_CC_INFO_ALL)?;
             }
             Ok(())
         }
@@ -54,7 +55,10 @@ pub fn read_video_fourcc_info_map_amf(buf: &mut Buffer, map: &mut VideoFourCcInf
             let data = read_amf_binary_blob(buf, ty)?;
             video_fourcc_info_map_parse(map, &data).map(|_| ())
         }
-        Amf0Type::Object => {
+        Amf0Type::Object | Amf0Type::EcmaArray => {
+            if ty == Amf0Type::EcmaArray {
+                let _declared_count = read_u32(buf)?;
+            }
             let mut keys = 0usize;
             while !amf0::is_object_end(buf) {
                 keys += 1;
@@ -63,11 +67,15 @@ pub fn read_video_fourcc_info_map_amf(buf: &mut Buffer, map: &mut VideoFourCcInf
                 }
                 let mut key = [0u8; 256];
                 let key_len = amf0::read_object_key(buf, &mut key)?;
-                if key_len >= 4 && map.count < crate::types::MAX_FOURCCS {
-                    map.entries[map.count].cc[..4].copy_from_slice(&key[..4]);
-                    map.count += 1;
+                let value_type = amf0::read_type(buf)?;
+                if value_type != Amf0Type::Number {
+                    return Err(ErrorCode::Amf);
                 }
-                amf0::skip_value(buf)?;
+                let value = amf0::read_number(buf)?;
+                if !value.is_finite() || value < 0.0 || value > u32::MAX as f64 {
+                    return Err(ErrorCode::Amf);
+                }
+                add_video_map_entry(map, &key[..key_len], value as u32)?;
             }
             let mut end = [0u8; 3];
             buf.read(&mut end).map_err(|_| ErrorCode::Amf)?;
@@ -75,6 +83,23 @@ pub fn read_video_fourcc_info_map_amf(buf: &mut Buffer, map: &mut VideoFourCcInf
         }
         _ => Err(ErrorCode::Amf),
     }
+}
+
+fn add_video_map_entry(map: &mut VideoFourCcInfoMap, key: &[u8], mask: u32) -> Result<()> {
+    if map.count >= crate::types::MAX_FOURCCS {
+        return Err(ErrorCode::Amf);
+    }
+    let entry = &mut map.entries[map.count];
+    if key == b"*" {
+        entry.cc[0] = b'*';
+    } else if key.len() >= 4 {
+        entry.cc[..4].copy_from_slice(&key[..4]);
+    } else {
+        return Err(ErrorCode::Amf);
+    }
+    map.masks[map.count] = mask;
+    map.count += 1;
+    Ok(())
 }
 
 /// Read a `capsEx` AMF value (numeric bitmask per E-RTMP v2 spec).
@@ -160,17 +185,28 @@ pub fn write_four_cc_list_amf(buf: &mut Buffer, list: &FourCcList) -> Result<()>
     buf.write(&(list.count as u32).to_be_bytes())
         .map_err(|_| ErrorCode::Internal)?;
     for i in 0..list.count {
-        let cc = std::str::from_utf8(&list.entries[i].cc[..4]).unwrap_or("????");
+        let cc = if list.entries[i].cc[0] == b'*' {
+            "*"
+        } else {
+            std::str::from_utf8(&list.entries[i].cc[..4]).unwrap_or("????")
+        };
         amf0::write_string(buf, cc)?;
     }
     Ok(())
 }
 
 pub fn write_video_fourcc_info_map_amf(buf: &mut Buffer, map: &VideoFourCcInfoMap) -> Result<()> {
-    write_four_cc_list_amf(buf, &FourCcList {
-        entries: map.entries,
-        count: map.count,
-    })
+    amf0::write_object_begin(buf)?;
+    for i in 0..map.count {
+        let key = if map.entries[i].cc[0] == b'*' {
+            "*"
+        } else {
+            std::str::from_utf8(&map.entries[i].cc[..4]).map_err(|_| ErrorCode::Amf)?
+        };
+        amf0::write_object_key(buf, key)?;
+        amf0::write_number(buf, map.masks[i] as f64)?;
+    }
+    amf0::write_object_end(buf)
 }
 
 pub fn write_caps_ex_amf(buf: &mut Buffer, caps_ex_mask: u32) -> Result<()> {
@@ -193,7 +229,7 @@ fn read_four_cc_strict_array(buf: &mut Buffer, list: &mut FourCcList) -> Result<
     for _ in 0..count {
         let mut cc = [0u8; 8];
         let n = amf0::read_string(buf, &mut cc)?;
-        if n >= 4 {
+        if (n == 1 && cc[0] == b'*') || n >= 4 {
             fourcc_list_add(list, &cc[..n])?;
         }
     }
@@ -205,13 +241,13 @@ fn read_fourcc_number(buf: &mut Buffer) -> Result<i32> {
     if ty == Amf0Type::Number {
         Ok(amf0::read_number(buf)? as i32)
     } else if ty == Amf0Type::String {
-        let mut cc = [0u8; 8];
-        let n = amf0::read_string(buf, &mut cc)?;
-        if n >= 4 {
-            Ok(i32::from_be_bytes([cc[0], cc[1], cc[2], cc[3]]))
-        } else {
-            Err(ErrorCode::Amf)
+        let len = read_u16(buf)? as usize;
+        if len < 4 || buf.available() < len {
+            return Err(ErrorCode::Amf);
         }
+        let mut cc = vec![0u8; len];
+        buf.read(&mut cc).map_err(|_| ErrorCode::Amf)?;
+        Ok(i32::from_be_bytes([cc[0], cc[1], cc[2], cc[3]]))
     } else {
         Err(ErrorCode::Amf)
     }
@@ -244,10 +280,30 @@ fn read_u32(buf: &mut Buffer) -> Result<u32> {
 }
 
 fn four_cc_supported(cc: &[u8]) -> bool {
-    matches!(
-        cc,
-        b"avc1" | b"hvc1" | b"av01" | b"vp09" | b"mp4a" | b"Opus"
-    )
+    cc == b"*"
+        || matches!(
+            cc,
+            b"avc1"
+                | b"hvc1"
+                | b"av01"
+                | b"vp08"
+                | b"vp09"
+                | b"vvc1"
+                | b"mp4a"
+                | b"Opus"
+                | b"ac-3"
+                | b"ec-3"
+                | b".mp3"
+                | b"fLaC"
+        )
+}
+
+fn fourcc_entry_bytes(entry: &crate::types::FourCc) -> &[u8] {
+    if entry.cc[0] == b'*' {
+        b"*"
+    } else {
+        &entry.cc[..4]
+    }
 }
 
 /// Intersect client-offered E-RTMP caps with what this server supports.
@@ -256,7 +312,7 @@ pub fn negotiate_caps(client: &crate::types::ConnectInfo) -> NegotiatedCaps {
 
     if client.has_four_cc_list {
         for i in 0..client.four_cc_list.count {
-            let cc = &client.four_cc_list.entries[i].cc[..4];
+            let cc = fourcc_entry_bytes(&client.four_cc_list.entries[i]);
             if four_cc_supported(cc) {
                 let _ = fourcc_list_add(&mut out.four_cc_list, cc);
             }
@@ -280,12 +336,19 @@ pub fn negotiate_caps(client: &crate::types::ConnectInfo) -> NegotiatedCaps {
 
     if client.has_video_four_cc_info_map {
         for i in 0..client.video_four_cc_info_map.count {
-            let cc = &client.video_four_cc_info_map.entries[i].cc[..4];
-            if four_cc_supported(cc) {
-                out.video_four_cc_info_map.entries[out.video_four_cc_info_map.count].cc[..4]
-                    .copy_from_slice(cc);
-                out.video_four_cc_info_map.count += 1;
+            let cc = fourcc_entry_bytes(&client.video_four_cc_info_map.entries[i]);
+            let negotiated_mask = client.video_four_cc_info_map.masks[i] & FOUR_CC_INFO_CAN_FORWARD;
+            if negotiated_mask == 0 || !four_cc_supported(cc) {
+                continue;
             }
+            let idx = out.video_four_cc_info_map.count;
+            if cc == b"*" {
+                out.video_four_cc_info_map.entries[idx].cc[0] = b'*';
+            } else {
+                out.video_four_cc_info_map.entries[idx].cc[..4].copy_from_slice(&cc[..4]);
+            }
+            out.video_four_cc_info_map.masks[idx] = negotiated_mask;
+            out.video_four_cc_info_map.count += 1;
         }
         out.has_video_four_cc_info_map = out.video_four_cc_info_map.count > 0;
     }
@@ -333,7 +396,9 @@ mod tests {
         read_video_fourcc_info_map_amf(&mut buf, &mut map).unwrap();
         assert_eq!(map.count, 2);
         assert_eq!(&map.entries[0].cc[..4], b"av01");
+        assert_eq!(map.masks[0], 1);
         assert_eq!(&map.entries[1].cc[..4], b"hvc1");
+        assert_eq!(map.masks[1], 2);
     }
 
     #[test]
@@ -413,5 +478,46 @@ mod tests {
         assert!(caps.has_caps_ex);
         assert_eq!(caps.caps_ex_mask, CAPS_EX_MASK_SERVER_DEFAULT);
         assert!(caps.multitrack_enabled);
+    }
+
+    #[test]
+    fn video_info_map_writes_object_with_numeric_masks() {
+        let mut map = VideoFourCcInfoMap::default();
+        map.entries[0].cc[..4].copy_from_slice(b"vp09");
+        map.masks[0] = FOUR_CC_INFO_CAN_FORWARD;
+        map.count = 1;
+
+        let mut buf = Buffer::new();
+        write_video_fourcc_info_map_amf(&mut buf, &map).unwrap();
+        assert_eq!(buf.peek()[0], Amf0Type::Object as u8);
+
+        let mut parsed = VideoFourCcInfoMap::default();
+        read_video_fourcc_info_map_amf(&mut buf, &mut parsed).unwrap();
+        assert_eq!(parsed.count, 1);
+        assert_eq!(&parsed.entries[0].cc[..4], b"vp09");
+        assert_eq!(parsed.masks[0], FOUR_CC_INFO_CAN_FORWARD);
+    }
+
+    #[test]
+    fn four_cc_list_preserves_wildcard() {
+        let mut buf = Buffer::new();
+        buf.write(&[Amf0Type::StrictArray as u8]).unwrap();
+        buf.write(&1u32.to_be_bytes()).unwrap();
+        amf0::write_string(&mut buf, "*").unwrap();
+
+        let mut parsed = FourCcList::default();
+        read_four_cc_list_amf(&mut buf, &mut parsed).unwrap();
+        assert_eq!(parsed.count, 1);
+        assert_eq!(parsed.entries[0].cc[0], b'*');
+    }
+
+    #[test]
+    fn string_fourcc_value_is_read_after_consumed_marker() {
+        let mut buf = Buffer::new();
+        amf0::write_string(&mut buf, "av01").unwrap();
+        assert_eq!(
+            read_fourcc_number(&mut buf).unwrap(),
+            i32::from_be_bytes(*b"av01")
+        );
     }
 }

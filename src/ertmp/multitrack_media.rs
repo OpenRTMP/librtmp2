@@ -1,16 +1,13 @@
 //! E-RTMP v2 multitrack audio/video message parsing for the session hot path.
 //!
 //! Multitrack containers are relayed opaque; this module extracts per-track
-//! slices for callbacks and init-cache classification.
+//! slices and codec metadata for callbacks, authorization, and init caching.
 
-use crate::types::{FrameType, VideoHeader};
+use crate::types::FrameType;
 
-/// Enhanced audio `AudioPacketType::Multitrack`.
 pub const ERTMP_AUDIO_PACKET_TYPE_MULTITRACK: u8 = 5;
-/// Enhanced video `VideoPacketType::Multitrack`.
 pub const ERTMP_VIDEO_PACKET_TYPE_MULTITRACK: u8 = 6;
 
-/// `AvMultitrackType` from the E-RTMP v2 spec.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum AvMultitrackType {
@@ -19,19 +16,19 @@ pub enum AvMultitrackType {
     ManyTracksManyCodecs = 2,
 }
 
-/// One logical track inside a multitrack RTMP message.
 #[derive(Debug, Clone, Copy)]
 pub struct MediaTrackSlice<'a> {
     pub track_id: u8,
     pub packet_type: u8,
+    pub fourcc: [u8; 4],
+    pub video_frame_type: u8,
     pub payload: &'a [u8],
 }
 
-fn read_u24(data: &[u8]) -> u32 {
-    ((data[0] as u32) << 16) | ((data[1] as u32) << 8) | (data[2] as u32)
+fn read_u24(data: &[u8]) -> usize {
+    ((data[0] as usize) << 16) | ((data[1] as usize) << 8) | data[2] as usize
 }
 
-/// Returns true when `payload` is an enhanced multitrack container.
 pub fn is_multitrack_container(frame_type: FrameType, payload: &[u8]) -> bool {
     if payload.is_empty() || payload[0] & 0x80 == 0 {
         return false;
@@ -44,8 +41,6 @@ pub fn is_multitrack_container(frame_type: FrameType, payload: &[u8]) -> bool {
     (payload[0] & 0x0F) == expected
 }
 
-/// Iterate sub-tracks in a multitrack message. Returns true when at least one
-/// track was delivered; false when `payload` is not a multitrack container.
 pub fn foreach_track(
     frame_type: FrameType,
     payload: &[u8],
@@ -57,100 +52,114 @@ pub fn foreach_track(
 
     let multitrack_type = (payload[1] >> 4) & 0x0F;
     let inner_packet_type = payload[1] & 0x0F;
-    let mut pos = 2usize;
-    let mut delivered = false;
+    if multitrack_type > AvMultitrackType::ManyTracksManyCodecs as u8 {
+        return false;
+    }
 
-    if multitrack_type != AvMultitrackType::ManyTracksManyCodecs as u8 && pos + 4 <= payload.len() {
+    let video_frame_type = if frame_type == FrameType::Video {
+        (payload[0] >> 4) & 0x07
+    } else {
+        0
+    };
+    let mut pos = 2usize;
+    let mut shared_fourcc = [0u8; 4];
+
+    if multitrack_type != AvMultitrackType::ManyTracksManyCodecs as u8 {
+        if pos + 4 > payload.len() {
+            return false;
+        }
+        shared_fourcc.copy_from_slice(&payload[pos..pos + 4]);
         pos += 4;
     }
 
+    let mut tracks = Vec::new();
     loop {
-        if multitrack_type == AvMultitrackType::ManyTracksManyCodecs as u8 {
+        let fourcc = if multitrack_type == AvMultitrackType::ManyTracksManyCodecs as u8 {
             if pos + 4 > payload.len() {
-                break;
+                return false;
             }
+            let mut cc = [0u8; 4];
+            cc.copy_from_slice(&payload[pos..pos + 4]);
             pos += 4;
-        }
+            cc
+        } else {
+            shared_fourcc
+        };
 
         if pos >= payload.len() {
-            break;
+            return false;
         }
-
         let track_id = payload[pos];
         pos += 1;
 
         let track_size = if multitrack_type != AvMultitrackType::OneTrack as u8 {
             if pos + 3 > payload.len() {
-                break;
+                return false;
             }
-            read_u24(&payload[pos..pos + 3]) as usize
-        } else {
-            payload.len().saturating_sub(pos)
-        };
-        if multitrack_type != AvMultitrackType::OneTrack as u8 {
+            let size = read_u24(&payload[pos..pos + 3]);
             pos += 3;
-        }
+            size
+        } else {
+            payload.len() - pos
+        };
 
         if pos + track_size > payload.len() {
-            break;
+            return false;
         }
-
-        visit(&MediaTrackSlice {
+        tracks.push(MediaTrackSlice {
             track_id,
             packet_type: inner_packet_type,
+            fourcc,
+            video_frame_type,
             payload: &payload[pos..pos + track_size],
         });
-        delivered = true;
         pos += track_size;
 
-        if multitrack_type == AvMultitrackType::OneTrack as u8 || pos >= payload.len() {
+        if multitrack_type == AvMultitrackType::OneTrack as u8 {
+            break;
+        }
+        if pos == payload.len() {
             break;
         }
     }
 
-    delivered
+    if pos != payload.len() || tracks.is_empty() {
+        return false;
+    }
+    for track in &tracks {
+        visit(track);
+    }
+    true
 }
 
-/// True when a multitrack container carries at least one sequence-start track.
+pub fn first_track_fourcc(frame_type: FrameType, payload: &[u8]) -> Option<[u8; 4]> {
+    let mut result = None;
+    if foreach_track(frame_type, payload, |track| {
+        if result.is_none() {
+            result = Some(track.fourcc);
+        }
+    }) {
+        result
+    } else {
+        None
+    }
+}
+
 pub fn multitrack_has_sequence_start(frame_type: FrameType, payload: &[u8]) -> bool {
     let mut found = false;
-    let _ = foreach_track(frame_type, payload, |track| {
-        if track.packet_type == 0 {
-            found = true;
-        }
+    let valid = foreach_track(frame_type, payload, |track| {
+        found |= track.packet_type == 0;
     });
-    found
+    valid && found
 }
 
-/// True when a multitrack container carries at least one video keyframe track.
 pub fn multitrack_has_keyframe(payload: &[u8]) -> bool {
     if !is_multitrack_container(FrameType::Video, payload) {
         return false;
     }
-    // Coded multitrack video carries the keyframe flag on the outer ExVideo header.
-    if (payload[0] >> 4) & 0x07 == 1 {
-        return true;
-    }
-    let mut found = false;
-    let _ = foreach_track(FrameType::Video, payload, |track| {
-        if track.packet_type != 1 {
-            return;
-        }
-        if track.payload.is_empty() {
-            return;
-        }
-        if track.payload[0] & 0x80 != 0 {
-            let mut hdr = VideoHeader::default();
-            if crate::ertmp::exvideo::exvideo_parse(track.payload, &mut hdr).is_ok()
-                && hdr.frame_type == 1
-            {
-                found = true;
-            }
-        } else if (track.payload[0] >> 4) & 0x0F == 1 {
-            found = true;
-        }
-    });
-    found
+    let packet_type = payload.get(1).map(|b| b & 0x0F);
+    let coded = matches!(packet_type, Some(1 | 3));
+    coded && ((payload[0] >> 4) & 0x07) == 1 && foreach_track(FrameType::Video, payload, |_| {})
 }
 
 #[cfg(test)]
@@ -158,27 +167,10 @@ mod tests {
     use super::*;
 
     fn build_many_tracks_video_message() -> Vec<u8> {
-        // Enhanced multitrack header + shared avc1 fourCC + two tracks.
-        let mut msg = vec![
-            0x86, // ex header, multitrack packet type 6
-            0x10, // ManyTracks + inner SequenceStart (0)
-            b'a', b'v', b'c', b'1',
-            0x00, // track 0
-            0x00, 0x00, 0x03, // size
-            0xAA, 0xBB, 0xCC,
-            0x01, // track 1
-            0x00, 0x00, 0x02, // size
-            0xDD, 0xEE,
-        ];
-        msg
-    }
-
-    #[test]
-    fn multitrack_keyframe_detected_from_outer_header() {
-        let payload = vec![
-            0x96, 0x11, b'a', b'v', b'c', b'1', 0x00, 0x00, 0x00, 0x02, 0xDE, 0xAD,
-        ];
-        assert!(multitrack_has_keyframe(&payload));
+        vec![
+            0x86, 0x10, b'a', b'v', b'c', b'1', 0x00, 0x00, 0x00, 0x03, 0xAA, 0xBB, 0xCC, 0x01,
+            0x00, 0x00, 0x02, 0xDD, 0xEE,
+        ]
     }
 
     #[test]
@@ -188,12 +180,41 @@ mod tests {
     }
 
     #[test]
-    fn iterates_subtracks() {
+    fn iterates_subtracks_with_shared_codec() {
         let payload = build_many_tracks_video_message();
-        let mut ids = Vec::new();
+        let mut seen = Vec::new();
         assert!(foreach_track(FrameType::Video, &payload, |track| {
-            ids.push(track.track_id);
+            seen.push((track.track_id, track.fourcc, track.payload.to_vec()));
         }));
-        assert_eq!(ids, vec![0, 1]);
+        assert_eq!(seen[0], (0, *b"avc1", vec![0xAA, 0xBB, 0xCC]));
+        assert_eq!(seen[1], (1, *b"avc1", vec![0xDD, 0xEE]));
+    }
+
+    #[test]
+    fn iterates_many_tracks_many_codecs() {
+        let payload = vec![
+            0x86, 0x20, b'a', b'v', b'c', b'1', 0, 0, 0, 1, 0xAA, b'h', b'v', b'c', b'1', 1, 0, 0,
+            1, 0xBB,
+        ];
+        let mut codecs = Vec::new();
+        assert!(foreach_track(FrameType::Video, &payload, |track| {
+            codecs.push(track.fourcc);
+        }));
+        assert_eq!(codecs, vec![*b"avc1", *b"hvc1"]);
+    }
+
+    #[test]
+    fn malformed_message_delivers_no_partial_tracks() {
+        let mut payload = build_many_tracks_video_message();
+        payload.pop();
+        let mut calls = 0;
+        assert!(!foreach_track(FrameType::Video, &payload, |_| calls += 1));
+        assert_eq!(calls, 0);
+    }
+
+    #[test]
+    fn coded_frames_x_keyframe_is_detected() {
+        let payload = vec![0x96, 0x13, b'a', b'v', b'c', b'1', 0, 0, 0, 1, 0xAA];
+        assert!(multitrack_has_keyframe(&payload));
     }
 }

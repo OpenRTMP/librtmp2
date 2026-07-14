@@ -7,11 +7,14 @@ use crate::chunk::reader::{ChunkMessage, chunk_read_owned};
 use crate::chunk::state::{ChunkRegistry, DEFAULT_CHUNK_SIZE, DEFAULT_MAX_MSG_LENGTH};
 use crate::chunk::writer::chunk_write;
 use crate::ertmp::connect_amf::{negotiate_caps, write_negotiated_caps};
-use crate::ertmp::multitrack_media::foreach_track;
+use crate::ertmp::multitrack_media::{first_track_fourcc, foreach_track};
 use crate::handshake::{self, Handshake, HandshakeState};
-use crate::media::{is_on_metadata_payload, populate_av_frame};
+use crate::media::{is_on_metadata_payload, normalize_modex_payload, populate_av_frame};
 use crate::message::command;
-use crate::message::control::{self, UCTRL_PING_REQUEST, UCTRL_PING_RESPONSE, UCTRL_SET_BUFFER_LENGTH, UCTRL_STREAM_BEGIN, UCTRL_STREAM_EOF};
+use crate::message::control::{
+    self, UCTRL_PING_REQUEST, UCTRL_PING_RESPONSE, UCTRL_SET_BUFFER_LENGTH, UCTRL_STREAM_BEGIN,
+    UCTRL_STREAM_EOF,
+};
 use crate::message::message as msg_dispatch;
 use crate::session::publish_route::PublishRouteRegistry;
 use crate::session::state_machine;
@@ -72,6 +75,8 @@ pub struct RelayFrame {
     pub frame_type: FrameType,
     pub timestamp: u32,
     pub payload: Vec<u8>,
+    /// ModEx-normalized bytes used only for codec parsing and cache classification.
+    pub cache_payload: Vec<u8>,
     pub app: String,
     pub stream_name: String,
     pub publisher_conn_id: u64,
@@ -259,6 +264,10 @@ impl Conn {
             .unwrap_or_default()
     }
 
+    pub fn accepts_multitrack(&self) -> bool {
+        !self.negotiated_caps.has_caps_ex || self.negotiated_caps.multitrack_enabled
+    }
+
     /// Queue eviction of the current publish route's cache key when
     /// `current_stream` is about to be repurposed or replaced while still
     /// marked as actively publishing (a fresh `createStream`, or switching
@@ -338,7 +347,7 @@ impl Conn {
                 };
                 cb(&frame);
             }
-            self.queue_relay_frame(FrameType::Script, timestamp, payload)?;
+            self.queue_relay_frame(FrameType::Script, timestamp, payload, payload)?;
         }
         Ok(())
     }
@@ -348,6 +357,7 @@ impl Conn {
         frame_type: FrameType,
         timestamp: u32,
         payload: &[u8],
+        cache_payload: &[u8],
     ) -> Result<()> {
         if self.pending_relay.len() >= MAX_PENDING_RELAY_FRAMES
             || self.pending_relay_bytes() + payload.len() > self.max_pending_relay_bytes
@@ -358,6 +368,7 @@ impl Conn {
             frame_type,
             timestamp,
             payload: payload.to_vec(),
+            cache_payload: cache_payload.to_vec(),
             app: self.app.clone(),
             stream_name: self.relay_route_key(),
             publisher_conn_id: self.conn_id,
@@ -403,7 +414,9 @@ impl Conn {
             return Ok(());
         }
 
-        let parse_payload = strip_leading_modex(payload, self.negotiated_caps.caps_ex_mask);
+        let normalized_payload =
+            normalize_modex_payload(payload, self.negotiated_caps.caps_ex_mask);
+        let parse_payload = normalized_payload.as_ref();
 
         match frame_type {
             FrameType::Video if self.detected_video_codec.is_none() => {
@@ -445,7 +458,7 @@ impl Conn {
         }
 
         if self
-            .queue_relay_frame(frame_type, timestamp, payload)
+            .queue_relay_frame(frame_type, timestamp, payload, parse_payload)
             .is_err()
         {
             return Err(ErrorCode::Internal);
@@ -724,7 +737,11 @@ impl Conn {
             }
             msg_dispatch::RTMP_MSG_AMF3_DATA => {
                 if !payload.is_empty() && payload[0] == 0x00 {
-                    self.handle_publisher_data_message(msg.msg_stream_id, msg.timestamp, &payload[1..])
+                    self.handle_publisher_data_message(
+                        msg.msg_stream_id,
+                        msg.timestamp,
+                        &payload[1..],
+                    )
                 } else {
                     self.handle_publisher_data_message(msg.msg_stream_id, msg.timestamp, payload)
                 }
@@ -979,8 +996,7 @@ impl Conn {
         if payload.len() < 6 {
             return Ok(());
         }
-        let event_type =
-            ((payload[0] as u16) << 8) | (payload[1] as u16);
+        let event_type = ((payload[0] as u16) << 8) | (payload[1] as u16);
         let (event_type, param1, param2) = if event_type == UCTRL_SET_BUFFER_LENGTH {
             control::read_user_control(payload, true)?
         } else {
@@ -1099,10 +1115,8 @@ impl Conn {
                     || info.has_video_four_cc_info_map
                     || info.has_reconnect;
                 if needs_caps {
-                    let _ = state_machine::conn_transition(
-                        &mut self.state,
-                        ConnState::CapsNegotiated,
-                    );
+                    let _ =
+                        state_machine::conn_transition(&mut self.state, ConnState::CapsNegotiated);
                 }
                 let negotiated = if needs_caps {
                     let caps = negotiate_caps(&info);
@@ -1330,15 +1344,31 @@ impl Conn {
             }
             "receiveAudio" => {
                 if let Ok(flag) = command::read_bool_command(&mut buf) {
+                    let was_enabled = self
+                        .current_stream
+                        .as_ref()
+                        .map(|stream| stream.receive_audio)
+                        .unwrap_or(true);
                     if let Some(ref mut stream) = self.current_stream {
                         stream.receive_audio = flag;
+                    }
+                    if flag && !was_enabled {
+                        self.needs_init_frames = true;
                     }
                 }
             }
             "receiveVideo" => {
                 if let Ok(flag) = command::read_bool_command(&mut buf) {
+                    let was_enabled = self
+                        .current_stream
+                        .as_ref()
+                        .map(|stream| stream.receive_video)
+                        .unwrap_or(true);
                     if let Some(ref mut stream) = self.current_stream {
                         stream.receive_video = flag;
+                    }
+                    if flag && !was_enabled {
+                        self.needs_init_frames = true;
                     }
                 }
             }
@@ -1348,12 +1378,7 @@ impl Conn {
                     .flatten()
                     .or_else(|| self.current_stream.as_ref().map(|s| s.stream_id))
                     .unwrap_or(0);
-                if self
-                    .current_stream
-                    .as_ref()
-                    .map(|s| s.stream_id)
-                    == Some(target_id)
-                {
+                if self.current_stream.as_ref().map(|s| s.stream_id) == Some(target_id) {
                     self.evict_active_publish_route();
                     if let Some(ref mut stream) = self.current_stream {
                         stream.is_playing = false;
@@ -1632,52 +1657,6 @@ impl Default for Conn {
     }
 }
 
-fn looks_like_fourcc(data: &[u8]) -> bool {
-    data.len() >= 4 && data[..4].iter().all(|b| b.is_ascii_graphic())
-}
-
-/// True when `payload` begins with an enhanced ExVideo/ExAudio tag rather than
-/// a standalone ModEx extension byte.
-fn is_enhanced_av_tag(payload: &[u8]) -> bool {
-    if payload.is_empty() || payload[0] & 0x80 == 0 {
-        return false;
-    }
-    let packet_type = payload[0] & 0x0F;
-    if packet_type == ERTMP_AUDIO_PACKET_TYPE_MULTITRACK
-        || packet_type == ERTMP_VIDEO_PACKET_TYPE_MULTITRACK
-    {
-        return true;
-    }
-    payload.len() >= 5 && looks_like_fourcc(&payload[1..5])
-}
-
-/// Strip negotiated ModEx prefix bytes when present. Enhanced A/V tags keep bit
-/// 7 set too, so only remove bytes that are unambiguous ModEx extensions.
-fn strip_leading_modex(payload: &[u8], caps_ex_mask: u32) -> &[u8] {
-    if payload.is_empty() || (caps_ex_mask & CAPS_EX_MASK_MODEX) == 0 {
-        return payload;
-    }
-
-    let mut pos = 0usize;
-    while pos < payload.len() {
-        let rest = &payload[pos..];
-        if rest[0] & 0x80 == 0 || is_enhanced_av_tag(rest) {
-            break;
-        }
-        let ty = rest[0] & 0x7F;
-        let consumed = match ty {
-            0 => 1,
-            1 if rest.len() >= 9 => 9,
-            _ => break,
-        };
-        if pos + consumed > payload.len() {
-            break;
-        }
-        pos += consumed;
-    }
-    &payload[pos..]
-}
-
 fn positive_f64_to_u32(v: f64) -> Option<u32> {
     if !v.is_finite() || v < 0.0 || v > u32::MAX as f64 {
         return None;
@@ -1701,6 +1680,9 @@ fn read_data_event_name(buf: &mut Buffer, is_string: bool, out: &mut [u8; 64]) -
 }
 
 fn detect_video_codec(payload: &[u8]) -> Option<String> {
+    if let Some(cc) = first_track_fourcc(FrameType::Video, payload) {
+        return std::str::from_utf8(&cc).ok().map(str::to_owned);
+    }
     let mut hdr = VideoHeader::default();
     if crate::ertmp::exvideo::exvideo_parse(payload, &mut hdr).is_err() {
         return None;
@@ -1720,6 +1702,9 @@ fn detect_video_codec(payload: &[u8]) -> Option<String> {
 }
 
 fn detect_audio_codec(payload: &[u8]) -> Option<String> {
+    if let Some(cc) = first_track_fourcc(FrameType::Audio, payload) {
+        return std::str::from_utf8(&cc).ok().map(str::to_owned);
+    }
     let mut hdr = AudioHeader::default();
     if crate::ertmp::exaudio::exaudio_parse(payload, &mut hdr).is_err() {
         return None;
@@ -2316,6 +2301,27 @@ mod tests {
     }
 
     #[test]
+    fn multitrack_codec_is_detected_before_authorization() {
+        use std::sync::{LazyLock, Mutex};
+
+        static SEEN_CODEC: LazyLock<Mutex<Option<String>>> = LazyLock::new(|| Mutex::new(None));
+        fn allow_media(_: u64, _: FrameType, codec: Option<&str>) -> bool {
+            *SEEN_CODEC.lock().unwrap() = codec.map(str::to_owned);
+            true
+        }
+
+        let mut conn = Conn::new();
+        conn.relay_enabled = true;
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+        conn.current_stream.as_mut().unwrap().is_publishing = true;
+        conn.on_media_cb = Some(allow_media);
+        let payload = vec![0x86, 0x10, b'a', b'v', b'c', b'1', 0, 0, 0, 1, 0xAA];
+        conn.handle_media_frame(1, FrameType::Video, 0, &payload)
+            .unwrap();
+        assert_eq!(SEEN_CODEC.lock().unwrap().as_deref(), Some("avc1"));
+    }
+
+    #[test]
     fn multitrack_on_frame_cb_scratch_retains_last_track_payload() {
         let mut conn = Conn::new();
         conn.relay_enabled = true;
@@ -2336,37 +2342,29 @@ mod tests {
     }
 
     #[test]
-    fn strip_leading_modex_preserves_enhanced_video_tag() {
-        let av1_seq = [0x90, b'a', b'v', b'0', b'1', 0x01];
+    fn modex_is_normalized_for_callbacks_and_cache_but_relayed_opaque() {
+        let mut conn = Conn::new();
+        conn.relay_enabled = true;
+        conn.negotiated_caps.has_caps_ex = true;
+        conn.negotiated_caps.caps_ex_mask = CAPS_EX_MASK_MODEX;
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+        conn.current_stream.as_mut().unwrap().is_publishing = true;
+        conn.on_frame_cb = Some(|_| {});
+
+        let payload = vec![
+            0x97, 0x02, 0, 1, 2, 0x01, b'a', b'v', b'c', b'1', 0, 0, 0, 0xAA,
+        ];
+        conn.handle_media_frame(1, FrameType::Video, 0, &payload)
+            .unwrap();
+
+        assert_eq!(conn.pending_relay[0].payload, payload);
         assert_eq!(
-            strip_leading_modex(&av1_seq, CAPS_EX_MASK_MODEX),
-            av1_seq.as_slice()
+            conn.pending_relay[0].cache_payload,
+            vec![0x91, b'a', b'v', b'c', b'1', 0, 0, 0, 0xAA]
         );
-    }
-
-    #[test]
-    fn strip_leading_modex_removes_negotiated_nop_prefix() {
-        let mut payload = vec![0x80];
-        payload.extend_from_slice(&[0x90, b'a', b'v', b'0', b'1']);
         assert_eq!(
-            strip_leading_modex(&payload, CAPS_EX_MASK_MODEX),
-            &[0x90, b'a', b'v', b'0', b'1']
-        );
-    }
-
-    #[test]
-    fn strip_leading_modex_is_noop_without_modex_cap() {
-        let mut payload = vec![0x80];
-        payload.extend_from_slice(&[0x90, b'a', b'v', b'0', b'1']);
-        assert_eq!(strip_leading_modex(&payload, 0), payload.as_slice());
-    }
-
-    #[test]
-    fn strip_leading_modex_preserves_legacy_aac_with_modex_cap() {
-        let payload = vec![0xAF, 0x00, 0x12, 0x10];
-        assert_eq!(
-            strip_leading_modex(&payload, CAPS_EX_MASK_MODEX),
-            payload.as_slice()
+            conn.frame_cb_scratch,
+            vec![0x91, b'a', b'v', b'c', b'1', 0, 0, 0, 0xAA]
         );
     }
 
@@ -2544,6 +2542,28 @@ mod tests {
         assert_eq!(conn.pending_relay[0].frame_type, FrameType::Script);
         assert_eq!(conn.pending_relay[0].timestamp, 9000);
         assert_eq!(conn.pending_relay[0].payload, payload);
+    }
+
+    #[test]
+    fn receive_video_reenable_requests_cached_replay() {
+        let mut conn = Conn::new();
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+        {
+            let stream = conn.current_stream.as_mut().unwrap();
+            stream.is_playing = true;
+            stream.receive_video = false;
+        }
+        conn.needs_init_frames = false;
+
+        let mut buf = Buffer::new();
+        crate::amf::amf0::write_string(&mut buf, "receiveVideo").unwrap();
+        crate::amf::amf0::write_number(&mut buf, 1.0).unwrap();
+        crate::amf::amf0::write_null(&mut buf).unwrap();
+        crate::amf::amf0::write_boolean(&mut buf, true).unwrap();
+        conn.handle_command(buf.as_slice()).unwrap();
+
+        assert!(conn.current_stream.as_ref().unwrap().receive_video);
+        assert!(conn.needs_init_frames);
     }
 
     #[test]

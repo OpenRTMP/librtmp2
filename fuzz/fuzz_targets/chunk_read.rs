@@ -2,7 +2,7 @@
 
 use libfuzzer_sys::fuzz_target;
 use librtmp2::buffer::Buffer;
-use librtmp2::chunk::reader::{chunk_read, ChunkMessage};
+use librtmp2::chunk::reader::{ChunkMessage, chunk_read};
 use librtmp2::chunk::state::ChunkRegistry;
 
 fuzz_target!(|data: &[u8]| {

@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use crate::chunk::state::DEFAULT_CHUNK_SIZE;
 use crate::ertmp::multitrack_media::{foreach_track, is_multitrack_container};
-use crate::media::{classify_cache_frame, CacheFrameKind};
+use crate::media::{CacheFrameKind, classify_cache_frame};
 use crate::net;
 use crate::session::conn::Conn;
 use crate::session::publish_route::PublishRouteRegistry;
@@ -630,23 +630,39 @@ impl Server {
                 }
                 if receive_video {
                     if let Some(ref hdr) = cache.avc_header.clone() {
-                        send_failed |= conn.send_frame(FrameType::Video, 0, hdr).is_err();
+                        if !is_multitrack_container(FrameType::Video, hdr)
+                            || conn.accepts_multitrack()
+                        {
+                            send_failed |= conn.send_frame(FrameType::Video, 0, hdr).is_err();
+                        }
                     }
                     for hdr in cache.video_track_headers.values() {
-                        send_failed |= conn.send_frame(FrameType::Video, 0, hdr).is_err();
+                        if conn.accepts_multitrack() {
+                            send_failed |= conn.send_frame(FrameType::Video, 0, hdr).is_err();
+                        }
                     }
                 }
                 if receive_audio && !send_failed {
                     if let Some(ref hdr) = cache.aac_header.clone() {
-                        send_failed |= conn.send_frame(FrameType::Audio, 0, hdr).is_err();
+                        if !is_multitrack_container(FrameType::Audio, hdr)
+                            || conn.accepts_multitrack()
+                        {
+                            send_failed |= conn.send_frame(FrameType::Audio, 0, hdr).is_err();
+                        }
                     }
                     for hdr in cache.audio_track_headers.values() {
-                        send_failed |= conn.send_frame(FrameType::Audio, 0, hdr).is_err();
+                        if conn.accepts_multitrack() {
+                            send_failed |= conn.send_frame(FrameType::Audio, 0, hdr).is_err();
+                        }
                     }
                 }
                 if receive_video && !send_failed {
                     if let Some((ts, ref kf)) = cache.last_keyframe.clone() {
-                        send_failed |= conn.send_frame(FrameType::Video, ts, kf).is_err();
+                        if !is_multitrack_container(FrameType::Video, kf)
+                            || conn.accepts_multitrack()
+                        {
+                            send_failed |= conn.send_frame(FrameType::Video, ts, kf).is_err();
+                        }
                     }
                 }
                 if send_failed {
@@ -708,14 +724,19 @@ impl Server {
                 {
                     continue;
                 }
+                if matches!(frame.frame_type, FrameType::Audio | FrameType::Video)
+                    && is_multitrack_container(frame.frame_type, &frame.payload)
+                    && !conn.accepts_multitrack()
+                {
+                    continue;
+                }
                 let send_result = match frame.frame_type {
                     FrameType::Script | FrameType::Metadata => {
                         conn.send_data_message(frame.timestamp, &frame.payload)
                     }
                     _ => conn.send_frame(frame.frame_type, frame.timestamp, &frame.payload),
                 };
-                if send_result.is_err()
-                {
+                if send_result.is_err() {
                     // Player stopped reading; outbound send_buffer is full.
                     // Drop the connection immediately so later relay frames in
                     // this poll batch skip it and no more socket work is done.
@@ -845,8 +866,7 @@ impl Server {
             }
         }
 
-        let mut projected_total =
-            self.stream_cache_bytes() + incoming_len - existing_field_len;
+        let mut projected_total = self.stream_cache_bytes() + incoming_len - existing_field_len;
         let max_cache_bytes = self.resource_limits.max_stream_cache_bytes;
         if projected_total > max_cache_bytes {
             let victims: Vec<_> = self
@@ -891,12 +911,15 @@ impl Server {
             if !self.reserve_stream_cache_storage(&key, frame.payload.len(), existing_field_len) {
                 return;
             }
-            let cache = self.stream_cache.entry(key).or_insert_with(empty_stream_cache);
+            let cache = self
+                .stream_cache
+                .entry(key)
+                .or_insert_with(empty_stream_cache);
             cache.metadata = Some(frame.payload.clone());
             return;
         }
 
-        let cache_kind = classify_cache_frame(frame.frame_type, &frame.payload);
+        let cache_kind = classify_cache_frame(frame.frame_type, &frame.cache_payload);
         let is_avc_header = cache_kind == CacheFrameKind::VideoSequenceHeader;
         let is_keyframe = cache_kind == CacheFrameKind::VideoKeyframe;
         let is_aac_header = cache_kind == CacheFrameKind::AudioSequenceHeader;
@@ -921,25 +944,31 @@ impl Server {
             if let Some(cache) = self.stream_cache.get_mut(&key) {
                 if is_avc_header {
                     let seq_tracks =
-                        Self::multitrack_sequence_track_ids(FrameType::Video, &frame.payload);
+                        Self::multitrack_sequence_track_ids(FrameType::Video, &frame.cache_payload);
                     if seq_tracks.len() > 1 {
                         cache.avc_header = None;
+                        cache.video_track_headers.clear();
                     } else if let Some(track_id) = seq_tracks.first().copied() {
+                        cache.avc_header = None;
                         cache.video_track_headers.remove(&track_id);
                     } else {
                         cache.avc_header = None;
+                        cache.video_track_headers.clear();
                     }
                 } else if is_keyframe {
                     cache.last_keyframe = None;
                 } else {
                     let seq_tracks =
-                        Self::multitrack_sequence_track_ids(FrameType::Audio, &frame.payload);
+                        Self::multitrack_sequence_track_ids(FrameType::Audio, &frame.cache_payload);
                     if seq_tracks.len() > 1 {
                         cache.aac_header = None;
+                        cache.audio_track_headers.clear();
                     } else if let Some(track_id) = seq_tracks.first().copied() {
+                        cache.aac_header = None;
                         cache.audio_track_headers.remove(&track_id);
                     } else {
                         cache.aac_header = None;
+                        cache.audio_track_headers.clear();
                     }
                 }
             }
@@ -967,7 +996,7 @@ impl Server {
             .map(|cache| {
                 if is_avc_header {
                     let seq_tracks =
-                        Self::multitrack_sequence_track_ids(FrameType::Video, &frame.payload);
+                        Self::multitrack_sequence_track_ids(FrameType::Video, &frame.cache_payload);
                     if seq_tracks.len() > 1 {
                         cache.avc_header.as_ref().map(|v| v.len()).unwrap_or(0)
                     } else if let Some(track_id) = seq_tracks.first() {
@@ -987,7 +1016,7 @@ impl Server {
                         .unwrap_or(0)
                 } else {
                     let seq_tracks =
-                        Self::multitrack_sequence_track_ids(FrameType::Audio, &frame.payload);
+                        Self::multitrack_sequence_track_ids(FrameType::Audio, &frame.cache_payload);
                     if seq_tracks.len() > 1 {
                         cache.aac_header.as_ref().map(|v| v.len()).unwrap_or(0)
                     } else if let Some(track_id) = seq_tracks.first() {
@@ -1006,31 +1035,40 @@ impl Server {
             return;
         }
 
-        let cache = self.stream_cache.entry(key).or_insert_with(empty_stream_cache);
+        let cache = self
+            .stream_cache
+            .entry(key)
+            .or_insert_with(empty_stream_cache);
         if is_avc_header {
             let seq_tracks =
-                Self::multitrack_sequence_track_ids(FrameType::Video, &frame.payload);
+                Self::multitrack_sequence_track_ids(FrameType::Video, &frame.cache_payload);
             if seq_tracks.len() > 1 {
+                cache.video_track_headers.clear();
                 cache.avc_header = Some(frame.payload.clone());
             } else if let Some(track_id) = seq_tracks.first().copied() {
+                cache.avc_header = None;
                 cache
                     .video_track_headers
                     .insert(track_id, frame.payload.clone());
             } else {
+                cache.video_track_headers.clear();
                 cache.avc_header = Some(frame.payload.clone());
             }
         } else if is_keyframe {
             cache.last_keyframe = Some((frame.timestamp, frame.payload.clone()));
         } else if is_aac_header {
             let seq_tracks =
-                Self::multitrack_sequence_track_ids(FrameType::Audio, &frame.payload);
+                Self::multitrack_sequence_track_ids(FrameType::Audio, &frame.cache_payload);
             if seq_tracks.len() > 1 {
+                cache.audio_track_headers.clear();
                 cache.aac_header = Some(frame.payload.clone());
             } else if let Some(track_id) = seq_tracks.first().copied() {
+                cache.aac_header = None;
                 cache
                     .audio_track_headers
                     .insert(track_id, frame.payload.clone());
             } else {
+                cache.audio_track_headers.clear();
                 cache.aac_header = Some(frame.payload.clone());
             }
         }
@@ -1142,6 +1180,7 @@ mod tests {
             publisher_conn_id: 1,
             frame_type,
             timestamp: 0,
+            cache_payload: payload.clone(),
             payload,
         }
     }
@@ -1150,8 +1189,8 @@ mod tests {
     fn multitrack_video_sequence_header_is_cached() {
         let mut server = test_server();
         let payload = vec![
-            0x86, 0x10, b'a', b'v', b'c', b'1', 0x00, 0x00, 0x00, 0x01, 0xAA, 0x01, 0x00,
-            0x00, 0x01, 0xBB,
+            0x86, 0x10, b'a', b'v', b'c', b'1', 0x00, 0x00, 0x00, 0x01, 0xAA, 0x01, 0x00, 0x00,
+            0x01, 0xBB,
         ];
         server.cache_relay_frame(&relay_frame(FrameType::Video, payload));
 
@@ -1562,8 +1601,8 @@ mod tests {
         use crate::chunk::writer::chunk_write;
         use crate::message::message::RTMP_MSG_AMF0_COMMAND;
         use crate::session::stream::Stream;
-        use crate::types::ConnState;
         use crate::transport::Transport;
+        use crate::types::ConnState;
         use std::os::unix::io::IntoRawFd;
         use std::os::unix::net::UnixStream;
 
@@ -1639,7 +1678,11 @@ mod tests {
         server.connections = vec![conn_a, conn_b];
         server.process_connections().unwrap();
 
-        assert_eq!(server.connections.len(), 1, "conn_a should have been removed");
+        assert_eq!(
+            server.connections.len(),
+            1,
+            "conn_a should have been removed"
+        );
         assert!(
             server.connections[0].relay_enabled,
             "conn_b's publish must succeed in the same batch conn_a's route was freed in"

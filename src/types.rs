@@ -366,9 +366,8 @@ pub const CAPS_EX_MASK_RECONNECT: u32 = 0x01;
 pub const CAPS_EX_MASK_MULTITRACK: u32 = 0x02;
 pub const CAPS_EX_MASK_MODEX: u32 = 0x04;
 pub const CAPS_EX_MASK_TIMESTAMP_NANO: u32 = 0x08;
-pub const CAPS_EX_MASK_SERVER_DEFAULT: u32 = CAPS_EX_MASK_MULTITRACK
-    | CAPS_EX_MASK_MODEX
-    | CAPS_EX_MASK_TIMESTAMP_NANO;
+pub const CAPS_EX_MASK_SERVER_DEFAULT: u32 =
+    CAPS_EX_MASK_MULTITRACK | CAPS_EX_MASK_MODEX | CAPS_EX_MASK_TIMESTAMP_NANO;
 
 /// Enhanced RTMP v1 AudioSampleRate (legacy)
 pub const ERTMP_AUDIO_RATE_5500: u8 = 0;
@@ -437,11 +436,19 @@ pub struct FourCcList {
 
 /* ── E-RTMP v2 capability negotiation ── */
 
-/// Video FourCC info map.
+/// E-RTMP v2 per-codec capability flags.
+pub const FOUR_CC_INFO_CAN_DECODE: u32 = 0x01;
+pub const FOUR_CC_INFO_CAN_ENCODE: u32 = 0x02;
+pub const FOUR_CC_INFO_CAN_FORWARD: u32 = 0x04;
+pub const FOUR_CC_INFO_ALL: u32 =
+    FOUR_CC_INFO_CAN_DECODE | FOUR_CC_INFO_CAN_ENCODE | FOUR_CC_INFO_CAN_FORWARD;
+
+/// Video FourCC info map. Each entry's mask uses `FOUR_CC_INFO_*`.
 #[derive(Debug, Clone, Default)]
 #[repr(C)]
 pub struct VideoFourCcInfoMap {
     pub entries: [FourCc; MAX_FOURCCS],
+    pub masks: [u32; MAX_FOURCCS],
     pub count: usize,
 }
 

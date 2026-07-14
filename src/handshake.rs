@@ -342,7 +342,11 @@ mod tests {
             time2 >= before && time2 <= after,
             "S2 time2 must be the server's own time"
         );
-        assert_eq!(&s2[8..], &c1[8..], "S2 random bytes must echo C1's random bytes");
+        assert_eq!(
+            &s2[8..],
+            &c1[8..],
+            "S2 random bytes must echo C1's random bytes"
+        );
     }
 
     #[test]
@@ -381,6 +385,10 @@ mod tests {
             time2 >= before && time2 <= after,
             "C2 time2 must be the client's own time"
         );
-        assert_eq!(&c2[8..], &s1[8..], "C2 random bytes must echo S1's random bytes");
+        assert_eq!(
+            &c2[8..],
+            &s1[8..],
+            "C2 random bytes must echo S1's random bytes"
+        );
     }
 }

@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use librtmp2::client::Client;
 use librtmp2::server::Server;
 use librtmp2::types::*;
@@ -35,9 +35,7 @@ fn relay_n_frames(frame_count: u32) {
         tls_insecure: 0,
     })
     .unwrap();
-    server
-        .listen(&format!("127.0.0.1:{RTMP_PORT}"))
-        .unwrap();
+    server.listen(&format!("127.0.0.1:{RTMP_PORT}")).unwrap();
     server.on_publish_cb = Some(allow);
     server.on_play_cb = Some(allow);
 
@@ -80,9 +78,7 @@ fn relay_n_frames(frame_count: u32) {
         }
 
         let deadline = Instant::now() + Duration::from_secs(10);
-        while RECEIVED.load(Ordering::SeqCst) < frame_count as usize
-            && Instant::now() < deadline
-        {
+        while RECEIVED.load(Ordering::SeqCst) < frame_count as usize && Instant::now() < deadline {
             player.poll(10).unwrap();
         }
     });

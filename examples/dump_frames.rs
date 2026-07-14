@@ -21,7 +21,11 @@ static FRAME_COUNT: AtomicUsize = AtomicUsize::new(0);
 static MAX_FRAMES: AtomicUsize = AtomicUsize::new(usize::MAX);
 
 fn fourcc_str(fourcc: &FourCc) -> String {
-    let end = fourcc.cc.iter().position(|&b| b == 0).unwrap_or(fourcc.cc.len());
+    let end = fourcc
+        .cc
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(fourcc.cc.len());
     String::from_utf8_lossy(&fourcc.cc[..end]).into_owned()
 }
 
@@ -138,14 +142,17 @@ fn main() -> ExitCode {
         eprintln!("[dump_frames] play failed");
         return ExitCode::from(1);
     }
-    eprintln!("[dump_frames] playing (timeout={timeout_s}s, max_frames={})", {
-        let cap = MAX_FRAMES.load(Ordering::SeqCst);
-        if cap == usize::MAX {
-            "unlimited".to_string()
-        } else {
-            cap.to_string()
+    eprintln!(
+        "[dump_frames] playing (timeout={timeout_s}s, max_frames={})",
+        {
+            let cap = MAX_FRAMES.load(Ordering::SeqCst);
+            if cap == usize::MAX {
+                "unlimited".to_string()
+            } else {
+                cap.to_string()
+            }
         }
-    });
+    );
 
     let deadline = Instant::now() + Duration::from_secs(timeout_s);
     while Instant::now() < deadline {

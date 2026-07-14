@@ -4,9 +4,7 @@
 
 use crate::buffer::Buffer;
 use crate::bytes::{hton24, ntoh32};
-use crate::chunk::state::{
-    ChunkRegistry, ChunkStream, DEFAULT_CHUNK_SIZE,
-};
+use crate::chunk::state::{ChunkRegistry, ChunkStream, DEFAULT_CHUNK_SIZE};
 use crate::types::ErrorCode;
 use crate::types::Result;
 
@@ -258,10 +256,7 @@ pub fn chunk_read(
     // After a complete message, reassembly_bytes_read is 0 but inherited
     // header fields remain — that is valid for the next constant-size frame
     // (common for AAC) or a fmt=3 header reuse per RTMP spec.
-    if (fmt == 2 || fmt == 3)
-        && stream.reassembly_bytes_read == 0
-        && stream.type0_msg_length == 0
-    {
+    if (fmt == 2 || fmt == 3) && stream.reassembly_bytes_read == 0 && stream.type0_msg_length == 0 {
         return Err(ErrorCode::Chunk);
     }
 
@@ -341,7 +336,9 @@ pub fn chunk_read(
         // invalidate a pointer into its storage. Reuse last_payload's
         // allocation to avoid allocator churn on every complete message.
         stream.last_payload.clear();
-        stream.last_payload.extend_from_slice(stream.reassembly_buf.peek());
+        stream
+            .last_payload
+            .extend_from_slice(stream.reassembly_buf.peek());
         *payload_len = stream.last_payload.len();
         *payload = stream.last_payload.as_ptr();
 
@@ -435,14 +432,7 @@ mod tests {
 
         let mut next = Buffer::new();
         next.write(&fmt3_wire(3, b"again")).expect("fmt3 wire");
-        let result = chunk_read(
-            &mut next,
-            &mut reg,
-            None,
-            &mut out_msg,
-            &mut ptr,
-            &mut len,
-        );
+        let result = chunk_read(&mut next, &mut reg, None, &mut out_msg, &mut ptr, &mut len);
 
         assert_eq!(result.unwrap(), 1);
         assert!(out_msg.is_complete);
@@ -471,28 +461,13 @@ mod tests {
         let mut out_msg = ChunkMessage::default();
         let mut ptr = std::ptr::null();
         let mut len = 0;
-        chunk_read(
-            &mut wire,
-            &mut reg,
-            None,
-            &mut out_msg,
-            &mut ptr,
-            &mut len,
-        )
-        .unwrap();
+        chunk_read(&mut wire, &mut reg, None, &mut out_msg, &mut ptr, &mut len).unwrap();
         assert!(out_msg.is_complete);
 
         let mut next = Buffer::new();
         next.write(&[2 << 6 | 5, 0, 0, 1]).unwrap();
         next.write(b"next").unwrap();
-        let result = chunk_read(
-            &mut next,
-            &mut reg,
-            None,
-            &mut out_msg,
-            &mut ptr,
-            &mut len,
-        );
+        let result = chunk_read(&mut next, &mut reg, None, &mut out_msg, &mut ptr, &mut len);
         assert_eq!(result.unwrap(), 1);
         assert!(out_msg.is_complete);
         assert_eq!(out_msg.msg_type_id, 0x08);
@@ -527,14 +502,20 @@ mod tests {
         fmt1.write(&[1 << 6 | 5, 0, 0, 33, 0, 0, 4, 0x08]).unwrap();
         fmt1.write(b"next").unwrap();
         chunk_read(&mut fmt1, &mut reg, None, &mut out_msg, &mut ptr, &mut len).unwrap();
-        assert_eq!(out_msg.timestamp, 1033, "fmt=1 timestamp must add the delta to the running total");
+        assert_eq!(
+            out_msg.timestamp, 1033,
+            "fmt=1 timestamp must add the delta to the running total"
+        );
 
         // fmt=2 header: timestamp(3)=33 (delta only; length/type inherited).
         let mut fmt2 = Buffer::new();
         fmt2.write(&[2 << 6 | 5, 0, 0, 33]).unwrap();
         fmt2.write(b"next").unwrap();
         chunk_read(&mut fmt2, &mut reg, None, &mut out_msg, &mut ptr, &mut len).unwrap();
-        assert_eq!(out_msg.timestamp, 1066, "fmt=2 timestamp must add the delta to the running total");
+        assert_eq!(
+            out_msg.timestamp, 1066,
+            "fmt=2 timestamp must add the delta to the running total"
+        );
 
         // fmt=3 starting a brand new message (no message currently in
         // flight) implicitly repeats the last delta (33) per RTMP spec
@@ -561,14 +542,7 @@ mod tests {
         let mut out_msg = ChunkMessage::default();
         let mut ptr = std::ptr::null();
         let mut len = 0;
-        let result = chunk_read(
-            &mut next,
-            &mut reg,
-            None,
-            &mut out_msg,
-            &mut ptr,
-            &mut len,
-        );
+        let result = chunk_read(&mut next, &mut reg, None, &mut out_msg, &mut ptr, &mut len);
         assert!(matches!(result, Err(ErrorCode::Chunk)));
     }
 
@@ -695,8 +669,7 @@ mod tests {
 
             let mut out_msg = ChunkMessage::default();
             loop {
-                let (rc, owned) =
-                    chunk_read_owned(&mut wire, &mut reg, &mut out_msg).unwrap();
+                let (rc, owned) = chunk_read_owned(&mut wire, &mut reg, &mut out_msg).unwrap();
                 if rc == 1 {
                     assert_eq!(owned.len(), payload.len());
                     break;

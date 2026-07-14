@@ -8,8 +8,8 @@ use librtmp2::client::Client;
 use librtmp2::server::Server;
 
 use common::{
-    allow_publish, make_video_frame, on_video_frame, plain_config, poll_until, run_client_with_server,
-    FRAMES_RECEIVED,
+    FRAMES_RECEIVED, allow_publish, make_video_frame, on_video_frame, plain_config, poll_until,
+    run_client_with_server,
 };
 
 #[test]

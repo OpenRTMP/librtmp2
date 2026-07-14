@@ -4,14 +4,14 @@
 
 use std::net::{TcpStream, ToSocketAddrs};
 use std::os::unix::io::IntoRawFd;
-use std::sync::{mpsc, Mutex};
+use std::sync::{Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use crate::buffer::Buffer;
-use crate::chunk::reader::{chunk_read_owned, ChunkMessage};
-use crate::ertmp::multitrack_media::foreach_track;
+use crate::chunk::reader::{ChunkMessage, chunk_read_owned};
 use crate::chunk::state::{ChunkRegistry, DEFAULT_MAX_MSG_LENGTH};
 use crate::chunk::writer::chunk_write;
+use crate::ertmp::multitrack_media::foreach_track;
 use crate::handshake::{self, Handshake};
 use crate::media::populate_av_frame;
 use crate::message::command;
@@ -69,7 +69,8 @@ const FIRST_CHUNK_EXTRA_OVERHEAD_BYTES: usize = 11;
 /// two max-size messages at the minimum practical chunk size don't get
 /// rejected before they can be reassembled.
 const MAX_RECV_BUFFER_BYTES: usize = MAX_RECV_BUFFER_PAYLOAD_BYTES
-    + (MAX_RECV_BUFFER_PAYLOAD_BYTES / MIN_PRACTICAL_CHUNK_SIZE + 1) * MAX_CHUNK_HEADER_OVERHEAD_BYTES
+    + (MAX_RECV_BUFFER_PAYLOAD_BYTES / MIN_PRACTICAL_CHUNK_SIZE + 1)
+        * MAX_CHUNK_HEADER_OVERHEAD_BYTES
     + 2 * FIRST_CHUNK_EXTRA_OVERHEAD_BYTES;
 /// Cap inbound Ping-Request reflections to prevent trivial outbound
 /// bandwidth/CPU amplification from a malicious RTMP(S) server.
@@ -292,7 +293,17 @@ impl Client {
         let scheme = if use_tls { "rtmps" } else { "rtmp" };
         let tc_url = format!("{scheme}://{host}:{port}/{app}");
         let mut connect_amf = Buffer::with_capacity(512);
-        command::build_connect(&mut connect_amf, app, &tc_url, "", "", "FMLE/3.0", 0, 0, None)?;
+        command::build_connect(
+            &mut connect_amf,
+            app,
+            &tc_url,
+            "",
+            "",
+            "FMLE/3.0",
+            0,
+            0,
+            None,
+        )?;
         self.send_command_msg(0, connect_amf.as_slice())?;
         let mut result = self.wait_for_command("_result")?;
         command::read_connect_result(&mut result)?;
@@ -361,13 +372,7 @@ impl Client {
         }
         cmsg.fmt = 0;
 
-        chunk_write(
-            &mut self.send_buffer,
-            &cmsg,
-            payload,
-            payload.len(),
-            128,
-        )?;
+        chunk_write(&mut self.send_buffer, &cmsg, payload, payload.len(), 128)?;
 
         // Non-blocking flush: a malicious server that stops reading must not
         // stall the embedder's thread for up to 10s per frame via blocking send.
@@ -459,12 +464,7 @@ impl Client {
             };
             if n > 0 {
                 let chunk_len = n as usize;
-                if self
-                    .recv_buffer
-                    .available()
-                    .saturating_add(chunk_len)
-                    > MAX_RECV_BUFFER_BYTES
-                {
+                if self.recv_buffer.available().saturating_add(chunk_len) > MAX_RECV_BUFFER_BYTES {
                     return Err(ErrorCode::Protocol);
                 }
                 self.recv_buffer
@@ -695,13 +695,7 @@ impl Client {
         cmsg.msg_length = payload.len() as u32;
         cmsg.msg_type_id = msg_dispatch::RTMP_MSG_USER_CONTROL;
         cmsg.msg_stream_id = 0;
-        chunk_write(
-            &mut self.send_buffer,
-            &cmsg,
-            payload,
-            payload.len(),
-            128,
-        )?;
+        chunk_write(&mut self.send_buffer, &cmsg, payload, payload.len(), 128)?;
         Ok(())
     }
 
@@ -757,8 +751,7 @@ impl Client {
         if payload.len() < 6 {
             return Ok(());
         }
-        let event_type =
-            ((payload[0] as u16) << 8) | (payload[1] as u16);
+        let event_type = ((payload[0] as u16) << 8) | (payload[1] as u16);
         let (event_type, param1, param2) = if event_type == control::UCTRL_SET_BUFFER_LENGTH {
             control::read_user_control(payload, true)?
         } else {
@@ -834,16 +827,10 @@ impl Client {
             };
             if n > 0 {
                 let chunk_len = n as usize;
-                if self
-                    .recv_buffer
-                    .available()
-                    .saturating_add(chunk_len)
-                    > MAX_RECV_BUFFER_BYTES
-                {
+                if self.recv_buffer.available().saturating_add(chunk_len) > MAX_RECV_BUFFER_BYTES {
                     return Err(ErrorCode::Protocol);
                 }
-                self
-                    .recv_buffer
+                self.recv_buffer
                     .write(&buf[..chunk_len])
                     .map_err(|_| ErrorCode::Internal)?;
                 bytes_drained += chunk_len;
@@ -1001,12 +988,7 @@ impl Client {
             };
             if n > 0 {
                 let chunk_len = n as usize;
-                if self
-                    .recv_buffer
-                    .available()
-                    .saturating_add(chunk_len)
-                    > MAX_RECV_BUFFER_BYTES
-                {
+                if self.recv_buffer.available().saturating_add(chunk_len) > MAX_RECV_BUFFER_BYTES {
                     return Err(ErrorCode::Protocol);
                 }
                 *recv_budget -= chunk_len;
@@ -1038,7 +1020,11 @@ fn poll_for_transport_direction(fd: i32, again: i32, timeout_ms: i32) -> Result<
         libc::POLLIN
     };
     loop {
-        let mut pfd = libc::pollfd { fd, events, revents: 0 };
+        let mut pfd = libc::pollfd {
+            fd,
+            events,
+            revents: 0,
+        };
         let rc = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
         if rc == 0 {
             return Err(ErrorCode::Timeout);
@@ -1140,14 +1126,7 @@ mod tests {
         cmsg.msg_length = payload_len as u32;
         cmsg.msg_type_id = msg_dispatch::RTMP_MSG_USER_CONTROL;
         cmsg.msg_stream_id = 0;
-        chunk_write(
-            &mut wire,
-            &cmsg,
-            payload.as_slice(),
-            payload_len,
-            128,
-        )
-        .unwrap();
+        chunk_write(&mut wire, &cmsg, payload.as_slice(), payload_len, 128).unwrap();
         wire.peek().to_vec()
     }
 
@@ -1165,8 +1144,9 @@ mod tests {
         let chunks = payload.div_ceil(MIN_PRACTICAL_CHUNK_SIZE);
         // Each message's first chunk (fmt=0) carries the larger message
         // header on top of the shared continuation-chunk overhead.
-        let worst_case_wire_bytes =
-            payload + chunks * MAX_CHUNK_HEADER_OVERHEAD_BYTES + 2 * FIRST_CHUNK_EXTRA_OVERHEAD_BYTES;
+        let worst_case_wire_bytes = payload
+            + chunks * MAX_CHUNK_HEADER_OVERHEAD_BYTES
+            + 2 * FIRST_CHUNK_EXTRA_OVERHEAD_BYTES;
         assert!(MAX_RECV_BUFFER_BYTES >= worst_case_wire_bytes);
     }
 
@@ -1242,7 +1222,9 @@ mod tests {
 
         client.on_frame_cb = Some(|_| {});
         let mut messages_processed = 0;
-        client.drain_ready_messages(&mut messages_processed).unwrap();
+        client
+            .drain_ready_messages(&mut messages_processed)
+            .unwrap();
 
         // Frame.data must still be valid (i.e. frame_cb_scratch must still
         // hold the delivered payload) after the callback has returned, not
@@ -1255,8 +1237,7 @@ mod tests {
     fn drain_ready_messages_splits_multitrack_video() {
         use std::sync::{LazyLock, Mutex};
 
-        static SEEN: LazyLock<Mutex<Vec<(u8, Vec<u8>)>>> =
-            LazyLock::new(|| Mutex::new(Vec::new()));
+        static SEEN: LazyLock<Mutex<Vec<(u8, Vec<u8>)>>> = LazyLock::new(|| Mutex::new(Vec::new()));
 
         let payload = vec![
             0x86, 0x10, b'a', b'v', b'c', b'1', 0x00, 0x00, 0x00, 0x03, 0xAA, 0xBB, 0xCC, 0x01,
@@ -1275,14 +1256,15 @@ mod tests {
         client.recv_buffer.write(wire.peek()).unwrap();
         SEEN.lock().unwrap().clear();
         client.on_frame_cb = Some(|frame| {
-            let data = unsafe {
-                std::slice::from_raw_parts(frame.data, frame.size as usize).to_vec()
-            };
+            let data =
+                unsafe { std::slice::from_raw_parts(frame.data, frame.size as usize).to_vec() };
             SEEN.lock().unwrap().push((frame.track_id, data));
         });
 
         let mut messages_processed = 0;
-        client.drain_ready_messages(&mut messages_processed).unwrap();
+        client
+            .drain_ready_messages(&mut messages_processed)
+            .unwrap();
 
         let seen = SEEN.lock().unwrap().clone();
         assert_eq!(seen.len(), 2);
