@@ -50,7 +50,9 @@ begin at `1.0.0`.
   `CHANGELOG.md`.
 
 ### Fixed
-- ModEx-prefixed media payloads are stripped before relay and codec detection.
+- ModEx prefix bytes are stripped only when the ModEx capability was negotiated
+  and the leading bytes are unambiguous ModEx extensions; enhanced ExVideo/ExAudio
+  and multitrack tags are preserved. Relay always forwards the original payload.
 - Complex RTMP handshake (digest/HMAC) is detected and rejected with
   `ErrorCode::Unsupported` instead of hanging or mis-parsing.
 

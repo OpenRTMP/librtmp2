@@ -398,14 +398,14 @@ impl Conn {
             return Ok(());
         }
 
-        let payload = strip_modex_prefix(payload);
+        let parse_payload = strip_leading_modex(payload, self.negotiated_caps.caps_ex_mask);
 
         match frame_type {
             FrameType::Video if self.detected_video_codec.is_none() => {
-                self.detected_video_codec = detect_video_codec(payload);
+                self.detected_video_codec = detect_video_codec(parse_payload);
             }
             FrameType::Audio if self.detected_audio_codec.is_none() => {
-                self.detected_audio_codec = detect_audio_codec(payload);
+                self.detected_audio_codec = detect_audio_codec(parse_payload);
             }
             _ => {}
         }
@@ -419,29 +419,23 @@ impl Conn {
             .saturating_add(payload.len() as u64);
 
         if let Some(cb) = self.on_frame_cb {
-            if !foreach_track(frame_type, payload, |track| {
-                let mut frame = Frame {
-                    frame_type,
-                    timestamp,
-                    size: track.payload.len() as u32,
-                    data: track.payload.as_ptr(),
-                    track_id: track.track_id,
-                    ..Default::default()
-                };
-                populate_av_frame(&mut frame, track.payload);
-                cb(&frame);
-            }) {
-                self.frame_cb_scratch.clear();
-                self.frame_cb_scratch.extend_from_slice(payload);
-                let mut frame = Frame {
-                    frame_type,
-                    timestamp,
-                    size: self.frame_cb_scratch.len() as u32,
-                    data: self.frame_cb_scratch.as_ptr(),
-                    ..Default::default()
-                };
-                populate_av_frame(&mut frame, payload);
-                cb(&frame);
+            let mut track_ranges: Vec<(u8, usize, usize)> = Vec::new();
+            foreach_track(frame_type, parse_payload, |track| {
+                let start = track.payload.as_ptr() as usize - parse_payload.as_ptr() as usize;
+                track_ranges.push((track.track_id, start, track.payload.len()));
+            });
+            if track_ranges.is_empty() {
+                self.invoke_on_frame_cb(cb, frame_type, timestamp, u8::MAX, parse_payload);
+            } else {
+                for (track_id, start, len) in track_ranges {
+                    self.invoke_on_frame_cb(
+                        cb,
+                        frame_type,
+                        timestamp,
+                        track_id,
+                        &parse_payload[start..start + len],
+                    );
+                }
             }
         }
 
@@ -1598,6 +1592,28 @@ impl Conn {
         control::write_user_control_stream_eof(&mut buf, stream_id)?;
         self.send_control(msg_dispatch::RTMP_MSG_USER_CONTROL, buf.as_slice())
     }
+
+    fn invoke_on_frame_cb(
+        &mut self,
+        cb: fn(&Frame),
+        frame_type: FrameType,
+        timestamp: u32,
+        track_id: u8,
+        payload: &[u8],
+    ) {
+        self.frame_cb_scratch.clear();
+        self.frame_cb_scratch.extend_from_slice(payload);
+        let mut frame = Frame {
+            frame_type,
+            timestamp,
+            size: self.frame_cb_scratch.len() as u32,
+            data: self.frame_cb_scratch.as_ptr(),
+            track_id,
+            ..Default::default()
+        };
+        populate_av_frame(&mut frame, &self.frame_cb_scratch);
+        cb(&frame);
+    }
 }
 
 impl Default for Conn {
@@ -1606,16 +1622,50 @@ impl Default for Conn {
     }
 }
 
-fn strip_modex_prefix(payload: &[u8]) -> &[u8] {
-    if payload.first().is_none_or(|b| b & 0x80 == 0) {
+fn looks_like_fourcc(data: &[u8]) -> bool {
+    data.len() >= 4 && data[..4].iter().all(|b| b.is_ascii_graphic())
+}
+
+/// True when `payload` begins with an enhanced ExVideo/ExAudio tag rather than
+/// a standalone ModEx extension byte.
+fn is_enhanced_av_tag(payload: &[u8]) -> bool {
+    if payload.is_empty() || payload[0] & 0x80 == 0 {
+        return false;
+    }
+    let packet_type = payload[0] & 0x0F;
+    if packet_type == ERTMP_AUDIO_PACKET_TYPE_MULTITRACK
+        || packet_type == ERTMP_VIDEO_PACKET_TYPE_MULTITRACK
+    {
+        return true;
+    }
+    payload.len() >= 5 && looks_like_fourcc(&payload[1..5])
+}
+
+/// Strip negotiated ModEx prefix bytes when present. Enhanced A/V tags keep bit
+/// 7 set too, so only remove bytes that are unambiguous ModEx extensions.
+fn strip_leading_modex(payload: &[u8], caps_ex_mask: u32) -> &[u8] {
+    if payload.is_empty() || (caps_ex_mask & CAPS_EX_MASK_MODEX) == 0 {
         return payload;
     }
-    let strip = match payload[0] & 0x7F {
-        0 => 1,
-        1 if payload.len() >= 9 => 9,
-        _ => 1,
-    };
-    payload.get(strip..).unwrap_or(payload)
+
+    let mut pos = 0usize;
+    while pos < payload.len() {
+        let rest = &payload[pos..];
+        if rest[0] & 0x80 == 0 || is_enhanced_av_tag(rest) {
+            break;
+        }
+        let ty = rest[0] & 0x7F;
+        let consumed = match ty {
+            0 => 1,
+            1 if rest.len() >= 9 => 9,
+            _ => 1,
+        };
+        if pos + consumed > payload.len() {
+            break;
+        }
+        pos += consumed;
+    }
+    &payload[pos..]
 }
 
 fn positive_f64_to_u32(v: f64) -> Option<u32> {
@@ -2253,6 +2303,52 @@ mod tests {
         assert_eq!(*SEEN_TRACK_IDS.lock().unwrap(), vec![0, 1]);
         assert_eq!(conn.pending_relay.len(), 1);
         assert_eq!(conn.pending_relay[0].payload, payload);
+    }
+
+    #[test]
+    fn multitrack_on_frame_cb_scratch_retains_last_track_payload() {
+        let mut conn = Conn::new();
+        conn.relay_enabled = true;
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+        if let Some(s) = conn.current_stream.as_mut() {
+            s.is_publishing = true;
+        }
+        conn.on_frame_cb = Some(|_| {});
+
+        let payload = vec![
+            0x86, 0x11, b'a', b'v', b'c', b'1', 0x00, 0x00, 0x00, 0x03, 0xAA, 0xBB, 0xCC, 0x01,
+            0x00, 0x00, 0x02, 0xDD, 0xEE,
+        ];
+        conn.handle_media_frame(1, FrameType::Video, 0, &payload)
+            .unwrap();
+
+        assert_eq!(conn.frame_cb_scratch.as_slice(), &[0xDD, 0xEE]);
+    }
+
+    #[test]
+    fn strip_leading_modex_preserves_enhanced_video_tag() {
+        let av1_seq = [0x90, b'a', b'v', b'0', b'1', 0x01];
+        assert_eq!(
+            strip_leading_modex(&av1_seq, CAPS_EX_MASK_MODEX),
+            av1_seq.as_slice()
+        );
+    }
+
+    #[test]
+    fn strip_leading_modex_removes_negotiated_nop_prefix() {
+        let mut payload = vec![0x80];
+        payload.extend_from_slice(&[0x90, b'a', b'v', b'0', b'1']);
+        assert_eq!(
+            strip_leading_modex(&payload, CAPS_EX_MASK_MODEX),
+            &[0x90, b'a', b'v', b'0', b'1']
+        );
+    }
+
+    #[test]
+    fn strip_leading_modex_is_noop_without_modex_cap() {
+        let mut payload = vec![0x80];
+        payload.extend_from_slice(&[0x90, b'a', b'v', b'0', b'1']);
+        assert_eq!(strip_leading_modex(&payload, 0), payload.as_slice());
     }
 
     #[test]
