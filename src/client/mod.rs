@@ -151,6 +151,10 @@ pub struct Client {
     pub app: String,
     pub stream_key: String,
     pub on_frame_cb: Option<fn(&Frame)>,
+    /// Retains the last frame payload delivered through `on_frame_cb` so
+    /// `Frame.data` stays valid until the next callback on this connection
+    /// (mirrors `Conn::frame_cb_scratch` on the server side).
+    frame_cb_scratch: Vec<u8>,
     /// PEM CA bundle used to verify `rtmps://` servers, in addition to the
     /// system trust store. `None` uses the system trust store only.
     tls_ca_file: Option<String>,
@@ -174,6 +178,7 @@ impl Client {
             app: String::new(),
             stream_key: String::new(),
             on_frame_cb: None,
+            frame_cb_scratch: Vec::new(),
             tls_ca_file: None,
             tls_insecure: false,
         }
@@ -503,6 +508,11 @@ impl Client {
                         || msg.msg_type_id == msg_dispatch::RTMP_MSG_VIDEO
                     {
                         if let Some(ref cb) = self.on_frame_cb {
+                            // Move the already-owned payload into the
+                            // connection-scoped scratch buffer so Frame.data
+                            // stays valid until the next callback, not just
+                            // for the duration of this call.
+                            self.frame_cb_scratch = payload;
                             let frame = Frame {
                                 frame_type: if msg.msg_type_id == msg_dispatch::RTMP_MSG_AUDIO {
                                     FrameType::Audio
@@ -510,8 +520,8 @@ impl Client {
                                     FrameType::Video
                                 },
                                 timestamp: msg.timestamp,
-                                size: payload.len() as u32,
-                                data: payload.as_ptr(),
+                                size: self.frame_cb_scratch.len() as u32,
+                                data: self.frame_cb_scratch.as_ptr(),
                                 ..Default::default()
                             };
                             cb(&frame);
@@ -1033,6 +1043,32 @@ mod tests {
             "send_buffer should shrink back to {BUFFER_RESET_CAPACITY} after a full flush, got {}",
             client.send_buffer.capacity()
         );
+    }
+
+    #[test]
+    fn frame_cb_scratch_retains_payload_after_delivery() {
+        let mut client = Client::new();
+
+        let video_payload = [0x17u8, 0x01, 0x02, 0x03];
+        let mut wire = Buffer::new();
+        let mut cmsg = ChunkMessage::default();
+        cmsg.csid = 6;
+        cmsg.fmt = 0;
+        cmsg.msg_length = video_payload.len() as u32;
+        cmsg.msg_type_id = msg_dispatch::RTMP_MSG_VIDEO;
+        cmsg.msg_stream_id = 1;
+        chunk_write(&mut wire, &cmsg, &video_payload, video_payload.len(), 128).unwrap();
+        client.recv_buffer.write(wire.peek()).unwrap();
+
+        client.on_frame_cb = Some(|_| {});
+        let mut messages_processed = 0;
+        client.drain_ready_messages(&mut messages_processed).unwrap();
+
+        // Frame.data must still be valid (i.e. frame_cb_scratch must still
+        // hold the delivered payload) after the callback has returned, not
+        // just for the duration of the call itself -- matching the
+        // server-side Conn::frame_cb_scratch contract.
+        assert_eq!(client.frame_cb_scratch.as_slice(), &video_payload[..]);
     }
 
     #[test]
