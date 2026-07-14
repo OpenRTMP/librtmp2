@@ -307,7 +307,12 @@ impl Conn {
         msg_stream_id == expected_stream_id && expected_stream_id != 0
     }
 
-    fn handle_publisher_data_message(&mut self, msg_stream_id: u32, payload: &[u8]) -> Result<()> {
+    fn handle_publisher_data_message(
+        &mut self,
+        msg_stream_id: u32,
+        timestamp: u32,
+        payload: &[u8],
+    ) -> Result<()> {
         if !self.publishing_metadata_allowed(msg_stream_id) {
             return Ok(());
         }
@@ -325,7 +330,7 @@ impl Conn {
                 self.frame_cb_scratch.extend_from_slice(payload);
                 let frame = Frame {
                     frame_type: FrameType::Script,
-                    timestamp: 0,
+                    timestamp,
                     size: self.frame_cb_scratch.len() as u32,
                     data: self.frame_cb_scratch.as_ptr(),
                     is_metadata: 1,
@@ -333,7 +338,7 @@ impl Conn {
                 };
                 cb(&frame);
             }
-            self.queue_relay_frame(FrameType::Script, 0, payload)?;
+            self.queue_relay_frame(FrameType::Script, timestamp, payload)?;
         }
         Ok(())
     }
@@ -506,7 +511,7 @@ impl Conn {
                     self.handle_media_frame(msg_stream_id, FrameType::Video, out_ts, tag_payload)?;
                 }
                 msg_dispatch::RTMP_MSG_AMF0_DATA => {
-                    self.handle_publisher_data_message(msg_stream_id, tag_payload)?;
+                    self.handle_publisher_data_message(msg_stream_id, out_ts, tag_payload)?;
                 }
                 _ => {}
             }
@@ -715,13 +720,13 @@ impl Conn {
                 self.handle_aggregate(msg.msg_stream_id, msg.timestamp, payload)
             }
             msg_dispatch::RTMP_MSG_AMF0_DATA => {
-                self.handle_publisher_data_message(msg.msg_stream_id, payload)
+                self.handle_publisher_data_message(msg.msg_stream_id, msg.timestamp, payload)
             }
             msg_dispatch::RTMP_MSG_AMF3_DATA => {
                 if !payload.is_empty() && payload[0] == 0x00 {
-                    self.handle_publisher_data_message(msg.msg_stream_id, &payload[1..])
+                    self.handle_publisher_data_message(msg.msg_stream_id, msg.timestamp, &payload[1..])
                 } else {
-                    self.handle_publisher_data_message(msg.msg_stream_id, payload)
+                    self.handle_publisher_data_message(msg.msg_stream_id, msg.timestamp, payload)
                 }
             }
             msg_dispatch::RTMP_MSG_AMF3_SHARED_OBJECT => {
@@ -1297,21 +1302,22 @@ impl Conn {
             }
             "FCPublish" | "releaseStream" => {}
             "pause" => {
-                let pause_flag = command::read_pause(&mut buf).unwrap_or(true);
-                if let Some(ref mut stream) = self.current_stream {
-                    stream.paused = pause_flag;
+                if let Ok(pause_flag) = command::read_pause(&mut buf) {
+                    if let Some(ref mut stream) = self.current_stream {
+                        stream.paused = pause_flag;
+                    }
+                    let sid = self
+                        .current_stream
+                        .as_ref()
+                        .map(|s| s.stream_id)
+                        .unwrap_or(0);
+                    let (code, desc) = if pause_flag {
+                        ("NetStream.Pause.Notify", "Paused")
+                    } else {
+                        ("NetStream.Unpause.Notify", "Unpaused")
+                    };
+                    self.send_onstatus(sid, "status", code, desc)?;
                 }
-                let sid = self
-                    .current_stream
-                    .as_ref()
-                    .map(|s| s.stream_id)
-                    .unwrap_or(0);
-                let (code, desc) = if pause_flag {
-                    ("NetStream.Pause.Notify", "Paused")
-                } else {
-                    ("NetStream.Unpause.Notify", "Unpaused")
-                };
-                self.send_onstatus(sid, "status", code, desc)?;
             }
             "seek" => {
                 let _millis = command::read_seek(&mut buf).unwrap_or(0.0);
@@ -2532,11 +2538,29 @@ mod tests {
             stream.name = "stream".to_string();
         }
         let payload = build_on_metadata_payload(false, &[("width", 1920.0)], &[]);
-        conn.handle_publisher_data_message(1, &payload)
+        conn.handle_publisher_data_message(1, 9000, &payload)
             .unwrap();
         assert_eq!(conn.pending_relay.len(), 1);
         assert_eq!(conn.pending_relay[0].frame_type, FrameType::Script);
+        assert_eq!(conn.pending_relay[0].timestamp, 9000);
         assert_eq!(conn.pending_relay[0].payload, payload);
+    }
+
+    #[test]
+    fn malformed_pause_command_leaves_stream_unpaused() {
+        let mut conn = Conn::new();
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+        if let Some(ref mut stream) = conn.current_stream {
+            stream.is_playing = true;
+            stream.paused = false;
+        }
+
+        let mut buf = Buffer::new();
+        crate::amf::amf0::write_string(&mut buf, "pause").unwrap();
+        crate::amf::amf0::write_number(&mut buf, 1.0).unwrap();
+        // Missing null + boolean: parse must fail without forcing paused=true.
+        assert!(conn.handle_command(buf.as_slice()).is_ok());
+        assert!(!conn.current_stream.as_ref().unwrap().paused);
     }
 
     #[test]
