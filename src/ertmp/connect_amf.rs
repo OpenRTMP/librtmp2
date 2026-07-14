@@ -69,12 +69,13 @@ pub fn read_caps_ex_amf(buf: &mut Buffer, caps: &mut CapsExit, mask: &mut u32) -
         Amf0Type::LongString => {
             let data = read_amf_binary_blob(buf, ty)?;
             caps_exit_parse(caps, &data)?;
-            *mask = 0;
+            // Legacy blob form carries codec ids, not a v2 bitmask.
+            *mask = CAPS_EX_MASK_SERVER_DEFAULT;
             Ok(())
         }
         Amf0Type::Object => {
             caps.version = 1;
-            amf0::read_object_begin(buf)?;
+            // `read_type` already consumed the object marker.
             let mut keys = 0usize;
             while !amf0::is_object_end(buf) {
                 keys += 1;
@@ -98,6 +99,8 @@ pub fn read_caps_ex_amf(buf: &mut Buffer, caps: &mut CapsExit, mask: &mut u32) -
             }
             let mut end = [0u8; 3];
             buf.read(&mut end).map_err(|_| ErrorCode::Amf)?;
+            // Legacy object form carries codec ids, not a v2 bitmask.
+            *mask = CAPS_EX_MASK_SERVER_DEFAULT;
             Ok(())
         }
         _ => Err(ErrorCode::Amf),
@@ -325,6 +328,25 @@ mod tests {
         read_caps_ex_amf(&mut buf, &mut parsed, &mut mask).unwrap();
         assert_eq!(parsed.video_codec_32, caps.video_codec_32);
         assert_eq!(parsed.audio_codec_32, caps.audio_codec_32);
+        assert_eq!(mask, CAPS_EX_MASK_SERVER_DEFAULT);
+    }
+
+    #[test]
+    fn caps_ex_object_parses_legacy_codec_fields() {
+        let mut buf = Buffer::new();
+        buf.write(&[Amf0Type::Object as u8]).unwrap();
+        amf0::write_object_key(&mut buf, "videoCodecId").unwrap();
+        amf0::write_number(&mut buf, f64::from(i32::from_be_bytes(*b"av01"))).unwrap();
+        amf0::write_object_key(&mut buf, "audioCodecId").unwrap();
+        amf0::write_number(&mut buf, f64::from(i32::from_be_bytes(*b"mp4a"))).unwrap();
+        amf0::write_object_end(&mut buf).unwrap();
+
+        let mut parsed = CapsExit::default();
+        let mut mask = 0u32;
+        read_caps_ex_amf(&mut buf, &mut parsed, &mut mask).unwrap();
+        assert_eq!(parsed.video_codec_32, i32::from_be_bytes(*b"av01"));
+        assert_eq!(parsed.audio_codec_32, i32::from_be_bytes(*b"mp4a"));
+        assert_eq!(mask, CAPS_EX_MASK_SERVER_DEFAULT);
     }
 
     #[test]
@@ -339,5 +361,21 @@ mod tests {
         assert!(caps.has_caps_ex);
         assert_eq!(caps.caps_ex_mask, 0);
         assert!(!caps.multitrack_enabled);
+    }
+
+    #[test]
+    fn negotiate_caps_legacy_object_caps_ex_uses_defaults() {
+        use crate::types::ConnectInfo;
+
+        let mut client = ConnectInfo::default();
+        client.has_caps_ex = true;
+        client.caps_ex_mask = CAPS_EX_MASK_SERVER_DEFAULT;
+        client.caps_ex.version = 1;
+        client.caps_ex.video_codec_32 = i32::from_be_bytes(*b"av01");
+
+        let caps = negotiate_caps(&client);
+        assert!(caps.has_caps_ex);
+        assert_eq!(caps.caps_ex_mask, CAPS_EX_MASK_SERVER_DEFAULT);
+        assert!(caps.multitrack_enabled);
     }
 }
