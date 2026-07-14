@@ -7,6 +7,12 @@ on:
     paths:
       - scripts/apply_modex_multitrack_gate_fix.py
       - .github/workflows/apply-modex-multitrack-gate-fix.yml
+  pull_request:
+    branches:
+      - main
+    paths:
+      - scripts/apply_modex_multitrack_gate_fix.py
+      - .github/workflows/apply-modex-multitrack-gate-fix.yml
 
 permissions:
   contents: write
