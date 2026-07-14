@@ -12,6 +12,7 @@ use crate::chunk::reader::{chunk_read_owned, ChunkMessage};
 use crate::chunk::state::{ChunkRegistry, DEFAULT_MAX_MSG_LENGTH};
 use crate::chunk::writer::chunk_write;
 use crate::handshake::{self, Handshake};
+use crate::media::populate_av_frame;
 use crate::message::command;
 use crate::message::control;
 use crate::message::message as msg_dispatch;
@@ -286,8 +287,24 @@ impl Client {
     fn do_amf_connect(&mut self, app: &str, host: &str, port: u16, use_tls: bool) -> Result<()> {
         let scheme = if use_tls { "rtmps" } else { "rtmp" };
         let tc_url = format!("{scheme}://{host}:{port}/{app}");
+        let client_caps = NegotiatedCaps {
+            has_caps_ex: true,
+            caps_ex_mask: CAPS_EX_MASK_SERVER_DEFAULT,
+            multitrack_enabled: true,
+            ..Default::default()
+        };
         let mut connect_amf = Buffer::with_capacity(512);
-        command::build_connect(&mut connect_amf, app, &tc_url, "", "", "FMLE/3.0", 0, 0)?;
+        command::build_connect(
+            &mut connect_amf,
+            app,
+            &tc_url,
+            "",
+            "",
+            "FMLE/3.0",
+            0,
+            0,
+            Some(&client_caps),
+        )?;
         self.send_command_msg(0, connect_amf.as_slice())?;
         let mut result = self.wait_for_command("_result")?;
         command::read_connect_result(&mut result)?;
@@ -521,24 +538,119 @@ impl Client {
                             // stays valid until the next callback, not just
                             // for the duration of this call.
                             self.frame_cb_scratch = payload;
-                            let frame = Frame {
-                                frame_type: if msg.msg_type_id == msg_dispatch::RTMP_MSG_AUDIO {
-                                    FrameType::Audio
-                                } else {
-                                    FrameType::Video
-                                },
+                            let frame_type = if msg.msg_type_id == msg_dispatch::RTMP_MSG_AUDIO {
+                                FrameType::Audio
+                            } else {
+                                FrameType::Video
+                            };
+                            let mut frame = Frame {
+                                frame_type,
                                 timestamp: msg.timestamp,
                                 size: self.frame_cb_scratch.len() as u32,
                                 data: self.frame_cb_scratch.as_ptr(),
                                 ..Default::default()
                             };
+                            populate_av_frame(&mut frame, &self.frame_cb_scratch);
                             cb(&frame);
                         }
+                    } else if msg.msg_type_id == msg_dispatch::RTMP_MSG_AMF0_DATA
+                        || msg.msg_type_id == msg_dispatch::RTMP_MSG_AMF3_DATA
+                    {
+                        let data_payload = if msg.msg_type_id == msg_dispatch::RTMP_MSG_AMF3_DATA
+                            && !payload.is_empty()
+                            && payload[0] == 0x00
+                        {
+                            payload[1..].to_vec()
+                        } else {
+                            payload
+                        };
+                        if let Some(ref cb) = self.on_frame_cb {
+                            self.frame_cb_scratch = data_payload;
+                            let mut frame = Frame {
+                                frame_type: FrameType::Script,
+                                timestamp: msg.timestamp,
+                                size: self.frame_cb_scratch.len() as u32,
+                                data: self.frame_cb_scratch.as_ptr(),
+                                is_metadata: 1,
+                                ..Default::default()
+                            };
+                            cb(&frame);
+                        }
+                    } else if msg.msg_type_id == msg_dispatch::RTMP_MSG_AGGREGATE {
+                        self.handle_aggregate_message(msg.timestamp, &payload)?;
                     }
                 }
                 Ok(_) => break,
                 Err(_) => return Err(ErrorCode::Chunk),
             }
+        }
+        Ok(())
+    }
+
+    /// Unpack aggregate A/V/script sub-tags for play-side frame callbacks.
+    fn handle_aggregate_message(&mut self, base_timestamp: u32, payload: &[u8]) -> Result<()> {
+        let mut pos = 0usize;
+        let mut have_base = false;
+        let mut sub_base_ts: u32 = 0;
+
+        while pos + 11 <= payload.len() {
+            let tag_type = payload[pos];
+            let data_size = ((payload[pos + 1] as u32) << 16)
+                | ((payload[pos + 2] as u32) << 8)
+                | (payload[pos + 3] as u32);
+            let ts = ((payload[pos + 4] as u32) << 16)
+                | ((payload[pos + 5] as u32) << 8)
+                | (payload[pos + 6] as u32)
+                | ((payload[pos + 7] as u32) << 24);
+            let body = pos + 11;
+            let data_size = data_size as usize;
+            if body + data_size > payload.len() {
+                return Err(ErrorCode::Protocol);
+            }
+            if !have_base {
+                sub_base_ts = ts;
+                have_base = true;
+            }
+            let out_ts = base_timestamp.wrapping_add(ts.wrapping_sub(sub_base_ts));
+            let tag_payload = &payload[body..body + data_size];
+
+            if let Some(ref cb) = self.on_frame_cb {
+                self.frame_cb_scratch = tag_payload.to_vec();
+                let mut frame = match tag_type {
+                    msg_dispatch::RTMP_MSG_AUDIO => Frame {
+                        frame_type: FrameType::Audio,
+                        timestamp: out_ts,
+                        size: self.frame_cb_scratch.len() as u32,
+                        data: self.frame_cb_scratch.as_ptr(),
+                        ..Default::default()
+                    },
+                    msg_dispatch::RTMP_MSG_VIDEO => Frame {
+                        frame_type: FrameType::Video,
+                        timestamp: out_ts,
+                        size: self.frame_cb_scratch.len() as u32,
+                        data: self.frame_cb_scratch.as_ptr(),
+                        ..Default::default()
+                    },
+                    msg_dispatch::RTMP_MSG_AMF0_DATA => Frame {
+                        frame_type: FrameType::Script,
+                        timestamp: out_ts,
+                        size: self.frame_cb_scratch.len() as u32,
+                        data: self.frame_cb_scratch.as_ptr(),
+                        is_metadata: 1,
+                        ..Default::default()
+                    },
+                    _ => {
+                        pos = body + data_size + 4;
+                        continue;
+                    }
+                };
+                if frame.frame_type == FrameType::Audio || frame.frame_type == FrameType::Video {
+                    populate_av_frame(&mut frame, &self.frame_cb_scratch);
+                }
+                cb(&frame);
+            }
+
+            pos = body + data_size + 4;
         }
         Ok(())
     }
@@ -614,24 +726,38 @@ impl Client {
         if payload.len() < 6 {
             return Ok(());
         }
-        let (event_type, param1, _) = control::read_user_control(payload, false)?;
-        if event_type == control::UCTRL_PING_REQUEST {
-            let now = Instant::now();
-            if let Some(start) = self.inbound_ping_window_start {
-                if now.duration_since(start) >= INBOUND_PING_WINDOW {
+        let event_type =
+            ((payload[0] as u16) << 8) | (payload[1] as u16);
+        let (event_type, param1, param2) = if event_type == control::UCTRL_SET_BUFFER_LENGTH {
+            control::read_user_control(payload, true)?
+        } else {
+            let (ty, p1, _) = control::read_user_control(payload, false)?;
+            (ty, p1, None)
+        };
+        match event_type {
+            control::UCTRL_PING_REQUEST => {
+                let now = Instant::now();
+                if let Some(start) = self.inbound_ping_window_start {
+                    if now.duration_since(start) >= INBOUND_PING_WINDOW {
+                        self.inbound_ping_window_start = Some(now);
+                        self.inbound_ping_responses = 0;
+                    }
+                } else {
                     self.inbound_ping_window_start = Some(now);
-                    self.inbound_ping_responses = 0;
                 }
-            } else {
-                self.inbound_ping_window_start = Some(now);
+                if self.inbound_ping_responses >= MAX_INBOUND_PING_RESPONSES {
+                    return Err(ErrorCode::Protocol);
+                }
+                self.inbound_ping_responses += 1;
+                let mut buf = Buffer::with_capacity(6);
+                control::write_user_control_ping_response(&mut buf, param1)?;
+                self.send_user_control_message_nonblocking(buf.as_slice())?;
             }
-            if self.inbound_ping_responses >= MAX_INBOUND_PING_RESPONSES {
-                return Err(ErrorCode::Protocol);
+            control::UCTRL_STREAM_BEGIN | control::UCTRL_STREAM_EOF => {}
+            control::UCTRL_SET_BUFFER_LENGTH => {
+                let _ = param2;
             }
-            self.inbound_ping_responses += 1;
-            let mut buf = Buffer::with_capacity(6);
-            control::write_user_control_ping_response(&mut buf, param1)?;
-            self.send_user_control_message_nonblocking(buf.as_slice())?;
+            _ => {}
         }
         Ok(())
     }

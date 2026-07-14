@@ -18,6 +18,7 @@ pub mod ertmp;
 pub mod flv;
 pub mod handshake;
 pub mod log;
+pub mod media;
 pub mod message;
 pub mod net;
 pub mod server;

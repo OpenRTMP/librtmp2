@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::chunk::state::DEFAULT_CHUNK_SIZE;
+use crate::media::{classify_cache_frame, CacheFrameKind};
 use crate::net;
 use crate::session::conn::Conn;
 use crate::session::publish_route::PublishRouteRegistry;
@@ -65,6 +66,8 @@ const MAX_BUDGET_DRAIN_PASSES_PER_CONN_PER_POLL: usize = 3;
 struct StreamCache {
     avc_header: Option<Vec<u8>>,
     aac_header: Option<Vec<u8>>,
+    /// Last onMetaData AMF0 payload for late-joining players.
+    metadata: Option<Vec<u8>>,
     /// (timestamp, payload) of the most recent IDR keyframe.
     last_keyframe: Option<(u32, Vec<u8>)>,
 }
@@ -608,6 +611,9 @@ impl Server {
             let key = (conn.app.clone(), conn.relay_route_key());
             if let Some(cache) = self.stream_cache.get(&key) {
                 let mut send_failed = false;
+                if let Some(ref md) = cache.metadata.clone() {
+                    send_failed |= conn.send_data_message(0, md).is_err();
+                }
                 if let Some(ref hdr) = cache.avc_header.clone() {
                     send_failed |= conn.send_frame(FrameType::Video, 0, hdr).is_err();
                 }
@@ -655,8 +661,38 @@ impl Server {
                     continue;
                 }
                 if conn
-                    .send_frame(frame.frame_type, frame.timestamp, &frame.payload)
-                    .is_err()
+                    .current_stream
+                    .as_ref()
+                    .map(|s| s.paused)
+                    .unwrap_or(false)
+                {
+                    continue;
+                }
+                if frame.frame_type == FrameType::Audio
+                    && !conn
+                        .current_stream
+                        .as_ref()
+                        .map(|s| s.receive_audio)
+                        .unwrap_or(true)
+                {
+                    continue;
+                }
+                if frame.frame_type == FrameType::Video
+                    && !conn
+                        .current_stream
+                        .as_ref()
+                        .map(|s| s.receive_video)
+                        .unwrap_or(true)
+                {
+                    continue;
+                }
+                let send_result = match frame.frame_type {
+                    FrameType::Script | FrameType::Metadata => {
+                        conn.send_data_message(frame.timestamp, &frame.payload)
+                    }
+                    _ => conn.send_frame(frame.frame_type, frame.timestamp, &frame.payload),
+                };
+                if send_result.is_err()
                 {
                     // Player stopped reading; outbound send_buffer is full.
                     // Drop the connection immediately so later relay frames in
@@ -719,6 +755,7 @@ impl Server {
     fn stream_cache_entry_bytes(cache: &StreamCache) -> usize {
         cache.avc_header.as_ref().map(|v| v.len()).unwrap_or(0)
             + cache.aac_header.as_ref().map(|v| v.len()).unwrap_or(0)
+            + cache.metadata.as_ref().map(|v| v.len()).unwrap_or(0)
             + cache
                 .last_keyframe
                 .as_ref()
@@ -742,18 +779,27 @@ impl Server {
     }
 
     fn cache_relay_frame(&mut self, frame: &crate::session::conn::RelayFrame) {
-        let is_avc_header = frame.frame_type == FrameType::Video
-            && frame.payload.len() >= 2
-            && frame.payload[0] == 0x17
-            && frame.payload[1] == 0x00;
-        let is_keyframe = frame.frame_type == FrameType::Video
-            && frame.payload.len() >= 2
-            && frame.payload[0] == 0x17
-            && frame.payload[1] == 0x01;
-        let is_aac_header = frame.frame_type == FrameType::Audio
-            && frame.payload.len() >= 2
-            && (frame.payload[0] & 0xF0) == 0xA0
-            && frame.payload[1] == 0x00;
+        if frame.frame_type == FrameType::Script || frame.frame_type == FrameType::Metadata {
+            if frame.payload.len() > MAX_CACHED_INIT_FRAME_BYTES {
+                return;
+            }
+            let key = (frame.app.clone(), frame.stream_name.clone());
+            let publisher_keys = self
+                .publisher_cache_keys
+                .entry(frame.publisher_conn_id)
+                .or_default();
+            if !publisher_keys.iter().any(|k| k == &key) {
+                publisher_keys.push(key.clone());
+            }
+            let cache = self.stream_cache.entry(key).or_insert_with(empty_stream_cache);
+            cache.metadata = Some(frame.payload.clone());
+            return;
+        }
+
+        let cache_kind = classify_cache_frame(frame.frame_type, &frame.payload);
+        let is_avc_header = cache_kind == CacheFrameKind::VideoSequenceHeader;
+        let is_keyframe = cache_kind == CacheFrameKind::VideoKeyframe;
+        let is_aac_header = cache_kind == CacheFrameKind::AudioSequenceHeader;
 
         // Frames that are neither a codec header nor a keyframe are relayed
         // live but never cached; don't create an empty entry for them.
@@ -782,7 +828,10 @@ impl Server {
                 }
             }
             if self.stream_cache.get(&key).is_some_and(|c| {
-                c.avc_header.is_none() && c.aac_header.is_none() && c.last_keyframe.is_none()
+                c.avc_header.is_none()
+                    && c.aac_header.is_none()
+                    && c.metadata.is_none()
+                    && c.last_keyframe.is_none()
             }) {
                 self.evict_stream_cache_key(&key);
             }
@@ -852,11 +901,7 @@ impl Server {
             return;
         }
 
-        let cache = self.stream_cache.entry(key).or_insert(StreamCache {
-            avc_header: None,
-            aac_header: None,
-            last_keyframe: None,
-        });
+        let cache = self.stream_cache.entry(key).or_insert_with(empty_stream_cache);
         if is_avc_header {
             cache.avc_header = Some(frame.payload.clone());
         } else if is_keyframe {
@@ -921,6 +966,15 @@ impl Server {
     }
 }
 
+fn empty_stream_cache() -> StreamCache {
+    StreamCache {
+        avc_header: None,
+        aac_header: None,
+        metadata: None,
+        last_keyframe: None,
+    }
+}
+
 impl Drop for Server {
     fn drop(&mut self) {
         self.running = false;
@@ -963,6 +1017,41 @@ mod tests {
             timestamp: 0,
             payload,
         }
+    }
+
+    #[test]
+    fn multitrack_video_sequence_header_is_cached() {
+        let mut server = test_server();
+        let payload = vec![
+            0x86, 0x11, b'a', b'v', b'c', b'1', 0x00, 0x00, 0x00, 0x03, 0xAA, 0xBB, 0xCC,
+        ];
+        server.cache_relay_frame(&relay_frame(FrameType::Video, payload));
+
+        let key = ("live".to_string(), "stream".to_string());
+        assert!(server.stream_cache.get(&key).unwrap().avc_header.is_some());
+    }
+
+    #[test]
+    fn enhanced_hevc_sequence_header_is_cached() {
+        let mut server = test_server();
+        let payload = vec![0x90, b'h', b'v', b'c', b'1', 0x01, 0x02];
+        server.cache_relay_frame(&relay_frame(FrameType::Video, payload));
+
+        let key = ("live".to_string(), "stream".to_string());
+        assert!(server.stream_cache.get(&key).unwrap().avc_header.is_some());
+    }
+
+    #[test]
+    fn on_metadata_script_is_cached() {
+        let mut server = test_server();
+        let mut payload = vec![0x02, 0x00, 0x0A];
+        payload.extend_from_slice(b"onMetaData");
+        payload.push(crate::amf::amf0::Amf0Type::Object as u8);
+        payload.extend_from_slice(&[0x00, 0x00, 0x09]);
+
+        server.cache_relay_frame(&relay_frame(FrameType::Script, payload));
+        let key = ("live".to_string(), "stream".to_string());
+        assert!(server.stream_cache.get(&key).unwrap().metadata.is_some());
     }
 
     #[test]

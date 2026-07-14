@@ -1,3 +1,13 @@
+librtmp2 (0.4.0-1) UNRELEASED; urgency=medium
+
+  * E-RTMP v2 connect negotiation (fourCcList, capsEx bitmask, videoFourCcInfoMap,
+    reconnect) and multitrack media relay with per-track callbacks and init-cache
+    replay for late-joining players.
+  * Enhanced init-frame classification for HEVC, AV1, and Opus; onMetaData caching
+    and relay; legacy pause/seek/receiveAudio/receiveVideo/closeStream commands.
+
+ -- OpenRTMP <info@openrtmp.org>  Tue, 14 Jul 2026 00:00:00 +0000
+
 librtmp2 (0.3.1-1) UNRELEASED; urgency=medium
 
   * Harden DNS resolution, RTMP ping keepalive, and publishing send-path

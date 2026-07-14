@@ -4,9 +4,12 @@
 
 use crate::amf::amf0;
 use crate::buffer::Buffer;
+use crate::ertmp::connect_amf;
 use crate::types::ConnectInfo;
 use crate::types::ErrorCode;
+use crate::types::NegotiatedCaps;
 use crate::types::Result;
+use crate::types::CAPS_EX_MASK_MULTITRACK;
 
 /// Maximum key/value pairs in a connect object
 const MAX_CONNECT_OBJECT_KEYS: usize = 256;
@@ -23,6 +26,7 @@ pub fn build_connect(
     flash_ver: &str,
     audio_codecs: i32,
     video_codecs: i32,
+    caps: Option<&NegotiatedCaps>,
 ) -> Result<()> {
     macro_rules! chk {
         ($expr:expr) => {
@@ -57,8 +61,32 @@ pub fn build_connect(
     chk!(amf0::write_number(buf, audio_codecs as f64));
     chk!(amf0::write_object_key(buf, "videoCodecs"));
     chk!(amf0::write_number(buf, video_codecs as f64));
+    if let Some(caps) = caps {
+        connect_amf::write_negotiated_caps(buf, caps)?;
+    }
     chk!(amf0::write_object_end(buf));
 
+    Ok(())
+}
+
+/// Build a NetConnection `_error` response.
+pub fn build_error(
+    buf: &mut Buffer,
+    transaction_id: f64,
+    code: &str,
+    description: &str,
+) -> Result<()> {
+    amf0::write_string(buf, "_error")?;
+    amf0::write_number(buf, transaction_id)?;
+    amf0::write_null(buf)?;
+    amf0::write_object_begin(buf)?;
+    amf0::write_object_key(buf, "level")?;
+    amf0::write_string(buf, "error")?;
+    amf0::write_object_key(buf, "code")?;
+    amf0::write_string(buf, code)?;
+    amf0::write_object_key(buf, "description")?;
+    amf0::write_string(buf, description)?;
+    amf0::write_object_end(buf)?;
     Ok(())
 }
 
@@ -189,6 +217,55 @@ pub fn read_connect(buf: &mut Buffer, info: &mut ConnectInfo) -> Result<()> {
 
         let mut key = [0u8; 256];
         let key_len = amf0::read_object_key(buf, &mut key)?;
+        let key_str = std::str::from_utf8(&key[..key_len]).unwrap_or("");
+
+        if key_str == "fourCcList" {
+            if connect_amf::read_four_cc_list_amf(buf, &mut info.four_cc_list).is_ok() {
+                info.has_four_cc_list = true;
+            } else {
+                let type_pos = buf.read_pos();
+                let _ = amf0::read_type(buf);
+                buf.set_read_pos(type_pos);
+                amf0::skip_value(buf)?;
+            }
+            continue;
+        }
+        if key_str == "capsEx" {
+            if connect_amf::read_caps_ex_amf(buf, &mut info.caps_ex, &mut info.caps_ex_mask).is_ok()
+            {
+                info.has_caps_ex = true;
+            } else {
+                let type_pos = buf.read_pos();
+                let _ = amf0::read_type(buf);
+                buf.set_read_pos(type_pos);
+                amf0::skip_value(buf)?;
+            }
+            continue;
+        }
+        if key_str == "videoFourCcInfoMap" {
+            if connect_amf::read_video_fourcc_info_map_amf(buf, &mut info.video_four_cc_info_map)
+                .is_ok()
+            {
+                info.has_video_four_cc_info_map = true;
+            } else {
+                let type_pos = buf.read_pos();
+                let _ = amf0::read_type(buf);
+                buf.set_read_pos(type_pos);
+                amf0::skip_value(buf)?;
+            }
+            continue;
+        }
+        if key_str == "reconnect" {
+            if connect_amf::read_reconnect_amf(buf, &mut info.reconnect).is_ok() {
+                info.has_reconnect = true;
+            } else {
+                let type_pos = buf.read_pos();
+                let _ = amf0::read_type(buf);
+                buf.set_read_pos(type_pos);
+                amf0::skip_value(buf)?;
+            }
+            continue;
+        }
 
         // Peek value type
         let type_pos = buf.read_pos();
@@ -197,7 +274,6 @@ pub fn read_connect(buf: &mut Buffer, info: &mut ConnectInfo) -> Result<()> {
 
         match value_type {
             amf0::Amf0Type::String => {
-                let key_str = std::str::from_utf8(&key[..key_len]).unwrap_or("");
                 match key_str {
                     "app" => read_string_checked(buf, &mut info.app)?,
                     "tcUrl" => read_string_checked(buf, &mut info.tc_url)?,
@@ -211,7 +287,6 @@ pub fn read_connect(buf: &mut Buffer, info: &mut ConnectInfo) -> Result<()> {
             }
             amf0::Amf0Type::Number => {
                 let value = read_number_value(buf)?;
-                let key_str = std::str::from_utf8(&key[..key_len]).unwrap_or("");
                 match key_str {
                     "audioCodecs" => info.audio_codecs = value as i32,
                     "videoCodecs" => info.video_codecs = value as i32,
@@ -270,14 +345,147 @@ pub fn read_play(buf: &mut Buffer, stream_name: &mut [u8]) -> Result<()> {
     Ok(())
 }
 
+/// Read a pause command. Returns the pause flag (true = pause, false = unpause).
+pub fn read_pause(buf: &mut Buffer) -> Result<bool> {
+    let mut name = [0u8; 64];
+    amf0::read_string(buf, &mut name)?;
+    read_number_value(buf)?;
+    amf0::skip_value(buf)?;
+    read_bool_value(buf)
+}
+
+/// Read a seek command. Returns the target time in milliseconds.
+pub fn read_seek(buf: &mut Buffer) -> Result<f64> {
+    let mut name = [0u8; 64];
+    amf0::read_string(buf, &mut name)?;
+    read_number_value(buf)?;
+    amf0::skip_value(buf)?;
+    read_number_value(buf)
+}
+
+/// Read receiveAudio / receiveVideo: the boolean enable flag.
+pub fn read_bool_command(buf: &mut Buffer) -> Result<bool> {
+    let mut name = [0u8; 64];
+    amf0::read_string(buf, &mut name)?;
+    read_number_value(buf)?;
+    amf0::skip_value(buf)?;
+    read_bool_value(buf)
+}
+
+/// Read a closeStream command.
+pub fn read_close_stream(buf: &mut Buffer) -> Result<u32> {
+    let mut name = [0u8; 64];
+    amf0::read_string(buf, &mut name)?;
+    read_number_value(buf)?;
+    amf0::skip_value(buf)?;
+    Ok(read_number_value(buf)? as u32)
+}
+
+/// Build a pause command.
+pub fn build_pause(buf: &mut Buffer, pause: bool) -> Result<()> {
+    amf0::write_string(buf, "pause")?;
+    amf0::write_number(buf, 0.0)?;
+    amf0::write_null(buf)?;
+    amf0::write_boolean(buf, pause)?;
+    Ok(())
+}
+
+/// Build a seek command.
+pub fn build_seek(buf: &mut Buffer, millis: f64) -> Result<()> {
+    amf0::write_string(buf, "seek")?;
+    amf0::write_number(buf, 0.0)?;
+    amf0::write_null(buf)?;
+    amf0::write_number(buf, millis)?;
+    Ok(())
+}
+
 /// Read a connect _result response.
 pub fn read_connect_result(buf: &mut Buffer) -> Result<f64> {
+    read_connect_result_with_caps(buf, None)
+}
+
+/// Read a connect `_result` and optionally capture negotiated E-RTMP caps.
+pub fn read_connect_result_with_caps(
+    buf: &mut Buffer,
+    caps: Option<&mut NegotiatedCaps>,
+) -> Result<f64> {
     let mut name = [0u8; 64];
     amf0::read_string(buf, &mut name)?;
     let txn = read_number_value(buf)?;
     amf0::skip_value(buf)?;
-    amf0::skip_value(buf)?;
+    if let Some(caps) = caps {
+        parse_connect_result_caps(buf, caps)?;
+    } else {
+        amf0::skip_value(buf)?;
+    }
     Ok(txn)
+}
+
+fn parse_connect_result_caps(buf: &mut Buffer, caps: &mut NegotiatedCaps) -> Result<()> {
+    let type_pos = buf.read_pos();
+    let ty = amf0::read_type(buf)?;
+    if ty != amf0::Amf0Type::Object {
+        buf.set_read_pos(type_pos);
+        amf0::skip_value(buf)?;
+        return Ok(());
+    }
+    let mut keys = 0usize;
+    while !amf0::is_object_end(buf) {
+        keys += 1;
+        if keys > amf0::MAX_OBJECT_KEYS {
+            return Err(ErrorCode::Amf);
+        }
+        let mut key = [0u8; 256];
+        let key_len = amf0::read_object_key(buf, &mut key)?;
+        let key_str = std::str::from_utf8(&key[..key_len]).unwrap_or("");
+        let type_pos = buf.read_pos();
+        match key_str {
+            "fourCcList" => {
+                if connect_amf::read_four_cc_list_amf(buf, &mut caps.four_cc_list).is_ok() {
+                    caps.has_four_cc_list = true;
+                } else {
+                    buf.set_read_pos(type_pos);
+                    amf0::skip_value(buf)?;
+                }
+            }
+            "capsEx" => {
+                if connect_amf::read_caps_ex_amf(buf, &mut caps.caps_ex, &mut caps.caps_ex_mask)
+                    .is_ok()
+                {
+                    caps.has_caps_ex = true;
+                    caps.multitrack_enabled =
+                        (caps.caps_ex_mask & CAPS_EX_MASK_MULTITRACK) != 0;
+                } else {
+                    buf.set_read_pos(type_pos);
+                    amf0::skip_value(buf)?;
+                }
+            }
+            "videoFourCcInfoMap" => {
+                if connect_amf::read_video_fourcc_info_map_amf(buf, &mut caps.video_four_cc_info_map)
+                    .is_ok()
+                {
+                    caps.has_video_four_cc_info_map = true;
+                } else {
+                    buf.set_read_pos(type_pos);
+                    amf0::skip_value(buf)?;
+                }
+            }
+            "reconnect" => {
+                if connect_amf::read_reconnect_amf(buf, &mut caps.reconnect).is_ok() {
+                    caps.has_reconnect = true;
+                } else {
+                    buf.set_read_pos(type_pos);
+                    amf0::skip_value(buf)?;
+                }
+            }
+            _ => {
+                amf0::skip_value(buf)?;
+            }
+        }
+    }
+    let mut end = [0u8; 3];
+    buf.read(&mut end).map_err(|_| ErrorCode::Amf)?;
+    Ok(())
 }
 
 /// Read a createStream _result response.
@@ -336,6 +544,15 @@ fn read_number_value(buf: &mut Buffer) -> Result<f64> {
     amf0::read_number(buf)
 }
 
+fn read_bool_value(buf: &mut Buffer) -> Result<bool> {
+    let ty = amf0::read_type(buf)?;
+    match ty {
+        amf0::Amf0Type::Boolean => amf0::read_boolean(buf),
+        amf0::Amf0Type::Number => Ok(amf0::read_number(buf)? != 0.0),
+        _ => Err(ErrorCode::Amf),
+    }
+}
+
 fn read_string_checked(buf: &mut Buffer, out: &mut [u8]) -> Result<()> {
     let mut byte = [0u8; 1];
     buf.read(&mut byte).map_err(|_| ErrorCode::Amf)?;
@@ -378,7 +595,7 @@ mod tests {
     }
 
     #[test]
-    fn read_connect_skips_four_cc_list_strict_array() {
+    fn read_connect_parses_four_cc_list_strict_array() {
         let mut buf = Buffer::new();
         amf0::write_string(&mut buf, "connect").unwrap();
         amf0::write_number(&mut buf, 1.0).unwrap();
@@ -394,6 +611,9 @@ mod tests {
         read_connect(&mut buf, &mut info).unwrap();
         let app_len = info.app.iter().position(|&b| b == 0).unwrap_or(0);
         assert_eq!(std::str::from_utf8(&info.app[..app_len]).unwrap(), "live");
+        assert!(info.has_four_cc_list);
+        assert_eq!(info.four_cc_list.count, 1);
+        assert_eq!(&info.four_cc_list.entries[0].cc[..4], b"av01");
     }
 
     #[test]

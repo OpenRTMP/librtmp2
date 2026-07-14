@@ -67,6 +67,7 @@ fn bench_amf_connect(c: &mut Criterion) {
                 "FMLE/3.0",
                 3191,
                 252,
+                None,
             )
             .unwrap();
             black_box(buf.write_pos())

@@ -12,6 +12,11 @@ pub struct Stream {
     pub is_playing: bool,
     /// Stream name from the `publish` or `play` command.
     pub name: String,
+    /// Set by the RTMP `pause` command.
+    pub paused: bool,
+    /// Honored by server relay when forwarding to this player.
+    pub receive_audio: bool,
+    pub receive_video: bool,
 }
 
 impl Stream {
@@ -22,6 +27,9 @@ impl Stream {
             is_publishing: false,
             is_playing: false,
             name: String::new(),
+            paused: false,
+            receive_audio: true,
+            receive_video: true,
         }
     }
 }

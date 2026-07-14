@@ -204,6 +204,8 @@ pub struct Frame {
     pub video_frame_type: u8,
     /// Script/metadata flag
     pub is_metadata: u8,
+    /// E-RTMP multitrack id (0 = default track; 255 = not set / single-track).
+    pub track_id: u8,
 }
 
 impl Default for Frame {
@@ -223,6 +225,7 @@ impl Default for Frame {
             video_fourcc: FourCc::default(),
             video_frame_type: 0,
             is_metadata: 0,
+            track_id: u8::MAX,
         }
     }
 }
@@ -349,11 +352,23 @@ pub const ERTMP_PACKET_TYPE_CODED_FRAMES_X: u8 = 3;
 pub const ERTMP_PACKET_TYPE_METADATA: u8 = 4;
 pub const ERTMP_PACKET_TYPE_MPEG2TS_SEQUENCE_START: u8 = 5;
 
-/// Enhanced RTMP v1 AudioPacketType
+/// Enhanced RTMP v1/v2 AudioPacketType
 pub const ERTMP_AUDIO_PACKET_TYPE_SEQUENCE_START: u8 = 0;
 pub const ERTMP_AUDIO_PACKET_TYPE_CODED_FRAMES: u8 = 1;
-pub const ERTMP_AUDIO_PACKET_TYPE_MULTICHANNEL: u8 = 2;
+pub const ERTMP_AUDIO_PACKET_TYPE_SEQUENCE_END: u8 = 2;
 pub const ERTMP_AUDIO_PACKET_TYPE_METADATA: u8 = 3;
+pub const ERTMP_AUDIO_PACKET_TYPE_MULTICHANNEL: u8 = 4;
+pub const ERTMP_AUDIO_PACKET_TYPE_MULTITRACK: u8 = 5;
+pub const ERTMP_VIDEO_PACKET_TYPE_MULTITRACK: u8 = 6;
+
+/// E-RTMP v2 `CapsExMask` bits carried in the connect `capsEx` AMF number.
+pub const CAPS_EX_MASK_RECONNECT: u32 = 0x01;
+pub const CAPS_EX_MASK_MULTITRACK: u32 = 0x02;
+pub const CAPS_EX_MASK_MODEX: u32 = 0x04;
+pub const CAPS_EX_MASK_TIMESTAMP_NANO: u32 = 0x08;
+pub const CAPS_EX_MASK_SERVER_DEFAULT: u32 = CAPS_EX_MASK_MULTITRACK
+    | CAPS_EX_MASK_MODEX
+    | CAPS_EX_MASK_TIMESTAMP_NANO;
 
 /// Enhanced RTMP v1 AudioSampleRate (legacy)
 pub const ERTMP_AUDIO_RATE_5500: u8 = 0;
@@ -582,6 +597,21 @@ impl Default for ScriptTag {
 
 /* ── Connect info ── */
 
+/// Negotiated E-RTMP capability set returned in connect `_result`.
+#[derive(Debug, Clone, Default)]
+pub struct NegotiatedCaps {
+    pub four_cc_list: FourCcList,
+    pub caps_ex: CapsExit,
+    pub video_four_cc_info_map: VideoFourCcInfoMap,
+    pub reconnect: Reconnect,
+    pub caps_ex_mask: u32,
+    pub has_four_cc_list: bool,
+    pub has_caps_ex: bool,
+    pub has_video_four_cc_info_map: bool,
+    pub has_reconnect: bool,
+    pub multitrack_enabled: bool,
+}
+
 /// Connect command information.
 #[derive(Debug, Clone)]
 #[repr(C)]
@@ -595,6 +625,15 @@ pub struct ConnectInfo {
     pub flash_ver: [u8; 64],
     pub audio_codecs: i32,
     pub video_codecs: i32,
+    pub four_cc_list: FourCcList,
+    pub caps_ex: CapsExit,
+    pub video_four_cc_info_map: VideoFourCcInfoMap,
+    pub reconnect: Reconnect,
+    pub caps_ex_mask: u32,
+    pub has_four_cc_list: bool,
+    pub has_caps_ex: bool,
+    pub has_video_four_cc_info_map: bool,
+    pub has_reconnect: bool,
 }
 
 impl Default for ConnectInfo {
@@ -609,6 +648,15 @@ impl Default for ConnectInfo {
             flash_ver: [0; 64],
             audio_codecs: 0,
             video_codecs: 0,
+            four_cc_list: FourCcList::default(),
+            caps_ex: CapsExit::default(),
+            video_four_cc_info_map: VideoFourCcInfoMap::default(),
+            reconnect: Reconnect::default(),
+            caps_ex_mask: 0,
+            has_four_cc_list: false,
+            has_caps_ex: false,
+            has_video_four_cc_info_map: false,
+            has_reconnect: false,
         }
     }
 }

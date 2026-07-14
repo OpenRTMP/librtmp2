@@ -13,7 +13,26 @@ begin at `1.0.0`.
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-07-14
+
 ### Added
+- E-RTMP v2 connect negotiation on the live session path: `fourCcList`, numeric
+  `capsEx` capability bitmask, `videoFourCcInfoMap`, `reconnect`, and NetConnection
+  `_error` responses when capability negotiation fails.
+- Multitrack media support (E-RTMP v2 `AudioPacketType::Multitrack` /
+  `VideoPacketType::Multitrack`): opaque relay of full multitrack messages,
+  per-track `on_frame_cb` delivery with `Frame.track_id`, and init-cache replay
+  of multitrack sequence-start headers to late-joining players.
+- Enhanced init-frame classification via `exvideo`/`exaudio` parsers (HEVC, AV1,
+  Opus, AAC) in `media/init_cache.rs`, replacing legacy nibble-only detection.
+- `onMetaData` script caching in `StreamCache` and replay to players that join
+  after the publisher has already sent metadata.
+- Client receive path for AMF0 `onMetaData` and RTMP Aggregate messages
+  (`0x16`), unpacking sub-tags into the normal A/V frame handler.
+- Legacy RTMP commands on the server session path: `pause`, `seek`,
+  `receiveAudio`, `receiveVideo`, and `closeStream`.
+- User Control message handling for `StreamBegin`, `StreamEOF`, and
+  `SetBufferLength`; AMF3 Shared Object messages are accepted as no-ops.
 - `examples/dump_frames.rs` — play a stream and print one line per received frame
   (type, timestamp, size, codec details) for debugging live publishers.
 - libFuzzer harnesses under `fuzz/` for chunk reading, handshake parsing, AMF0
@@ -23,8 +42,17 @@ begin at `1.0.0`.
   libFuzzer smoke runs).
 
 ### Changed
+- Server and client `connect` exchanges now advertise and negotiate E-RTMP v2
+  capabilities (including multitrack) instead of ignoring enhanced connect fields.
+- `Frame` now carries populated codec/header fields (`video_fourcc`, `audio_fourcc`,
+  composition time, etc.) and optional `track_id` for multitrack callbacks.
 - Removed `docs/roadmap.md`; release status lives in `README.md` and
   `CHANGELOG.md`.
+
+### Fixed
+- ModEx-prefixed media payloads are stripped before relay and codec detection.
+- Complex RTMP handshake (digest/HMAC) is detected and rejected with
+  `ErrorCode::Unsupported` instead of hanging or mis-parsing.
 
 ## [0.3.1] — 2026-07-13
 
@@ -245,7 +273,8 @@ and others.
 - Protocol mapping documents for legacy, E-RTMP v1, and E-RTMP v2
 - `CONTRIBUTING.md` guidelines
 
-[Unreleased]: https://github.com/OpenRTMP/librtmp2/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/OpenRTMP/librtmp2/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/OpenRTMP/librtmp2/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/OpenRTMP/librtmp2/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/OpenRTMP/librtmp2/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/OpenRTMP/librtmp2/compare/v0.2.0...v0.2.1
