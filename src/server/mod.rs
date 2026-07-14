@@ -1150,7 +1150,8 @@ mod tests {
     fn multitrack_video_sequence_header_is_cached() {
         let mut server = test_server();
         let payload = vec![
-            0x86, 0x10, b'a', b'v', b'c', b'1', 0x00, 0x00, 0x00, 0x03, 0xAA, 0xBB, 0xCC,
+            0x86, 0x10, b'a', b'v', b'c', b'1', 0x00, 0x00, 0x00, 0x01, 0xAA, 0x01, 0x00,
+            0x00, 0x01, 0xBB,
         ];
         server.cache_relay_frame(&relay_frame(FrameType::Video, payload));
 
