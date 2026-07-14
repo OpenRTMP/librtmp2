@@ -384,7 +384,7 @@ pub fn read_close_stream(buf: &mut Buffer) -> Result<Option<u32>> {
     }
     let type_pos = buf.read_pos();
     let ty = amf0::read_type(buf)?;
-    if ty == Amf0Type::Number {
+    if ty == amf0::Amf0Type::Number {
         Ok(Some(read_number_value(buf)? as u32))
     } else {
         buf.set_read_pos(type_pos);
