@@ -54,6 +54,25 @@ pub fn read_video_fourcc_info_map_amf(buf: &mut Buffer, map: &mut VideoFourCcInf
             let data = read_amf_binary_blob(buf, ty)?;
             video_fourcc_info_map_parse(map, &data).map(|_| ())
         }
+        Amf0Type::Object => {
+            let mut keys = 0usize;
+            while !amf0::is_object_end(buf) {
+                keys += 1;
+                if keys > amf0::MAX_OBJECT_KEYS {
+                    return Err(ErrorCode::Amf);
+                }
+                let mut key = [0u8; 256];
+                let key_len = amf0::read_object_key(buf, &mut key)?;
+                if key_len >= 4 && map.count < crate::types::MAX_FOURCCS {
+                    map.entries[map.count].cc[..4].copy_from_slice(&key[..4]);
+                    map.count += 1;
+                }
+                amf0::skip_value(buf)?;
+            }
+            let mut end = [0u8; 3];
+            buf.read(&mut end).map_err(|_| ErrorCode::Amf)?;
+            Ok(())
+        }
         _ => Err(ErrorCode::Amf),
     }
 }
@@ -282,7 +301,7 @@ pub fn negotiate_caps(client: &crate::types::ConnectInfo) -> NegotiatedCaps {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::FourCcList;
+    use crate::types::{FourCcList, VideoFourCcInfoMap};
 
     #[test]
     fn four_cc_list_strict_array_round_trip() {
@@ -298,6 +317,23 @@ mod tests {
         assert_eq!(parsed.count, 2);
         assert_eq!(&parsed.entries[0].cc[..4], b"av01");
         assert_eq!(&parsed.entries[1].cc[..4], b"hvc1");
+    }
+
+    #[test]
+    fn video_fourcc_info_map_object_parses_fourcc_keys() {
+        let mut buf = Buffer::new();
+        buf.write(&[Amf0Type::Object as u8]).unwrap();
+        amf0::write_object_key(&mut buf, "av01").unwrap();
+        amf0::write_number(&mut buf, 1.0).unwrap();
+        amf0::write_object_key(&mut buf, "hvc1").unwrap();
+        amf0::write_number(&mut buf, 2.0).unwrap();
+        amf0::write_object_end(&mut buf).unwrap();
+
+        let mut map = VideoFourCcInfoMap::default();
+        read_video_fourcc_info_map_amf(&mut buf, &mut map).unwrap();
+        assert_eq!(map.count, 2);
+        assert_eq!(&map.entries[0].cc[..4], b"av01");
+        assert_eq!(&map.entries[1].cc[..4], b"hvc1");
     }
 
     #[test]

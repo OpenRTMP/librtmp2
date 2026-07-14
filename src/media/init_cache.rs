@@ -228,11 +228,22 @@ mod tests {
     #[test]
     fn multitrack_video_sequence_start_is_cached() {
         let payload = vec![
-            0x86, 0x01, b'a', b'v', b'c', b'1', 0x00, 0x00, 0x00, 0x03, 0xAA, 0xBB, 0xCC,
+            0x86, 0x10, b'a', b'v', b'c', b'1', 0x00, 0x00, 0x00, 0x03, 0xAA, 0xBB, 0xCC,
         ];
         assert_eq!(
             classify_cache_frame(FrameType::Video, &payload),
             CacheFrameKind::VideoSequenceHeader
+        );
+    }
+
+    #[test]
+    fn multitrack_video_keyframe_is_cached_from_outer_header() {
+        let payload = vec![
+            0x96, 0x11, b'a', b'v', b'c', b'1', 0x00, 0x00, 0x00, 0x02, 0xDE, 0xAD,
+        ];
+        assert_eq!(
+            classify_cache_frame(FrameType::Video, &payload),
+            CacheFrameKind::VideoKeyframe
         );
     }
 

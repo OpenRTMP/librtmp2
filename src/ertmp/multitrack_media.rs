@@ -55,8 +55,8 @@ pub fn foreach_track(
         return false;
     }
 
-    let multitrack_type = payload[1] & 0x0F;
-    let inner_packet_type = (payload[1] >> 4) & 0x0F;
+    let multitrack_type = (payload[1] >> 4) & 0x0F;
+    let inner_packet_type = payload[1] & 0x0F;
     let mut pos = 2usize;
     let mut delivered = false;
 
@@ -124,6 +124,13 @@ pub fn multitrack_has_sequence_start(frame_type: FrameType, payload: &[u8]) -> b
 
 /// True when a multitrack container carries at least one video keyframe track.
 pub fn multitrack_has_keyframe(payload: &[u8]) -> bool {
+    if !is_multitrack_container(FrameType::Video, payload) {
+        return false;
+    }
+    // Coded multitrack video carries the keyframe flag on the outer ExVideo header.
+    if (payload[0] >> 4) & 0x07 == 1 {
+        return true;
+    }
     let mut found = false;
     let _ = foreach_track(FrameType::Video, payload, |track| {
         if track.packet_type != 1 {
@@ -154,7 +161,7 @@ mod tests {
         // Enhanced multitrack header + shared avc1 fourCC + two tracks.
         let mut msg = vec![
             0x86, // ex header, multitrack packet type 6
-            0x11, // ManyTracks + inner SequenceStart (0)
+            0x10, // ManyTracks + inner SequenceStart (0)
             b'a', b'v', b'c', b'1',
             0x00, // track 0
             0x00, 0x00, 0x03, // size
@@ -164,6 +171,14 @@ mod tests {
             0xDD, 0xEE,
         ];
         msg
+    }
+
+    #[test]
+    fn multitrack_keyframe_detected_from_outer_header() {
+        let payload = vec![
+            0x96, 0x11, b'a', b'v', b'c', b'1', 0x00, 0x00, 0x00, 0x02, 0xDE, 0xAD,
+        ];
+        assert!(multitrack_has_keyframe(&payload));
     }
 
     #[test]

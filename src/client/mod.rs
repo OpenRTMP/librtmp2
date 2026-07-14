@@ -21,6 +21,9 @@ use crate::net;
 use crate::transport::Transport;
 use crate::types::*;
 
+/// Cap aggregate sub-tags per message (matches server-side limit).
+const MAX_AGGREGATE_SUBTAGS: usize = 4096;
+
 /// Handshake payload size (mirrors `handshake::HANDSHAKE_SIZE`, which is private).
 const HANDSHAKE_SIZE: usize = 1536;
 
@@ -564,8 +567,14 @@ impl Client {
         let mut pos = 0usize;
         let mut have_base = false;
         let mut sub_base_ts: u32 = 0;
+        let mut subtags = 0usize;
 
         while pos + 11 <= payload.len() {
+            if subtags >= MAX_AGGREGATE_SUBTAGS {
+                return Err(ErrorCode::Protocol);
+            }
+            subtags += 1;
+
             let tag_type = payload[pos];
             let data_size = ((payload[pos + 1] as u32) << 16)
                 | ((payload[pos + 2] as u32) << 8)
@@ -1250,7 +1259,7 @@ mod tests {
             LazyLock::new(|| Mutex::new(Vec::new()));
 
         let payload = vec![
-            0x86, 0x11, b'a', b'v', b'c', b'1', 0x00, 0x00, 0x00, 0x03, 0xAA, 0xBB, 0xCC, 0x01,
+            0x86, 0x10, b'a', b'v', b'c', b'1', 0x00, 0x00, 0x00, 0x03, 0xAA, 0xBB, 0xCC, 0x01,
             0x00, 0x00, 0x02, 0xDD, 0xEE,
         ];
         let mut wire = Buffer::new();

@@ -1337,7 +1337,11 @@ impl Conn {
                 }
             }
             "closeStream" => {
-                let target_id = command::read_close_stream(&mut buf).unwrap_or(0);
+                let target_id = command::read_close_stream(&mut buf)
+                    .ok()
+                    .flatten()
+                    .or_else(|| self.current_stream.as_ref().map(|s| s.stream_id))
+                    .unwrap_or(0);
                 if self
                     .current_stream
                     .as_ref()
@@ -1658,7 +1662,7 @@ fn strip_leading_modex(payload: &[u8], caps_ex_mask: u32) -> &[u8] {
         let consumed = match ty {
             0 => 1,
             1 if rest.len() >= 9 => 9,
-            _ => 1,
+            _ => break,
         };
         if pos + consumed > payload.len() {
             break;
@@ -2294,7 +2298,7 @@ mod tests {
         conn.on_frame_cb = Some(record_track_id);
 
         let payload = vec![
-            0x86, 0x11, b'a', b'v', b'c', b'1', 0x00, 0x00, 0x00, 0x03, 0xAA, 0xBB, 0xCC, 0x01,
+            0x86, 0x10, b'a', b'v', b'c', b'1', 0x00, 0x00, 0x00, 0x03, 0xAA, 0xBB, 0xCC, 0x01,
             0x00, 0x00, 0x02, 0xDD, 0xEE,
         ];
         conn.handle_media_frame(1, FrameType::Video, 0, &payload)
@@ -2316,7 +2320,7 @@ mod tests {
         conn.on_frame_cb = Some(|_| {});
 
         let payload = vec![
-            0x86, 0x11, b'a', b'v', b'c', b'1', 0x00, 0x00, 0x00, 0x03, 0xAA, 0xBB, 0xCC, 0x01,
+            0x86, 0x10, b'a', b'v', b'c', b'1', 0x00, 0x00, 0x00, 0x03, 0xAA, 0xBB, 0xCC, 0x01,
             0x00, 0x00, 0x02, 0xDD, 0xEE,
         ];
         conn.handle_media_frame(1, FrameType::Video, 0, &payload)
@@ -2349,6 +2353,15 @@ mod tests {
         let mut payload = vec![0x80];
         payload.extend_from_slice(&[0x90, b'a', b'v', b'0', b'1']);
         assert_eq!(strip_leading_modex(&payload, 0), payload.as_slice());
+    }
+
+    #[test]
+    fn strip_leading_modex_preserves_legacy_aac_with_modex_cap() {
+        let payload = vec![0xAF, 0x00, 0x12, 0x10];
+        assert_eq!(
+            strip_leading_modex(&payload, CAPS_EX_MASK_MODEX),
+            payload.as_slice()
+        );
     }
 
     #[test]

@@ -372,13 +372,24 @@ pub fn read_bool_command(buf: &mut Buffer) -> Result<bool> {
     read_bool_value(buf)
 }
 
-/// Read a closeStream command.
-pub fn read_close_stream(buf: &mut Buffer) -> Result<u32> {
+/// Read a closeStream command. Returns `None` when the peer sends the usual
+/// three-argument form (stream id comes from the RTMP message stream id).
+pub fn read_close_stream(buf: &mut Buffer) -> Result<Option<u32>> {
     let mut name = [0u8; 64];
     amf0::read_string(buf, &mut name)?;
     read_number_value(buf)?;
     amf0::skip_value(buf)?;
-    Ok(read_number_value(buf)? as u32)
+    if buf.available() == 0 {
+        return Ok(None);
+    }
+    let type_pos = buf.read_pos();
+    let ty = amf0::read_type(buf)?;
+    if ty == Amf0Type::Number {
+        Ok(Some(read_number_value(buf)? as u32))
+    } else {
+        buf.set_read_pos(type_pos);
+        Ok(None)
+    }
 }
 
 /// Build a pause command.
@@ -720,5 +731,15 @@ mod tests {
         amf0::write_object_end(&mut buf).unwrap();
 
         assert_eq!(read_onstatus(&mut buf), Err(ErrorCode::Amf));
+    }
+
+    #[test]
+    fn read_close_stream_accepts_three_argument_form() {
+        let mut buf = Buffer::new();
+        amf0::write_string(&mut buf, "closeStream").unwrap();
+        amf0::write_number(&mut buf, 2.0).unwrap();
+        amf0::write_null(&mut buf).unwrap();
+
+        assert_eq!(read_close_stream(&mut buf).unwrap(), None);
     }
 }
