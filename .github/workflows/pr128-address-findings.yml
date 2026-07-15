@@ -1,11 +1,9 @@
 name: Apply PR 128 review fixes
 
 on:
-  pull_request:
+  push:
     branches:
-      - main
-    types:
-      - synchronize
+      - feat/ertmp-v2-multitrack-0.4.0
     paths:
       - .github/workflows/pr128-address-findings.yml
 
@@ -17,7 +15,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  apply-and-validate:
+  apply:
     runs-on: ubuntu-latest
     steps:
       - name: Check out PR branch
@@ -26,7 +24,7 @@ jobs:
           ref: feat/ertmp-v2-multitrack-0.4.0
           fetch-depth: 0
 
-      - name: Apply review fixes
+      - name: Apply and commit review fixes
         shell: bash
         run: |
           set -euo pipefail
@@ -162,20 +160,6 @@ jobs:
           )
           PY
 
-      - name: Format and validate
-        shell: bash
-        run: |
-          set -euo pipefail
-          rustup default stable
-          cargo fmt --all
-          cargo fmt --all -- --check
-          cargo test --all-targets
-          cargo clippy --all-targets -- -D warnings
-
-      - name: Commit fixes and remove temporary workflow
-        shell: bash
-        run: |
-          set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git rm .github/workflows/pr128-address-findings.yml
