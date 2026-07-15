@@ -1,0 +1,269 @@
+name: Apply latest PR 128 review fixes
+
+on:
+  push:
+    branches: [feat/ertmp-v2-multitrack-0.4.0]
+    paths: [.github/workflows/apply-qodo-findings.yml]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: apply-qodo-findings-pr128
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/ertmp-v2-multitrack-0.4.0
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Apply fixes
+        shell: python
+        run: |
+          from pathlib import Path
+
+          def replace_once(path, old, new):
+              p = Path(path)
+              text = p.read_text()
+              if text.count(old) != 1:
+                  raise SystemExit(f"expected exactly one match in {path}, got {text.count(old)}")
+              p.write_text(text.replace(old, new, 1))
+
+          replace_once('src/ertmp/connect_amf.rs', '''        let mut cc = vec![0u8; len];
+        buf.read(&mut cc).map_err(|_| ErrorCode::Amf)?;
+        Ok(i32::from_be_bytes([cc[0], cc[1], cc[2], cc[3]]))''', '''        let mut cc = [0u8; 4];
+        buf.read(&mut cc).map_err(|_| ErrorCode::Amf)?;
+        if len > cc.len() {
+            buf.drain(len - cc.len());
+        }
+        Ok(i32::from_be_bytes(cc))''')
+
+          replace_once('src/session/conn.rs', '''    fn pending_relay_bytes(&self) -> usize {
+        self.pending_relay.iter().map(|f| f.payload.len()).sum()
+    }''', '''    fn pending_relay_bytes(&self) -> usize {
+        self.pending_relay
+            .iter()
+            .map(|f| f.payload.len().saturating_add(f.cache_payload.len()))
+            .sum()
+    }''')
+
+          replace_once('src/session/conn.rs', '''            || self.pending_relay_bytes() + payload.len() > self.max_pending_relay_bytes''', '''            || self
+                .pending_relay_bytes()
+                .saturating_add(payload.len())
+                .saturating_add(cache_payload.len())
+                > self.max_pending_relay_bytes''')
+
+          replace_once('src/media/init_cache.rs', '''use crate::ertmp::{exaudio, exvideo, fourcc};''', '''use crate::ertmp::{exaudio, exvideo, fourcc};''')
+
+          marker = '''pub fn populate_av_frame(frame: &mut Frame, payload: &[u8]) {
+'''
+          addition = '''/// Fill codec/header fields for a per-track callback extracted from an E-RTMP
+/// multitrack container. The inner track payload does not contain an enhanced
+/// tag header, so its metadata must come from the container descriptor.
+pub fn populate_multitrack_frame(
+    frame: &mut Frame,
+    fourcc_value: [u8; 4],
+    packet_type: u8,
+    video_frame_type: u8,
+) {
+    match frame.frame_type {
+        FrameType::Video => {
+            frame.video_fourcc = FourCc { cc: fourcc_value };
+            frame.video_frame_type = video_frame_type;
+            frame.video_codec = fourcc::fourcc_to_video_codec(&fourcc_value)
+                .unwrap_or(VideoCodec::H264);
+            frame.is_metadata = u8::from(packet_type == crate::types::ERTMP_PACKET_TYPE_METADATA);
+        }
+        FrameType::Audio => {
+            frame.audio_fourcc = FourCc { cc: fourcc_value };
+            frame.audio_codec = fourcc::fourcc_to_audio_codec(&fourcc_value)
+                .unwrap_or(AudioCodec::Pcm);
+            frame.is_metadata = u8::from(packet_type == crate::types::ERTMP_AUDIO_PACKET_TYPE_METADATA);
+        }
+        FrameType::Script | FrameType::Metadata => {
+            frame.is_metadata = 1;
+        }
+    }
+}
+
+'''
+          p = Path('src/media/init_cache.rs')
+          text = p.read_text()
+          if addition not in text:
+              if text.count(marker) != 1:
+                  raise SystemExit('populate_av_frame marker missing')
+              p.write_text(text.replace(marker, addition + marker, 1))
+
+          replace_once('src/session/conn.rs', '''use crate::media::{is_on_metadata_payload, normalize_modex_payload, populate_av_frame};''', '''use crate::media::{
+    is_on_metadata_payload, normalize_modex_payload, populate_av_frame,
+    populate_multitrack_frame,
+};''')
+
+          replace_once('src/session/conn.rs', '''            let mut track_ranges: Vec<(u8, usize, usize)> = Vec::new();
+            foreach_track(frame_type, parse_payload, |track| {
+                let start = track.payload.as_ptr() as usize - parse_payload.as_ptr() as usize;
+                track_ranges.push((track.track_id, start, track.payload.len()));
+            });''', '''            let mut track_ranges: Vec<(u8, usize, usize, [u8; 4], u8, u8)> = Vec::new();
+            foreach_track(frame_type, parse_payload, |track| {
+                let start = track.payload.as_ptr() as usize - parse_payload.as_ptr() as usize;
+                track_ranges.push((
+                    track.track_id,
+                    start,
+                    track.payload.len(),
+                    track.fourcc,
+                    track.packet_type,
+                    track.video_frame_type,
+                ));
+            });''')
+
+          replace_once('src/session/conn.rs', '''                for (track_id, start, len) in track_ranges {
+                    self.invoke_on_frame_cb(
+                        cb,
+                        frame_type,
+                        timestamp,
+                        track_id,
+                        &parse_payload[start..start + len],
+                    );
+                }''', '''                for (track_id, start, len, fourcc, packet_type, video_frame_type) in track_ranges {
+                    self.invoke_multitrack_on_frame_cb(
+                        cb,
+                        frame_type,
+                        timestamp,
+                        track_id,
+                        fourcc,
+                        packet_type,
+                        video_frame_type,
+                        &parse_payload[start..start + len],
+                    );
+                }''')
+
+          conn_marker = '''    fn invoke_on_frame_cb(
+'''
+          conn_helper = '''    fn invoke_multitrack_on_frame_cb(
+        &mut self,
+        cb: fn(&Frame),
+        frame_type: FrameType,
+        timestamp: u32,
+        track_id: u8,
+        fourcc: [u8; 4],
+        packet_type: u8,
+        video_frame_type: u8,
+        payload: &[u8],
+    ) {
+        self.frame_cb_scratch.clear();
+        self.frame_cb_scratch.extend_from_slice(payload);
+        let mut frame = Frame {
+            frame_type,
+            timestamp,
+            size: self.frame_cb_scratch.len() as u32,
+            data: self.frame_cb_scratch.as_ptr(),
+            track_id,
+            ..Default::default()
+        };
+        populate_multitrack_frame(&mut frame, fourcc, packet_type, video_frame_type);
+        cb(&frame);
+    }
+
+'''
+          p = Path('src/session/conn.rs')
+          text = p.read_text()
+          if conn_helper not in text:
+              if text.count(conn_marker) != 1:
+                  raise SystemExit('conn callback marker missing')
+              p.write_text(text.replace(conn_marker, conn_helper + conn_marker, 1))
+
+          replace_once('src/client/mod.rs', '''use crate::media::{is_on_metadata_payload, populate_av_frame};''', '''use crate::media::{is_on_metadata_payload, populate_av_frame, populate_multitrack_frame};''')
+
+          replace_once('src/client/mod.rs', '''        let mut track_ranges: Vec<(u8, usize, usize)> = Vec::new();
+        foreach_track(frame_type, &payload, |track| {
+            let start = track.payload.as_ptr() as usize - payload.as_ptr() as usize;
+            track_ranges.push((track.track_id, start, track.payload.len()));
+        });''', '''        let mut track_ranges: Vec<(u8, usize, usize, [u8; 4], u8, u8)> = Vec::new();
+        foreach_track(frame_type, &payload, |track| {
+            let start = track.payload.as_ptr() as usize - payload.as_ptr() as usize;
+            track_ranges.push((
+                track.track_id,
+                start,
+                track.payload.len(),
+                track.fourcc,
+                track.packet_type,
+                track.video_frame_type,
+            ));
+        });''')
+
+          replace_once('src/client/mod.rs', '''            for (track_id, start, len) in track_ranges {
+                self.invoke_on_frame_cb(
+                    cb,
+                    frame_type,
+                    timestamp,
+                    track_id,
+                    &payload[start..start + len],
+                );
+            }''', '''            for (track_id, start, len, fourcc, packet_type, video_frame_type) in track_ranges {
+                self.invoke_multitrack_on_frame_cb(
+                    cb,
+                    frame_type,
+                    timestamp,
+                    track_id,
+                    fourcc,
+                    packet_type,
+                    video_frame_type,
+                    &payload[start..start + len],
+                );
+            }''')
+
+          client_marker = '''    fn invoke_on_frame_cb(
+'''
+          client_helper = '''    fn invoke_multitrack_on_frame_cb(
+        &mut self,
+        cb: fn(&Frame),
+        frame_type: FrameType,
+        timestamp: u32,
+        track_id: u8,
+        fourcc: [u8; 4],
+        packet_type: u8,
+        video_frame_type: u8,
+        payload: &[u8],
+    ) {
+        self.frame_cb_scratch.clear();
+        self.frame_cb_scratch.extend_from_slice(payload);
+        let mut frame = Frame {
+            frame_type,
+            timestamp,
+            size: self.frame_cb_scratch.len() as u32,
+            data: self.frame_cb_scratch.as_ptr(),
+            track_id,
+            ..Default::default()
+        };
+        populate_multitrack_frame(&mut frame, fourcc, packet_type, video_frame_type);
+        cb(&frame);
+    }
+
+'''
+          p = Path('src/client/mod.rs')
+          text = p.read_text()
+          if client_helper not in text:
+              if text.count(client_marker) != 1:
+                  raise SystemExit('client callback marker missing')
+              p.write_text(text.replace(client_marker, client_helper + client_marker, 1))
+
+          # The workflow is one-shot and removes itself from the branch.
+          Path('.github/workflows/apply-qodo-findings.yml').unlink()
+      - name: Validate
+        run: |
+          cargo fmt --all -- --check
+          cargo test --all-targets
+          cargo clippy --all-targets -- -D warnings
+      - name: Commit fixes
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -A
+          git commit -m "fix: address latest PR review findings"
+          git push origin HEAD:feat/ertmp-v2-multitrack-0.4.0
