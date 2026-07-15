@@ -1,8 +1,9 @@
 name: Apply PR 128 review fixes (one-shot)
 
 on:
-  push:
-    branches: [feat/ertmp-v2-multitrack-0.4.0]
+  pull_request:
+    branches: [main]
+    types: [synchronize]
     paths: [.github/workflows/apply-qodo-findings.yml]
 
 permissions:
