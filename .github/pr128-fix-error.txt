@@ -1,0 +1,10 @@
+Traceback (most recent call last):
+  File "<stdin>", line 6, in <module>
+  File "<frozen runpy>", line 286, in run_path
+  File "<frozen runpy>", line 98, in _run_module_code
+  File "<frozen runpy>", line 88, in _run_code
+  File ".github/scripts/apply_pr128_fixes.py", line 29, in <module>
+    replace_once(
+  File ".github/scripts/apply_pr128_fixes.py", line 14, in replace_once
+    raise RuntimeError(f"expected exactly one match in {path}, got {count}")
+RuntimeError: expected exactly one match in src/ertmp/connect_amf.rs, got 0
