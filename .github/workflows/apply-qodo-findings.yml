@@ -33,8 +33,19 @@ jobs:
           python - <<'PY'
           from pathlib import Path
           import runpy
+          import textwrap
           import traceback
 
+          def preserve_rust_indent(value: str) -> str:
+              lines = value.splitlines()
+              if lines and not lines[0].strip():
+                  lines.pop(0)
+              if lines and not lines[-1].strip():
+                  lines.pop()
+              return "\n".join(lines)
+
+          textwrap.dedent = preserve_rust_indent
+          Path(".github/pr128-fix-error.txt").unlink(missing_ok=True)
           try:
               runpy.run_path(".github/scripts/apply_pr128_fixes.py", run_name="__main__")
           except BaseException:
