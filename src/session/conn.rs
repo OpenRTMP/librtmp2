@@ -380,7 +380,9 @@ impl Conn {
         payload: &[u8],
         cache_payload: &[u8],
     ) -> Result<()> {
-        let cache_payload = if cache_payload == payload {
+        let cache_payload = if cache_payload.len() == payload.len()
+            && std::ptr::eq(cache_payload.as_ptr(), payload.as_ptr())
+        {
             None
         } else {
             Some(cache_payload.to_vec())
@@ -470,33 +472,20 @@ impl Conn {
             .saturating_add(payload.len() as u64);
 
         if let Some(cb) = self.on_frame_cb {
-            let mut track_ranges: Vec<(u8, usize, usize, [u8; 4], u8, u8)> = Vec::new();
-            foreach_track(frame_type, parse_payload, |track| {
-                let start = track.payload.as_ptr() as usize - parse_payload.as_ptr() as usize;
-                track_ranges.push((
+            let had_multitrack = foreach_track(frame_type, parse_payload, |track| {
+                self.invoke_multitrack_on_frame_cb(
+                    cb,
+                    frame_type,
+                    timestamp,
                     track.track_id,
-                    start,
-                    track.payload.len(),
                     track.fourcc,
                     track.packet_type,
                     track.video_frame_type,
-                ));
+                    track.payload,
+                );
             });
-            if track_ranges.is_empty() {
+            if !had_multitrack {
                 self.invoke_on_frame_cb(cb, frame_type, timestamp, u8::MAX, parse_payload);
-            } else {
-                for (track_id, start, len, fourcc, packet_type, video_frame_type) in track_ranges {
-                    self.invoke_multitrack_on_frame_cb(
-                        cb,
-                        frame_type,
-                        timestamp,
-                        track_id,
-                        fourcc,
-                        packet_type,
-                        video_frame_type,
-                        &parse_payload[start..start + len],
-                    );
-                }
             }
         }
 
