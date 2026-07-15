@@ -1,0 +1,276 @@
+name: Apply PR 130 to PR 128
+
+on:
+  push:
+    branches:
+      - feat/ertmp-v2-multitrack-0.4.0
+    paths:
+      - .github/workflows/apply-pr130-to-pr128.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/ertmp-v2-multitrack-0.4.0
+          fetch-depth: 0
+
+      - name: Apply conflict-resolved security fix
+        shell: bash
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+
+          path = Path("src/server/mod.rs")
+          text = path.read_text()
+
+          def replace_once(old: str, new: str, label: str) -> None:
+              global text
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{label}: expected exactly one match, found {count}")
+              text = text.replace(old, new, 1)
+
+          replace_once(
+              "const MAX_BUDGET_DRAIN_PASSES_PER_CONN_PER_POLL: usize = 3;\n",
+              """const MAX_BUDGET_DRAIN_PASSES_PER_CONN_PER_POLL: usize = 3;
+
+          /// Cap total relay sends issued while fanning publisher media out to
+          /// players in one `process_connections` pass. Without this, a full
+          /// `pending_relay` batch multiplied by every playing connection can
+          /// monopolize the single-threaded poll loop.
+          const MAX_RELAY_SENDS_PER_POLL: usize = 4096;
+          """,
+              "relay budget constant",
+          )
+
+          replace_once(
+              "        let relay_frames: Vec<_> = self\n",
+              "        let mut relay_frames: Vec<_> = self\n",
+              "mutable relay frame batch",
+          )
+
+          old_loop = """        // Update per-stream cache and relay each frame in order so players
+                  // receive frames in the same sequence the publisher sent them.
+                  for frame in &relay_frames {
+                      let abandon_key = (
+                          frame.app.clone(),
+                          frame.stream_name.clone(),
+                          frame.publisher_conn_id,
+                      );
+                      if !abandoned_this_batch.contains(&abandon_key) {
+                          self.cache_relay_frame(frame);
+                      }
+                      for (i, conn) in self.connections.iter_mut().enumerate() {
+                          let is_player = conn.relay_enabled
+                              && conn.transport.is_some()
+                              && conn
+                                  .current_stream
+                                  .as_ref()
+                                  .map(|s| s.is_playing && conn.relay_route_key() == frame.stream_name)
+                                  .unwrap_or(false);
+                          if !is_player || conn.app != frame.app {
+                              continue;
+                          }
+                          if conn
+                              .current_stream
+                              .as_ref()
+                              .map(|s| s.paused)
+                              .unwrap_or(false)
+                          {
+                              continue;
+                          }
+                          if frame.frame_type == FrameType::Audio
+                              && !conn
+                                  .current_stream
+                                  .as_ref()
+                                  .map(|s| s.receive_audio)
+                                  .unwrap_or(true)
+                          {
+                              continue;
+                          }
+                          if frame.frame_type == FrameType::Video
+                              && !conn
+                                  .current_stream
+                                  .as_ref()
+                                  .map(|s| s.receive_video)
+                                  .unwrap_or(true)
+                          {
+                              continue;
+                          }
+                          if matches!(frame.frame_type, FrameType::Audio | FrameType::Video)
+                              && is_multitrack_container(frame.frame_type, frame.cache_payload())
+                              && !conn.accepts_multitrack()
+                          {
+                              continue;
+                          }
+                          let send_result = match frame.frame_type {
+                              FrameType::Script | FrameType::Metadata => {
+                                  conn.send_data_message(frame.timestamp, &frame.payload)
+                              }
+                              _ => conn.send_frame(frame.frame_type, frame.timestamp, &frame.payload),
+                          };
+                          if send_result.is_err() {
+                              // Player stopped reading; outbound send_buffer is full.
+                              // Drop the connection immediately so later relay frames in
+                              // this poll batch skip it and no more socket work is done.
+                              conn.relay_enabled = false;
+                              conn.needs_init_frames = false;
+                              conn.disconnect_transport();
+                              closed.push(i);
+                          }
+                      }
+                  }
+          """
+
+          new_loop = """        // Update per-stream cache and relay each frame in order so players
+                  // receive frames in the same sequence the publisher sent them.
+                  let mut relay_sends = 0usize;
+                  let mut relay_processed = 0usize;
+                  for frame in &relay_frames {
+                      let player_count = self.count_relay_players(frame);
+                      if player_count > 0
+                          && relay_sends.saturating_add(player_count) > MAX_RELAY_SENDS_PER_POLL
+                      {
+                          break;
+                      }
+
+                      let abandon_key = (
+                          frame.app.clone(),
+                          frame.stream_name.clone(),
+                          frame.publisher_conn_id,
+                      );
+                      if !abandoned_this_batch.contains(&abandon_key) {
+                          self.cache_relay_frame(frame);
+                      }
+                      for (i, conn) in self.connections.iter_mut().enumerate() {
+                          if !Self::conn_will_receive_relay_frame(conn, frame) {
+                              continue;
+                          }
+                          let send_result = match frame.frame_type {
+                              FrameType::Script | FrameType::Metadata => {
+                                  conn.send_data_message(frame.timestamp, &frame.payload)
+                              }
+                              _ => conn.send_frame(frame.frame_type, frame.timestamp, &frame.payload),
+                          };
+                          if send_result.is_err() {
+                              // Player stopped reading; outbound send_buffer is full.
+                              // Drop the connection immediately so later relay frames in
+                              // this poll batch skip it and no more socket work is done.
+                              conn.relay_enabled = false;
+                              conn.needs_init_frames = false;
+                              conn.disconnect_transport();
+                              closed.push(i);
+                          }
+                      }
+                      relay_sends += player_count;
+                      relay_processed += 1;
+                  }
+                  for frame in relay_frames.drain(relay_processed..) {
+                      self.requeue_relay_frame(frame);
+                  }
+          """
+          replace_once(old_loop, new_loop, "relay loop")
+
+          helper_marker = """    /// Bytes retained by a single stream_cache entry.
+              fn stream_cache_entry_bytes(cache: &StreamCache) -> usize {
+          """
+          helpers = """    fn conn_will_receive_relay_frame(
+                  conn: &Conn,
+                  frame: &crate::session::conn::RelayFrame,
+              ) -> bool {
+                  let Some(stream) = conn.current_stream.as_ref() else {
+                      return false;
+                  };
+                  if !conn.relay_enabled
+                      || conn.transport.is_none()
+                      || conn.app != frame.app
+                      || !stream.is_playing
+                      || conn.relay_route_key() != frame.stream_name
+                      || stream.paused
+                  {
+                      return false;
+                  }
+                  if frame.frame_type == FrameType::Audio && !stream.receive_audio {
+                      return false;
+                  }
+                  if frame.frame_type == FrameType::Video && !stream.receive_video {
+                      return false;
+                  }
+                  if matches!(frame.frame_type, FrameType::Audio | FrameType::Video)
+                      && is_multitrack_container(frame.frame_type, frame.cache_payload())
+                      && !conn.accepts_multitrack()
+                  {
+                      return false;
+                  }
+                  true
+              }
+
+              fn count_relay_players(&self, frame: &crate::session::conn::RelayFrame) -> usize {
+                  self.connections
+                      .iter()
+                      .filter(|conn| Self::conn_will_receive_relay_frame(conn, frame))
+                      .count()
+              }
+
+              fn requeue_relay_frame(&mut self, frame: crate::session::conn::RelayFrame) {
+                  if let Some(conn) = self
+                      .connections
+                      .iter_mut()
+                      .find(|conn| conn.conn_id == frame.publisher_conn_id)
+                  {
+                      conn.pending_relay.push(frame);
+                  }
+              }
+
+              /// Bytes retained by a single stream_cache entry.
+              fn stream_cache_entry_bytes(cache: &StreamCache) -> usize {
+          """
+          replace_once(helper_marker, helpers, "relay helpers")
+
+          test_marker = """    #[test]
+              fn recv_budget_is_small_enough_for_fairness_across_connections() {
+                  assert!(MAX_RECV_BYTES_PER_CONN_PER_POLL <= 1024 * 1024);
+              }
+
+              fn test_server() -> Server {
+          """
+          test_replacement = """    #[test]
+              fn recv_budget_is_small_enough_for_fairness_across_connections() {
+                  assert!(MAX_RECV_BYTES_PER_CONN_PER_POLL <= 1024 * 1024);
+              }
+
+              #[test]
+              fn relay_send_budget_limits_worst_case_player_fan_out() {
+                  // One publisher can queue 1024 frames; with 256 connections that
+                  // could be 261_120 sends per poll without a relay budget.
+                  let worst_case = 1024 * 256;
+                  assert!(
+                      MAX_RELAY_SENDS_PER_POLL < worst_case / 10,
+                      "relay budget should be well below unbounded fan-out"
+                  );
+              }
+
+              fn test_server() -> Server {
+          """
+          replace_once(test_marker, test_replacement, "relay budget test")
+
+          path.write_text(text)
+          PY
+
+          cargo fmt --all -- --check || cargo fmt --all
+          cargo test
+
+      - name: Commit resolved fix
+        shell: bash
+        run: |
+          rm .github/workflows/apply-pr130-to-pr128.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "fix(security): cap built-in relay fan-out per poll tick"
+          git push origin HEAD:feat/ertmp-v2-multitrack-0.4.0
