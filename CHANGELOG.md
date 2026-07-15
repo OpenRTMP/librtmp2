@@ -43,6 +43,10 @@ begin at `1.0.0`.
   libFuzzer smoke runs).
 
 ### Changed
+- The built-in relay fan-out budget is configurable through
+  `Server::max_relay_sends_per_poll` (default: 4096 sends per poll). The first
+  eligible frame in a poll is always processed even when its audience exceeds
+  the budget, preventing an oversized fan-out frame from being re-queued forever.
 - Connect AMF helpers now parse and write E-RTMP v2 capability representations,
   including wildcard FourCC entries, numeric `capsEx`, and per-codec
   `videoFourCcInfoMap` masks. The built-in client continues to connect without
