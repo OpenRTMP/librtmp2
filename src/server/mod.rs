@@ -62,6 +62,12 @@ const MAX_RECV_BYTES_PER_CONN_PER_POLL: usize = 256 * 1024;
 /// connections in this one.
 const MAX_BUDGET_DRAIN_PASSES_PER_CONN_PER_POLL: usize = 3;
 
+/// Cap total relay sends issued while fanning publisher media out to
+/// players in one `process_connections` pass. Without this, a full
+/// `pending_relay` batch multiplied by every playing connection can
+/// monopolize the single-threaded poll loop.
+const MAX_RELAY_SENDS_PER_POLL: usize = 4096;
+
 /// Cached codec headers and last keyframe for a (app, stream_name) pair.
 /// Replayed to players that join after the publisher has already sent headers.
 struct StreamCache {
@@ -592,7 +598,7 @@ impl Server {
 
         // Collect all frames queued by publishers, then relay them to players
         // on the same (app, stream_name) pair.
-        let relay_frames: Vec<_> = self
+        let mut relay_frames: Vec<_> = self
             .connections
             .iter_mut()
             .flat_map(|c| c.pending_relay.drain(..))
@@ -678,7 +684,16 @@ impl Server {
 
         // Update per-stream cache and relay each frame in order so players
         // receive frames in the same sequence the publisher sent them.
+        let mut relay_sends = 0usize;
+        let mut relay_processed = 0usize;
         for frame in &relay_frames {
+            let player_count = self.count_relay_players(frame);
+            if player_count > 0
+                && relay_sends.saturating_add(player_count) > MAX_RELAY_SENDS_PER_POLL
+            {
+                break;
+            }
+
             let abandon_key = (
                 frame.app.clone(),
                 frame.stream_name.clone(),
@@ -688,46 +703,7 @@ impl Server {
                 self.cache_relay_frame(frame);
             }
             for (i, conn) in self.connections.iter_mut().enumerate() {
-                let is_player = conn.relay_enabled
-                    && conn.transport.is_some()
-                    && conn
-                        .current_stream
-                        .as_ref()
-                        .map(|s| s.is_playing && conn.relay_route_key() == frame.stream_name)
-                        .unwrap_or(false);
-                if !is_player || conn.app != frame.app {
-                    continue;
-                }
-                if conn
-                    .current_stream
-                    .as_ref()
-                    .map(|s| s.paused)
-                    .unwrap_or(false)
-                {
-                    continue;
-                }
-                if frame.frame_type == FrameType::Audio
-                    && !conn
-                        .current_stream
-                        .as_ref()
-                        .map(|s| s.receive_audio)
-                        .unwrap_or(true)
-                {
-                    continue;
-                }
-                if frame.frame_type == FrameType::Video
-                    && !conn
-                        .current_stream
-                        .as_ref()
-                        .map(|s| s.receive_video)
-                        .unwrap_or(true)
-                {
-                    continue;
-                }
-                if matches!(frame.frame_type, FrameType::Audio | FrameType::Video)
-                    && is_multitrack_container(frame.frame_type, frame.cache_payload())
-                    && !conn.accepts_multitrack()
-                {
+                if !Self::conn_will_receive_relay_frame(conn, frame) {
                     continue;
                 }
                 let send_result = match frame.frame_type {
@@ -746,6 +722,11 @@ impl Server {
                     closed.push(i);
                 }
             }
+            relay_sends += player_count;
+            relay_processed += 1;
+        }
+        for frame in relay_frames.drain(relay_processed..) {
+            self.requeue_relay_frame(frame);
         }
 
         // Flush all connections.
@@ -792,6 +773,54 @@ impl Server {
             self.connections.remove(i);
         }
         Ok(())
+    }
+
+    fn conn_will_receive_relay_frame(
+        conn: &Conn,
+        frame: &crate::session::conn::RelayFrame,
+    ) -> bool {
+        let Some(stream) = conn.current_stream.as_ref() else {
+            return false;
+        };
+        if !conn.relay_enabled
+            || conn.transport.is_none()
+            || conn.app != frame.app
+            || !stream.is_playing
+            || conn.relay_route_key() != frame.stream_name
+            || stream.paused
+        {
+            return false;
+        }
+        if frame.frame_type == FrameType::Audio && !stream.receive_audio {
+            return false;
+        }
+        if frame.frame_type == FrameType::Video && !stream.receive_video {
+            return false;
+        }
+        if matches!(frame.frame_type, FrameType::Audio | FrameType::Video)
+            && is_multitrack_container(frame.frame_type, frame.cache_payload())
+            && !conn.accepts_multitrack()
+        {
+            return false;
+        }
+        true
+    }
+
+    fn count_relay_players(&self, frame: &crate::session::conn::RelayFrame) -> usize {
+        self.connections
+            .iter()
+            .filter(|conn| Self::conn_will_receive_relay_frame(conn, frame))
+            .count()
+    }
+
+    fn requeue_relay_frame(&mut self, frame: crate::session::conn::RelayFrame) {
+        if let Some(conn) = self
+            .connections
+            .iter_mut()
+            .find(|conn| conn.conn_id == frame.publisher_conn_id)
+        {
+            conn.pending_relay.push(frame);
+        }
     }
 
     /// Bytes retained by a single stream_cache entry.
@@ -1171,6 +1200,17 @@ mod tests {
     #[test]
     fn recv_budget_is_small_enough_for_fairness_across_connections() {
         assert!(MAX_RECV_BYTES_PER_CONN_PER_POLL <= 1024 * 1024);
+    }
+
+    #[test]
+    fn relay_send_budget_limits_worst_case_player_fan_out() {
+        // One publisher can queue 1024 frames; with 256 connections that
+        // could be 261_120 sends per poll without a relay budget.
+        let worst_case = 1024 * 256;
+        assert!(
+            MAX_RELAY_SENDS_PER_POLL < worst_case / 10,
+            "relay budget should be well below unbounded fan-out"
+        );
     }
 
     fn test_server() -> Server {
