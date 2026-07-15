@@ -13,7 +13,7 @@ permissions:
 
 concurrency:
   group: pr128-relay-budget-fixes
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   apply-and-validate:
@@ -25,23 +25,27 @@ jobs:
           ref: feat/ertmp-v2-multitrack-0.4.0
           fetch-depth: 0
 
-      - name: Apply review fixes
+      - name: Apply, format, and validate
+        id: validate
         shell: bash
         run: |
-          set -euo pipefail
-          python3 .github/scripts/pr128_relay_budget_fixes.py
-
-      - name: Format and validate
-        shell: bash
-        run: |
-          set -euo pipefail
-          rustup default stable
-          cargo fmt --all
-          cargo fmt --all -- --check
-          cargo test --all-targets
-          cargo clippy --all-targets -- -D warnings
+          set +e
+          {
+            set -euo pipefail
+            python3 .github/scripts/pr128_relay_budget_fixes.py
+            rustup default stable
+            cargo fmt --all
+            cargo fmt --all -- --check
+            cargo test --all-targets
+            cargo clippy --all-targets -- -D warnings
+          } > /tmp/pr128-relay-budget.log 2>&1
+          status=$?
+          cat /tmp/pr128-relay-budget.log
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          exit 0
 
       - name: Commit fixes and remove temporary automation
+        if: steps.validate.outputs.status == '0'
         shell: bash
         run: |
           set -euo pipefail
@@ -49,6 +53,22 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git rm .github/workflows/pr128-relay-budget-fixes.yml
           git rm .github/scripts/pr128_relay_budget_fixes.py
+          git rm --ignore-unmatch .github/pr128-relay-budget-error.txt
           git add src/server/mod.rs CHANGELOG.md
           git commit -m "fix(server): make relay budget configurable and starvation-free"
           git push origin HEAD:feat/ertmp-v2-multitrack-0.4.0
+
+      - name: Record validation failure
+        if: steps.validate.outputs.status != '0'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git restore --worktree --staged src/server/mod.rs CHANGELOG.md || true
+          cp /tmp/pr128-relay-budget.log .github/pr128-relay-budget-error.txt
+          printf '\nworkflow_run=%s\n' "$GITHUB_RUN_ID" >> .github/pr128-relay-budget-error.txt
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .github/pr128-relay-budget-error.txt
+          git commit -m "ci: record PR 128 relay budget validation failure"
+          git push origin HEAD:feat/ertmp-v2-multitrack-0.4.0
+          exit 1
