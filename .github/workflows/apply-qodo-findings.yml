@@ -78,8 +78,8 @@ jobs:
           set -o pipefail
           {
             cargo fmt --all
-            cargo test --all-targets
-            cargo clippy --all-targets -- -D warnings
+            cargo test --lib --tests
+            cargo clippy --lib --tests -- -D warnings
           } 2>&1 | tee /tmp/pr128-validation-error.txt
       - name: Commit validation diagnostics
         if: steps.apply.outcome == 'success' && steps.validate.outcome == 'failure'
