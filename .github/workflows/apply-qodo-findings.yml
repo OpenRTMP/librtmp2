@@ -46,6 +46,7 @@ jobs:
 
           textwrap.dedent = preserve_rust_indent
           Path(".github/pr128-fix-error.txt").unlink(missing_ok=True)
+          Path(".github/pr128-validation-error.txt").unlink(missing_ok=True)
           try:
               runpy.run_path(".github/scripts/apply_pr128_fixes.py", run_name="__main__")
           except BaseException:
@@ -57,22 +58,43 @@ jobs:
         run: |
           cp .github/pr128-fix-error.txt /tmp/pr128-fix-error.txt
           git reset --hard HEAD
+          rm -f .github/pr128-validation-error.txt
           mkdir -p .github
           cp /tmp/pr128-fix-error.txt .github/pr128-fix-error.txt
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add .github/pr128-fix-error.txt
+          git add -A .github/pr128-fix-error.txt .github/pr128-validation-error.txt
           git commit -m "ci: record PR 128 patch failure"
           git push origin HEAD:feat/ertmp-v2-multitrack-0.4.0
           exit 1
       - name: Format and validate
+        id: validate
         if: steps.apply.outcome == 'success'
+        continue-on-error: true
+        shell: bash
         run: |
-          cargo fmt --all
-          cargo test --all-targets
-          cargo clippy --all-targets -- -D warnings
+          set -o pipefail
+          {
+            cargo fmt --all
+            cargo test --all-targets
+            cargo clippy --all-targets -- -D warnings
+          } 2>&1 | tee /tmp/pr128-validation-error.txt
+      - name: Commit validation diagnostics
+        if: steps.apply.outcome == 'success' && steps.validate.outcome == 'failure'
+        run: |
+          cp /tmp/pr128-validation-error.txt /tmp/pr128-validation-error.saved
+          git reset --hard HEAD
+          rm -f .github/pr128-fix-error.txt
+          mkdir -p .github
+          cp /tmp/pr128-validation-error.saved .github/pr128-validation-error.txt
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -A .github/pr128-fix-error.txt .github/pr128-validation-error.txt
+          git commit -m "ci: record PR 128 validation failure"
+          git push origin HEAD:feat/ertmp-v2-multitrack-0.4.0
+          exit 1
       - name: Commit fixes
-        if: steps.apply.outcome == 'success'
+        if: steps.apply.outcome == 'success' && steps.validate.outcome == 'success'
         run: |
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
