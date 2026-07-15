@@ -9,7 +9,9 @@ use crate::chunk::writer::chunk_write;
 use crate::ertmp::connect_amf::{negotiate_caps, write_negotiated_caps};
 use crate::ertmp::multitrack_media::{first_track_fourcc, foreach_track};
 use crate::handshake::{self, Handshake, HandshakeState};
-use crate::media::{is_on_metadata_payload, normalize_modex_payload, populate_av_frame};
+use crate::media::{
+    is_on_metadata_payload, normalize_modex_payload, populate_av_frame, populate_multitrack_frame,
+};
 use crate::message::command;
 use crate::message::control::{
     self, UCTRL_PING_REQUEST, UCTRL_PING_RESPONSE, UCTRL_SET_BUFFER_LENGTH, UCTRL_STREAM_BEGIN,
@@ -76,12 +78,28 @@ pub struct RelayFrame {
     pub timestamp: u32,
     pub payload: Vec<u8>,
     /// ModEx-normalized bytes used only for codec parsing and cache classification.
-    pub cache_payload: Vec<u8>,
+    /// `None` means the normalized bytes are identical to `payload`.
+    pub cache_payload: Option<Vec<u8>>,
     pub app: String,
     pub stream_name: String,
     pub publisher_conn_id: u64,
 }
 
+impl RelayFrame {
+    /// Bytes used for codec parsing and cache classification.
+    pub fn cache_payload(&self) -> &[u8] {
+        self.cache_payload.as_deref().unwrap_or(&self.payload)
+    }
+
+    fn retained_bytes(&self) -> usize {
+        self.payload.len().saturating_add(
+            self.cache_payload
+                .as_ref()
+                .map(|payload| payload.len())
+                .unwrap_or(0),
+        )
+    }
+}
 pub struct Conn {
     pub state: ConnState,
     pub handshake: Handshake,
@@ -250,7 +268,10 @@ impl Conn {
     }
 
     fn pending_relay_bytes(&self) -> usize {
-        self.pending_relay.iter().map(|f| f.payload.len()).sum()
+        self.pending_relay
+            .iter()
+            .map(RelayFrame::retained_bytes)
+            .sum()
     }
 
     /// Key used to route relayed media between publishers and players.
@@ -359,8 +380,20 @@ impl Conn {
         payload: &[u8],
         cache_payload: &[u8],
     ) -> Result<()> {
+        let cache_payload = if cache_payload == payload {
+            None
+        } else {
+            Some(cache_payload.to_vec())
+        };
+        let retained_bytes = payload.len().saturating_add(
+            cache_payload
+                .as_ref()
+                .map(|payload| payload.len())
+                .unwrap_or(0),
+        );
         if self.pending_relay.len() >= MAX_PENDING_RELAY_FRAMES
-            || self.pending_relay_bytes() + payload.len() > self.max_pending_relay_bytes
+            || self.pending_relay_bytes().saturating_add(retained_bytes)
+                > self.max_pending_relay_bytes
         {
             return Err(ErrorCode::Internal);
         }
@@ -368,7 +401,7 @@ impl Conn {
             frame_type,
             timestamp,
             payload: payload.to_vec(),
-            cache_payload: cache_payload.to_vec(),
+            cache_payload,
             app: self.app.clone(),
             stream_name: self.relay_route_key(),
             publisher_conn_id: self.conn_id,
@@ -437,20 +470,30 @@ impl Conn {
             .saturating_add(payload.len() as u64);
 
         if let Some(cb) = self.on_frame_cb {
-            let mut track_ranges: Vec<(u8, usize, usize)> = Vec::new();
+            let mut track_ranges: Vec<(u8, usize, usize, [u8; 4], u8, u8)> = Vec::new();
             foreach_track(frame_type, parse_payload, |track| {
                 let start = track.payload.as_ptr() as usize - parse_payload.as_ptr() as usize;
-                track_ranges.push((track.track_id, start, track.payload.len()));
+                track_ranges.push((
+                    track.track_id,
+                    start,
+                    track.payload.len(),
+                    track.fourcc,
+                    track.packet_type,
+                    track.video_frame_type,
+                ));
             });
             if track_ranges.is_empty() {
                 self.invoke_on_frame_cb(cb, frame_type, timestamp, u8::MAX, parse_payload);
             } else {
-                for (track_id, start, len) in track_ranges {
-                    self.invoke_on_frame_cb(
+                for (track_id, start, len, fourcc, packet_type, video_frame_type) in track_ranges {
+                    self.invoke_multitrack_on_frame_cb(
                         cb,
                         frame_type,
                         timestamp,
                         track_id,
+                        fourcc,
+                        packet_type,
+                        video_frame_type,
                         &parse_payload[start..start + len],
                     );
                 }
@@ -1635,6 +1678,30 @@ impl Conn {
         self.send_control(msg_dispatch::RTMP_MSG_USER_CONTROL, buf.as_slice())
     }
 
+    fn invoke_multitrack_on_frame_cb(
+        &mut self,
+        cb: fn(&Frame),
+        frame_type: FrameType,
+        timestamp: u32,
+        track_id: u8,
+        fourcc: [u8; 4],
+        packet_type: u8,
+        video_frame_type: u8,
+        payload: &[u8],
+    ) {
+        self.frame_cb_scratch.clear();
+        self.frame_cb_scratch.extend_from_slice(payload);
+        let mut frame = Frame {
+            frame_type,
+            timestamp,
+            size: self.frame_cb_scratch.len() as u32,
+            data: self.frame_cb_scratch.as_ptr(),
+            track_id,
+            ..Default::default()
+        };
+        populate_multitrack_frame(&mut frame, fourcc, packet_type, video_frame_type);
+        cb(&frame);
+    }
     fn invoke_on_frame_cb(
         &mut self,
         cb: fn(&Frame),
@@ -1736,6 +1803,29 @@ mod tests {
     use crate::amf::amf0;
     use crate::session::stream::Stream;
 
+    #[test]
+    fn relay_budget_counts_actual_retained_bytes() {
+        let mut conn = Conn::new();
+        conn.max_pending_relay_bytes = 6;
+
+        assert!(
+            conn.queue_relay_frame(FrameType::Video, 0, b"data", b"data")
+                .is_ok()
+        );
+        assert_eq!(conn.pending_relay_bytes(), 4);
+        assert!(conn.pending_relay[0].cache_payload.is_none());
+        assert_eq!(conn.pending_relay[0].cache_payload(), b"data");
+
+        assert!(
+            conn.queue_relay_frame(FrameType::Video, 0, b"x", b"y")
+                .is_ok()
+        );
+        assert_eq!(conn.pending_relay_bytes(), 6);
+        assert!(
+            conn.queue_relay_frame(FrameType::Video, 0, b"z", b"z")
+                .is_err()
+        );
+    }
     #[test]
     fn relay_route_key_prefers_relay_key_over_rtmp_name() {
         let mut conn = Conn::new();
@@ -2373,8 +2463,8 @@ mod tests {
 
         assert_eq!(conn.pending_relay[0].payload, payload);
         assert_eq!(
-            conn.pending_relay[0].cache_payload,
-            vec![0x91, b'a', b'v', b'c', b'1', 0, 0, 0, 0xAA]
+            conn.pending_relay[0].cache_payload(),
+            &[0x91, b'a', b'v', b'c', b'1', 0, 0, 0, 0xAA]
         );
         assert_eq!(
             conn.frame_cb_scratch,

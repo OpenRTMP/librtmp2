@@ -725,7 +725,7 @@ impl Server {
                     continue;
                 }
                 if matches!(frame.frame_type, FrameType::Audio | FrameType::Video)
-                    && is_multitrack_container(frame.frame_type, &frame.cache_payload)
+                    && is_multitrack_container(frame.frame_type, frame.cache_payload())
                     && !conn.accepts_multitrack()
                 {
                     continue;
@@ -924,7 +924,7 @@ impl Server {
             return;
         }
 
-        let cache_kind = classify_cache_frame(frame.frame_type, &frame.cache_payload);
+        let cache_kind = classify_cache_frame(frame.frame_type, frame.cache_payload());
         let is_avc_header = cache_kind == CacheFrameKind::VideoSequenceHeader;
         let is_keyframe = cache_kind == CacheFrameKind::VideoKeyframe;
         let is_aac_header = cache_kind == CacheFrameKind::AudioSequenceHeader;
@@ -948,8 +948,10 @@ impl Server {
             // it) -- drop it rather than keep replaying it to late joiners.
             if let Some(cache) = self.stream_cache.get_mut(&key) {
                 if is_avc_header {
-                    let seq_tracks =
-                        Self::multitrack_sequence_track_ids(FrameType::Video, &frame.cache_payload);
+                    let seq_tracks = Self::multitrack_sequence_track_ids(
+                        FrameType::Video,
+                        frame.cache_payload(),
+                    );
                     if seq_tracks.len() > 1 {
                         cache.avc_header = None;
                         cache.video_track_headers.clear();
@@ -963,8 +965,10 @@ impl Server {
                 } else if is_keyframe {
                     cache.last_keyframe = None;
                 } else {
-                    let seq_tracks =
-                        Self::multitrack_sequence_track_ids(FrameType::Audio, &frame.cache_payload);
+                    let seq_tracks = Self::multitrack_sequence_track_ids(
+                        FrameType::Audio,
+                        frame.cache_payload(),
+                    );
                     if seq_tracks.len() > 1 {
                         cache.aac_header = None;
                         cache.audio_track_headers.clear();
@@ -1000,8 +1004,10 @@ impl Server {
             .get(&key)
             .map(|cache| {
                 if is_avc_header {
-                    let seq_tracks =
-                        Self::multitrack_sequence_track_ids(FrameType::Video, &frame.cache_payload);
+                    let seq_tracks = Self::multitrack_sequence_track_ids(
+                        FrameType::Video,
+                        frame.cache_payload(),
+                    );
                     if seq_tracks.len() > 1 {
                         cache.avc_header.as_ref().map(|v| v.len()).unwrap_or(0)
                     } else if let Some(track_id) = seq_tracks.first() {
@@ -1020,8 +1026,10 @@ impl Server {
                         .map(|(_, v)| v.len())
                         .unwrap_or(0)
                 } else {
-                    let seq_tracks =
-                        Self::multitrack_sequence_track_ids(FrameType::Audio, &frame.cache_payload);
+                    let seq_tracks = Self::multitrack_sequence_track_ids(
+                        FrameType::Audio,
+                        frame.cache_payload(),
+                    );
                     if seq_tracks.len() > 1 {
                         cache.aac_header.as_ref().map(|v| v.len()).unwrap_or(0)
                     } else if let Some(track_id) = seq_tracks.first() {
@@ -1046,7 +1054,7 @@ impl Server {
             .or_insert_with(empty_stream_cache);
         if is_avc_header {
             let seq_tracks =
-                Self::multitrack_sequence_track_ids(FrameType::Video, &frame.cache_payload);
+                Self::multitrack_sequence_track_ids(FrameType::Video, frame.cache_payload());
             if seq_tracks.len() > 1 {
                 cache.video_track_headers.clear();
                 cache.avc_header = Some(frame.payload.clone());
@@ -1063,7 +1071,7 @@ impl Server {
             cache.last_keyframe = Some((frame.timestamp, frame.payload.clone()));
         } else if is_aac_header {
             let seq_tracks =
-                Self::multitrack_sequence_track_ids(FrameType::Audio, &frame.cache_payload);
+                Self::multitrack_sequence_track_ids(FrameType::Audio, frame.cache_payload());
             if seq_tracks.len() > 1 {
                 cache.audio_track_headers.clear();
                 cache.aac_header = Some(frame.payload.clone());
@@ -1185,7 +1193,7 @@ mod tests {
             publisher_conn_id: 1,
             frame_type,
             timestamp: 0,
-            cache_payload: payload.clone(),
+            cache_payload: None,
             payload,
         }
     }

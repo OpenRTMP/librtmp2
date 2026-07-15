@@ -80,6 +80,39 @@ fn classify_audio(payload: &[u8]) -> CacheFrameKind {
 }
 
 /// Fill codec/header fields on a [`Frame`] from raw RTMP A/V payload bytes.
+/// Fill codec/header fields for a per-track callback extracted from an E-RTMP
+/// multitrack container. Inner track payloads do not include the enhanced tag
+/// header or FourCC, so metadata comes from the track descriptor.
+pub fn populate_multitrack_frame(
+    frame: &mut Frame,
+    fourcc_value: [u8; 4],
+    packet_type: u8,
+    video_frame_type: u8,
+) {
+    let mut cc = [0u8; 5];
+    cc[..4].copy_from_slice(&fourcc_value);
+    match frame.frame_type {
+        FrameType::Video => {
+            frame.video_fourcc = FourCc { cc };
+            frame.video_frame_type = video_frame_type;
+            if let Ok(codec) = fourcc::fourcc_to_video_codec(&fourcc_value) {
+                frame.video_codec = codec;
+            }
+            frame.is_metadata = u8::from(packet_type == crate::types::ERTMP_PACKET_TYPE_METADATA);
+        }
+        FrameType::Audio => {
+            frame.audio_fourcc = FourCc { cc };
+            if let Ok(codec) = fourcc::fourcc_to_audio_codec(&fourcc_value) {
+                frame.audio_codec = codec;
+            }
+            frame.is_metadata =
+                u8::from(packet_type == crate::types::ERTMP_AUDIO_PACKET_TYPE_METADATA);
+        }
+        FrameType::Script | FrameType::Metadata => {
+            frame.is_metadata = 1;
+        }
+    }
+}
 pub fn populate_av_frame(frame: &mut Frame, payload: &[u8]) {
     match frame.frame_type {
         FrameType::Video => populate_video_frame(frame, payload),
@@ -196,6 +229,28 @@ fn read_data_event_name(
 mod tests {
     use super::*;
 
+    #[test]
+    fn multitrack_video_callback_metadata_uses_track_descriptor() {
+        let mut frame = Frame {
+            frame_type: FrameType::Video,
+            ..Default::default()
+        };
+        populate_multitrack_frame(&mut frame, *b"hvc1", 1, 1);
+        assert_eq!(&frame.video_fourcc.cc[..4], b"hvc1");
+        assert_eq!(frame.video_codec, VideoCodec::H265);
+        assert_eq!(frame.video_frame_type, 1);
+    }
+
+    #[test]
+    fn multitrack_audio_callback_metadata_uses_track_descriptor() {
+        let mut frame = Frame {
+            frame_type: FrameType::Audio,
+            ..Default::default()
+        };
+        populate_multitrack_frame(&mut frame, *b"Opus", 1, 0);
+        assert_eq!(&frame.audio_fourcc.cc[..4], b"Opus");
+        assert_eq!(frame.audio_codec, AudioCodec::Opus);
+    }
     #[test]
     fn enhanced_hevc_sequence_start_is_cached() {
         let payload = [0x90, b'h', b'v', b'c', b'1', 0x01, 0x02];

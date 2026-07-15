@@ -13,7 +13,7 @@ use crate::chunk::state::{ChunkRegistry, DEFAULT_MAX_MSG_LENGTH};
 use crate::chunk::writer::chunk_write;
 use crate::ertmp::multitrack_media::foreach_track;
 use crate::handshake::{self, Handshake};
-use crate::media::{is_on_metadata_payload, populate_av_frame};
+use crate::media::{is_on_metadata_payload, populate_av_frame, populate_multitrack_frame};
 use crate::message::command;
 use crate::message::control;
 use crate::message::message as msg_dispatch;
@@ -628,26 +628,60 @@ impl Client {
         timestamp: u32,
         payload: Vec<u8>,
     ) {
-        let mut track_ranges: Vec<(u8, usize, usize)> = Vec::new();
+        let mut track_ranges: Vec<(u8, usize, usize, [u8; 4], u8, u8)> = Vec::new();
         foreach_track(frame_type, &payload, |track| {
             let start = track.payload.as_ptr() as usize - payload.as_ptr() as usize;
-            track_ranges.push((track.track_id, start, track.payload.len()));
+            track_ranges.push((
+                track.track_id,
+                start,
+                track.payload.len(),
+                track.fourcc,
+                track.packet_type,
+                track.video_frame_type,
+            ));
         });
         if track_ranges.is_empty() {
             self.invoke_on_frame_cb(cb, frame_type, timestamp, u8::MAX, &payload);
         } else {
-            for (track_id, start, len) in track_ranges {
-                self.invoke_on_frame_cb(
+            for (track_id, start, len, fourcc, packet_type, video_frame_type) in track_ranges {
+                self.invoke_multitrack_on_frame_cb(
                     cb,
                     frame_type,
                     timestamp,
                     track_id,
+                    fourcc,
+                    packet_type,
+                    video_frame_type,
                     &payload[start..start + len],
                 );
             }
         }
     }
 
+    fn invoke_multitrack_on_frame_cb(
+        &mut self,
+        cb: fn(&Frame),
+        frame_type: FrameType,
+        timestamp: u32,
+        track_id: u8,
+        fourcc: [u8; 4],
+        packet_type: u8,
+        video_frame_type: u8,
+        payload: &[u8],
+    ) {
+        self.frame_cb_scratch.clear();
+        self.frame_cb_scratch.extend_from_slice(payload);
+        let mut frame = Frame {
+            frame_type,
+            timestamp,
+            size: self.frame_cb_scratch.len() as u32,
+            data: self.frame_cb_scratch.as_ptr(),
+            track_id,
+            ..Default::default()
+        };
+        populate_multitrack_frame(&mut frame, fourcc, packet_type, video_frame_type);
+        cb(&frame);
+    }
     fn invoke_on_frame_cb(
         &mut self,
         cb: fn(&Frame),

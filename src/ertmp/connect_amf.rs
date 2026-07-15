@@ -247,12 +247,15 @@ fn read_fourcc_number(buf: &mut Buffer) -> Result<i32> {
         Ok(amf0::read_number(buf)? as i32)
     } else if ty == Amf0Type::String {
         let len = read_u16(buf)? as usize;
-        if len < 4 || buf.available() < len {
+        if !(4..=MAX_CAPS_BLOB_BYTES).contains(&len) || buf.available() < len {
             return Err(ErrorCode::Amf);
         }
-        let mut cc = vec![0u8; len];
+        let mut cc = [0u8; 4];
         buf.read(&mut cc).map_err(|_| ErrorCode::Amf)?;
-        Ok(i32::from_be_bytes([cc[0], cc[1], cc[2], cc[3]]))
+        if len > cc.len() {
+            buf.drain(len - cc.len());
+        }
+        Ok(i32::from_be_bytes(cc))
     } else {
         Err(ErrorCode::Amf)
     }
@@ -531,6 +534,13 @@ mod tests {
         assert_eq!(parsed.entries[0].cc[0], b'*');
     }
 
+    #[test]
+    fn string_fourcc_value_rejects_oversized_input() {
+        let mut buf = Buffer::new();
+        let oversized = "x".repeat(MAX_CAPS_BLOB_BYTES + 1);
+        amf0::write_string(&mut buf, &oversized).unwrap();
+        assert_eq!(read_fourcc_number(&mut buf), Err(ErrorCode::Amf));
+    }
     #[test]
     fn string_fourcc_value_is_read_after_consumed_marker() {
         let mut buf = Buffer::new();
