@@ -11,8 +11,8 @@ use librtmp2::server::Server;
 use librtmp2::types::ErrorCode;
 
 use common::{
-    allow_play, allow_publish, make_video_frame, on_video_frame, plain_config, poll_until,
-    run_client_with_server, FRAMES_RECEIVED, SENT_FRAME_BYTE,
+    FRAMES_RECEIVED, SENT_FRAME_BYTE, allow_play, allow_publish, make_video_frame, on_video_frame,
+    plain_config, poll_until, run_client_with_server,
 };
 
 #[test]

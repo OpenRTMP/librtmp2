@@ -1,3 +1,18 @@
+librtmp2 (0.4.0-1) UNRELEASED; urgency=medium
+
+  * Server-side E-RTMP v2 connect negotiation (fourCcList, capsEx bitmask,
+    videoFourCcInfoMap, reconnect) with capability-aware multitrack relay,
+    per-track callbacks, and init-cache replay for late-joining players.
+  * Enhanced init-frame classification for HEVC, AV1, Opus, AAC, and
+    CodedFramesX keyframes; onMetaData caching and timestamp-preserving relay.
+  * Client AMF0/AMF3 metadata and Aggregate receive callbacks, populated
+    codec/track fields, and legacy pause/seek/receiveAudio/receiveVideo/
+    closeStream command handling on the server session path.
+  * Correct E-RTMP packet-type constants and per-codec capability masks;
+    bound capability blobs, Aggregate sub-tags, and multitrack cache storage.
+
+ -- OpenRTMP <info@openrtmp.org>  Wed, 15 Jul 2026 00:00:00 +0000
+
 librtmp2 (0.3.1-1) UNRELEASED; urgency=medium
 
   * Harden DNS resolution, RTMP ping keepalive, and publishing send-path

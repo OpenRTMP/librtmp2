@@ -236,7 +236,7 @@ mod tests {
 
     #[test]
     fn completed_messages_do_not_pin_multi_megabyte_reassembly_capacity() {
-        use crate::chunk::reader::{chunk_read, ChunkMessage};
+        use crate::chunk::reader::{ChunkMessage, chunk_read};
         use crate::chunk::writer::chunk_write;
 
         let payload = vec![0xAB_u8; 256 * 1024];

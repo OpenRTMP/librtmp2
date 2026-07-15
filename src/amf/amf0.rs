@@ -130,7 +130,12 @@ pub fn write_string(buf: &mut Buffer, s: &str) -> Result<()> {
 
 /// Write an AMF0 long string (4-byte length + UTF-8).
 pub fn write_long_string(buf: &mut Buffer, s: &str) -> Result<()> {
-    let len = s.len();
+    write_long_string_bytes(buf, s.as_bytes())
+}
+
+/// Write an AMF0 long string from raw bytes.
+pub fn write_long_string_bytes(buf: &mut Buffer, data: &[u8]) -> Result<()> {
+    let len = data.len();
     if len > u32::MAX as usize {
         return Err(ErrorCode::Amf);
     }
@@ -138,7 +143,7 @@ pub fn write_long_string(buf: &mut Buffer, s: &str) -> Result<()> {
         .map_err(|_| ErrorCode::Internal)?;
     buf.write(&(len as u32).to_be_bytes())
         .map_err(|_| ErrorCode::Internal)?;
-    buf.write(s.as_bytes()).map_err(|_| ErrorCode::Internal)?;
+    buf.write(data).map_err(|_| ErrorCode::Internal)?;
     Ok(())
 }
 

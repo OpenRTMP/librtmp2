@@ -10,6 +10,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::chunk::state::DEFAULT_CHUNK_SIZE;
+use crate::ertmp::multitrack_media::{foreach_track, is_multitrack_container};
+use crate::media::{CacheFrameKind, classify_cache_frame, normalize_modex_payload};
 use crate::net;
 use crate::session::conn::Conn;
 use crate::session::publish_route::PublishRouteRegistry;
@@ -60,11 +62,21 @@ const MAX_RECV_BYTES_PER_CONN_PER_POLL: usize = 256 * 1024;
 /// connections in this one.
 const MAX_BUDGET_DRAIN_PASSES_PER_CONN_PER_POLL: usize = 3;
 
+/// Default cap on relay sends issued while fanning publisher media out to
+/// players in one `process_connections` pass. Integrators can tune the active
+/// value through [`Server::max_relay_sends_per_poll`].
+pub const DEFAULT_MAX_RELAY_SENDS_PER_POLL: usize = 4096;
+
 /// Cached codec headers and last keyframe for a (app, stream_name) pair.
 /// Replayed to players that join after the publisher has already sent headers.
 struct StreamCache {
     avc_header: Option<Vec<u8>>,
+    /// Per-track video sequence headers when publishers send multitrack inits separately.
+    video_track_headers: HashMap<u8, Vec<u8>>,
     aac_header: Option<Vec<u8>>,
+    audio_track_headers: HashMap<u8, Vec<u8>>,
+    /// Last onMetaData AMF0 payload for late-joining players.
+    metadata: Option<Vec<u8>>,
     /// (timestamp, payload) of the most recent IDR keyframe.
     last_keyframe: Option<(u32, Vec<u8>)>,
 }
@@ -96,6 +108,13 @@ struct PendingTlsConnection {
 pub struct Server {
     pub config: ServerConfig,
     pub resource_limits: ResourceLimits,
+    /// Maximum relay send operations allowed in one `process_connections` pass.
+    ///
+    /// The first eligible frame in a pass is always relayed even when its fan-out
+    /// exceeds this value, which guarantees forward progress instead of
+    /// perpetually re-queueing an oversized frame. Later frames are deferred once
+    /// the accumulated send count would exceed the configured budget.
+    pub max_relay_sends_per_poll: usize,
     pub running: bool,
     /// Identifies *one* bound listener (whichever was bound first) for
     /// diagnostics/backward compatibility. When more than one listener is
@@ -162,6 +181,7 @@ impl Server {
         Ok(Self {
             config,
             resource_limits: ResourceLimits::default(),
+            max_relay_sends_per_poll: DEFAULT_MAX_RELAY_SENDS_PER_POLL,
             running: false,
             server_fd: -1,
             connections: Vec::new(),
@@ -585,7 +605,7 @@ impl Server {
 
         // Collect all frames queued by publishers, then relay them to players
         // on the same (app, stream_name) pair.
-        let relay_frames: Vec<_> = self
+        let mut relay_frames: Vec<_> = self
             .connections
             .iter_mut()
             .flat_map(|c| c.pending_relay.drain(..))
@@ -606,19 +626,56 @@ impl Server {
             }
             conn.needs_init_frames = false;
             let key = (conn.app.clone(), conn.relay_route_key());
+            let receive_audio = conn
+                .current_stream
+                .as_ref()
+                .map(|s| s.receive_audio)
+                .unwrap_or(true);
+            let receive_video = conn
+                .current_stream
+                .as_ref()
+                .map(|s| s.receive_video)
+                .unwrap_or(true);
             if let Some(cache) = self.stream_cache.get(&key) {
                 let mut send_failed = false;
-                if let Some(ref hdr) = cache.avc_header.clone() {
-                    send_failed |= conn.send_frame(FrameType::Video, 0, hdr).is_err();
+                if let Some(ref md) = cache.metadata.clone() {
+                    send_failed |= conn.send_data_message(0, md).is_err();
                 }
-                if !send_failed {
-                    if let Some(ref hdr) = cache.aac_header.clone() {
-                        send_failed |= conn.send_frame(FrameType::Audio, 0, hdr).is_err();
+                if receive_video {
+                    if let Some(ref hdr) = cache.avc_header.clone() {
+                        if !Self::cached_payload_is_multitrack(FrameType::Video, hdr)
+                            || conn.accepts_multitrack()
+                        {
+                            send_failed |= conn.send_frame(FrameType::Video, 0, hdr).is_err();
+                        }
+                    }
+                    for hdr in cache.video_track_headers.values() {
+                        if conn.accepts_multitrack() {
+                            send_failed |= conn.send_frame(FrameType::Video, 0, hdr).is_err();
+                        }
                     }
                 }
-                if !send_failed {
+                if receive_audio && !send_failed {
+                    if let Some(ref hdr) = cache.aac_header.clone() {
+                        if !Self::cached_payload_is_multitrack(FrameType::Audio, hdr)
+                            || conn.accepts_multitrack()
+                        {
+                            send_failed |= conn.send_frame(FrameType::Audio, 0, hdr).is_err();
+                        }
+                    }
+                    for hdr in cache.audio_track_headers.values() {
+                        if conn.accepts_multitrack() {
+                            send_failed |= conn.send_frame(FrameType::Audio, 0, hdr).is_err();
+                        }
+                    }
+                }
+                if receive_video && !send_failed {
                     if let Some((ts, ref kf)) = cache.last_keyframe.clone() {
-                        send_failed |= conn.send_frame(FrameType::Video, ts, kf).is_err();
+                        if !Self::cached_payload_is_multitrack(FrameType::Video, kf)
+                            || conn.accepts_multitrack()
+                        {
+                            send_failed |= conn.send_frame(FrameType::Video, ts, kf).is_err();
+                        }
                     }
                 }
                 if send_failed {
@@ -634,7 +691,17 @@ impl Server {
 
         // Update per-stream cache and relay each frame in order so players
         // receive frames in the same sequence the publisher sent them.
+        let mut relay_sends = 0usize;
+        let mut relay_processed = 0usize;
         for frame in &relay_frames {
+            let player_count = self.count_relay_players(frame);
+            if player_count > 0
+                && relay_sends > 0
+                && relay_sends.saturating_add(player_count) > self.max_relay_sends_per_poll
+            {
+                break;
+            }
+
             let abandon_key = (
                 frame.app.clone(),
                 frame.stream_name.clone(),
@@ -644,20 +711,16 @@ impl Server {
                 self.cache_relay_frame(frame);
             }
             for (i, conn) in self.connections.iter_mut().enumerate() {
-                let is_player = conn.relay_enabled
-                    && conn.transport.is_some()
-                    && conn
-                        .current_stream
-                        .as_ref()
-                        .map(|s| s.is_playing && conn.relay_route_key() == frame.stream_name)
-                        .unwrap_or(false);
-                if !is_player || conn.app != frame.app {
+                if !Self::conn_will_receive_relay_frame(conn, frame) {
                     continue;
                 }
-                if conn
-                    .send_frame(frame.frame_type, frame.timestamp, &frame.payload)
-                    .is_err()
-                {
+                let send_result = match frame.frame_type {
+                    FrameType::Script | FrameType::Metadata => {
+                        conn.send_data_message(frame.timestamp, &frame.payload)
+                    }
+                    _ => conn.send_frame(frame.frame_type, frame.timestamp, &frame.payload),
+                };
+                if send_result.is_err() {
                     // Player stopped reading; outbound send_buffer is full.
                     // Drop the connection immediately so later relay frames in
                     // this poll batch skip it and no more socket work is done.
@@ -667,6 +730,11 @@ impl Server {
                     closed.push(i);
                 }
             }
+            relay_sends += player_count;
+            relay_processed += 1;
+        }
+        for frame in relay_frames.drain(relay_processed..) {
+            self.requeue_relay_frame(frame);
         }
 
         // Flush all connections.
@@ -715,10 +783,69 @@ impl Server {
         Ok(())
     }
 
+    fn conn_will_receive_relay_frame(
+        conn: &Conn,
+        frame: &crate::session::conn::RelayFrame,
+    ) -> bool {
+        let Some(stream) = conn.current_stream.as_ref() else {
+            return false;
+        };
+        if !conn.relay_enabled
+            || conn.transport.is_none()
+            || conn.app != frame.app
+            || !stream.is_playing
+            || conn.relay_route_key() != frame.stream_name
+            || stream.paused
+        {
+            return false;
+        }
+        if frame.frame_type == FrameType::Audio && !stream.receive_audio {
+            return false;
+        }
+        if frame.frame_type == FrameType::Video && !stream.receive_video {
+            return false;
+        }
+        if matches!(frame.frame_type, FrameType::Audio | FrameType::Video)
+            && is_multitrack_container(frame.frame_type, frame.cache_payload())
+            && !conn.accepts_multitrack()
+        {
+            return false;
+        }
+        true
+    }
+
+    fn count_relay_players(&self, frame: &crate::session::conn::RelayFrame) -> usize {
+        self.connections
+            .iter()
+            .filter(|conn| Self::conn_will_receive_relay_frame(conn, frame))
+            .count()
+    }
+
+    fn requeue_relay_frame(&mut self, frame: crate::session::conn::RelayFrame) {
+        if let Some(conn) = self
+            .connections
+            .iter_mut()
+            .find(|conn| conn.conn_id == frame.publisher_conn_id)
+        {
+            conn.pending_relay.push(frame);
+        }
+    }
+
     /// Bytes retained by a single stream_cache entry.
     fn stream_cache_entry_bytes(cache: &StreamCache) -> usize {
         cache.avc_header.as_ref().map(|v| v.len()).unwrap_or(0)
+            + cache
+                .video_track_headers
+                .values()
+                .map(|v| v.len())
+                .sum::<usize>()
             + cache.aac_header.as_ref().map(|v| v.len()).unwrap_or(0)
+            + cache
+                .audio_track_headers
+                .values()
+                .map(|v| v.len())
+                .sum::<usize>()
+            + cache.metadata.as_ref().map(|v| v.len()).unwrap_or(0)
             + cache
                 .last_keyframe
                 .as_ref()
@@ -741,19 +868,103 @@ impl Server {
         }
     }
 
+    fn stream_cache_is_empty(cache: &StreamCache) -> bool {
+        cache.avc_header.is_none()
+            && cache.video_track_headers.is_empty()
+            && cache.aac_header.is_none()
+            && cache.audio_track_headers.is_empty()
+            && cache.metadata.is_none()
+            && cache.last_keyframe.is_none()
+    }
+
+    fn cached_payload_is_multitrack(frame_type: FrameType, payload: &[u8]) -> bool {
+        let normalized = normalize_modex_payload(payload, CAPS_EX_MASK_MODEX);
+        is_multitrack_container(frame_type, normalized.as_ref())
+    }
+
+    fn multitrack_sequence_track_ids(frame_type: FrameType, payload: &[u8]) -> Vec<u8> {
+        let mut ids = Vec::new();
+        if is_multitrack_container(frame_type, payload) {
+            foreach_track(frame_type, payload, |track| {
+                if track.packet_type == 0 {
+                    ids.push(track.track_id);
+                }
+            });
+        }
+        ids
+    }
+
+    fn reserve_stream_cache_storage(
+        &mut self,
+        key: &(String, String),
+        incoming_len: usize,
+        existing_field_len: usize,
+    ) -> bool {
+        if self.stream_cache.len() >= MAX_STREAM_CACHE_ENTRIES
+            && !self.stream_cache.contains_key(key)
+        {
+            if let Some(evict) = self.stream_cache.keys().find(|k| *k != key).cloned() {
+                self.evict_stream_cache_key(&evict);
+            }
+        }
+
+        let mut projected_total = self.stream_cache_bytes() + incoming_len - existing_field_len;
+        let max_cache_bytes = self.resource_limits.max_stream_cache_bytes;
+        if projected_total > max_cache_bytes {
+            let victims: Vec<_> = self
+                .stream_cache
+                .keys()
+                .filter(|k| *k != key)
+                .cloned()
+                .collect();
+            for victim in victims {
+                if projected_total <= max_cache_bytes {
+                    break;
+                }
+                if let Some(cache) = self.stream_cache.get(&victim) {
+                    projected_total -= Self::stream_cache_entry_bytes(cache);
+                }
+                self.evict_stream_cache_key(&victim);
+            }
+        }
+
+        projected_total <= max_cache_bytes
+    }
+
     fn cache_relay_frame(&mut self, frame: &crate::session::conn::RelayFrame) {
-        let is_avc_header = frame.frame_type == FrameType::Video
-            && frame.payload.len() >= 2
-            && frame.payload[0] == 0x17
-            && frame.payload[1] == 0x00;
-        let is_keyframe = frame.frame_type == FrameType::Video
-            && frame.payload.len() >= 2
-            && frame.payload[0] == 0x17
-            && frame.payload[1] == 0x01;
-        let is_aac_header = frame.frame_type == FrameType::Audio
-            && frame.payload.len() >= 2
-            && (frame.payload[0] & 0xF0) == 0xA0
-            && frame.payload[1] == 0x00;
+        if frame.frame_type == FrameType::Script || frame.frame_type == FrameType::Metadata {
+            if frame.payload.len() > MAX_CACHED_INIT_FRAME_BYTES {
+                return;
+            }
+            let key = (frame.app.clone(), frame.stream_name.clone());
+            let publisher_keys = self
+                .publisher_cache_keys
+                .entry(frame.publisher_conn_id)
+                .or_default();
+            if !publisher_keys.iter().any(|k| k == &key) {
+                publisher_keys.push(key.clone());
+            }
+            let existing_field_len = self
+                .stream_cache
+                .get(&key)
+                .and_then(|cache| cache.metadata.as_ref())
+                .map(|v| v.len())
+                .unwrap_or(0);
+            if !self.reserve_stream_cache_storage(&key, frame.payload.len(), existing_field_len) {
+                return;
+            }
+            let cache = self
+                .stream_cache
+                .entry(key)
+                .or_insert_with(empty_stream_cache);
+            cache.metadata = Some(frame.payload.clone());
+            return;
+        }
+
+        let cache_kind = classify_cache_frame(frame.frame_type, frame.cache_payload());
+        let is_avc_header = cache_kind == CacheFrameKind::VideoSequenceHeader;
+        let is_keyframe = cache_kind == CacheFrameKind::VideoKeyframe;
+        let is_aac_header = cache_kind == CacheFrameKind::AudioSequenceHeader;
 
         // Frames that are neither a codec header nor a keyframe are relayed
         // live but never cached; don't create an empty entry for them.
@@ -774,16 +985,44 @@ impl Server {
             // it) -- drop it rather than keep replaying it to late joiners.
             if let Some(cache) = self.stream_cache.get_mut(&key) {
                 if is_avc_header {
-                    cache.avc_header = None;
+                    let seq_tracks = Self::multitrack_sequence_track_ids(
+                        FrameType::Video,
+                        frame.cache_payload(),
+                    );
+                    if seq_tracks.len() > 1 {
+                        cache.avc_header = None;
+                        cache.video_track_headers.clear();
+                    } else if let Some(track_id) = seq_tracks.first().copied() {
+                        cache.avc_header = None;
+                        cache.video_track_headers.remove(&track_id);
+                    } else {
+                        cache.avc_header = None;
+                        cache.video_track_headers.clear();
+                    }
                 } else if is_keyframe {
                     cache.last_keyframe = None;
                 } else {
-                    cache.aac_header = None;
+                    let seq_tracks = Self::multitrack_sequence_track_ids(
+                        FrameType::Audio,
+                        frame.cache_payload(),
+                    );
+                    if seq_tracks.len() > 1 {
+                        cache.aac_header = None;
+                        cache.audio_track_headers.clear();
+                    } else if let Some(track_id) = seq_tracks.first().copied() {
+                        cache.aac_header = None;
+                        cache.audio_track_headers.remove(&track_id);
+                    } else {
+                        cache.aac_header = None;
+                        cache.audio_track_headers.clear();
+                    }
                 }
             }
-            if self.stream_cache.get(&key).is_some_and(|c| {
-                c.avc_header.is_none() && c.aac_header.is_none() && c.last_keyframe.is_none()
-            }) {
+            if self
+                .stream_cache
+                .get(&key)
+                .is_some_and(Self::stream_cache_is_empty)
+            {
                 self.evict_stream_cache_key(&key);
             }
             return;
@@ -796,20 +1035,27 @@ impl Server {
         if !publisher_keys.iter().any(|k| k == &key) {
             publisher_keys.push(key.clone());
         }
-        if self.stream_cache.len() >= MAX_STREAM_CACHE_ENTRIES
-            && !self.stream_cache.contains_key(&key)
-        {
-            if let Some(evict) = self.stream_cache.keys().find(|k| *k != &key).cloned() {
-                self.evict_stream_cache_key(&evict);
-            }
-        }
 
         let existing_field_len = self
             .stream_cache
             .get(&key)
             .map(|cache| {
                 if is_avc_header {
-                    cache.avc_header.as_ref().map(|v| v.len()).unwrap_or(0)
+                    let seq_tracks = Self::multitrack_sequence_track_ids(
+                        FrameType::Video,
+                        frame.cache_payload(),
+                    );
+                    if seq_tracks.len() > 1 {
+                        cache.avc_header.as_ref().map(|v| v.len()).unwrap_or(0)
+                    } else if let Some(track_id) = seq_tracks.first() {
+                        cache
+                            .video_track_headers
+                            .get(track_id)
+                            .map(|v| v.len())
+                            .unwrap_or(0)
+                    } else {
+                        cache.avc_header.as_ref().map(|v| v.len()).unwrap_or(0)
+                    }
                 } else if is_keyframe {
                     cache
                         .last_keyframe
@@ -817,52 +1063,64 @@ impl Server {
                         .map(|(_, v)| v.len())
                         .unwrap_or(0)
                 } else {
-                    cache.aac_header.as_ref().map(|v| v.len()).unwrap_or(0)
+                    let seq_tracks = Self::multitrack_sequence_track_ids(
+                        FrameType::Audio,
+                        frame.cache_payload(),
+                    );
+                    if seq_tracks.len() > 1 {
+                        cache.aac_header.as_ref().map(|v| v.len()).unwrap_or(0)
+                    } else if let Some(track_id) = seq_tracks.first() {
+                        cache
+                            .audio_track_headers
+                            .get(track_id)
+                            .map(|v| v.len())
+                            .unwrap_or(0)
+                    } else {
+                        cache.aac_header.as_ref().map(|v| v.len()).unwrap_or(0)
+                    }
                 }
             })
             .unwrap_or(0);
-        let incoming_len = frame.payload.len();
-        // Track the running total locally instead of recomputing
-        // stream_cache_bytes() (an O(n) scan) on every eviction, which would
-        // make this O(n^2) under sustained cache churn.
-        let mut projected_total = self.stream_cache_bytes() + incoming_len - existing_field_len;
-        let max_cache_bytes = self.resource_limits.max_stream_cache_bytes;
-        if projected_total > max_cache_bytes {
-            let victims: Vec<_> = self
-                .stream_cache
-                .keys()
-                .filter(|k| *k != &key)
-                .cloned()
-                .collect();
-            for victim in victims {
-                if projected_total <= max_cache_bytes {
-                    break;
-                }
-                if let Some(cache) = self.stream_cache.get(&victim) {
-                    projected_total -= Self::stream_cache_entry_bytes(cache);
-                }
-                self.evict_stream_cache_key(&victim);
-            }
-        }
-
-        // Evicting every other entry still isn't enough when this single
-        // payload alone exceeds the budget -- don't cache it at all rather
-        // than let the server-wide total blow past the configured cache cap.
-        if projected_total > max_cache_bytes {
+        if !self.reserve_stream_cache_storage(&key, frame.payload.len(), existing_field_len) {
             return;
         }
 
-        let cache = self.stream_cache.entry(key).or_insert(StreamCache {
-            avc_header: None,
-            aac_header: None,
-            last_keyframe: None,
-        });
+        let cache = self
+            .stream_cache
+            .entry(key)
+            .or_insert_with(empty_stream_cache);
         if is_avc_header {
-            cache.avc_header = Some(frame.payload.clone());
+            let seq_tracks =
+                Self::multitrack_sequence_track_ids(FrameType::Video, frame.cache_payload());
+            if seq_tracks.len() > 1 {
+                cache.video_track_headers.clear();
+                cache.avc_header = Some(frame.payload.clone());
+            } else if let Some(track_id) = seq_tracks.first().copied() {
+                cache.avc_header = None;
+                cache
+                    .video_track_headers
+                    .insert(track_id, frame.payload.clone());
+            } else {
+                cache.video_track_headers.clear();
+                cache.avc_header = Some(frame.payload.clone());
+            }
         } else if is_keyframe {
             cache.last_keyframe = Some((frame.timestamp, frame.payload.clone()));
         } else if is_aac_header {
-            cache.aac_header = Some(frame.payload.clone());
+            let seq_tracks =
+                Self::multitrack_sequence_track_ids(FrameType::Audio, frame.cache_payload());
+            if seq_tracks.len() > 1 {
+                cache.audio_track_headers.clear();
+                cache.aac_header = Some(frame.payload.clone());
+            } else if let Some(track_id) = seq_tracks.first().copied() {
+                cache.aac_header = None;
+                cache
+                    .audio_track_headers
+                    .insert(track_id, frame.payload.clone());
+            } else {
+                cache.audio_track_headers.clear();
+                cache.aac_header = Some(frame.payload.clone());
+            }
         }
     }
 
@@ -921,6 +1179,17 @@ impl Server {
     }
 }
 
+fn empty_stream_cache() -> StreamCache {
+    StreamCache {
+        avc_header: None,
+        video_track_headers: HashMap::new(),
+        aac_header: None,
+        audio_track_headers: HashMap::new(),
+        metadata: None,
+        last_keyframe: None,
+    }
+}
+
 impl Drop for Server {
     fn drop(&mut self) {
         self.running = false;
@@ -939,6 +1208,79 @@ mod tests {
     #[test]
     fn recv_budget_is_small_enough_for_fairness_across_connections() {
         assert!(MAX_RECV_BYTES_PER_CONN_PER_POLL <= 1024 * 1024);
+    }
+
+    #[test]
+    fn relay_send_budget_limits_worst_case_player_fan_out() {
+        // One publisher can queue 1024 frames; with 256 connections that
+        // could be 261_120 sends per poll without a relay budget.
+        let worst_case = 1024 * 256;
+        let server = test_server();
+        assert_eq!(
+            server.max_relay_sends_per_poll,
+            DEFAULT_MAX_RELAY_SENDS_PER_POLL
+        );
+        assert!(
+            server.max_relay_sends_per_poll < worst_case / 10,
+            "relay budget should be well below unbounded fan-out"
+        );
+    }
+
+    #[test]
+    fn oversized_relay_fan_out_still_makes_progress_each_poll() {
+        use crate::session::stream::Stream;
+        use crate::transport::Transport;
+        use std::os::unix::io::IntoRawFd;
+        use std::os::unix::net::UnixStream;
+
+        fn attached_conn(conn_id: u64, publishing: bool) -> (Conn, UnixStream) {
+            let (server_end, peer_end) = UnixStream::pair().unwrap();
+            server_end.set_nonblocking(true).unwrap();
+            peer_end.set_nonblocking(true).unwrap();
+
+            let mut conn = Conn::new();
+            conn.conn_id = conn_id;
+            conn.app = "live".to_string();
+            conn.relay_enabled = true;
+            conn.transport = Some(Transport::new_plain(server_end.into_raw_fd()));
+            conn.current_stream = Some(Box::new(Stream {
+                stream_id: 1,
+                name: "stream".to_string(),
+                is_publishing: publishing,
+                is_playing: !publishing,
+                paused: false,
+                receive_audio: true,
+                receive_video: true,
+            }));
+            (conn, peer_end)
+        }
+
+        let mut server = test_server();
+        server.max_relay_sends_per_poll = 1;
+
+        let (mut publisher, _publisher_peer) = attached_conn(1, true);
+        publisher
+            .pending_relay
+            .push(relay_frame(FrameType::Video, vec![0x17, 0x01, 0xAA]));
+        publisher
+            .pending_relay
+            .push(relay_frame(FrameType::Video, vec![0x27, 0x01, 0xBB]));
+        let (player_a, _player_a_peer) = attached_conn(2, false);
+        let (player_b, _player_b_peer) = attached_conn(3, false);
+        server.connections = vec![publisher, player_a, player_b];
+
+        server.process_connections().unwrap();
+        assert_eq!(
+            server.connections[0].pending_relay.len(),
+            1,
+            "the first oversized fan-out frame must be relayed instead of re-queuing the whole batch"
+        );
+
+        server.process_connections().unwrap();
+        assert!(
+            server.connections[0].pending_relay.is_empty(),
+            "the deferred frame must make progress on the next poll"
+        );
     }
 
     fn test_server() -> Server {
@@ -961,8 +1303,77 @@ mod tests {
             publisher_conn_id: 1,
             frame_type,
             timestamp: 0,
+            cache_payload: None,
             payload,
         }
+    }
+
+    #[test]
+    fn modex_wrapped_multitrack_is_detected_for_player_gating() {
+        let payload = [
+            0x87, 0x02, 0x00, 0x01, 0x02, 0x06, 0x10, b'a', b'v', b'c', b'1', 0x00, 0x00, 0x00,
+            0x01, 0xAA,
+        ];
+        assert!(Server::cached_payload_is_multitrack(
+            FrameType::Video,
+            &payload
+        ));
+    }
+
+    #[test]
+    fn multitrack_video_sequence_header_is_cached() {
+        let mut server = test_server();
+        let payload = vec![
+            0x86, 0x10, b'a', b'v', b'c', b'1', 0x00, 0x00, 0x00, 0x01, 0xAA, 0x01, 0x00, 0x00,
+            0x01, 0xBB,
+        ];
+        server.cache_relay_frame(&relay_frame(FrameType::Video, payload));
+
+        let key = ("live".to_string(), "stream".to_string());
+        assert!(server.stream_cache.get(&key).unwrap().avc_header.is_some());
+    }
+
+    #[test]
+    fn multitrack_per_track_video_inits_are_retained() {
+        let mut server = test_server();
+        let track0 = vec![
+            0x86, 0x10, b'a', b'v', b'c', b'1', 0x00, 0x00, 0x00, 0x01, 0xAA,
+        ];
+        let track1 = vec![
+            0x86, 0x10, b'a', b'v', b'c', b'1', 0x01, 0x00, 0x00, 0x01, 0xBB,
+        ];
+        server.cache_relay_frame(&relay_frame(FrameType::Video, track0));
+        server.cache_relay_frame(&relay_frame(FrameType::Video, track1));
+
+        let key = ("live".to_string(), "stream".to_string());
+        let cache = server.stream_cache.get(&key).unwrap();
+        assert!(cache.avc_header.is_none());
+        assert_eq!(cache.video_track_headers.len(), 2);
+        assert!(cache.video_track_headers.contains_key(&0));
+        assert!(cache.video_track_headers.contains_key(&1));
+    }
+
+    #[test]
+    fn enhanced_hevc_sequence_header_is_cached() {
+        let mut server = test_server();
+        let payload = vec![0x90, b'h', b'v', b'c', b'1', 0x01, 0x02];
+        server.cache_relay_frame(&relay_frame(FrameType::Video, payload));
+
+        let key = ("live".to_string(), "stream".to_string());
+        assert!(server.stream_cache.get(&key).unwrap().avc_header.is_some());
+    }
+
+    #[test]
+    fn on_metadata_script_is_cached() {
+        let mut server = test_server();
+        let mut payload = vec![0x02, 0x00, 0x0A];
+        payload.extend_from_slice(b"onMetaData");
+        payload.push(crate::amf::amf0::Amf0Type::Object as u8);
+        payload.extend_from_slice(&[0x00, 0x00, 0x09]);
+
+        server.cache_relay_frame(&relay_frame(FrameType::Script, payload));
+        let key = ("live".to_string(), "stream".to_string());
+        assert!(server.stream_cache.get(&key).unwrap().metadata.is_some());
     }
 
     #[test]
@@ -1122,6 +1533,9 @@ mod tests {
             name: String::new(),
             is_publishing: false,
             is_playing: false,
+            paused: false,
+            receive_audio: true,
+            receive_video: true,
         }));
         first.publish_routes = Some(PublishRouteRegistry::new(Arc::clone(
             &server.active_publish_routes,
@@ -1135,6 +1549,9 @@ mod tests {
             name: String::new(),
             is_publishing: false,
             is_playing: false,
+            paused: false,
+            receive_audio: true,
+            receive_video: true,
         }));
         second.publish_routes = Some(PublishRouteRegistry::new(Arc::clone(
             &server.active_publish_routes,
@@ -1171,6 +1588,9 @@ mod tests {
             name: String::new(),
             is_publishing: false,
             is_playing: false,
+            paused: false,
+            receive_audio: true,
+            receive_video: true,
         }));
         first.publish_routes = Some(PublishRouteRegistry::new(Arc::clone(
             &server.active_publish_routes,
@@ -1184,6 +1604,9 @@ mod tests {
             name: String::new(),
             is_publishing: false,
             is_playing: false,
+            paused: false,
+            receive_audio: true,
+            receive_video: true,
         }));
         second.publish_routes = Some(PublishRouteRegistry::new(Arc::clone(
             &server.active_publish_routes,
@@ -1220,6 +1643,9 @@ mod tests {
             name: String::new(),
             is_publishing: false,
             is_playing: false,
+            paused: false,
+            receive_audio: true,
+            receive_video: true,
         }));
         third.publish_routes = Some(PublishRouteRegistry::new(Arc::clone(
             &server.active_publish_routes,
@@ -1249,6 +1675,9 @@ mod tests {
             name: String::new(),
             is_publishing: false,
             is_playing: false,
+            paused: false,
+            receive_audio: true,
+            receive_video: true,
         }));
         first.publish_routes = Some(PublishRouteRegistry::new(Arc::clone(
             &server.active_publish_routes,
@@ -1281,6 +1710,9 @@ mod tests {
             name: String::new(),
             is_publishing: false,
             is_playing: false,
+            paused: false,
+            receive_audio: true,
+            receive_video: true,
         }));
         second.publish_routes = Some(PublishRouteRegistry::new(Arc::clone(
             &server.active_publish_routes,
@@ -1304,8 +1736,8 @@ mod tests {
         use crate::chunk::writer::chunk_write;
         use crate::message::message::RTMP_MSG_AMF0_COMMAND;
         use crate::session::stream::Stream;
-        use crate::types::ConnState;
         use crate::transport::Transport;
+        use crate::types::ConnState;
         use std::os::unix::io::IntoRawFd;
         use std::os::unix::net::UnixStream;
 
@@ -1322,6 +1754,9 @@ mod tests {
             name: "victim".to_string(),
             is_publishing: true,
             is_playing: false,
+            paused: false,
+            receive_audio: true,
+            receive_video: true,
         }));
         conn_a.publish_routes = Some(PublishRouteRegistry::new(Arc::clone(
             &server.active_publish_routes,
@@ -1350,6 +1785,9 @@ mod tests {
             name: String::new(),
             is_publishing: false,
             is_playing: false,
+            paused: false,
+            receive_audio: true,
+            receive_video: true,
         }));
         conn_b.publish_routes = Some(PublishRouteRegistry::new(Arc::clone(
             &server.active_publish_routes,
@@ -1375,7 +1813,11 @@ mod tests {
         server.connections = vec![conn_a, conn_b];
         server.process_connections().unwrap();
 
-        assert_eq!(server.connections.len(), 1, "conn_a should have been removed");
+        assert_eq!(
+            server.connections.len(),
+            1,
+            "conn_a should have been removed"
+        );
         assert!(
             server.connections[0].relay_enabled,
             "conn_b's publish must succeed in the same batch conn_a's route was freed in"

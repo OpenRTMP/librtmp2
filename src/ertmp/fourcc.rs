@@ -149,24 +149,15 @@ mod tests {
 
     #[test]
     fn video_fourcc_roundtrip() {
-        assert_eq!(
-            fourcc_to_video_codec(b"avc1").unwrap(),
-            VideoCodec::H264
-        );
-        assert_eq!(
-            fourcc_to_video_codec(b"hvc1").unwrap(),
-            VideoCodec::H265
-        );
+        assert_eq!(fourcc_to_video_codec(b"avc1").unwrap(), VideoCodec::H264);
+        assert_eq!(fourcc_to_video_codec(b"hvc1").unwrap(), VideoCodec::H265);
         assert_eq!(fourcc_to_video_codec(b"av01").unwrap(), VideoCodec::Av1);
         assert_eq!(video_codec_to_fourcc(VideoCodec::H264), "avc1");
     }
 
     #[test]
     fn audio_fourcc_roundtrip() {
-        assert_eq!(
-            fourcc_to_audio_codec(b"mp4a").unwrap(),
-            AudioCodec::Aac
-        );
+        assert_eq!(fourcc_to_audio_codec(b"mp4a").unwrap(), AudioCodec::Aac);
         assert_eq!(fourcc_to_audio_codec(b"Opus").unwrap(), AudioCodec::Opus);
         assert_eq!(audio_codec_to_fourcc(AudioCodec::Aac), "mp4a");
     }

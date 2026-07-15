@@ -2,8 +2,8 @@
 //!
 //! Mirrors `src/core/log.h` and `src/core/log.c`.
 
-use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 /// Log levels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]

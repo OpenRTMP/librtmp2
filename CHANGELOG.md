@@ -13,7 +13,27 @@ begin at `1.0.0`.
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-07-15
+
 ### Added
+- Server-side E-RTMP v2 connect negotiation on the live session path:
+  `fourCcList`, numeric `capsEx` capability bitmask, `videoFourCcInfoMap`,
+  `reconnect`, and NetConnection `_error` responses when capability negotiation
+  fails.
+- Multitrack media support (E-RTMP v2 `AudioPacketType::Multitrack` /
+  `VideoPacketType::Multitrack`): opaque relay of full multitrack messages,
+  per-track `on_frame_cb` delivery with `Frame.track_id`, and init-cache replay
+  of multitrack sequence-start headers to late-joining players.
+- Enhanced init-frame classification via `exvideo`/`exaudio` parsers (HEVC, AV1,
+  Opus, AAC) in `media/init_cache.rs`, replacing legacy nibble-only detection.
+- `onMetaData` script caching in `StreamCache` and replay to players that join
+  after the publisher has already sent metadata.
+- Client receive path for AMF0/AMF3 `onMetaData` and RTMP Aggregate messages
+  (`0x16`), unpacking sub-tags into the normal A/V and script frame callbacks.
+- Legacy RTMP commands on the server session path: `pause`, `seek`,
+  `receiveAudio`, `receiveVideo`, and `closeStream`.
+- User Control message handling for `StreamBegin`, `StreamEOF`, and
+  `SetBufferLength`; AMF3 Shared Object messages are accepted as no-ops.
 - `examples/dump_frames.rs` — play a stream and print one line per received frame
   (type, timestamp, size, codec details) for debugging live publishers.
 - libFuzzer harnesses under `fuzz/` for chunk reading, handshake parsing, AMF0
@@ -23,8 +43,40 @@ begin at `1.0.0`.
   libFuzzer smoke runs).
 
 ### Changed
+- The built-in relay fan-out budget is configurable through
+  `Server::max_relay_sends_per_poll` (default: 4096 sends per poll). The first
+  eligible frame in a poll is always processed even when its audience exceeds
+  the budget, preventing an oversized fan-out frame from being re-queued forever.
+- Connect AMF helpers now parse and write E-RTMP v2 capability representations,
+  including wildcard FourCC entries, numeric `capsEx`, and per-codec
+  `videoFourCcInfoMap` masks. The built-in client continues to connect without
+  advertising capabilities; negotiation is active on the server session path.
+- `Frame` now carries populated codec/header fields (`video_fourcc`, `audio_fourcc`,
+  composition time, etc.) and optional `track_id` for multitrack callbacks.
+- Corrected E-RTMP audio/video packet-type constants for sequence-end,
+  multichannel, and multitrack values.
 - Removed `docs/roadmap.md`; release status lives in `README.md` and
   `CHANGELOG.md`.
+
+### Fixed
+- ModEx prefix bytes are normalized only when the ModEx capability was negotiated
+  and the leading bytes form an unambiguous ModEx wrapper; enhanced
+  ExVideo/ExAudio, legacy AAC, and multitrack tags are preserved. Relay always
+  forwards the original payload.
+- Aggregate processing preserves relative sub-tag timestamps for A/V and metadata,
+  rejects malformed or truncated payloads, and routes script tags through the
+  normal metadata path.
+- Re-enabling `receiveAudio` or `receiveVideo` schedules init-cache replay;
+  paused players and disabled media types are filtered during relay.
+- Enhanced `CodedFramesX` keyframes and multitrack sequence headers are classified
+  correctly for late-join cache replay.
+- Complex RTMP handshake (digest/HMAC) is not implemented; peers requesting it
+  still receive a legacy simple S1/S2 response so ffmpeg and similar clients connect.
+
+### Security
+- Bound E-RTMP capability blobs to 4 KiB and Aggregate messages to 4096 sub-tags
+  on both server and client receive paths; stream-cache resource accounting now
+  includes metadata and per-track headers.
 
 ## [0.3.1] — 2026-07-13
 
@@ -245,7 +297,8 @@ and others.
 - Protocol mapping documents for legacy, E-RTMP v1, and E-RTMP v2
 - `CONTRIBUTING.md` guidelines
 
-[Unreleased]: https://github.com/OpenRTMP/librtmp2/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/OpenRTMP/librtmp2/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/OpenRTMP/librtmp2/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/OpenRTMP/librtmp2/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/OpenRTMP/librtmp2/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/OpenRTMP/librtmp2/compare/v0.2.0...v0.2.1

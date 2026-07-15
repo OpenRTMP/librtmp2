@@ -98,6 +98,12 @@ fn get_time() -> u32 {
         .as_secs() as u32
 }
 
+/// True when C1 advertises the Adobe digest/complex handshake schema.
+#[allow(dead_code)]
+fn c1_requests_complex_handshake(c1: &[u8]) -> bool {
+    c1.len() >= HANDSHAKE_SIZE && (c1[4] != 0 || c1[5] != 0 || c1[6] != 0 || c1[7] != 0)
+}
+
 /* ── Server-side handshake ── */
 
 /// Initialize a server-side handshake.
@@ -336,7 +342,25 @@ mod tests {
             time2 >= before && time2 <= after,
             "S2 time2 must be the server's own time"
         );
-        assert_eq!(&s2[8..], &c1[8..], "S2 random bytes must echo C1's random bytes");
+        assert_eq!(
+            &s2[8..],
+            &c1[8..],
+            "S2 random bytes must echo C1's random bytes"
+        );
+    }
+
+    #[test]
+    fn complex_c1_still_gets_simple_s1s2_response() {
+        let mut hs = Handshake::default();
+        server_init(&mut hs);
+        let mut c1 = vec![0u8; HANDSHAKE_SIZE];
+        c1[..4].copy_from_slice(&0x1234_5678u32.to_be_bytes());
+        c1[4..8].copy_from_slice(&1u32.to_be_bytes());
+        let mut buf = Buffer::new();
+        buf.write(&c1).unwrap();
+        server_read_c1(&mut hs, &mut buf).unwrap();
+        assert_eq!(hs.state, HandshakeState::ServerWaitC2);
+        assert!(hs.out.available() >= HANDSHAKE_SIZE * 2);
     }
 
     #[test]
@@ -361,6 +385,10 @@ mod tests {
             time2 >= before && time2 <= after,
             "C2 time2 must be the client's own time"
         );
-        assert_eq!(&c2[8..], &s1[8..], "C2 random bytes must echo S1's random bytes");
+        assert_eq!(
+            &c2[8..],
+            &s1[8..],
+            "C2 random bytes must echo S1's random bytes"
+        );
     }
 }

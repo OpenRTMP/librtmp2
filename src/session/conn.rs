@@ -6,9 +6,17 @@ use crate::buffer::Buffer;
 use crate::chunk::reader::{ChunkMessage, chunk_read_owned};
 use crate::chunk::state::{ChunkRegistry, DEFAULT_CHUNK_SIZE, DEFAULT_MAX_MSG_LENGTH};
 use crate::chunk::writer::chunk_write;
+use crate::ertmp::connect_amf::{negotiate_caps, write_negotiated_caps};
+use crate::ertmp::multitrack_media::{first_track_fourcc, foreach_track};
 use crate::handshake::{self, Handshake, HandshakeState};
+use crate::media::{
+    is_on_metadata_payload, normalize_modex_payload, populate_av_frame, populate_multitrack_frame,
+};
 use crate::message::command;
-use crate::message::control::{self, UCTRL_PING_REQUEST, UCTRL_PING_RESPONSE};
+use crate::message::control::{
+    self, UCTRL_PING_REQUEST, UCTRL_PING_RESPONSE, UCTRL_SET_BUFFER_LENGTH, UCTRL_STREAM_BEGIN,
+    UCTRL_STREAM_EOF,
+};
 use crate::message::message as msg_dispatch;
 use crate::session::publish_route::PublishRouteRegistry;
 use crate::session::state_machine;
@@ -69,11 +77,29 @@ pub struct RelayFrame {
     pub frame_type: FrameType,
     pub timestamp: u32,
     pub payload: Vec<u8>,
+    /// ModEx-normalized bytes used only for codec parsing and cache classification.
+    /// `None` means the normalized bytes are identical to `payload`.
+    pub cache_payload: Option<Vec<u8>>,
     pub app: String,
     pub stream_name: String,
     pub publisher_conn_id: u64,
 }
 
+impl RelayFrame {
+    /// Bytes used for codec parsing and cache classification.
+    pub fn cache_payload(&self) -> &[u8] {
+        self.cache_payload.as_deref().unwrap_or(&self.payload)
+    }
+
+    fn retained_bytes(&self) -> usize {
+        self.payload.len().saturating_add(
+            self.cache_payload
+                .as_ref()
+                .map(|payload| payload.len())
+                .unwrap_or(0),
+        )
+    }
+}
 pub struct Conn {
     pub state: ConnState,
     pub handshake: Handshake,
@@ -153,6 +179,10 @@ pub struct Conn {
     /// When this inbound TCP session was accepted. Used to reap peers that
     /// never progress past the legacy handshake / AMF connect setup.
     session_setup_started: Instant,
+    /// E-RTMP caps agreed during connect (empty when legacy connect).
+    pub negotiated_caps: NegotiatedCaps,
+    /// Player-side buffer length from SetBufferLength user control (ms).
+    pub buffer_length_ms: u32,
 }
 
 impl Conn {
@@ -211,6 +241,8 @@ impl Conn {
             frame_cb_scratch: Vec::new(),
             budget_exhausted: false,
             session_setup_started: Instant::now(),
+            negotiated_caps: NegotiatedCaps::default(),
+            buffer_length_ms: 3000,
         }
     }
 
@@ -236,7 +268,10 @@ impl Conn {
     }
 
     fn pending_relay_bytes(&self) -> usize {
-        self.pending_relay.iter().map(|f| f.payload.len()).sum()
+        self.pending_relay
+            .iter()
+            .map(RelayFrame::retained_bytes)
+            .sum()
     }
 
     /// Key used to route relayed media between publishers and players.
@@ -248,6 +283,10 @@ impl Conn {
             .as_ref()
             .map(|s| s.name.clone())
             .unwrap_or_default()
+    }
+
+    pub fn accepts_multitrack(&self) -> bool {
+        !self.negotiated_caps.has_caps_ex || self.negotiated_caps.multitrack_enabled
     }
 
     /// Queue eviction of the current publish route's cache key when
@@ -298,11 +337,40 @@ impl Conn {
         msg_stream_id == expected_stream_id && expected_stream_id != 0
     }
 
-    fn handle_publisher_data_message(&mut self, msg_stream_id: u32, payload: &[u8]) -> Result<()> {
+    fn handle_publisher_data_message(
+        &mut self,
+        msg_stream_id: u32,
+        timestamp: u32,
+        payload: &[u8],
+    ) -> Result<()> {
         if !self.publishing_metadata_allowed(msg_stream_id) {
             return Ok(());
         }
-        self.handle_data_message(payload)
+        let relay_metadata = is_on_metadata_payload(payload)
+            && self.relay_enabled
+            && self
+                .current_stream
+                .as_ref()
+                .map(|s| s.is_publishing)
+                .unwrap_or(false);
+        self.handle_data_message(payload)?;
+        if relay_metadata {
+            if let Some(cb) = self.on_frame_cb {
+                self.frame_cb_scratch.clear();
+                self.frame_cb_scratch.extend_from_slice(payload);
+                let frame = Frame {
+                    frame_type: FrameType::Script,
+                    timestamp,
+                    size: self.frame_cb_scratch.len() as u32,
+                    data: self.frame_cb_scratch.as_ptr(),
+                    is_metadata: 1,
+                    ..Default::default()
+                };
+                cb(&frame);
+            }
+            self.queue_relay_frame(FrameType::Script, timestamp, payload, payload)?;
+        }
+        Ok(())
     }
 
     fn queue_relay_frame(
@@ -310,9 +378,24 @@ impl Conn {
         frame_type: FrameType,
         timestamp: u32,
         payload: &[u8],
+        cache_payload: &[u8],
     ) -> Result<()> {
+        let cache_payload = if cache_payload.len() == payload.len()
+            && std::ptr::eq(cache_payload.as_ptr(), payload.as_ptr())
+        {
+            None
+        } else {
+            Some(cache_payload.to_vec())
+        };
+        let retained_bytes = payload.len().saturating_add(
+            cache_payload
+                .as_ref()
+                .map(|payload| payload.len())
+                .unwrap_or(0),
+        );
         if self.pending_relay.len() >= MAX_PENDING_RELAY_FRAMES
-            || self.pending_relay_bytes() + payload.len() > self.max_pending_relay_bytes
+            || self.pending_relay_bytes().saturating_add(retained_bytes)
+                > self.max_pending_relay_bytes
         {
             return Err(ErrorCode::Internal);
         }
@@ -320,6 +403,7 @@ impl Conn {
             frame_type,
             timestamp,
             payload: payload.to_vec(),
+            cache_payload,
             app: self.app.clone(),
             stream_name: self.relay_route_key(),
             publisher_conn_id: self.conn_id,
@@ -365,12 +449,16 @@ impl Conn {
             return Ok(());
         }
 
+        let normalized_payload =
+            normalize_modex_payload(payload, self.negotiated_caps.caps_ex_mask);
+        let parse_payload = normalized_payload.as_ref();
+
         match frame_type {
             FrameType::Video if self.detected_video_codec.is_none() => {
-                self.detected_video_codec = detect_video_codec(payload);
+                self.detected_video_codec = detect_video_codec(parse_payload);
             }
             FrameType::Audio if self.detected_audio_codec.is_none() => {
-                self.detected_audio_codec = detect_audio_codec(payload);
+                self.detected_audio_codec = detect_audio_codec(parse_payload);
             }
             _ => {}
         }
@@ -384,20 +472,25 @@ impl Conn {
             .saturating_add(payload.len() as u64);
 
         if let Some(cb) = self.on_frame_cb {
-            self.frame_cb_scratch.clear();
-            self.frame_cb_scratch.extend_from_slice(payload);
-            let frame = Frame {
-                frame_type,
-                timestamp,
-                size: self.frame_cb_scratch.len() as u32,
-                data: self.frame_cb_scratch.as_ptr(),
-                ..Default::default()
-            };
-            cb(&frame);
+            let had_multitrack = foreach_track(frame_type, parse_payload, |track| {
+                self.invoke_multitrack_on_frame_cb(
+                    cb,
+                    frame_type,
+                    timestamp,
+                    track.track_id,
+                    track.fourcc,
+                    track.packet_type,
+                    track.video_frame_type,
+                    track.payload,
+                );
+            });
+            if !had_multitrack {
+                self.invoke_on_frame_cb(cb, frame_type, timestamp, u8::MAX, parse_payload);
+            }
         }
 
         if self
-            .queue_relay_frame(frame_type, timestamp, payload)
+            .queue_relay_frame(frame_type, timestamp, payload, parse_payload)
             .is_err()
         {
             return Err(ErrorCode::Internal);
@@ -463,7 +556,7 @@ impl Conn {
                     self.handle_media_frame(msg_stream_id, FrameType::Video, out_ts, tag_payload)?;
                 }
                 msg_dispatch::RTMP_MSG_AMF0_DATA => {
-                    self.handle_publisher_data_message(msg_stream_id, tag_payload)?;
+                    self.handle_publisher_data_message(msg_stream_id, out_ts, tag_payload)?;
                 }
                 _ => {}
             }
@@ -672,17 +765,34 @@ impl Conn {
                 self.handle_aggregate(msg.msg_stream_id, msg.timestamp, payload)
             }
             msg_dispatch::RTMP_MSG_AMF0_DATA => {
-                self.handle_publisher_data_message(msg.msg_stream_id, payload)
+                self.handle_publisher_data_message(msg.msg_stream_id, msg.timestamp, payload)
             }
             msg_dispatch::RTMP_MSG_AMF3_DATA => {
                 if !payload.is_empty() && payload[0] == 0x00 {
-                    self.handle_publisher_data_message(msg.msg_stream_id, &payload[1..])
+                    self.handle_publisher_data_message(
+                        msg.msg_stream_id,
+                        msg.timestamp,
+                        &payload[1..],
+                    )
                 } else {
-                    self.handle_publisher_data_message(msg.msg_stream_id, payload)
+                    self.handle_publisher_data_message(msg.msg_stream_id, msg.timestamp, payload)
                 }
+            }
+            msg_dispatch::RTMP_MSG_AMF3_SHARED_OBJECT => {
+                let data = if !payload.is_empty() && payload[0] == 0x00 {
+                    &payload[1..]
+                } else {
+                    payload
+                };
+                self.handle_amf3_shared_object(data)
             }
             _ => Ok(()),
         }
+    }
+
+    fn handle_amf3_shared_object(&mut self, _payload: &[u8]) -> Result<()> {
+        // AMF3 shared objects are accepted and ignored until a relay use-case exists.
+        Ok(())
     }
 
     fn handle_data_message(&mut self, payload: &[u8]) -> Result<()> {
@@ -918,7 +1028,13 @@ impl Conn {
         if payload.len() < 6 {
             return Ok(());
         }
-        let (event_type, param1, _) = control::read_user_control(payload, false)?;
+        let event_type = ((payload[0] as u16) << 8) | (payload[1] as u16);
+        let (event_type, param1, param2) = if event_type == UCTRL_SET_BUFFER_LENGTH {
+            control::read_user_control(payload, true)?
+        } else {
+            let (ty, p1, _) = control::read_user_control(payload, false)?;
+            (ty, p1, None)
+        };
         match event_type {
             UCTRL_PING_RESPONSE => {
                 if let Some(sent_at) = self.pending_pings.remove(&param1) {
@@ -940,6 +1056,17 @@ impl Conn {
                 }
                 self.inbound_ping_responses += 1;
                 self.send_user_control_ping_response(param1)?;
+            }
+            UCTRL_STREAM_BEGIN => {
+                let _ = param1;
+            }
+            UCTRL_STREAM_EOF => {
+                let _ = param1;
+            }
+            UCTRL_SET_BUFFER_LENGTH => {
+                if let Some(ms) = param2 {
+                    self.buffer_length_ms = ms;
+                }
             }
             _ => {}
         }
@@ -1010,13 +1137,35 @@ impl Conn {
                     return Ok(());
                 }
                 let mut info = ConnectInfo::default();
-                command::read_connect(&mut buf, &mut info)?;
+                if command::read_connect(&mut buf, &mut info).is_err() {
+                    self.send_command_error(
+                        info.transaction_id,
+                        "NetConnection.Connect.Rejected",
+                        "Invalid connect command or capability negotiation.",
+                    )?;
+                    return Ok(());
+                }
                 let app_len = info.app.iter().position(|&b| b == 0).unwrap_or(0);
                 self.app = std::str::from_utf8(&info.app[..app_len])
                     .unwrap_or("")
                     .to_string();
+                let needs_caps = info.has_four_cc_list
+                    || info.has_caps_ex
+                    || info.has_video_four_cc_info_map
+                    || info.has_reconnect;
+                if needs_caps {
+                    let _ =
+                        state_machine::conn_transition(&mut self.state, ConnState::CapsNegotiated);
+                }
+                let negotiated = if needs_caps {
+                    let caps = negotiate_caps(&info);
+                    self.negotiated_caps = caps.clone();
+                    Some(caps)
+                } else {
+                    None
+                };
                 let _ = state_machine::conn_transition(&mut self.state, ConnState::AppConnected);
-                self.send_connect_response(info.transaction_id)?;
+                self.send_connect_response(info.transaction_id, negotiated.as_ref())?;
                 if !self.connect_cb_fired {
                     self.connect_cb_fired = true;
                     if let Some(cb) = self.on_connect_cb {
@@ -1180,6 +1329,7 @@ impl Conn {
                         .map(|s| s.stream_id)
                         .unwrap_or(0);
                     self.send_onstatus(sid, "status", "NetStream.Play.Start", "Playing")?;
+                    self.send_stream_lifecycle_begin(sid)?;
                 }
             }
             "FCUnpublish" | "deleteStream" => {
@@ -1199,14 +1349,95 @@ impl Conn {
                 // `true` here would let a new publish on this connection
                 // relay before it's actually re-authorized.
                 self.relay_enabled = false;
+                if let Some(sid) = self.current_stream.as_ref().map(|s| s.stream_id) {
+                    let _ = self.send_stream_lifecycle_eof(sid);
+                }
             }
             "FCPublish" | "releaseStream" => {}
+            "pause" => {
+                if let Ok(pause_flag) = command::read_pause(&mut buf) {
+                    if let Some(ref mut stream) = self.current_stream {
+                        stream.paused = pause_flag;
+                    }
+                    let sid = self
+                        .current_stream
+                        .as_ref()
+                        .map(|s| s.stream_id)
+                        .unwrap_or(0);
+                    let (code, desc) = if pause_flag {
+                        ("NetStream.Pause.Notify", "Paused")
+                    } else {
+                        ("NetStream.Unpause.Notify", "Unpaused")
+                    };
+                    self.send_onstatus(sid, "status", code, desc)?;
+                }
+            }
+            "seek" => {
+                let _millis = command::read_seek(&mut buf).unwrap_or(0.0);
+                let sid = self
+                    .current_stream
+                    .as_ref()
+                    .map(|s| s.stream_id)
+                    .unwrap_or(0);
+                self.send_onstatus(sid, "status", "NetStream.Seek.Notify", "Seeking")?;
+            }
+            "receiveAudio" => {
+                if let Ok(flag) = command::read_bool_command(&mut buf) {
+                    let was_enabled = self
+                        .current_stream
+                        .as_ref()
+                        .map(|stream| stream.receive_audio)
+                        .unwrap_or(true);
+                    if let Some(ref mut stream) = self.current_stream {
+                        stream.receive_audio = flag;
+                    }
+                    if flag && !was_enabled {
+                        self.needs_init_frames = true;
+                    }
+                }
+            }
+            "receiveVideo" => {
+                if let Ok(flag) = command::read_bool_command(&mut buf) {
+                    let was_enabled = self
+                        .current_stream
+                        .as_ref()
+                        .map(|stream| stream.receive_video)
+                        .unwrap_or(true);
+                    if let Some(ref mut stream) = self.current_stream {
+                        stream.receive_video = flag;
+                    }
+                    if flag && !was_enabled {
+                        self.needs_init_frames = true;
+                    }
+                }
+            }
+            "closeStream" => {
+                let target_id = command::read_close_stream(&mut buf)
+                    .ok()
+                    .flatten()
+                    .or_else(|| self.current_stream.as_ref().map(|s| s.stream_id))
+                    .unwrap_or(0);
+                if self.current_stream.as_ref().map(|s| s.stream_id) == Some(target_id) {
+                    self.evict_active_publish_route();
+                    if let Some(ref mut stream) = self.current_stream {
+                        stream.is_playing = false;
+                        stream.is_publishing = false;
+                        stream.paused = false;
+                    }
+                    self.relay_enabled = false;
+                    let _ = self.send_stream_lifecycle_eof(target_id);
+                }
+            }
             _ => {}
         }
         Ok(())
     }
 
-    pub fn send_connect_response(&mut self, transaction_id: f64) -> Result<()> {
+    pub fn send_connect_response(
+        &mut self,
+        transaction_id: f64,
+        caps: Option<&NegotiatedCaps>,
+    ) -> Result<()> {
         let win = SERVER_WINDOW_ACK_SIZE.to_be_bytes();
         self.send_control(0x05, &win)?;
         let mut bw = [0u8; 5];
@@ -1230,7 +1461,21 @@ impl Conn {
         crate::amf::amf0::write_string(&mut amf_buf, "NetConnection.Connect.Success")?;
         crate::amf::amf0::write_object_key(&mut amf_buf, "description")?;
         crate::amf::amf0::write_string(&mut amf_buf, "Connection succeeded.")?;
+        if let Some(caps) = caps {
+            write_negotiated_caps(&mut amf_buf, caps)?;
+        }
         crate::amf::amf0::write_object_end(&mut amf_buf)?;
+        self.send_command(0, amf_buf.as_slice())
+    }
+
+    pub fn send_command_error(
+        &mut self,
+        transaction_id: f64,
+        code: &str,
+        description: &str,
+    ) -> Result<()> {
+        let mut amf_buf = Buffer::with_capacity(256);
+        command::build_error(&mut amf_buf, transaction_id, code, description)?;
         self.send_command(0, amf_buf.as_slice())
     }
 
@@ -1333,6 +1578,31 @@ impl Conn {
         Ok(())
     }
 
+    /// Send an AMF0 data message (e.g. onMetaData) on the current stream.
+    pub fn send_data_message(&mut self, timestamp: u32, payload: &[u8]) -> Result<()> {
+        let stream_id = self
+            .current_stream
+            .as_ref()
+            .map(|s| s.stream_id)
+            .unwrap_or(1);
+        let mut cmsg = ChunkMessage::default();
+        cmsg.timestamp = timestamp;
+        cmsg.msg_length = payload.len() as u32;
+        cmsg.msg_stream_id = stream_id;
+        cmsg.fmt = 0;
+        cmsg.csid = 5;
+        cmsg.msg_type_id = msg_dispatch::RTMP_MSG_AMF0_DATA;
+        chunk_write(
+            &mut self.send_buffer,
+            &cmsg,
+            payload,
+            payload.len(),
+            self.active_chunk_size as usize,
+        )?;
+        self.media_bytes_sent = self.media_bytes_sent.saturating_add(payload.len() as u64);
+        Ok(())
+    }
+
     fn send_control(&mut self, ty: u8, data: &[u8]) -> Result<()> {
         let mut msg = ChunkMessage::default();
         msg.csid = 2;
@@ -1381,6 +1651,67 @@ impl Conn {
         control::write_user_control_ping_response(&mut buf, timestamp)?;
         self.send_control(msg_dispatch::RTMP_MSG_USER_CONTROL, buf.as_slice())
     }
+
+    fn send_stream_lifecycle_begin(&mut self, stream_id: u32) -> Result<()> {
+        let mut buf = Buffer::with_capacity(14);
+        control::write_user_control_stream_begin(&mut buf, stream_id)?;
+        self.send_control(msg_dispatch::RTMP_MSG_USER_CONTROL, buf.as_slice())?;
+        buf.reset();
+        control::write_user_control_set_buffer_length(&mut buf, stream_id, self.buffer_length_ms)?;
+        self.send_control(msg_dispatch::RTMP_MSG_USER_CONTROL, buf.as_slice())
+    }
+
+    fn send_stream_lifecycle_eof(&mut self, stream_id: u32) -> Result<()> {
+        let mut buf = Buffer::with_capacity(6);
+        control::write_user_control_stream_eof(&mut buf, stream_id)?;
+        self.send_control(msg_dispatch::RTMP_MSG_USER_CONTROL, buf.as_slice())
+    }
+
+    fn invoke_multitrack_on_frame_cb(
+        &mut self,
+        cb: fn(&Frame),
+        frame_type: FrameType,
+        timestamp: u32,
+        track_id: u8,
+        fourcc: [u8; 4],
+        packet_type: u8,
+        video_frame_type: u8,
+        payload: &[u8],
+    ) {
+        self.frame_cb_scratch.clear();
+        self.frame_cb_scratch.extend_from_slice(payload);
+        let mut frame = Frame {
+            frame_type,
+            timestamp,
+            size: self.frame_cb_scratch.len() as u32,
+            data: self.frame_cb_scratch.as_ptr(),
+            track_id,
+            ..Default::default()
+        };
+        populate_multitrack_frame(&mut frame, fourcc, packet_type, video_frame_type);
+        cb(&frame);
+    }
+    fn invoke_on_frame_cb(
+        &mut self,
+        cb: fn(&Frame),
+        frame_type: FrameType,
+        timestamp: u32,
+        track_id: u8,
+        payload: &[u8],
+    ) {
+        self.frame_cb_scratch.clear();
+        self.frame_cb_scratch.extend_from_slice(payload);
+        let mut frame = Frame {
+            frame_type,
+            timestamp,
+            size: self.frame_cb_scratch.len() as u32,
+            data: self.frame_cb_scratch.as_ptr(),
+            track_id,
+            ..Default::default()
+        };
+        populate_av_frame(&mut frame, &self.frame_cb_scratch);
+        cb(&frame);
+    }
 }
 
 impl Default for Conn {
@@ -1412,47 +1743,78 @@ fn read_data_event_name(buf: &mut Buffer, is_string: bool, out: &mut [u8; 64]) -
 }
 
 fn detect_video_codec(payload: &[u8]) -> Option<String> {
-    if payload.is_empty() {
+    if let Some(cc) = first_track_fourcc(FrameType::Video, payload) {
+        return std::str::from_utf8(&cc).ok().map(str::to_owned);
+    }
+    let mut hdr = VideoHeader::default();
+    if crate::ertmp::exvideo::exvideo_parse(payload, &mut hdr).is_err() {
         return None;
     }
-    if payload[0] & 0x80 != 0 {
-        if payload.len() >= 5 {
-            if let Ok(s) = std::str::from_utf8(&payload[1..5]) {
-                return Some(s.to_string());
-            }
+    if hdr.is_ex_header != 0 {
+        std::str::from_utf8(&hdr.fourcc[..4])
+            .ok()
+            .map(|s| s.to_string())
+    } else {
+        match payload[0] & 0x0F {
+            7 => Some("avc1".to_string()),
+            12 => Some("hvc1".to_string()),
+            13 => Some("av01".to_string()),
+            _ => None,
         }
-        return None;
     }
-    Some(match payload[0] & 0x0F {
-        7 => "avc1".to_string(),
-        12 => "hvc1".to_string(),
-        13 => "av01".to_string(),
-        _ => return None,
-    })
 }
 
 fn detect_audio_codec(payload: &[u8]) -> Option<String> {
-    if payload.is_empty() {
+    if let Some(cc) = first_track_fourcc(FrameType::Audio, payload) {
+        return std::str::from_utf8(&cc).ok().map(str::to_owned);
+    }
+    let mut hdr = AudioHeader::default();
+    if crate::ertmp::exaudio::exaudio_parse(payload, &mut hdr).is_err() {
         return None;
     }
-    if (payload[0] & 0xF0) == 0x90 && payload.len() >= 5 {
-        if let Ok(s) = std::str::from_utf8(&payload[1..5]) {
-            return Some(s.to_string());
+    if hdr.is_ex_header != 0 {
+        std::str::from_utf8(&hdr.fourcc[..4])
+            .ok()
+            .map(|s| s.to_string())
+    } else {
+        match hdr.audio_codec {
+            AudioCodec::Aac => Some("mp4a".to_string()),
+            AudioCodec::Mp3 => Some("mp3".to_string()),
+            AudioCodec::Opus => Some("Opus".to_string()),
+            _ => None,
         }
     }
-    Some(match (payload[0] >> 4) & 0x0F {
-        10 => "mp4a".to_string(),
-        2 => "mp3".to_string(),
-        14 => "Opus".to_string(),
-        _ => return None,
-    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::amf::amf0;
     use crate::session::stream::Stream;
 
+    #[test]
+    fn relay_budget_counts_actual_retained_bytes() {
+        let mut conn = Conn::new();
+        conn.max_pending_relay_bytes = 6;
+
+        assert!(
+            conn.queue_relay_frame(FrameType::Video, 0, b"data", b"data")
+                .is_ok()
+        );
+        assert_eq!(conn.pending_relay_bytes(), 4);
+        assert!(conn.pending_relay[0].cache_payload.is_none());
+        assert_eq!(conn.pending_relay[0].cache_payload(), b"data");
+
+        assert!(
+            conn.queue_relay_frame(FrameType::Video, 0, b"x", b"y")
+                .is_ok()
+        );
+        assert_eq!(conn.pending_relay_bytes(), 6);
+        assert!(
+            conn.queue_relay_frame(FrameType::Video, 0, b"z", b"z")
+                .is_err()
+        );
+    }
     #[test]
     fn relay_route_key_prefers_relay_key_over_rtmp_name() {
         let mut conn = Conn::new();
@@ -1475,7 +1837,51 @@ mod tests {
     }
 
     #[test]
-    fn connect_rejects_app_names_longer_than_routing_buffer() {
+    fn connect_with_caps_sets_negotiated_state_and_caps() {
+        let mut conn = Conn::new();
+        conn.state = ConnState::Connected;
+
+        let mut buf = Buffer::new();
+        amf0::write_string(&mut buf, "connect").unwrap();
+        amf0::write_number(&mut buf, 1.0).unwrap();
+        amf0::write_object_begin(&mut buf).unwrap();
+        amf0::write_object_key(&mut buf, "app").unwrap();
+        amf0::write_string(&mut buf, "live").unwrap();
+        amf0::write_object_key(&mut buf, "fourCcList").unwrap();
+        buf.write(&[0x0A, 0x00, 0x00, 0x00, 0x02]).unwrap();
+        amf0::write_string(&mut buf, "av01").unwrap();
+        amf0::write_string(&mut buf, "hvc1").unwrap();
+        amf0::write_object_end(&mut buf).unwrap();
+
+        conn.handle_command(buf.as_slice()).unwrap();
+        assert_eq!(conn.state, ConnState::AppConnected);
+        assert!(conn.negotiated_caps.has_four_cc_list);
+        assert_eq!(conn.negotiated_caps.four_cc_list.count, 2);
+    }
+
+    #[test]
+    fn connect_with_caps_ex_enables_multitrack() {
+        let mut conn = Conn::new();
+        conn.state = ConnState::Connected;
+
+        let mut buf = Buffer::new();
+        amf0::write_string(&mut buf, "connect").unwrap();
+        amf0::write_number(&mut buf, 1.0).unwrap();
+        amf0::write_object_begin(&mut buf).unwrap();
+        amf0::write_object_key(&mut buf, "app").unwrap();
+        amf0::write_string(&mut buf, "live").unwrap();
+        amf0::write_object_key(&mut buf, "capsEx").unwrap();
+        amf0::write_number(&mut buf, CAPS_EX_MASK_MULTITRACK as f64).unwrap();
+        amf0::write_object_end(&mut buf).unwrap();
+
+        conn.handle_command(buf.as_slice()).unwrap();
+        assert_eq!(conn.state, ConnState::AppConnected);
+        assert!(conn.negotiated_caps.has_caps_ex);
+        assert!(conn.negotiated_caps.multitrack_enabled);
+    }
+
+    #[test]
+    fn connect_parse_failure_sends_error_response() {
         let mut conn = Conn::new();
         let mut buf = Buffer::with_capacity(512);
         let long_app = "a".repeat(256);
@@ -1488,10 +1894,18 @@ mod tests {
             "FMLE/3.0",
             0,
             0,
+            None,
         )
         .unwrap();
-        assert_eq!(conn.handle_command(buf.as_slice()), Err(ErrorCode::Amf));
+        assert_eq!(conn.handle_command(buf.as_slice()), Ok(()));
         assert!(conn.app.is_empty());
+        assert_ne!(conn.state, ConnState::AppConnected);
+        assert!(
+            conn.send_buffer
+                .peek()
+                .windows(b"_error".len())
+                .any(|window| window == b"_error")
+        );
     }
 
     #[test]
@@ -1508,6 +1922,7 @@ mod tests {
             "FMLE/3.0",
             0,
             0,
+            None,
         )
         .unwrap();
         conn.handle_command(buf.as_slice()).unwrap();
@@ -1528,6 +1943,7 @@ mod tests {
             "FMLE/3.0",
             0,
             0,
+            None,
         )
         .unwrap();
         conn.handle_command(buf2.as_slice()).unwrap();
@@ -1947,6 +2363,105 @@ mod tests {
     }
 
     #[test]
+    fn multitrack_invokes_on_frame_cb_per_track() {
+        use std::sync::{LazyLock, Mutex};
+
+        static SEEN_TRACK_IDS: LazyLock<Mutex<Vec<u8>>> = LazyLock::new(|| Mutex::new(Vec::new()));
+
+        fn record_track_id(frame: &Frame) {
+            SEEN_TRACK_IDS.lock().unwrap().push(frame.track_id);
+        }
+
+        SEEN_TRACK_IDS.lock().unwrap().clear();
+        let mut conn = Conn::new();
+        conn.relay_enabled = true;
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+        if let Some(s) = conn.current_stream.as_mut() {
+            s.is_publishing = true;
+        }
+        conn.on_frame_cb = Some(record_track_id);
+
+        let payload = vec![
+            0x86, 0x10, b'a', b'v', b'c', b'1', 0x00, 0x00, 0x00, 0x03, 0xAA, 0xBB, 0xCC, 0x01,
+            0x00, 0x00, 0x02, 0xDD, 0xEE,
+        ];
+        conn.handle_media_frame(1, FrameType::Video, 0, &payload)
+            .unwrap();
+
+        assert_eq!(*SEEN_TRACK_IDS.lock().unwrap(), vec![0, 1]);
+        assert_eq!(conn.pending_relay.len(), 1);
+        assert_eq!(conn.pending_relay[0].payload, payload);
+    }
+
+    #[test]
+    fn multitrack_codec_is_detected_before_authorization() {
+        use std::sync::{LazyLock, Mutex};
+
+        static SEEN_CODEC: LazyLock<Mutex<Option<String>>> = LazyLock::new(|| Mutex::new(None));
+        fn allow_media(_: u64, _: FrameType, codec: Option<&str>) -> bool {
+            *SEEN_CODEC.lock().unwrap() = codec.map(str::to_owned);
+            true
+        }
+
+        let mut conn = Conn::new();
+        conn.relay_enabled = true;
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+        conn.current_stream.as_mut().unwrap().is_publishing = true;
+        conn.on_media_cb = Some(allow_media);
+        let payload = vec![0x86, 0x10, b'a', b'v', b'c', b'1', 0, 0, 0, 1, 0xAA];
+        conn.handle_media_frame(1, FrameType::Video, 0, &payload)
+            .unwrap();
+        assert_eq!(SEEN_CODEC.lock().unwrap().as_deref(), Some("avc1"));
+    }
+
+    #[test]
+    fn multitrack_on_frame_cb_scratch_retains_last_track_payload() {
+        let mut conn = Conn::new();
+        conn.relay_enabled = true;
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+        if let Some(s) = conn.current_stream.as_mut() {
+            s.is_publishing = true;
+        }
+        conn.on_frame_cb = Some(|_| {});
+
+        let payload = vec![
+            0x86, 0x10, b'a', b'v', b'c', b'1', 0x00, 0x00, 0x00, 0x03, 0xAA, 0xBB, 0xCC, 0x01,
+            0x00, 0x00, 0x02, 0xDD, 0xEE,
+        ];
+        conn.handle_media_frame(1, FrameType::Video, 0, &payload)
+            .unwrap();
+
+        assert_eq!(conn.frame_cb_scratch.as_slice(), &[0xDD, 0xEE]);
+    }
+
+    #[test]
+    fn modex_is_normalized_for_callbacks_and_cache_but_relayed_opaque() {
+        let mut conn = Conn::new();
+        conn.relay_enabled = true;
+        conn.negotiated_caps.has_caps_ex = true;
+        conn.negotiated_caps.caps_ex_mask = CAPS_EX_MASK_MODEX;
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+        conn.current_stream.as_mut().unwrap().is_publishing = true;
+        conn.on_frame_cb = Some(|_| {});
+
+        let payload = vec![
+            0x97, 0x02, 0, 1, 2, 0x01, b'a', b'v', b'c', b'1', 0, 0, 0, 0xAA,
+        ];
+        conn.handle_media_frame(1, FrameType::Video, 0, &payload)
+            .unwrap();
+
+        assert_eq!(conn.pending_relay[0].payload, payload);
+        assert_eq!(
+            conn.pending_relay[0].cache_payload(),
+            &[0x91, b'a', b'v', b'c', b'1', 0, 0, 0, 0xAA]
+        );
+        assert_eq!(
+            conn.frame_cb_scratch,
+            vec![0x91, b'a', b'v', b'c', b'1', 0, 0, 0, 0xAA]
+        );
+    }
+
+    #[test]
     fn on_frame_cb_scratch_retains_payload_after_delivery() {
         let mut conn = Conn::new();
         conn.relay_enabled = true;
@@ -2101,6 +2616,64 @@ mod tests {
         }
         payload.extend_from_slice(&amf0_object_end());
         payload
+    }
+
+    #[test]
+    fn on_metadata_is_queued_for_relay_while_publishing() {
+        let mut conn = Conn::new();
+        conn.app = "live".to_string();
+        conn.relay_enabled = true;
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+        if let Some(ref mut stream) = conn.current_stream {
+            stream.is_publishing = true;
+            stream.name = "stream".to_string();
+        }
+        let payload = build_on_metadata_payload(false, &[("width", 1920.0)], &[]);
+        conn.handle_publisher_data_message(1, 9000, &payload)
+            .unwrap();
+        assert_eq!(conn.pending_relay.len(), 1);
+        assert_eq!(conn.pending_relay[0].frame_type, FrameType::Script);
+        assert_eq!(conn.pending_relay[0].timestamp, 9000);
+        assert_eq!(conn.pending_relay[0].payload, payload);
+    }
+
+    #[test]
+    fn receive_video_reenable_requests_cached_replay() {
+        let mut conn = Conn::new();
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+        {
+            let stream = conn.current_stream.as_mut().unwrap();
+            stream.is_playing = true;
+            stream.receive_video = false;
+        }
+        conn.needs_init_frames = false;
+
+        let mut buf = Buffer::new();
+        crate::amf::amf0::write_string(&mut buf, "receiveVideo").unwrap();
+        crate::amf::amf0::write_number(&mut buf, 1.0).unwrap();
+        crate::amf::amf0::write_null(&mut buf).unwrap();
+        crate::amf::amf0::write_boolean(&mut buf, true).unwrap();
+        conn.handle_command(buf.as_slice()).unwrap();
+
+        assert!(conn.current_stream.as_ref().unwrap().receive_video);
+        assert!(conn.needs_init_frames);
+    }
+
+    #[test]
+    fn malformed_pause_command_leaves_stream_unpaused() {
+        let mut conn = Conn::new();
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+        if let Some(ref mut stream) = conn.current_stream {
+            stream.is_playing = true;
+            stream.paused = false;
+        }
+
+        let mut buf = Buffer::new();
+        crate::amf::amf0::write_string(&mut buf, "pause").unwrap();
+        crate::amf::amf0::write_number(&mut buf, 1.0).unwrap();
+        // Missing null + boolean: parse must fail without forcing paused=true.
+        assert!(conn.handle_command(buf.as_slice()).is_ok());
+        assert!(!conn.current_stream.as_ref().unwrap().paused);
     }
 
     #[test]

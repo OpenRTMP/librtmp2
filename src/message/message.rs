@@ -68,6 +68,7 @@ fn deliver_audio_frame(conn: &mut dyn Connection, timestamp: u32, payload: &[u8]
         video_fourcc: crate::types::FourCc { cc: [0; 5] },
         video_frame_type: 0,
         is_metadata: 0,
+        track_id: u8::MAX,
     };
 
     if !payload.is_empty() {
@@ -111,6 +112,7 @@ fn deliver_video_frame(conn: &mut dyn Connection, timestamp: u32, payload: &[u8]
         video_fourcc: crate::types::FourCc { cc: [0; 5] },
         video_frame_type: 0,
         is_metadata: 0,
+        track_id: u8::MAX,
     };
 
     if !payload.is_empty() {

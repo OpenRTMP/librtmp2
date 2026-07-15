@@ -65,12 +65,16 @@ pub fn make_video_frame(timestamp: u32, byte: u8) -> ([u8; SENT_FRAME_LEN], Fram
         video_fourcc: FourCc::default(),
         video_frame_type: 1,
         is_metadata: 0,
+        track_id: u8::MAX,
     };
     (data, frame)
 }
 
 pub fn make_audio_frame(timestamp: u32) -> ([u8; 16], Frame) {
-    let data = [0xAF, 0x00, 0x12, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+    let data = [
+        0xAF, 0x00, 0x12, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00,
+    ];
     let frame = Frame {
         frame_type: FrameType::Audio,
         timestamp,
@@ -86,6 +90,7 @@ pub fn make_audio_frame(timestamp: u32) -> ([u8; 16], Frame) {
         video_fourcc: FourCc::default(),
         video_frame_type: 0,
         is_metadata: 0,
+        track_id: u8::MAX,
     };
     (data, frame)
 }

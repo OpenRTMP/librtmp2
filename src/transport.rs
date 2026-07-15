@@ -172,9 +172,9 @@ impl Transport {
         insecure: bool,
     ) -> Result<Self> {
         use openssl::ssl::{Ssl, SslContextBuilder, SslMode};
+        use openssl::x509::X509;
         use openssl::x509::store::X509StoreBuilder;
         use openssl::x509::verify::X509CheckFlags;
-        use openssl::x509::X509;
 
         stream
             .set_read_timeout(Some(Duration::from_secs(TLS_ACCEPT_TIMEOUT_SECS)))
@@ -184,8 +184,10 @@ impl Transport {
             .map_err(|_| ErrorCode::Io)?;
 
         let mut ctx = SslContextBuilder::new(SslMethod::tls()).map_err(|_| ErrorCode::Internal)?;
-        ctx.set_cipher_list("DEFAULT:!aNULL:!eNULL:!MD5:!3DES:!DES:!RC4:!IDEA:!SEED:!aDSS:!SRP:!PSK")
-            .map_err(|_| ErrorCode::Internal)?;
+        ctx.set_cipher_list(
+            "DEFAULT:!aNULL:!eNULL:!MD5:!3DES:!DES:!RC4:!IDEA:!SEED:!aDSS:!SRP:!PSK",
+        )
+        .map_err(|_| ErrorCode::Internal)?;
         // The non-blocking publish path (Client::try_flush_send_buffer) may
         // retry a WANT_READ/WANT_WRITE SSL_write() with a send_buffer that
         // has grown (a new frame appended after the pending one) since the
@@ -216,7 +218,8 @@ impl Transport {
                     ctx.set_cert_store(store.build());
                 }
                 None => {
-                    ctx.set_default_verify_paths().map_err(|_| ErrorCode::Internal)?;
+                    ctx.set_default_verify_paths()
+                        .map_err(|_| ErrorCode::Internal)?;
                 }
             }
         }
@@ -579,7 +582,7 @@ mod client_tls_tests {
     use openssl::pkey::PKey;
     use openssl::rsa::Rsa;
     use openssl::x509::extension::{BasicConstraints, SubjectAlternativeName};
-    use openssl::x509::{X509NameBuilder, X509};
+    use openssl::x509::{X509, X509NameBuilder};
     use std::net::TcpListener;
     use std::os::unix::io::IntoRawFd;
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -625,12 +628,8 @@ mod client_tls_tests {
 
         static COUNTER: AtomicU32 = AtomicU32::new(0);
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let base = std::env::temp_dir().join(format!(
-            "librtmp2-test-{}-{}-{}",
-            std::process::id(),
-            n,
-            cn
-        ));
+        let base =
+            std::env::temp_dir().join(format!("librtmp2-test-{}-{}-{}", std::process::id(), n, cn));
         let cert_path = base.with_extension("cert.pem");
         let key_path = base.with_extension("key.pem");
         std::fs::write(&cert_path, cert.to_pem().unwrap()).unwrap();
@@ -665,7 +664,11 @@ mod client_tls_tests {
 
         let stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
         let result = Transport::connect_tls(stream, "insecure.test", None, true);
-        assert!(result.is_ok(), "insecure connect should succeed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "insecure connect should succeed: {:?}",
+            result.err()
+        );
 
         let _ = std::fs::remove_file(cert_path);
         let _ = std::fs::remove_file(key_path);
