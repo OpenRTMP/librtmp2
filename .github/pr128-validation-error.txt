@@ -1,0 +1,243 @@
+    Updating crates.io index
+     Locking 94 packages to latest compatible versions
+ Downloading crates ...
+  Downloaded alloca v0.4.0
+  Downloaded anes v0.1.6
+  Downloaded anstyle v1.0.14
+  Downloaded crossbeam-utils v0.8.22
+  Downloaded criterion-plot v0.8.2
+  Downloaded itoa v1.0.18
+  Downloaded clap_lex v1.1.0
+  Downloaded ciborium-ll v0.2.2
+  Downloaded autocfg v1.5.1
+  Downloaded plotters-backend v0.3.7
+  Downloaded same-file v1.0.6
+  Downloaded page_size v0.6.0
+  Downloaded openssl-macros v0.1.1
+  Downloaded foreign-types v0.3.2
+  Downloaded cast v0.3.0
+  Downloaded plotters-svg v0.3.7
+  Downloaded scopeguard v1.2.0
+  Downloaded foreign-types-shared v0.1.1
+  Downloaded ciborium-io v0.2.2
+  Downloaded tinytemplate v1.2.1
+  Downloaded thiserror v2.0.18
+  Downloaded zmij v1.0.23
+  Downloaded parking_lot_core v0.9.12
+  Downloaded crossbeam-epoch v0.9.20
+  Downloaded ciborium v0.2.2
+  Downloaded unicode-ident v1.0.24
+  Downloaded serde_core v1.0.228
+  Downloaded bitflags v2.13.0
+  Downloaded rayon-core v1.13.0
+  Downloaded zerocopy-derive v0.8.54
+  Downloaded serde v1.0.228
+  Downloaded plotters v0.3.7
+  Downloaded criterion v0.8.2
+  Downloaded serde_json v1.0.150
+  Downloaded rayon v1.12.0
+  Downloaded clap_builder v4.6.0
+  Downloaded regex v1.13.0
+  Downloaded vcpkg v0.2.15
+  Downloaded zerocopy v0.8.54
+  Downloaded syn v2.0.119
+  Downloaded itertools v0.13.0
+  Downloaded openssl v0.10.81
+  Downloaded regex-syntax v0.8.11
+  Downloaded memchr v2.8.3
+  Downloaded cc v1.2.67
+  Downloaded proc-macro2 v1.0.106
+  Downloaded openssl-sys v0.9.117
+  Downloaded half v2.7.1
+  Downloaded clap v4.6.1
+  Downloaded aho-corasick v1.1.4
+  Downloaded serde_derive v1.0.228
+  Downloaded parking_lot v0.12.5
+  Downloaded num-traits v0.2.19
+  Downloaded walkdir v2.5.0
+  Downloaded thiserror-impl v2.0.18
+  Downloaded smallvec v1.15.2
+  Downloaded either v1.16.0
+  Downloaded regex-automata v0.4.15
+  Downloaded shlex v2.0.1
+  Downloaded pkg-config v0.3.33
+  Downloaded crossbeam-deque v0.8.7
+  Downloaded quote v1.0.46
+  Downloaded oorandom v11.1.5
+  Downloaded lock_api v0.4.14
+  Downloaded find-msvc-tools v0.1.9
+  Downloaded cfg-if v1.0.4
+  Downloaded libc v0.2.186
+   Compiling proc-macro2 v1.0.106
+   Compiling quote v1.0.46
+   Compiling unicode-ident v1.0.24
+   Compiling find-msvc-tools v0.1.9
+   Compiling shlex v2.0.1
+   Compiling libc v0.2.186
+   Compiling cc v1.2.67
+   Compiling cfg-if v1.0.4
+   Compiling crossbeam-utils v0.8.22
+   Compiling serde_core v1.0.228
+   Compiling pkg-config v0.3.33
+   Compiling zerocopy v0.8.54
+   Compiling crossbeam-epoch v0.9.20
+   Compiling vcpkg v0.2.15
+   Compiling syn v2.0.119
+   Compiling openssl-sys v0.9.117
+   Compiling crossbeam-deque v0.8.7
+   Compiling zmij v1.0.23
+   Compiling serde v1.0.228
+   Compiling autocfg v1.5.1
+   Compiling num-traits v0.2.19
+   Compiling rayon-core v1.13.0
+   Compiling either v1.16.0
+   Compiling parking_lot_core v0.9.12
+   Compiling serde_json v1.0.150
+   Compiling alloca v0.4.0
+   Compiling openssl v0.10.81
+   Compiling smallvec v1.15.2
+   Compiling plotters-backend v0.3.7
+   Compiling thiserror v2.0.18
+   Compiling anstyle v1.0.14
+   Compiling ciborium-io v0.2.2
+   Compiling regex-syntax v0.8.11
+   Compiling foreign-types-shared v0.1.1
+   Compiling clap_lex v1.1.0
+   Compiling itoa v1.0.18
+   Compiling memchr v2.8.3
+   Compiling scopeguard v1.2.0
+   Compiling lock_api v0.4.14
+   Compiling clap_builder v4.6.0
+   Compiling zerocopy-derive v0.8.54
+   Compiling serde_derive v1.0.228
+   Compiling openssl-macros v0.1.1
+   Compiling thiserror-impl v2.0.18
+   Compiling regex-automata v0.4.15
+   Compiling foreign-types v0.3.2
+   Compiling plotters-svg v0.3.7
+   Compiling itertools v0.13.0
+   Compiling half v2.7.1
+   Compiling ciborium-ll v0.2.2
+   Compiling librtmp2 v0.4.0 (/home/runner/work/librtmp2/librtmp2)
+   Compiling cast v0.3.0
+   Compiling bitflags v2.13.0
+   Compiling same-file v1.0.6
+   Compiling walkdir v2.5.0
+   Compiling criterion-plot v0.8.2
+   Compiling ciborium v0.2.2
+   Compiling plotters v0.3.7
+   Compiling rayon v1.12.0
+   Compiling tinytemplate v1.2.1
+   Compiling regex v1.13.0
+   Compiling parking_lot v0.12.5
+   Compiling clap v4.6.1
+   Compiling page_size v0.6.0
+   Compiling anes v0.1.6
+   Compiling oorandom v11.1.5
+   Compiling criterion v0.8.2
+warning: use of deprecated function `criterion::black_box`: use `std::hint::black_box()` instead
+ --> benches/relay.rs:5:53
+  |
+5 | use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+  |                                                     ^^^^^^^^^
+  |
+  = note: `#[warn(deprecated)]` on by default
+
+warning: use of deprecated function `criterion::black_box`: use `std::hint::black_box()` instead
+   --> benches/relay.rs:101:42
+    |
+101 |                 b.iter(|| relay_n_frames(black_box(count)));
+    |                                          ^^^^^^^^^
+
+warning: use of deprecated function `criterion::black_box`: use `std::hint::black_box()` instead
+ --> benches/protocol.rs:1:40
+  |
+1 | use criterion::{Criterion, Throughput, black_box, criterion_group, criterion_main};
+  |                                        ^^^^^^^^^
+  |
+  = note: `#[warn(deprecated)]` on by default
+
+warning: use of deprecated function `criterion::black_box`: use `std::hint::black_box()` instead
+  --> benches/protocol.rs:51:13
+   |
+51 |             black_box(payload_len)
+   |             ^^^^^^^^^
+
+warning: use of deprecated function `criterion::black_box`: use `std::hint::black_box()` instead
+  --> benches/protocol.rs:73:13
+   |
+73 |             black_box(buf.write_pos())
+   |             ^^^^^^^^^
+
+warning: use of deprecated function `criterion::black_box`: use `std::hint::black_box()` instead
+  --> benches/protocol.rs:86:30
+   |
+86 |             video_tag::parse(black_box(&video_payload), &mut tag).unwrap();
+   |                              ^^^^^^^^^
+
+warning: use of deprecated function `criterion::black_box`: use `std::hint::black_box()` instead
+  --> benches/protocol.rs:87:13
+   |
+87 |             black_box(tag.codec)
+   |             ^^^^^^^^^
+
+warning: use of deprecated function `criterion::black_box`: use `std::hint::black_box()` instead
+  --> benches/protocol.rs:93:30
+   |
+93 |             audio_tag::parse(black_box(&audio_payload), &mut tag).unwrap();
+   |                              ^^^^^^^^^
+
+warning: use of deprecated function `criterion::black_box`: use `std::hint::black_box()` instead
+  --> benches/protocol.rs:94:13
+   |
+94 |             black_box(tag.codec)
+   |             ^^^^^^^^^
+
+warning: use of deprecated function `criterion::black_box`: use `std::hint::black_box()` instead
+   --> benches/protocol.rs:102:19
+    |
+102 |         b.iter(|| black_box(fourcc::fourcc_to_video_codec(b"avc1").unwrap()));
+    |                   ^^^^^^^^^
+
+warning: use of deprecated function `criterion::black_box`: use `std::hint::black_box()` instead
+   --> benches/protocol.rs:112:46
+    |
+112 |             let mut buf = Buffer::from_slice(black_box(&c1));
+    |                                              ^^^^^^^^^
+
+warning: use of deprecated function `criterion::black_box`: use `std::hint::black_box()` instead
+   --> benches/protocol.rs:114:13
+    |
+114 |             black_box(hs.out.write_pos())
+    |             ^^^^^^^^^
+
+warning: `librtmp2` (bench "relay") generated 2 warnings
+error[E0308]: mismatched types
+    --> src/server/mod.rs:1196:28
+     |
+1196 |             cache_payload: payload.clone(),
+     |                            ^^^^^^^^^^^^^^^ expected `Option<Vec<u8>>`, found `Vec<u8>`
+     |
+     = note: expected enum `Option<Vec<_>>`
+              found struct `Vec<_>`
+help: try wrapping the expression in `Some`
+     |
+1196 |             cache_payload: Some(payload.clone()),
+     |                            +++++               +
+
+error[E0308]: mismatched types
+    --> src/session/conn.rs:2467:13
+     |
+2467 |             vec![0x91, b'a', b'v', b'c', b'1', 0, 0, 0, 0xAA]
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `Option<Vec<u8>>`, found `Vec<u8>`
+     |
+     = note: expected enum `Option<Vec<_>>`
+              found struct `Vec<_>`
+help: call `Into::into` on this expression to convert `Vec<u8>` into `Option<Vec<u8>>`
+     |
+2467 |             vec![0x91, b'a', b'v', b'c', b'1', 0, 0, 0, 0xAA].into()
+     |                                                              +++++++
+
+warning: `librtmp2` (bench "protocol") generated 10 warnings
+For more information about this error, try `rustc --explain E0308`.
+error: could not compile `librtmp2` (lib test) due to 2 previous errors
