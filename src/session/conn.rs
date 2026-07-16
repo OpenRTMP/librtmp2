@@ -7,7 +7,7 @@ use crate::chunk::reader::{ChunkMessage, chunk_read_owned};
 use crate::chunk::state::{ChunkRegistry, DEFAULT_CHUNK_SIZE, DEFAULT_MAX_MSG_LENGTH};
 use crate::chunk::writer::chunk_write;
 use crate::ertmp::connect_amf::{negotiate_caps, write_negotiated_caps};
-use crate::ertmp::multitrack_media::{first_track_fourcc, foreach_track};
+use crate::ertmp::multitrack_media::{first_track_fourcc, foreach_track, is_multitrack_container};
 use crate::handshake::{self, Handshake, HandshakeState};
 use crate::media::{
     is_on_metadata_payload, normalize_modex_payload, populate_av_frame, populate_multitrack_frame,
@@ -471,8 +471,10 @@ impl Conn {
             .media_bytes_received
             .saturating_add(payload.len() as u64);
 
-        if let Some(cb) = self.on_frame_cb {
-            let had_multitrack = foreach_track(frame_type, parse_payload, |track| {
+        let is_multitrack = is_multitrack_container(frame_type, parse_payload);
+        let cb = self.on_frame_cb;
+        let parsed_multitrack = foreach_track(frame_type, parse_payload, |track| {
+            if let Some(cb) = cb {
                 self.invoke_multitrack_on_frame_cb(
                     cb,
                     frame_type,
@@ -483,12 +485,16 @@ impl Conn {
                     track.video_frame_type,
                     track.payload,
                 );
-            });
-            if !had_multitrack {
+            }
+        });
+        if is_multitrack && !parsed_multitrack {
+            return Err(ErrorCode::Protocol);
+        }
+        if !is_multitrack {
+            if let Some(cb) = cb {
                 self.invoke_on_frame_cb(cb, frame_type, timestamp, u8::MAX, parse_payload);
             }
         }
-
         if self
             .queue_relay_frame(frame_type, timestamp, payload, parse_payload)
             .is_err()
