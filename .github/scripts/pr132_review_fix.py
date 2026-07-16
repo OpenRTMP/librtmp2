@@ -1,0 +1,170 @@
+from __future__ import annotations
+
+import re
+from pathlib import Path
+
+
+def replace_exact(path: str, old: str, new: str, expected: int = 1) -> None:
+    file = Path(path)
+    text = file.read_text()
+    count = text.count(old)
+    if count != expected:
+        raise RuntimeError(
+            f"expected {expected} matches in {path}, found {count}: {old!r}"
+        )
+    file.write_text(text.replace(old, new))
+
+
+def replace_regex(path: str, pattern: str, new: str) -> None:
+    file = Path(path)
+    text = file.read_text()
+    updated, count = re.subn(pattern, new, text, count=1, flags=re.DOTALL)
+    if count != 1:
+        raise RuntimeError(
+            f"expected one regex match in {path}, found {count}: {pattern!r}"
+        )
+    file.write_text(updated)
+
+
+replace_exact(
+    "src/session/conn.rs",
+    "use crate::ertmp::multitrack_media::{first_track_fourcc, foreach_track};",
+    "use crate::ertmp::multitrack_media::{\n"
+    "    first_track_fourcc, foreach_track, is_multitrack_container,\n"
+    "};",
+)
+
+server_block = "\n".join(
+    [
+        "        let is_multitrack = is_multitrack_container(frame_type, parse_payload);",
+        "        let cb = self.on_frame_cb;",
+        "        let parsed_multitrack = foreach_track(frame_type, parse_payload, |track| {",
+        "            if let Some(cb) = cb {",
+        "                self.invoke_multitrack_on_frame_cb(",
+        "                    cb,",
+        "                    frame_type,",
+        "                    timestamp,",
+        "                    track.track_id,",
+        "                    track.fourcc,",
+        "                    track.packet_type,",
+        "                    track.video_frame_type,",
+        "                    track.payload,",
+        "                );",
+        "            }",
+        "        });",
+        "        if is_multitrack && !parsed_multitrack {",
+        "            return Err(ErrorCode::Protocol);",
+        "        }",
+        "        if !is_multitrack {",
+        "            if let Some(cb) = cb {",
+        "                self.invoke_on_frame_cb(",
+        "                    cb,",
+        "                    frame_type,",
+        "                    timestamp,",
+        "                    u8::MAX,",
+        "                    parse_payload,",
+        "                );",
+        "            }",
+        "        }",
+        "",
+    ]
+)
+replace_regex(
+    "src/session/conn.rs",
+    r"        if let Some\(cb\) = self\.on_frame_cb \{\n"
+    r"            let had_multitrack = foreach_track\(frame_type, parse_payload, \|track\| \{"
+    r".*?\n        \}\n\n        if self\n",
+    server_block + "        if self\n",
+)
+
+replace_exact(
+    "src/client/mod.rs",
+    "use crate::ertmp::multitrack_media::foreach_track;",
+    "use crate::ertmp::multitrack_media::{foreach_track, is_multitrack_container};",
+)
+replace_exact(
+    "src/client/mod.rs",
+    "                            self.deliver_av_frame_cb(cb, frame_type, msg.timestamp, payload);",
+    "                            self.deliver_av_frame_cb(cb, frame_type, msg.timestamp, payload)?;",
+)
+replace_exact(
+    "src/client/mod.rs",
+    "                            tag_payload.to_vec(),\n                        );",
+    "                            tag_payload.to_vec(),\n                        )?;",
+    expected=2,
+)
+
+client_block = "\n".join(
+    [
+        "    fn deliver_av_frame_cb(",
+        "        &mut self,",
+        "        cb: fn(&Frame),",
+        "        frame_type: FrameType,",
+        "        timestamp: u32,",
+        "        payload: Vec<u8>,",
+        "    ) -> Result<()> {",
+        "        let is_multitrack = is_multitrack_container(frame_type, &payload);",
+        "        let parsed_multitrack = foreach_track(frame_type, &payload, |track| {",
+        "            self.invoke_multitrack_on_frame_cb(",
+        "                cb,",
+        "                frame_type,",
+        "                timestamp,",
+        "                track.track_id,",
+        "                track.fourcc,",
+        "                track.packet_type,",
+        "                track.video_frame_type,",
+        "                track.payload,",
+        "            );",
+        "        });",
+        "        if is_multitrack && !parsed_multitrack {",
+        "            return Err(ErrorCode::Protocol);",
+        "        }",
+        "        if !is_multitrack {",
+        "            self.invoke_on_frame_cb(cb, frame_type, timestamp, u8::MAX, &payload);",
+        "        }",
+        "        Ok(())",
+        "    }",
+        "",
+        "",
+    ]
+)
+replace_regex(
+    "src/client/mod.rs",
+    r"    fn deliver_av_frame_cb\(.*?\n    fn invoke_multitrack_on_frame_cb\(",
+    client_block + "    fn invoke_multitrack_on_frame_cb(",
+)
+
+test_lines = [
+    "    #[test]",
+    "    fn drain_ready_messages_rejects_oversized_multitrack_video() {",
+    "        let mut payload = vec![0x86, 0x10, b'a', b'v', b'c', b'1'];",
+    "        for id in 0..=crate::ertmp::multitrack_media::MAX_MULTITRACK_SUBTRACKS {",
+    "            payload.push(id as u8);",
+    "            payload.extend_from_slice(&[0x00, 0x00, 0x00]);",
+    "        }",
+    "",
+    "        let mut wire = Buffer::new();",
+    "        let mut cmsg = ChunkMessage::default();",
+    "        cmsg.csid = 6;",
+    "        cmsg.fmt = 0;",
+    "        cmsg.msg_length = payload.len() as u32;",
+    "        cmsg.msg_type_id = msg_dispatch::RTMP_MSG_VIDEO;",
+    "        cmsg.msg_stream_id = 1;",
+    "        chunk_write(&mut wire, &cmsg, &payload, payload.len(), 128).unwrap();",
+    "",
+    "        let mut client = Client::new();",
+    "        client.recv_buffer.write(wire.peek()).unwrap();",
+    "        client.on_frame_cb = Some(|_| panic!(\"invalid multitrack must not reach callback\"));",
+    "",
+    "        let mut messages_processed = 0;",
+    "        assert_eq!(",
+    "            client.drain_ready_messages(&mut messages_processed),",
+    "            Err(ErrorCode::Protocol)",
+    "        );",
+    "        assert!(client.frame_cb_scratch.is_empty());",
+    "    }",
+    "",
+    "",
+]
+marker = "    #[test]\n    fn poll_drains_leftover_messages_before_enforcing_staging_cap() {"
+replace_exact("src/client/mod.rs", marker, "\n".join(test_lines) + marker)
