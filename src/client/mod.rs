@@ -11,7 +11,7 @@ use crate::buffer::Buffer;
 use crate::chunk::reader::{ChunkMessage, chunk_read_owned};
 use crate::chunk::state::{ChunkRegistry, DEFAULT_MAX_MSG_LENGTH};
 use crate::chunk::writer::chunk_write;
-use crate::ertmp::multitrack_media::foreach_track;
+use crate::ertmp::multitrack_media::{foreach_track, is_multitrack_container};
 use crate::handshake::{self, Handshake};
 use crate::media::{is_on_metadata_payload, populate_av_frame, populate_multitrack_frame};
 use crate::message::command;
@@ -526,7 +526,7 @@ impl Client {
                             } else {
                                 FrameType::Video
                             };
-                            self.deliver_av_frame_cb(cb, frame_type, msg.timestamp, payload);
+                            self.deliver_av_frame_cb(cb, frame_type, msg.timestamp, payload)?;
                         }
                     } else if msg.msg_type_id == msg_dispatch::RTMP_MSG_AMF0_DATA
                         || msg.msg_type_id == msg_dispatch::RTMP_MSG_AMF3_DATA
@@ -594,7 +594,7 @@ impl Client {
                             FrameType::Audio,
                             out_ts,
                             tag_payload.to_vec(),
-                        );
+                        )?;
                     }
                     msg_dispatch::RTMP_MSG_VIDEO => {
                         self.deliver_av_frame_cb(
@@ -602,7 +602,7 @@ impl Client {
                             FrameType::Video,
                             out_ts,
                             tag_payload.to_vec(),
-                        );
+                        )?;
                     }
                     msg_dispatch::RTMP_MSG_AMF0_DATA => {
                         self.deliver_script_frame_cb(cb, out_ts, tag_payload);
@@ -627,8 +627,9 @@ impl Client {
         frame_type: FrameType,
         timestamp: u32,
         payload: Vec<u8>,
-    ) {
-        let had_multitrack = foreach_track(frame_type, &payload, |track| {
+    ) -> Result<()> {
+        let is_multitrack = is_multitrack_container(frame_type, &payload);
+        let parsed_multitrack = foreach_track(frame_type, &payload, |track| {
             self.invoke_multitrack_on_frame_cb(
                 cb,
                 frame_type,
@@ -640,9 +641,13 @@ impl Client {
                 track.payload,
             );
         });
-        if !had_multitrack {
+        if is_multitrack && !parsed_multitrack {
+            return Err(ErrorCode::Protocol);
+        }
+        if !is_multitrack {
             self.invoke_on_frame_cb(cb, frame_type, timestamp, u8::MAX, &payload);
         }
+        Ok(())
     }
 
     fn invoke_multitrack_on_frame_cb(
@@ -1319,6 +1324,37 @@ mod tests {
         assert_eq!(seen[0].1, vec![0xAA, 0xBB, 0xCC]);
         assert_eq!(seen[1].0, 1);
         assert_eq!(seen[1].1, vec![0xDD, 0xEE]);
+    }
+
+    #[test]
+    fn drain_ready_messages_rejects_oversized_multitrack_video() {
+        let mut payload = vec![0x86, 0x10, b'a', b'v', b'c', b'1'];
+        for id in 0..=crate::ertmp::multitrack_media::MAX_MULTITRACK_SUBTRACKS {
+            payload.push(id as u8);
+            payload.extend_from_slice(&[0x00, 0x00, 0x00]);
+        }
+
+        let mut wire = Buffer::new();
+        let mut cmsg = ChunkMessage::default();
+        cmsg.csid = 6;
+        cmsg.fmt = 0;
+        cmsg.msg_length = payload.len() as u32;
+        cmsg.msg_type_id = msg_dispatch::RTMP_MSG_VIDEO;
+        cmsg.msg_stream_id = 1;
+        let chunk_size = payload.len();
+        chunk_write(&mut wire, &cmsg, &payload, payload.len(), chunk_size).unwrap();
+
+        let mut client = Client::new();
+        client.chunk_reg.set_all_chunk_size(chunk_size as u32);
+        client.recv_buffer.write(wire.peek()).unwrap();
+        client.on_frame_cb = Some(|_| panic!("invalid multitrack must not reach callback"));
+
+        let mut messages_processed = 0;
+        assert_eq!(
+            client.drain_ready_messages(&mut messages_processed),
+            Err(ErrorCode::Protocol)
+        );
+        assert!(client.frame_cb_scratch.is_empty());
     }
 
     #[test]
