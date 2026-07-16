@@ -4,6 +4,11 @@ on:
   push:
     branches:
       - cursor/application-security-review-6876
+  pull_request:
+    branches:
+      - main
+    types:
+      - synchronize
 
 permissions:
   contents: write
@@ -181,6 +186,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git rm .github/workflows/apply-pr132-review-fix.yml
+          git rm .github/pr132-review-fix.trigger
           git add src/session/conn.rs src/client/mod.rs
           git commit -m "Fix rejection of invalid multitrack containers"
           git push origin HEAD:cursor/application-security-review-6876
