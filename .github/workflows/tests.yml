@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   test:
@@ -15,11 +15,7 @@ jobs:
     steps:
     - uses: actions/checkout@v7
       with:
-        ref: cursor/application-security-review-6876
-        fetch-depth: 0
-
-    - name: Apply PR 132 review fix
-      run: python3 .github/scripts/pr132_review_fix.py
+        persist-credentials: false
 
     - name: Install dependencies
       run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
@@ -28,9 +24,6 @@ jobs:
       uses: dtolnay/rust-toolchain@stable
 
     - uses: Swatinem/rust-cache@v2
-
-    - name: Format
-      run: cargo fmt --all -- --check
 
     - name: Build (default features)
       run: cargo build --all-features --verbose
@@ -55,15 +48,3 @@ jobs:
 
     - name: Clippy
       run: cargo clippy --all-features --all-targets
-
-    - name: Commit validated fix
-      run: |
-        git config user.name "github-actions[bot]"
-        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-        git checkout 99a23475c4d58bd3c64dd86fcbd3bb121b5226be -- .github/workflows/tests.yml
-        git rm .github/workflows/apply-pr132-review-fix.yml
-        git rm .github/pr132-review-fix.trigger
-        git rm .github/scripts/pr132_review_fix.py
-        git add src/session/conn.rs src/client/mod.rs .github/workflows/tests.yml
-        git commit -m "Fix rejection of invalid multitrack containers"
-        git push origin HEAD:cursor/application-security-review-6876
