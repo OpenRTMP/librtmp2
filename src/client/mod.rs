@@ -1341,9 +1341,11 @@ mod tests {
         cmsg.msg_length = payload.len() as u32;
         cmsg.msg_type_id = msg_dispatch::RTMP_MSG_VIDEO;
         cmsg.msg_stream_id = 1;
-        chunk_write(&mut wire, &cmsg, &payload, payload.len(), 128).unwrap();
+        let chunk_size = payload.len();
+        chunk_write(&mut wire, &cmsg, &payload, payload.len(), chunk_size).unwrap();
 
         let mut client = Client::new();
+        client.chunk_reg.set_all_chunk_size(chunk_size as u32);
         client.recv_buffer.write(wire.peek()).unwrap();
         client.on_frame_cb = Some(|_| panic!("invalid multitrack must not reach callback"));
 
