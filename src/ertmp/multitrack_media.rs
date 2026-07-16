@@ -7,6 +7,9 @@ use crate::types::FrameType;
 
 pub const ERTMP_AUDIO_PACKET_TYPE_MULTITRACK: u8 = 5;
 pub const ERTMP_VIDEO_PACKET_TYPE_MULTITRACK: u8 = 6;
+/// Cap sub-tracks unpacked from a single multitrack container (mirrors
+/// `message::message::MAX_AGGREGATE_SUBTAGS` and `session::conn::MAX_AGGREGATE_SUBTAGS`).
+pub const MAX_MULTITRACK_SUBTRACKS: usize = 4096;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -104,6 +107,9 @@ pub fn foreach_track(
         };
 
         if pos + track_size > payload.len() {
+            return false;
+        }
+        if tracks.len() >= MAX_MULTITRACK_SUBTRACKS {
             return false;
         }
         tracks.push(MediaTrackSlice {
@@ -216,5 +222,31 @@ mod tests {
     fn coded_frames_x_keyframe_is_detected() {
         let payload = vec![0x96, 0x13, b'a', b'v', b'c', b'1', 0, 0, 0, 1, 0xAA];
         assert!(multitrack_has_keyframe(&payload));
+    }
+
+    fn build_many_tracks_zero_payload_message(track_count: usize) -> Vec<u8> {
+        let mut payload = vec![0x86, 0x10, b'a', b'v', b'c', b'1'];
+        for id in 0..track_count {
+            payload.push(id as u8);
+            payload.extend_from_slice(&[0x00, 0x00, 0x00]);
+        }
+        payload
+    }
+
+    #[test]
+    fn rejects_multitrack_messages_with_too_many_subtracks() {
+        let at_limit = build_many_tracks_zero_payload_message(MAX_MULTITRACK_SUBTRACKS);
+        let mut calls = 0;
+        assert!(foreach_track(FrameType::Video, &at_limit, |_| calls += 1));
+        assert_eq!(calls, MAX_MULTITRACK_SUBTRACKS);
+
+        let over_limit = build_many_tracks_zero_payload_message(MAX_MULTITRACK_SUBTRACKS + 1);
+        let mut over_calls = 0;
+        assert!(!foreach_track(
+            FrameType::Video,
+            &over_limit,
+            |_| over_calls += 1
+        ));
+        assert_eq!(over_calls, 0);
     }
 }
