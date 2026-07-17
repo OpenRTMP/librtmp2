@@ -123,10 +123,22 @@ struct FrameSendFields {
 }
 
 // `FrameSendFields` intentionally reinterprets the leading `FrameType` field
-// as its raw C ABI integer. Keep the assumption explicit and fail compilation
-// if the enum's representation ever changes.
+// as its raw C ABI integer. Keep every layout assumption explicit so changes
+// to either struct fail compilation instead of silently shifting FFI reads.
 const _: [(); std::mem::size_of::<i32>()] = [(); std::mem::size_of::<FrameType>()];
 const _: [(); std::mem::align_of::<i32>()] = [(); std::mem::align_of::<FrameType>()];
+const _: [(); std::mem::offset_of!(Frame, frame_type)] =
+    [(); std::mem::offset_of!(FrameSendFields, frame_type)];
+const _: [(); std::mem::offset_of!(Frame, timestamp)] =
+    [(); std::mem::offset_of!(FrameSendFields, timestamp)];
+const _: [(); std::mem::offset_of!(Frame, composition_time)] =
+    [(); std::mem::offset_of!(FrameSendFields, composition_time)];
+const _: [(); std::mem::offset_of!(Frame, size)] =
+    [(); std::mem::offset_of!(FrameSendFields, size)];
+const _: [(); std::mem::offset_of!(Frame, data)] =
+    [(); std::mem::offset_of!(FrameSendFields, data)];
+const _: [(); std::mem::size_of::<FrameSendFields>()] =
+    [(); std::mem::offset_of!(Frame, audio_codec)];
 
 #[cfg(test)]
 mod ffi_tests {
