@@ -294,10 +294,14 @@ impl Conn {
         // low rate. Dividing this send's bytes by the whole idle gap would
         // produce an artificially tiny bitrate -- and therefore an inflated
         // latency_ms() -- that would then persist until the next full window.
-        // Restart the window from here instead of publishing that sample.
+        // Restart the window from here instead of publishing that sample, and
+        // invalidate the old one: it's now stale enough that latency_ms()
+        // should report unknown (None) rather than keep computing off a rate
+        // that may no longer bear any relation to current traffic.
         if elapsed > BITRATE_SAMPLE_WINDOW * 2 {
             self.bitrate_window_start = now;
             self.bitrate_window_start_bytes = self.media_bytes_sent;
+            self.send_bitrate_bps = 0.0;
             return;
         }
         let bytes_this_window = self
@@ -1931,19 +1935,26 @@ mod tests {
         conn.bitrate_window_start = Instant::now() - BITRATE_SAMPLE_WINDOW;
         conn.send_frame(FrameType::Video, 0, &[0xAB; 10_000])
             .unwrap();
-        let warm_bitrate = conn.send_bitrate_bps;
-        assert!(warm_bitrate > 0.0);
+        assert!(conn.send_bitrate_bps > 0.0);
 
         // Simulate a long idle gap (e.g. a paused stream) followed by one
         // small frame. Dividing that frame's bytes by the whole idle gap
         // would produce a bitrate orders of magnitude lower than reality.
-        conn.bitrate_window_start = Instant::now() - BITRATE_SAMPLE_WINDOW * 100;
+        // Just over the 2x-window threshold is enough to exercise the
+        // idle-gap branch without subtracting an unnecessarily large
+        // duration from Instant::now().
+        conn.bitrate_window_start = Instant::now() - BITRATE_SAMPLE_WINDOW * 3;
         let window_start_bytes_before = conn.bitrate_window_start_bytes;
         conn.send_frame(FrameType::Video, 0, &[0xCD; 10]).unwrap();
 
         assert_eq!(
-            conn.send_bitrate_bps, warm_bitrate,
-            "an idle gap must not skew send_bitrate_bps down instead of just restarting the window"
+            conn.send_bitrate_bps, 0.0,
+            "a stale sample from before the idle gap must not keep informing latency_ms()"
+        );
+        assert_eq!(
+            conn.latency_ms(),
+            None,
+            "latency_ms() must report unknown rather than compute off an invalidated sample"
         );
         assert!(
             conn.bitrate_window_start_bytes > window_start_bytes_before,
