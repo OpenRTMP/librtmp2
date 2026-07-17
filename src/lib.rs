@@ -122,6 +122,12 @@ struct FrameSendFields {
     data: *const u8,
 }
 
+// `FrameSendFields` intentionally reinterprets the leading `FrameType` field
+// as its raw C ABI integer. Keep the assumption explicit and fail compilation
+// if the enum's representation ever changes.
+const _: [(); std::mem::size_of::<i32>()] = [(); std::mem::size_of::<FrameType>()];
+const _: [(); std::mem::align_of::<i32>()] = [(); std::mem::align_of::<FrameType>()];
+
 #[cfg(test)]
 mod ffi_tests {
     use super::*;
@@ -214,6 +220,17 @@ mod ffi_tests {
         assert_eq!(frame_type_from_raw(3).unwrap(), FrameType::Metadata);
         assert!(frame_type_from_raw(4).is_err());
         assert!(frame_type_from_raw(-1).is_err());
+    }
+
+    #[test]
+    fn client_send_frame_checks_state_before_reading_frame() {
+        let client = Box::into_raw(Box::new(client::Client::new()));
+        let dangling_frame = NonNull::<Frame>::dangling().as_ptr();
+
+        let rc = unsafe { lrtmp2_client_send_frame(client, dangling_frame) };
+
+        unsafe { lrtmp2_client_destroy(client) };
+        assert_eq!(rc, ErrorCode::Protocol as i32);
     }
 }
 
@@ -376,14 +393,14 @@ pub unsafe extern "C" fn lrtmp2_client_send_frame(
     if c.is_null() || frame.is_null() {
         return ErrorCode::Internal as i32;
     }
+    if unsafe { (*c).state } != client::ClientState::Publishing {
+        return ErrorCode::Protocol as i32;
+    }
     let fields = unsafe { &*(frame as *const Frame as *const FrameSendFields) };
     let frame_type = match frame_type_from_raw(fields.frame_type) {
         Ok(t) => t,
         Err(e) => return e as i32,
     };
-    if unsafe { (*c).state } != client::ClientState::Publishing {
-        return ErrorCode::Protocol as i32;
-    }
     if fields.size > 0 && fields.data.is_null() {
         return ErrorCode::Internal as i32;
     }
