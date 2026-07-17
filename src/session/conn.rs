@@ -289,6 +289,17 @@ impl Conn {
         if elapsed < BITRATE_SAMPLE_WINDOW {
             return;
         }
+        // A gap far beyond one window means this connection sat idle (paused
+        // stream, sparse metadata, slow start), not that it sustained a very
+        // low rate. Dividing this send's bytes by the whole idle gap would
+        // produce an artificially tiny bitrate -- and therefore an inflated
+        // latency_ms() -- that would then persist until the next full window.
+        // Restart the window from here instead of publishing that sample.
+        if elapsed > BITRATE_SAMPLE_WINDOW * 2 {
+            self.bitrate_window_start = now;
+            self.bitrate_window_start_bytes = self.media_bytes_sent;
+            return;
+        }
         let bytes_this_window = self
             .media_bytes_sent
             .saturating_sub(self.bitrate_window_start_bytes);
@@ -1911,6 +1922,33 @@ mod tests {
         conn.send_frame(FrameType::Video, 0, &[0xCD; 50]).unwrap();
         let expected = conn.buffer_bytes() as f64 * 8.0 / conn.send_bitrate_bps * 1000.0;
         assert_eq!(conn.latency_ms(), Some(expected));
+    }
+
+    #[test]
+    fn sample_send_bitrate_ignores_long_idle_gaps_instead_of_diluting_the_rate() {
+        let mut conn = Conn::new();
+        // Warm up with a real sample so send_bitrate_bps starts non-zero.
+        conn.bitrate_window_start = Instant::now() - BITRATE_SAMPLE_WINDOW;
+        conn.send_frame(FrameType::Video, 0, &[0xAB; 10_000])
+            .unwrap();
+        let warm_bitrate = conn.send_bitrate_bps;
+        assert!(warm_bitrate > 0.0);
+
+        // Simulate a long idle gap (e.g. a paused stream) followed by one
+        // small frame. Dividing that frame's bytes by the whole idle gap
+        // would produce a bitrate orders of magnitude lower than reality.
+        conn.bitrate_window_start = Instant::now() - BITRATE_SAMPLE_WINDOW * 100;
+        let window_start_bytes_before = conn.bitrate_window_start_bytes;
+        conn.send_frame(FrameType::Video, 0, &[0xCD; 10]).unwrap();
+
+        assert_eq!(
+            conn.send_bitrate_bps, warm_bitrate,
+            "an idle gap must not skew send_bitrate_bps down instead of just restarting the window"
+        );
+        assert!(
+            conn.bitrate_window_start_bytes > window_start_bytes_before,
+            "the window baseline must still advance so the next real sample is accurate"
+        );
     }
 
     #[test]
