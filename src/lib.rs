@@ -99,6 +99,29 @@ fn error_code_from_raw(code: i32) -> ErrorCode {
     }
 }
 
+/// Map a raw `FrameType` discriminant without constructing an invalid enum
+/// value (which would be undefined behavior at the FFI boundary).
+fn frame_type_from_raw(raw: i32) -> Result<FrameType> {
+    match raw {
+        0 => Ok(FrameType::Audio),
+        1 => Ok(FrameType::Video),
+        2 => Ok(FrameType::Script),
+        3 => Ok(FrameType::Metadata),
+        _ => Err(ErrorCode::Internal),
+    }
+}
+
+/// Leading fields of [`Frame`] read as plain scalars so invalid enum
+/// discriminants never instantiate a `Frame` reference.
+#[repr(C)]
+struct FrameSendFields {
+    frame_type: i32,
+    timestamp: u32,
+    composition_time: u32,
+    size: u32,
+    data: *const u8,
+}
+
 #[cfg(test)]
 mod ffi_tests {
     use super::*;
@@ -163,6 +186,35 @@ mod ffi_tests {
         let server = Server::new(config).unwrap();
         assert_eq!(server.config.max_connections, 0);
     }
+
+    #[test]
+    fn server_listen_rejects_invalid_utf8_bind_addr() {
+        let config = ServerConfig {
+            max_connections: 8,
+            chunk_size: 128,
+            tls_enabled: 0,
+            tls_cert_file: std::ptr::null(),
+            tls_key_file: std::ptr::null(),
+            tls_ca_file: std::ptr::null(),
+            tls_insecure: 0,
+        };
+        let server = NonNull::new(unsafe { lrtmp2_server_create(&config) })
+            .expect("lrtmp2_server_create returned null");
+        let invalid = [0xFF, b':', b'1', b'9', b'3', b'5', 0];
+        let rc = unsafe { lrtmp2_server_listen(server.as_ptr(), invalid.as_ptr()) };
+        unsafe {
+            lrtmp2_server_destroy(server.as_ptr());
+        }
+        assert_eq!(rc, ErrorCode::Internal as i32);
+    }
+
+    #[test]
+    fn frame_type_from_raw_rejects_invalid_discriminants() {
+        assert_eq!(frame_type_from_raw(0).unwrap(), FrameType::Audio);
+        assert_eq!(frame_type_from_raw(3).unwrap(), FrameType::Metadata);
+        assert!(frame_type_from_raw(4).is_err());
+        assert!(frame_type_from_raw(-1).is_err());
+    }
 }
 
 use std::ffi::c_int;
@@ -210,7 +262,12 @@ pub unsafe extern "C" fn lrtmp2_server_listen(
     }
     let s = unsafe { &mut *server };
     let addr = unsafe { std::ffi::CStr::from_ptr(bind_addr as *const std::ffi::c_char) };
-    match s.listen(addr.to_str().unwrap_or("")) {
+    let addr_str = match addr.to_str() {
+        Ok(s) => s,
+        // Invalid UTF-8 must not fall back to "" (which binds 0.0.0.0).
+        Err(_) => return ErrorCode::Internal as i32,
+    };
+    match s.listen(addr_str) {
         Ok(()) => 0,
         Err(e) => e as i32,
     }
@@ -319,22 +376,26 @@ pub unsafe extern "C" fn lrtmp2_client_send_frame(
     if c.is_null() || frame.is_null() {
         return ErrorCode::Internal as i32;
     }
-    let frame_ref = unsafe { &*frame };
+    let fields = unsafe { &*(frame as *const Frame as *const FrameSendFields) };
+    let frame_type = match frame_type_from_raw(fields.frame_type) {
+        Ok(t) => t,
+        Err(e) => return e as i32,
+    };
     if unsafe { (*c).state } != client::ClientState::Publishing {
         return ErrorCode::Protocol as i32;
     }
-    if frame_ref.size > 0 && frame_ref.data.is_null() {
+    if fields.size > 0 && fields.data.is_null() {
         return ErrorCode::Internal as i32;
     }
-    if frame_ref.size as usize > client::MAX_CLIENT_FRAME_BYTES {
+    if fields.size as usize > client::MAX_CLIENT_FRAME_BYTES {
         return ErrorCode::Protocol as i32;
     }
-    let payload = if frame_ref.size == 0 || frame_ref.data.is_null() {
+    let payload = if fields.size == 0 || fields.data.is_null() {
         Vec::new()
     } else {
-        unsafe { std::slice::from_raw_parts(frame_ref.data, frame_ref.size as usize).to_vec() }
+        unsafe { std::slice::from_raw_parts(fields.data, fields.size as usize).to_vec() }
     };
-    match unsafe { (*c).send_frame_payload(frame_ref.frame_type, frame_ref.timestamp, &payload) } {
+    match unsafe { (*c).send_frame_payload(frame_type, fields.timestamp, &payload) } {
         Ok(()) => 0,
         Err(e) => e as i32,
     }
