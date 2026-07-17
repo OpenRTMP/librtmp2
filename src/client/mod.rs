@@ -242,6 +242,10 @@ impl Client {
         } else {
             ErrorCode::Io
         })?;
+        // See the matching comment in server/mod.rs: without this, Nagle's
+        // algorithm can delay small RTMP control messages (pings, command
+        // replies) by tens of ms, inflating measured RTT.
+        let _ = stream.set_nodelay(true);
         let mut transport = if use_tls {
             Transport::connect_tls(
                 stream,

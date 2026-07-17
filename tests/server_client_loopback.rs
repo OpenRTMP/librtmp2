@@ -98,6 +98,76 @@ fn server_client_publish_over_real_sockets() {
     );
 }
 
+/// Reads `TCP_NODELAY` off a raw fd via `getsockopt`, mirroring how the
+/// kernel reports it -- there's no safe-Rust way to query it back from an
+/// already-owned fd.
+fn tcp_nodelay(fd: i32) -> bool {
+    let mut val: libc::c_int = 0;
+    let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+    let rc = unsafe {
+        libc::getsockopt(
+            fd,
+            libc::IPPROTO_TCP,
+            libc::TCP_NODELAY,
+            &mut val as *mut _ as *mut libc::c_void,
+            &mut len,
+        )
+    };
+    assert_eq!(rc, 0, "getsockopt(TCP_NODELAY) failed");
+    val != 0
+}
+
+/// `librtmp2` measures RTT with a UserControl ping/pong (`Conn::rtt_ms`).
+/// Without `TCP_NODELAY`, Nagle's algorithm can hold that tiny message in the
+/// kernel send buffer waiting to coalesce with more data, inflating the
+/// measured RTT by tens of ms on an otherwise idle connection. Both the
+/// server's accept path and the client's connect path must set it on the
+/// real socket.
+#[test]
+fn accepted_and_connected_sockets_have_tcp_nodelay_set() {
+    let mut server = Server::new(plain_config()).unwrap();
+    server.listen("127.0.0.1:19665").unwrap();
+
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let mut client = Client::new();
+    let client_thread = thread::spawn(move || {
+        client
+            .connect("rtmp://127.0.0.1:19665/live/stream1")
+            .unwrap();
+        let _ = done_tx.send(client.client_fd);
+        client
+    });
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut client_fd = None;
+    while client_fd.is_none() && Instant::now() < deadline {
+        server.poll(20).unwrap();
+        if let Ok(fd) = done_rx.try_recv() {
+            client_fd = Some(fd);
+        }
+    }
+    let client_fd = client_fd.expect("client never finished connect()");
+    assert_eq!(
+        server.connections.len(),
+        1,
+        "server never accepted the connection"
+    );
+    let server_fd = server.connections[0].transport.as_ref().unwrap().fd();
+
+    // Keep the joined `Client` alive: its `Drop` closes `client_fd`, which
+    // would make the getsockopt() calls below fail on a stale fd.
+    let _client = client_thread.join().unwrap();
+
+    assert!(
+        tcp_nodelay(server_fd),
+        "accepted server socket must have TCP_NODELAY set"
+    );
+    assert!(
+        tcp_nodelay(client_fd),
+        "connected client socket must have TCP_NODELAY set"
+    );
+}
+
 static OBSERVED_CONN_ID: AtomicU64 = AtomicU64::new(0);
 
 fn record_conn_id(conn_id: u64, _app: &str, _stream_name: &str) -> bool {

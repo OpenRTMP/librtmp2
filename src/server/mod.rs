@@ -154,6 +154,13 @@ pub struct Server {
     pub defer_media_relay: bool,
     /// Active publish routes: (app, stream_name) -> owning conn_id.
     pub(crate) active_publish_routes: Arc<Mutex<HashMap<(String, String), u64>>>,
+    /// Cumulative count of connections this server has force-closed because
+    /// their outbound send buffer filled up (a player or relay peer that
+    /// stopped reading fast enough). RTMP runs over TCP, so there is no
+    /// individual-packet loss to count here -- this is the closest real
+    /// analog: how many times a slow peer had to be dropped rather than let
+    /// its backlog grow without bound.
+    pub backpressure_drops: u64,
 }
 
 impl Server {
@@ -201,6 +208,7 @@ impl Server {
             conn_ids_issued: false,
             defer_media_relay: false,
             active_publish_routes: Arc::new(Mutex::new(HashMap::new())),
+            backpressure_drops: 0,
         })
     }
 
@@ -462,6 +470,13 @@ impl Server {
                     Ok((stream, addr)) => {
                         accepted_any = true;
                         self.next_listener_accept = (i + 1) % listener_count;
+                        // Small RTMP control messages (pings, command replies)
+                        // must not sit in the kernel's send buffer waiting for
+                        // Nagle's algorithm to coalesce them with more data --
+                        // that inflates measured RTT and adds latency to
+                        // interactive exchanges. Best-effort: a failure here
+                        // just leaves Nagle enabled, it isn't fatal.
+                        let _ = stream.set_nodelay(true);
                         let remote_addr = addr.to_string();
                         let tls_ctx = self.listeners[i].tls_ctx.clone();
                         if let Some(ctx) = tls_ctx.as_ref() {
@@ -685,6 +700,7 @@ impl Server {
                     conn.needs_init_frames = false;
                     conn.disconnect_transport();
                     closed.push(i);
+                    self.backpressure_drops = self.backpressure_drops.saturating_add(1);
                 }
             }
         }
@@ -728,6 +744,7 @@ impl Server {
                     conn.needs_init_frames = false;
                     conn.disconnect_transport();
                     closed.push(i);
+                    self.backpressure_drops = self.backpressure_drops.saturating_add(1);
                 }
             }
             relay_sends += player_count;
@@ -1224,6 +1241,69 @@ mod tests {
             server.max_relay_sends_per_poll < worst_case / 10,
             "relay budget should be well below unbounded fan-out"
         );
+    }
+
+    #[test]
+    fn player_dropped_for_backpressure_increments_backpressure_drops() {
+        use crate::buffer::BUFFER_MAX_SIZE;
+        use crate::session::stream::Stream;
+        use crate::transport::Transport;
+        use std::os::unix::io::IntoRawFd;
+        use std::os::unix::net::UnixStream;
+
+        fn attached_conn(conn_id: u64, publishing: bool) -> (Conn, UnixStream) {
+            let (server_end, peer_end) = UnixStream::pair().unwrap();
+            server_end.set_nonblocking(true).unwrap();
+            peer_end.set_nonblocking(true).unwrap();
+
+            let mut conn = Conn::new();
+            conn.conn_id = conn_id;
+            conn.app = "live".to_string();
+            conn.relay_enabled = true;
+            conn.transport = Some(Transport::new_plain(server_end.into_raw_fd()));
+            conn.current_stream = Some(Box::new(Stream {
+                stream_id: 1,
+                name: "stream".to_string(),
+                is_publishing: publishing,
+                is_playing: !publishing,
+                paused: false,
+                receive_audio: true,
+                receive_video: true,
+            }));
+            (conn, peer_end)
+        }
+
+        let mut server = test_server();
+        assert_eq!(server.backpressure_drops, 0);
+
+        let (mut publisher, _publisher_peer) = attached_conn(1, true);
+        publisher
+            .pending_relay
+            .push(relay_frame(FrameType::Video, vec![0x17, 0x01, 0xAA]));
+
+        let (mut player, _player_peer) = attached_conn(2, false);
+        // Pre-fill the player's outbound buffer right up to the hard cap so
+        // the relay send below has no room left and errors out, exactly like
+        // a real player that stopped reading for long enough to back the
+        // kernel socket buffer up into this in-memory one.
+        player
+            .send_buffer
+            .write(&vec![0u8; BUFFER_MAX_SIZE - 1])
+            .unwrap();
+        server.connections = vec![publisher, player];
+
+        server.process_connections().unwrap();
+
+        assert_eq!(
+            server.backpressure_drops, 1,
+            "the player's send failure must be counted as a backpressure drop"
+        );
+        assert_eq!(
+            server.connections.len(),
+            1,
+            "the backed-up player must be disconnected"
+        );
+        assert_eq!(server.connections[0].conn_id, 1, "the publisher stays");
     }
 
     #[test]

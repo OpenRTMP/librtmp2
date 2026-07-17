@@ -13,6 +13,21 @@ begin at `1.0.0`.
 
 ## [Unreleased]
 
+### Added
+- `Conn::buffer_bytes()` and `Conn::latency_ms()`: outbound send-buffer
+  backlog and an estimated queuing latency derived from it and a rolling
+  outbound-bitrate sample (`Conn::send_bitrate_bps`).
+- `Server::backpressure_drops`: cumulative count of connections force-closed
+  because their outbound send buffer filled up (a slow player/relay peer).
+  RTMP runs over TCP, so this is the closest analog to a "dropped packets"
+  counter — there is no individual-packet loss to track at this layer.
+
+### Fixed
+- Set `TCP_NODELAY` on accepted (server) and connected (client) sockets.
+  Without it, Nagle's algorithm could delay small RTMP control messages
+  (pings, command replies) by tens of ms, inflating measured `rtt_ms` on
+  otherwise low-latency connections.
+
 ## [0.4.0] — 2026-07-15
 
 ### Added

@@ -50,6 +50,10 @@ const PEER_BANDWIDTH_DYNAMIC: u8 = 2;
 const PING_INTERVAL: Duration = Duration::from_secs(5);
 const PING_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_PENDING_PINGS: usize = 4;
+/// Sampling window for the outbound media bitrate estimate used by
+/// `latency_ms()`. Short enough to react to a publisher/player's current
+/// send rate, long enough not to be dominated by single-frame bursts.
+const BITRATE_SAMPLE_WINDOW: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone)]
 struct QueuedPing {
@@ -183,6 +187,14 @@ pub struct Conn {
     pub negotiated_caps: NegotiatedCaps,
     /// Player-side buffer length from SetBufferLength user control (ms).
     pub buffer_length_ms: u32,
+    /// Start of the current outbound-bitrate sampling window (see
+    /// `send_bitrate_bps`).
+    bitrate_window_start: Instant,
+    /// `media_bytes_sent` value at `bitrate_window_start`.
+    bitrate_window_start_bytes: u64,
+    /// Outbound media bitrate estimated over the last `BITRATE_SAMPLE_WINDOW`,
+    /// in bits/second. Zero until the first full window has elapsed.
+    pub send_bitrate_bps: f64,
 }
 
 impl Conn {
@@ -243,7 +255,46 @@ impl Conn {
             session_setup_started: Instant::now(),
             negotiated_caps: NegotiatedCaps::default(),
             buffer_length_ms: 3000,
+            bitrate_window_start: Instant::now(),
+            bitrate_window_start_bytes: 0,
+            send_bitrate_bps: 0.0,
         }
+    }
+
+    /// Bytes currently queued in the outbound send buffer, not yet flushed to
+    /// the socket. A value that keeps climbing under sustained load is the
+    /// earliest sign this peer (or the network path to it) can't keep up.
+    pub fn buffer_bytes(&self) -> usize {
+        self.send_buffer.available()
+    }
+
+    /// Estimated queuing latency of the outbound buffer, in milliseconds:
+    /// how long the currently buffered bytes would take to drain at the
+    /// recently observed send bitrate. `None` until `send_bitrate_bps` has
+    /// its first sample (see `sample_send_bitrate`).
+    pub fn latency_ms(&self) -> Option<f64> {
+        if self.send_bitrate_bps <= 0.0 {
+            return None;
+        }
+        Some(self.buffer_bytes() as f64 * 8.0 / self.send_bitrate_bps * 1000.0)
+    }
+
+    /// Rolls the outbound-bitrate sampling window forward once
+    /// `BITRATE_SAMPLE_WINDOW` has elapsed, updating `send_bitrate_bps` from
+    /// the bytes sent during that window. Called after every `media_bytes_sent`
+    /// increment so `latency_ms()` always reflects a recent send rate.
+    fn sample_send_bitrate(&mut self) {
+        let now = Instant::now();
+        let elapsed = now.duration_since(self.bitrate_window_start);
+        if elapsed < BITRATE_SAMPLE_WINDOW {
+            return;
+        }
+        let bytes_this_window = self
+            .media_bytes_sent
+            .saturating_sub(self.bitrate_window_start_bytes);
+        self.send_bitrate_bps = (bytes_this_window as f64 * 8.0) / elapsed.as_secs_f64();
+        self.bitrate_window_start = now;
+        self.bitrate_window_start_bytes = self.media_bytes_sent;
     }
 
     /// True when an inbound peer has held a connection slot without reaching
@@ -1581,6 +1632,7 @@ impl Conn {
             self.active_chunk_size as usize,
         )?;
         self.media_bytes_sent = self.media_bytes_sent.saturating_add(payload.len() as u64);
+        self.sample_send_bitrate();
         Ok(())
     }
 
@@ -1606,6 +1658,7 @@ impl Conn {
             self.active_chunk_size as usize,
         )?;
         self.media_bytes_sent = self.media_bytes_sent.saturating_add(payload.len() as u64);
+        self.sample_send_bitrate();
         Ok(())
     }
 
@@ -1821,6 +1874,45 @@ mod tests {
                 .is_err()
         );
     }
+    #[test]
+    fn buffer_bytes_reflects_unflushed_send_buffer() {
+        let mut conn = Conn::new();
+        assert_eq!(conn.buffer_bytes(), 0);
+        conn.send_frame(FrameType::Video, 0, &[0xAB; 100]).unwrap();
+        assert_eq!(conn.buffer_bytes(), conn.send_buffer.available());
+        assert!(conn.buffer_bytes() > 0);
+    }
+
+    #[test]
+    fn latency_ms_is_none_before_a_bitrate_sample_exists() {
+        let mut conn = Conn::new();
+        conn.send_frame(FrameType::Video, 0, &[0xAB; 100]).unwrap();
+        assert_eq!(
+            conn.latency_ms(),
+            None,
+            "no bitrate sample has been taken yet (BITRATE_SAMPLE_WINDOW hasn't elapsed)"
+        );
+    }
+
+    #[test]
+    fn latency_ms_estimates_drain_time_from_sampled_bitrate() {
+        let mut conn = Conn::new();
+        // Force the next `sample_send_bitrate()` call to treat a full window
+        // as having already elapsed, so the test doesn't need to sleep.
+        conn.bitrate_window_start = Instant::now() - BITRATE_SAMPLE_WINDOW;
+        conn.send_frame(FrameType::Video, 0, &[0xAB; 100]).unwrap();
+        assert!(
+            conn.send_bitrate_bps > 0.0,
+            "sending past a full window must produce a bitrate sample"
+        );
+
+        // Queue more data without letting another window elapse, so
+        // buffer_bytes() > 0 while send_bitrate_bps stays at the sampled rate.
+        conn.send_frame(FrameType::Video, 0, &[0xCD; 50]).unwrap();
+        let expected = conn.buffer_bytes() as f64 * 8.0 / conn.send_bitrate_bps * 1000.0;
+        assert_eq!(conn.latency_ms(), Some(expected));
+    }
+
     #[test]
     fn relay_route_key_prefers_relay_key_over_rtmp_name() {
         let mut conn = Conn::new();
