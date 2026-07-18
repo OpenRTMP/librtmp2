@@ -13,6 +13,18 @@ begin at `1.0.0`.
 
 ## [Unreleased]
 
+### Changed
+- `Client::connect()` now enforces a single wall-clock deadline across DNS
+  resolution, TCP/TLS connect, the RTMP handshake, and the AMF
+  `connect`/`createStream` exchange (previously only DNS/TCP connect were
+  bounded). The default budget is unchanged (`TCP_CONNECT_TIMEOUT_SECS`, 10s);
+  callers on slower or more loaded hosts can raise it with the new
+  `Client::set_connect_timeout()`.
+
+### Fixed
+- Capped chained ModEx extension unwrapping at 32 layers to prevent CPU
+  amplification from deeply nested wrappers on media frames.
+
 ## [0.4.0] — 2026-07-15
 
 ### Added

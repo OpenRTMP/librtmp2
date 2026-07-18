@@ -234,10 +234,16 @@ impl Client {
         }
         self.reset_session_state();
 
+        let connect_timeout = self
+            .connect_timeout
+            .unwrap_or(Duration::from_secs(TCP_CONNECT_TIMEOUT_SECS));
+        // A caller-supplied timeout could in principle be large enough that
+        // adding it to `Instant::now()` overflows the clock's representable
+        // range; `Instant::now() + timeout` would panic in that case, so use
+        // `checked_add` and fail the connect instead of aborting the process.
         let deadline = Instant::now()
-            + self
-                .connect_timeout
-                .unwrap_or(Duration::from_secs(TCP_CONNECT_TIMEOUT_SECS));
+            .checked_add(connect_timeout)
+            .ok_or(ErrorCode::Internal)?;
         let addrs = resolve_socket_addrs(&host, port, deadline)?;
         let mut last_err_was_timeout = false;
         let mut stream = None;
@@ -1164,10 +1170,14 @@ fn poll_until_deadline(fd: i32, again: i32, deadline: Instant) -> Result<()> {
     };
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
+        // `poll(2)`'s granularity is milliseconds, so a sub-millisecond
+        // remainder can't be represented faithfully; round it down to an
+        // expired deadline rather than up to a full 1ms wait, which would
+        // let the caller's absolute deadline be overshot.
+        if remaining.as_millis() == 0 {
             return Err(ErrorCode::Timeout);
         }
-        let timeout_ms = remaining.as_millis().min(i32::MAX as u128).max(1) as i32;
+        let timeout_ms = remaining.as_millis().min(i32::MAX as u128) as i32;
         let mut pfd = libc::pollfd {
             fd,
             events,
