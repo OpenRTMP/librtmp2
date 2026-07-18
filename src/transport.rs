@@ -163,7 +163,9 @@ impl Transport {
     /// otherwise-blocking connect sequence. The handshake itself is bounded by
     /// a read/write timeout so a peer that completes the TCP connect but then
     /// stalls mid-handshake cannot hang the caller indefinitely (mirroring the
-    /// bound `send()` places on writes post-handshake).
+    /// bound `send()` places on writes post-handshake). Uses a fixed default
+    /// timeout; call [`Transport::connect_tls_with_timeout`] to bound it by
+    /// an existing deadline instead.
     #[cfg(feature = "tls")]
     pub fn connect_tls(
         stream: TcpStream,
@@ -171,17 +173,47 @@ impl Transport {
         ca_file: Option<&str>,
         insecure: bool,
     ) -> Result<Self> {
+        Transport::connect_tls_with_timeout(
+            stream,
+            host,
+            ca_file,
+            insecure,
+            Duration::from_secs(TLS_ACCEPT_TIMEOUT_SECS),
+        )
+    }
+
+    /// Same as [`Transport::connect_tls`], but `timeout` bounds the whole
+    /// handshake instead of the fixed default. Pass the caller's remaining
+    /// connect deadline here — otherwise the TLS handshake could run well
+    /// past the overall connect timeout the caller already spent on DNS/TCP
+    /// connect.
+    #[cfg(feature = "tls")]
+    pub fn connect_tls_with_timeout(
+        stream: TcpStream,
+        host: &str,
+        ca_file: Option<&str>,
+        insecure: bool,
+        timeout: Duration,
+    ) -> Result<Self> {
         use openssl::ssl::{Ssl, SslContextBuilder, SslMode};
         use openssl::x509::X509;
         use openssl::x509::store::X509StoreBuilder;
         use openssl::x509::verify::X509CheckFlags;
 
-        stream
-            .set_read_timeout(Some(Duration::from_secs(TLS_ACCEPT_TIMEOUT_SECS)))
-            .map_err(|_| ErrorCode::Io)?;
-        stream
-            .set_write_timeout(Some(Duration::from_secs(TLS_ACCEPT_TIMEOUT_SECS)))
-            .map_err(|_| ErrorCode::Io)?;
+        if timeout.is_zero() {
+            return Err(ErrorCode::Timeout);
+        }
+        // A single fixed read/write socket timeout only bounds each
+        // individual I/O call, not the handshake as a whole — a peer that
+        // drip-feeds one byte just before each timeout could stall the
+        // handshake far past `timeout`. Drive the handshake non-blocking
+        // instead (mirroring the server-side `accept_nonblocking` pattern)
+        // and poll against one absolute deadline so the wall-clock budget
+        // can't be reset by partial I/O.
+        let deadline = Instant::now()
+            .checked_add(timeout)
+            .ok_or(ErrorCode::Internal)?;
+        stream.set_nonblocking(true).map_err(|_| ErrorCode::Io)?;
 
         let mut ctx = SslContextBuilder::new(SslMethod::tls()).map_err(|_| ErrorCode::Internal)?;
         ctx.set_cipher_list(
@@ -236,8 +268,51 @@ impl Transport {
         }
         ssl.set_hostname(host).map_err(|_| ErrorCode::Internal)?;
 
-        let ssl_stream = ssl.connect(stream).map_err(|_| ErrorCode::Handshake)?;
-        Transport::new_tls(ssl_stream)
+        let mut pending = match ssl.connect(stream) {
+            Ok(ssl_stream) => return Transport::new_tls(ssl_stream),
+            Err(HandshakeError::WouldBlock(mid)) => mid,
+            Err(_) => return Err(ErrorCode::Handshake),
+        };
+        loop {
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                return Err(ErrorCode::Timeout);
+            };
+            // `poll(2)`'s granularity is milliseconds; round a sub-ms
+            // remainder down to an expired deadline instead of up to a full
+            // 1ms wait, so the caller's absolute deadline can't be overshot.
+            if remaining.as_millis() == 0 {
+                return Err(ErrorCode::Timeout);
+            }
+            // `poll(2)`'s timeout is a 32-bit millisecond count, so a
+            // remaining budget past ~24.8 days must be clamped; `rc == 0`
+            // then only means "this clamped wait expired", not "the real
+            // deadline passed" — loop and recheck instead of timing out
+            // early.
+            let timeout_ms = remaining.as_millis().min(i32::MAX as u128) as i32;
+            let mut pfd = libc::pollfd {
+                fd: pending.get_ref().as_raw_fd(),
+                events: tls_poll_interest(&pending).poll_events(),
+                revents: 0,
+            };
+            let rc = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
+            if rc == 0 {
+                if Instant::now() >= deadline {
+                    return Err(ErrorCode::Timeout);
+                }
+                continue;
+            }
+            if rc < 0 {
+                if std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                    continue;
+                }
+                return Err(ErrorCode::Io);
+            }
+            match pending.handshake() {
+                Ok(ssl_stream) => return Transport::new_tls(ssl_stream),
+                Err(HandshakeError::WouldBlock(mid)) => pending = mid,
+                Err(_) => return Err(ErrorCode::Handshake),
+            }
+        }
     }
 
     /// TLS is not available in this build.
@@ -247,6 +322,18 @@ impl Transport {
         _host: &str,
         _ca_file: Option<&str>,
         _insecure: bool,
+    ) -> Result<Self> {
+        Err(ErrorCode::Unsupported)
+    }
+
+    /// TLS is not available in this build.
+    #[cfg(not(feature = "tls"))]
+    pub fn connect_tls_with_timeout(
+        _stream: TcpStream,
+        _host: &str,
+        _ca_file: Option<&str>,
+        _insecure: bool,
+        _timeout: std::time::Duration,
     ) -> Result<Self> {
         Err(ErrorCode::Unsupported)
     }
@@ -735,5 +822,38 @@ mod client_tls_tests {
 
         let _ = std::fs::remove_file(cert_path);
         let _ = std::fs::remove_file(key_path);
+    }
+
+    #[test]
+    fn connect_tls_with_timeout_times_out_against_a_stalled_peer() {
+        // Accept the TCP connection but never write a byte of TLS data back:
+        // the client's handshake should time out on the supplied deadline
+        // rather than hang, and must not take anywhere close to the fixed
+        // 10s default (proving the deadline, not the socket default, is
+        // what's bounding it).
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let _keep_alive = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            std::thread::sleep(Duration::from_secs(5));
+            drop(stream);
+        });
+
+        let stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let start = Instant::now();
+        let result = Transport::connect_tls_with_timeout(
+            stream,
+            "stalled.test",
+            None,
+            true,
+            Duration::from_millis(200),
+        );
+        let elapsed = start.elapsed();
+        assert_eq!(result.err(), Some(ErrorCode::Timeout));
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "expected the ~200ms deadline to bound the handshake, took {:?}",
+            elapsed
+        );
     }
 }

@@ -242,11 +242,9 @@ mod tests {
 
         let over_limit = build_many_tracks_zero_payload_message(MAX_MULTITRACK_SUBTRACKS + 1);
         let mut over_calls = 0;
-        assert!(!foreach_track(
-            FrameType::Video,
-            &over_limit,
-            |_| over_calls += 1
-        ));
+        assert!(!foreach_track(FrameType::Video, &over_limit, |_| {
+            over_calls += 1
+        }));
         assert_eq!(over_calls, 0);
     }
 }
