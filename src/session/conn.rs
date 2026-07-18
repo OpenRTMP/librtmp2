@@ -311,10 +311,18 @@ impl Conn {
         }
         let claimed_route = self.claimed_publish_route.clone();
         self.release_claimed_publish_route();
-        let route_key = claimed_route.unwrap_or_else(|| self.relay_route_key());
-        if !route_key.is_empty() {
-            self.pending_cache_evictions
-                .push((self.app.clone(), route_key));
+        // Cached frames are keyed by whatever relay_route_key() was live at
+        // the moment each frame was queued (see RelayFrame::stream_name), so
+        // if an integrator pins relay_key after the route was claimed, cache
+        // entries can exist under both the originally claimed key and the
+        // current one. Evict both to avoid leaving either behind.
+        let live_route_key = self.relay_route_key();
+        let mut evicted = std::collections::HashSet::new();
+        for route_key in [claimed_route, Some(live_route_key)].into_iter().flatten() {
+            if !route_key.is_empty() && evicted.insert(route_key.clone()) {
+                self.pending_cache_evictions
+                    .push((self.app.clone(), route_key));
+            }
         }
         self.clear_detected_stream_metadata();
     }
@@ -2094,6 +2102,42 @@ mod tests {
         assert!(conn.pending_cache_evictions.is_empty());
         assert_eq!(conn.current_stream.as_ref().unwrap().name, "other");
         assert!(!conn.current_stream.as_ref().unwrap().is_playing);
+    }
+
+    #[test]
+    fn evict_active_publish_route_evicts_both_claimed_and_pinned_relay_key() {
+        let mut conn = Conn::new();
+        conn.app = "live".to_string();
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+
+        // Publish claims the route under the RTMP name (no relay_key set
+        // yet), so frames get cached under "A".
+        let mut buf = Buffer::with_capacity(128);
+        command::build_publish(&mut buf, "A", "live").unwrap();
+        conn.handle_command(buf.as_slice()).unwrap();
+        assert!(conn.pending_cache_evictions.is_empty());
+
+        // Integrator pins relay_key mid-publish, after the route was
+        // already claimed under "A". New frames from this point on are
+        // cached under "route-pinned" (relay_route_key() is live at
+        // frame-queue time), diverging from the claimed route key.
+        conn.relay_key = "route-pinned".to_string();
+
+        // `play` supersedes the active publish, evicting whatever was
+        // being served. Both the originally claimed key ("A") and the
+        // now-current relay route key ("route-pinned") must be evicted,
+        // since cached frames may exist under either.
+        let mut buf = Buffer::with_capacity(128);
+        command::build_play(&mut buf, "victim").unwrap();
+        conn.handle_command(buf.as_slice()).unwrap();
+
+        assert_eq!(
+            conn.pending_cache_evictions,
+            vec![
+                ("live".to_string(), "A".to_string()),
+                ("live".to_string(), "route-pinned".to_string()),
+            ]
+        );
     }
 
     #[test]
