@@ -9,6 +9,13 @@ use crate::types::CAPS_EX_MASK_MODEX;
 /// and force O(payload) normalization work on every frame.
 const MAX_MODEX_CHAIN_LAYERS: usize = 32;
 
+/// Peels chained ModEx wrappers so codec/multitrack detection sees the
+/// underlying packet type. When a chain exceeds `MAX_MODEX_CHAIN_LAYERS` the
+/// payload is intentionally left wrapped and opaque: codec/multitrack
+/// detection derived from this payload (e.g. `Conn::detected_video_codec` /
+/// `detected_audio_codec`) will not fire for that frame. This is a deliberate
+/// CPU-amplification tradeoff, not a parsing bug — callers that surface
+/// detected-codec stats should expect them to be absent for such frames.
 pub fn normalize_modex_payload<'a>(payload: &'a [u8], caps_ex_mask: u32) -> Cow<'a, [u8]> {
     if payload.is_empty()
         || (caps_ex_mask & CAPS_EX_MASK_MODEX) == 0

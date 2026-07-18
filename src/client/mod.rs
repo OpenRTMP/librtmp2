@@ -171,6 +171,10 @@ pub struct Client {
     /// Skip TLS certificate verification for `rtmps://` connections.
     /// Only for testing against self-signed deployments.
     tls_insecure: bool,
+    /// Overall wall-clock budget for `connect()` (DNS + TCP connect + TLS +
+    /// handshake + AMF connect/createStream). `None` uses
+    /// `TCP_CONNECT_TIMEOUT_SECS`.
+    connect_timeout: Option<Duration>,
     inbound_ping_window_start: Option<Instant>,
     inbound_ping_responses: usize,
 }
@@ -193,6 +197,7 @@ impl Client {
             frame_cb_scratch: Vec::new(),
             tls_ca_file: None,
             tls_insecure: false,
+            connect_timeout: None,
             inbound_ping_window_start: None,
             inbound_ping_responses: 0,
         }
@@ -202,6 +207,16 @@ impl Client {
     pub fn set_tls_client_config(&mut self, ca_file: Option<String>, insecure: bool) {
         self.tls_ca_file = ca_file;
         self.tls_insecure = insecure;
+    }
+
+    /// Override the overall wall-clock budget for subsequent `connect()`
+    /// calls (DNS resolution, TCP connect, TLS handshake, RTMP handshake, and
+    /// the AMF `connect`/`createStream` exchange all share this one budget).
+    /// Defaults to `TCP_CONNECT_TIMEOUT_SECS` when never called. Useful for
+    /// slower CI hosts or higher-latency TLS handshakes where the default is
+    /// too tight.
+    pub fn set_connect_timeout(&mut self, timeout: Duration) {
+        self.connect_timeout = Some(timeout);
     }
 
     /// Connect to an RTMP(S) server at `rtmp://host[:port]/app/streamKey` or
@@ -219,7 +234,10 @@ impl Client {
         }
         self.reset_session_state();
 
-        let deadline = Instant::now() + Duration::from_secs(TCP_CONNECT_TIMEOUT_SECS);
+        let deadline = Instant::now()
+            + self
+                .connect_timeout
+                .unwrap_or(Duration::from_secs(TCP_CONNECT_TIMEOUT_SECS));
         let addrs = resolve_socket_addrs(&host, port, deadline)?;
         let mut last_err_was_timeout = false;
         let mut stream = None;
@@ -243,11 +261,13 @@ impl Client {
             ErrorCode::Io
         })?;
         let mut transport = if use_tls {
+            let remaining = deadline.saturating_duration_since(Instant::now());
             Transport::connect_tls(
                 stream,
                 &host,
                 self.tls_ca_file.as_deref(),
                 self.tls_insecure,
+                remaining,
             )?
         } else {
             Transport::new_plain(stream.into_raw_fd())
@@ -1131,16 +1151,40 @@ fn send_bounded(transport: &mut Transport, data: &[u8], deadline: Instant) -> Re
     Ok(())
 }
 
+/// Like `poll_for_transport_direction`, but bounded by an absolute `deadline`
+/// rather than a fixed timeout. Unlike that function, the `EINTR` retry loop
+/// recomputes the remaining time on every iteration — a signal arriving near
+/// the deadline must not restart a full poll interval and blow through the
+/// caller's wall-clock budget.
 fn poll_until_deadline(fd: i32, again: i32, deadline: Instant) -> Result<()> {
-    let remaining = deadline.saturating_duration_since(Instant::now());
-    if remaining.is_zero() {
-        return Err(ErrorCode::Timeout);
+    let events = if again == 2 {
+        libc::POLLOUT
+    } else {
+        libc::POLLIN
+    };
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(ErrorCode::Timeout);
+        }
+        let timeout_ms = remaining.as_millis().min(i32::MAX as u128).max(1) as i32;
+        let mut pfd = libc::pollfd {
+            fd,
+            events,
+            revents: 0,
+        };
+        let rc = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
+        if rc == 0 {
+            return Err(ErrorCode::Timeout);
+        }
+        if rc < 0 {
+            if std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            return Err(ErrorCode::Io);
+        }
+        return Ok(());
     }
-    let timeout_ms = remaining.as_millis().min(i32::MAX as u128) as i32;
-    if timeout_ms == 0 {
-        return Err(ErrorCode::Timeout);
-    }
-    poll_for_transport_direction(fd, again, timeout_ms)
 }
 
 /// Parse `rtmp://host[:port]/app/streamKey` or `rtmps://host[:port]/app/streamKey`

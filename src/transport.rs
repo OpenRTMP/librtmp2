@@ -164,23 +164,32 @@ impl Transport {
     /// a read/write timeout so a peer that completes the TCP connect but then
     /// stalls mid-handshake cannot hang the caller indefinitely (mirroring the
     /// bound `send()` places on writes post-handshake).
+    ///
+    /// `timeout` bounds the whole handshake and should be the caller's
+    /// remaining connect deadline, not a fresh fixed budget — otherwise the
+    /// TLS handshake could run well past the overall connect timeout the
+    /// caller already spent on DNS/TCP connect.
     #[cfg(feature = "tls")]
     pub fn connect_tls(
         stream: TcpStream,
         host: &str,
         ca_file: Option<&str>,
         insecure: bool,
+        timeout: Duration,
     ) -> Result<Self> {
         use openssl::ssl::{Ssl, SslContextBuilder, SslMode};
         use openssl::x509::X509;
         use openssl::x509::store::X509StoreBuilder;
         use openssl::x509::verify::X509CheckFlags;
 
+        if timeout.is_zero() {
+            return Err(ErrorCode::Timeout);
+        }
         stream
-            .set_read_timeout(Some(Duration::from_secs(TLS_ACCEPT_TIMEOUT_SECS)))
+            .set_read_timeout(Some(timeout))
             .map_err(|_| ErrorCode::Io)?;
         stream
-            .set_write_timeout(Some(Duration::from_secs(TLS_ACCEPT_TIMEOUT_SECS)))
+            .set_write_timeout(Some(timeout))
             .map_err(|_| ErrorCode::Io)?;
 
         let mut ctx = SslContextBuilder::new(SslMethod::tls()).map_err(|_| ErrorCode::Internal)?;
@@ -247,6 +256,7 @@ impl Transport {
         _host: &str,
         _ca_file: Option<&str>,
         _insecure: bool,
+        _timeout: std::time::Duration,
     ) -> Result<Self> {
         Err(ErrorCode::Unsupported)
     }
@@ -663,7 +673,8 @@ mod client_tls_tests {
         let port = spawn_tls_server(cert_path.clone(), key_path.clone());
 
         let stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
-        let result = Transport::connect_tls(stream, "insecure.test", None, true);
+        let result =
+            Transport::connect_tls(stream, "insecure.test", None, true, Duration::from_secs(10));
         assert!(
             result.is_ok(),
             "insecure connect should succeed: {:?}",
@@ -685,6 +696,7 @@ mod client_tls_tests {
             "matching-ca.test",
             Some(cert_path.to_str().unwrap()),
             false,
+            Duration::from_secs(10),
         );
         assert!(
             result.is_ok(),
@@ -713,6 +725,7 @@ mod client_tls_tests {
             "mismatched-server.test",
             Some(other_cert.to_str().unwrap()),
             false,
+            Duration::from_secs(10),
         );
         assert_eq!(result.err(), Some(ErrorCode::Handshake));
 
@@ -730,7 +743,13 @@ mod client_tls_tests {
         let stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
         // No ca_file, not insecure: a self-signed cert absent from the
         // system trust store must be rejected, same as before this change.
-        let result = Transport::connect_tls(stream, "default-mode.test", None, false);
+        let result = Transport::connect_tls(
+            stream,
+            "default-mode.test",
+            None,
+            false,
+            Duration::from_secs(10),
+        );
         assert_eq!(result.err(), Some(ErrorCode::Handshake));
 
         let _ = std::fs::remove_file(cert_path);
