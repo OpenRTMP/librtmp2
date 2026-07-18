@@ -13,6 +13,8 @@ begin at `1.0.0`.
 
 ## [Unreleased]
 
+## [0.4.1] — 2026-07-18
+
 ### Changed
 - `Client::connect()` now enforces a single wall-clock deadline across DNS
   resolution, TCP/TLS connect, the RTMP handshake, and the AMF
@@ -24,6 +26,15 @@ begin at `1.0.0`.
 ### Fixed
 - Capped chained ModEx extension unwrapping at 32 layers to prevent CPU
   amplification from deeply nested wrappers on media frames.
+- `Conn` now tracks the exact `PublishRouteRegistry` key it claimed and
+  releases that same key on `FCUnpublish`/`closeStream`/play takeover,
+  instead of re-deriving a route key from the current `relay_key` at release
+  time. Fixes stale route ownership (blocking other publishers) and stale
+  `stream_cache` entries when a host integrator pins `relay_key` after the
+  initial publish claim.
+- `publish()` now clears `Stream.is_playing` (mirroring what `play()` already
+  does for `is_publishing`), so a play→publish switch on the same connection
+  is correctly observable by hosts polling stream role flags.
 
 ## [0.4.0] — 2026-07-15
 
