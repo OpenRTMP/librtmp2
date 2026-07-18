@@ -1,9 +1,10 @@
 librtmp2 (0.4.1-1) UNRELEASED; urgency=medium
 
   * Track the exact publish-route key claimed per connection and release
-    that same key (and the current relay route key, if pinned to a
-    different value afterward) on FCUnpublish/closeStream/play takeover,
-    fixing stale route ownership and stale stream_cache replay.
+    that same key from the route registry on FCUnpublish/closeStream/play
+    takeover, fixing stale route ownership. Also evict stream_cache entries
+    for both the claimed key and the current relay route key (if pinned to
+    a different value afterward), fixing stale cache replay.
   * publish() now clears Stream.is_playing, matching play()'s existing
     is_publishing clear, so a play->publish switch on the same connection
     is observable by hosts polling stream role flags.
