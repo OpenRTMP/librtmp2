@@ -155,6 +155,10 @@ pub struct Conn {
     pub on_play_cb: Option<fn(conn_id: u64, app: &str, stream_name: &str) -> bool>,
     /// When set by the built-in server, enforces single-publisher-per-route.
     pub(crate) publish_routes: Option<PublishRouteRegistry>,
+    /// Exact stream-name key currently held in `publish_routes` for this conn.
+    /// Must be released on teardown even when `relay_key` later diverges from
+    /// the RTMP publish name (librtmp2-server pins `relay_key` to the DB id).
+    claimed_publish_route: Option<String>,
     /// Cache keys to evict after the publisher renames its stream.
     pub pending_cache_evictions: Vec<(String, String)>,
     /// Last measured client↔server RTT in milliseconds (RTMP UserControl ping).
@@ -230,6 +234,7 @@ impl Conn {
             on_publish_cb: None,
             on_play_cb: None,
             publish_routes: None,
+            claimed_publish_route: None,
             pending_cache_evictions: Vec::new(),
             rtt_ms: 0.0,
             pending_pings: HashMap::new(),
@@ -304,9 +309,9 @@ impl Conn {
         if !was_publishing {
             return;
         }
+        self.release_claimed_publish_route();
         let route_key = self.relay_route_key();
         if !route_key.is_empty() {
-            self.release_publish_route(&route_key);
             self.pending_cache_evictions
                 .push((self.app.clone(), route_key));
         }
@@ -317,6 +322,34 @@ impl Conn {
         if let Some(routes) = self.publish_routes.as_ref() {
             routes.release(self.conn_id, &self.app, stream);
         }
+        if self.claimed_publish_route.as_deref() == Some(stream) {
+            self.claimed_publish_route = None;
+        }
+    }
+
+    fn release_claimed_publish_route(&mut self) {
+        if let Some(claimed) = self.claimed_publish_route.take() {
+            if let Some(routes) = self.publish_routes.as_ref() {
+                routes.release(self.conn_id, &self.app, &claimed);
+            }
+        }
+    }
+
+    fn claim_publish_route(&mut self, stream: &str) -> bool {
+        let Some(routes) = self.publish_routes.as_ref() else {
+            self.claimed_publish_route = Some(stream.to_string());
+            return true;
+        };
+        if !routes.claim(self.conn_id, &self.app, stream) {
+            return false;
+        }
+        if let Some(prev) = self.claimed_publish_route.take()
+            && prev != stream
+        {
+            routes.release(self.conn_id, &self.app, &prev);
+        }
+        self.claimed_publish_route = Some(stream.to_string());
+        true
     }
 
     fn clear_detected_stream_metadata(&mut self) {
@@ -1254,18 +1287,15 @@ impl Conn {
                 let renaming_route = was_publishing
                     && !prev_route_key.is_empty()
                     && prev_route_key != next_route_key;
-                if let Some(routes) = self.publish_routes.as_ref() {
-                    if !routes.claim(self.conn_id, &self.app, &next_route_key) {
-                        return self.send_onstatus(
-                            0,
-                            "error",
-                            "NetStream.Publish.BadName",
-                            "Route already publishing",
-                        );
-                    }
+                if !self.claim_publish_route(&next_route_key) {
+                    return self.send_onstatus(
+                        0,
+                        "error",
+                        "NetStream.Publish.BadName",
+                        "Route already publishing",
+                    );
                 }
                 if renaming_route {
-                    self.release_publish_route(&prev_route_key);
                     self.pending_cache_evictions
                         .push((self.app.clone(), prev_route_key));
                 }

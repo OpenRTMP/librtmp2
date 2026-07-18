@@ -25,3 +25,7 @@ install-abi-*/
 .idea/
 .vscode/
 
+
+# Bug Hunter local artifacts
+.bug-hunter/
+
