@@ -262,7 +262,7 @@ impl Client {
         })?;
         let mut transport = if use_tls {
             let remaining = deadline.saturating_duration_since(Instant::now());
-            Transport::connect_tls(
+            Transport::connect_tls_with_timeout(
                 stream,
                 &host,
                 self.tls_ca_file.as_deref(),

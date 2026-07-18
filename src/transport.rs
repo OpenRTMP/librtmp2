@@ -163,14 +163,32 @@ impl Transport {
     /// otherwise-blocking connect sequence. The handshake itself is bounded by
     /// a read/write timeout so a peer that completes the TCP connect but then
     /// stalls mid-handshake cannot hang the caller indefinitely (mirroring the
-    /// bound `send()` places on writes post-handshake).
-    ///
-    /// `timeout` bounds the whole handshake and should be the caller's
-    /// remaining connect deadline, not a fresh fixed budget — otherwise the
-    /// TLS handshake could run well past the overall connect timeout the
-    /// caller already spent on DNS/TCP connect.
+    /// bound `send()` places on writes post-handshake). Uses a fixed default
+    /// timeout; call [`Transport::connect_tls_with_timeout`] to bound it by
+    /// an existing deadline instead.
     #[cfg(feature = "tls")]
     pub fn connect_tls(
+        stream: TcpStream,
+        host: &str,
+        ca_file: Option<&str>,
+        insecure: bool,
+    ) -> Result<Self> {
+        Transport::connect_tls_with_timeout(
+            stream,
+            host,
+            ca_file,
+            insecure,
+            Duration::from_secs(TLS_ACCEPT_TIMEOUT_SECS),
+        )
+    }
+
+    /// Same as [`Transport::connect_tls`], but `timeout` bounds the whole
+    /// handshake instead of the fixed default. Pass the caller's remaining
+    /// connect deadline here — otherwise the TLS handshake could run well
+    /// past the overall connect timeout the caller already spent on DNS/TCP
+    /// connect.
+    #[cfg(feature = "tls")]
+    pub fn connect_tls_with_timeout(
         stream: TcpStream,
         host: &str,
         ca_file: Option<&str>,
@@ -252,6 +270,17 @@ impl Transport {
     /// TLS is not available in this build.
     #[cfg(not(feature = "tls"))]
     pub fn connect_tls(
+        _stream: TcpStream,
+        _host: &str,
+        _ca_file: Option<&str>,
+        _insecure: bool,
+    ) -> Result<Self> {
+        Err(ErrorCode::Unsupported)
+    }
+
+    /// TLS is not available in this build.
+    #[cfg(not(feature = "tls"))]
+    pub fn connect_tls_with_timeout(
         _stream: TcpStream,
         _host: &str,
         _ca_file: Option<&str>,
@@ -673,8 +702,7 @@ mod client_tls_tests {
         let port = spawn_tls_server(cert_path.clone(), key_path.clone());
 
         let stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
-        let result =
-            Transport::connect_tls(stream, "insecure.test", None, true, Duration::from_secs(10));
+        let result = Transport::connect_tls(stream, "insecure.test", None, true);
         assert!(
             result.is_ok(),
             "insecure connect should succeed: {:?}",
@@ -696,7 +724,6 @@ mod client_tls_tests {
             "matching-ca.test",
             Some(cert_path.to_str().unwrap()),
             false,
-            Duration::from_secs(10),
         );
         assert!(
             result.is_ok(),
@@ -725,7 +752,6 @@ mod client_tls_tests {
             "mismatched-server.test",
             Some(other_cert.to_str().unwrap()),
             false,
-            Duration::from_secs(10),
         );
         assert_eq!(result.err(), Some(ErrorCode::Handshake));
 
@@ -743,13 +769,7 @@ mod client_tls_tests {
         let stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
         // No ca_file, not insecure: a self-signed cert absent from the
         // system trust store must be rejected, same as before this change.
-        let result = Transport::connect_tls(
-            stream,
-            "default-mode.test",
-            None,
-            false,
-            Duration::from_secs(10),
-        );
+        let result = Transport::connect_tls(stream, "default-mode.test", None, false);
         assert_eq!(result.err(), Some(ErrorCode::Handshake));
 
         let _ = std::fs::remove_file(cert_path);
