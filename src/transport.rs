@@ -283,6 +283,11 @@ impl Transport {
             if remaining.as_millis() == 0 {
                 return Err(ErrorCode::Timeout);
             }
+            // `poll(2)`'s timeout is a 32-bit millisecond count, so a
+            // remaining budget past ~24.8 days must be clamped; `rc == 0`
+            // then only means "this clamped wait expired", not "the real
+            // deadline passed" — loop and recheck instead of timing out
+            // early.
             let timeout_ms = remaining.as_millis().min(i32::MAX as u128) as i32;
             let mut pfd = libc::pollfd {
                 fd: pending.get_ref().as_raw_fd(),
@@ -291,7 +296,10 @@ impl Transport {
             };
             let rc = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
             if rc == 0 {
-                return Err(ErrorCode::Timeout);
+                if Instant::now() >= deadline {
+                    return Err(ErrorCode::Timeout);
+                }
+                continue;
             }
             if rc < 0 {
                 if std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
