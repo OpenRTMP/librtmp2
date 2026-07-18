@@ -309,22 +309,14 @@ impl Conn {
         if !was_publishing {
             return;
         }
+        let claimed_route = self.claimed_publish_route.clone();
         self.release_claimed_publish_route();
-        let route_key = self.relay_route_key();
+        let route_key = claimed_route.unwrap_or_else(|| self.relay_route_key());
         if !route_key.is_empty() {
             self.pending_cache_evictions
                 .push((self.app.clone(), route_key));
         }
         self.clear_detected_stream_metadata();
-    }
-
-    fn release_publish_route(&mut self, stream: &str) {
-        if let Some(routes) = self.publish_routes.as_ref() {
-            routes.release(self.conn_id, &self.app, stream);
-        }
-        if self.claimed_publish_route.as_deref() == Some(stream) {
-            self.claimed_publish_route = None;
-        }
     }
 
     fn release_claimed_publish_route(&mut self) {
@@ -343,12 +335,14 @@ impl Conn {
         if !routes.claim(self.conn_id, &self.app, stream) {
             return false;
         }
-        if let Some(prev) = self.claimed_publish_route.take()
-            && prev != stream
-        {
-            routes.release(self.conn_id, &self.app, &prev);
+        match self.claimed_publish_route.take() {
+            Some(prev) if prev == stream => self.claimed_publish_route = Some(prev),
+            Some(prev) => {
+                routes.release(self.conn_id, &self.app, &prev);
+                self.claimed_publish_route = Some(stream.to_string());
+            }
+            None => self.claimed_publish_route = Some(stream.to_string()),
         }
-        self.claimed_publish_route = Some(stream.to_string());
         true
     }
 
@@ -1305,6 +1299,7 @@ impl Conn {
                 {
                     if let Some(ref mut stream) = self.current_stream {
                         stream.is_publishing = true;
+                        stream.is_playing = false;
                         stream.name = name_str;
                     }
                     self.clear_detected_stream_metadata();
@@ -2098,6 +2093,7 @@ mod tests {
         // a cache key this connection never created.
         assert!(conn.pending_cache_evictions.is_empty());
         assert_eq!(conn.current_stream.as_ref().unwrap().name, "other");
+        assert!(!conn.current_stream.as_ref().unwrap().is_playing);
     }
 
     #[test]
