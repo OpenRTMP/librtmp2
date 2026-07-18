@@ -254,7 +254,7 @@ impl Client {
         };
 
         self.state = ClientState::Handshaking;
-        if let Err(e) = self.do_handshake(&mut transport) {
+        if let Err(e) = self.do_handshake(&mut transport, deadline) {
             // transport drops here, closing the fd via Transport::drop
             return Err(e);
         }
@@ -265,7 +265,7 @@ impl Client {
         self.stream_key = stream_key;
         self.state = ClientState::Connected;
 
-        if let Err(e) = self.do_amf_connect(&app, &host, port, use_tls) {
+        if let Err(e) = self.do_amf_connect(&app, &host, port, use_tls, deadline) {
             self.reset_session_state();
             return Err(e);
         }
@@ -279,8 +279,8 @@ impl Client {
         }
         let mut amf = Buffer::with_capacity(256);
         command::build_publish(&mut amf, &self.stream_key, "live")?;
-        self.send_command_msg(self.stream_id, amf.as_slice())?;
-        let mut status = self.wait_for_command("onStatus")?;
+        self.send_command_msg(self.stream_id, amf.as_slice(), None)?;
+        let mut status = self.wait_for_command("onStatus", None)?;
         command::read_onstatus(&mut status)?;
         self.state = ClientState::Publishing;
         Ok(())
@@ -289,7 +289,14 @@ impl Client {
     /// Run the AMF connect + createStream exchange. Separated from `connect()`
     /// so the transport is already stored before we enter, letting the caller
     /// call `reset_session_state()` (which drops the transport) on any error.
-    fn do_amf_connect(&mut self, app: &str, host: &str, port: u16, use_tls: bool) -> Result<()> {
+    fn do_amf_connect(
+        &mut self,
+        app: &str,
+        host: &str,
+        port: u16,
+        use_tls: bool,
+        deadline: Instant,
+    ) -> Result<()> {
         let scheme = if use_tls { "rtmps" } else { "rtmp" };
         let tc_url = format!("{scheme}://{host}:{port}/{app}");
         let mut connect_amf = Buffer::with_capacity(512);
@@ -304,14 +311,14 @@ impl Client {
             0,
             None,
         )?;
-        self.send_command_msg(0, connect_amf.as_slice())?;
-        let mut result = self.wait_for_command("_result")?;
+        self.send_command_msg(0, connect_amf.as_slice(), Some(deadline))?;
+        let mut result = self.wait_for_command("_result", Some(deadline))?;
         command::read_connect_result(&mut result)?;
 
         let mut create_stream_amf = Buffer::with_capacity(64);
         command::build_create_stream(&mut create_stream_amf, 2.0)?;
-        self.send_command_msg(0, create_stream_amf.as_slice())?;
-        let mut create_result = self.wait_for_command("_result")?;
+        self.send_command_msg(0, create_stream_amf.as_slice(), Some(deadline))?;
+        let mut create_result = self.wait_for_command("_result", Some(deadline))?;
         let (_txn, stream_id) = command::read_create_stream_result(&mut create_result)?;
         self.stream_id = stream_id as u32;
 
@@ -326,8 +333,8 @@ impl Client {
         }
         let mut amf = Buffer::with_capacity(256);
         command::build_play(&mut amf, &self.stream_key)?;
-        self.send_command_msg(self.stream_id, amf.as_slice())?;
-        let mut status = self.wait_for_command("onStatus")?;
+        self.send_command_msg(self.stream_id, amf.as_slice(), None)?;
+        let mut status = self.wait_for_command("onStatus", None)?;
         command::read_onstatus(&mut status)?;
         self.state = ClientState::Playing;
         Ok(())
@@ -902,24 +909,24 @@ impl Client {
     }
 
     /// Drive the legacy C0/C1/C2 client handshake to completion over `transport`.
-    fn do_handshake(&mut self, transport: &mut Transport) -> Result<()> {
+    fn do_handshake(&mut self, transport: &mut Transport, deadline: Instant) -> Result<()> {
         handshake::client_init(&mut self.handshake);
         handshake::client_generate_c0c1(&mut self.handshake)?;
         let c0c1 = self.handshake.out.peek().to_vec();
-        transport.send(&c0c1)?;
+        send_bounded(transport, &c0c1, deadline)?;
         self.handshake.out.reset();
 
-        let s0s1 = read_exact(transport, 1 + HANDSHAKE_SIZE)?;
+        let s0s1 = read_exact_bounded(transport, 1 + HANDSHAKE_SIZE, deadline)?;
         let mut buf = Buffer::new();
         buf.write(&s0s1).map_err(|_| ErrorCode::Internal)?;
         handshake::client_read_s0(&mut self.handshake, &mut buf)?;
         handshake::client_read_s1(&mut self.handshake, &mut buf)?;
 
         let c2 = self.handshake.out.peek().to_vec();
-        transport.send(&c2)?;
+        send_bounded(transport, &c2, deadline)?;
         self.handshake.out.reset();
 
-        let s2 = read_exact(transport, HANDSHAKE_SIZE)?;
+        let s2 = read_exact_bounded(transport, HANDSHAKE_SIZE, deadline)?;
         let mut buf2 = Buffer::new();
         buf2.write(&s2).map_err(|_| ErrorCode::Internal)?;
         handshake::client_read_s2(&mut self.handshake, &mut buf2)?;
@@ -927,7 +934,12 @@ impl Client {
         Ok(())
     }
 
-    fn send_command_msg(&mut self, msg_stream_id: u32, amf_data: &[u8]) -> Result<()> {
+    fn send_command_msg(
+        &mut self,
+        msg_stream_id: u32,
+        amf_data: &[u8],
+        deadline: Option<Instant>,
+    ) -> Result<()> {
         let mut cmsg = ChunkMessage::default();
         cmsg.csid = 3;
         cmsg.fmt = 0;
@@ -938,17 +950,20 @@ impl Client {
 
         let data = self.send_buffer.peek().to_vec();
         if let Some(ref mut transport) = self.transport {
-            transport.send(&data)?;
+            match deadline {
+                Some(deadline) => send_bounded(transport, &data, deadline)?,
+                None => transport.send(&data)?,
+            }
         }
         self.send_buffer.reset();
         Ok(())
     }
 
     /// Block until an AMF0 command named `want` is received, returning its payload buffer.
-    fn wait_for_command(&mut self, want: &str) -> Result<Buffer> {
+    fn wait_for_command(&mut self, want: &str, deadline: Option<Instant>) -> Result<Buffer> {
         let mut recv_budget = MAX_RECV_BYTES_PER_COMMAND_WAIT;
         for _ in 0..64 {
-            let (msg, payload) = self.recv_message(&mut recv_budget)?;
+            let (msg, payload) = self.recv_message(&mut recv_budget, deadline)?;
             if msg.msg_type_id != msg_dispatch::RTMP_MSG_AMF0_COMMAND {
                 continue;
             }
@@ -968,8 +983,17 @@ impl Client {
     }
 
     /// Block until one fully-reassembled chunk message is available.
-    fn recv_message(&mut self, recv_budget: &mut usize) -> Result<(ChunkMessage, Vec<u8>)> {
+    fn recv_message(
+        &mut self,
+        recv_budget: &mut usize,
+        deadline: Option<Instant>,
+    ) -> Result<(ChunkMessage, Vec<u8>)> {
         loop {
+            if let Some(deadline) = deadline {
+                if Instant::now() >= deadline {
+                    return Err(ErrorCode::Timeout);
+                }
+            }
             let mut msg = ChunkMessage::default();
             match chunk_read_owned(&mut self.recv_buffer, &mut self.chunk_reg, &mut msg) {
                 Ok((1, payload)) if msg.is_complete => {
@@ -1021,7 +1045,10 @@ impl Client {
             } else if n == 0 {
                 return Err(ErrorCode::Io);
             } else if again != 0 {
-                poll_for_transport_direction(t_fd, again, RECV_POLL_TIMEOUT_MS)?;
+                match deadline {
+                    Some(deadline) => poll_until_deadline(t_fd, again, deadline)?,
+                    None => poll_for_transport_direction(t_fd, again, RECV_POLL_TIMEOUT_MS)?,
+                }
             } else {
                 return Err(ErrorCode::Io);
             }
@@ -1062,11 +1089,14 @@ fn poll_for_transport_direction(fd: i32, again: i32, timeout_ms: i32) -> Result<
     }
 }
 
-/// Block until exactly `n` bytes have been read from `transport`.
-fn read_exact(transport: &mut Transport, n: usize) -> Result<Vec<u8>> {
+/// Block until exactly `n` bytes have been read from `transport`, or `deadline`.
+fn read_exact_bounded(transport: &mut Transport, n: usize, deadline: Instant) -> Result<Vec<u8>> {
     let mut out = vec![0u8; n];
     let mut got = 0;
     while got < n {
+        if Instant::now() >= deadline {
+            return Err(ErrorCode::Timeout);
+        }
         let mut again = 0i32;
         let r = transport.recv(&mut out[got..], &mut again);
         if r > 0 {
@@ -1074,12 +1104,43 @@ fn read_exact(transport: &mut Transport, n: usize) -> Result<Vec<u8>> {
         } else if r == 0 {
             return Err(ErrorCode::Io);
         } else if again != 0 {
-            poll_for_transport_direction(transport.fd(), again, RECV_POLL_TIMEOUT_MS)?;
+            poll_until_deadline(transport.fd(), again, deadline)?;
         } else {
             return Err(ErrorCode::Io);
         }
     }
     Ok(out)
+}
+
+/// Send all bytes before `deadline`, using non-blocking I/O with poll retries.
+fn send_bounded(transport: &mut Transport, data: &[u8], deadline: Instant) -> Result<()> {
+    let mut sent = 0;
+    while sent < data.len() {
+        if Instant::now() >= deadline {
+            return Err(ErrorCode::Timeout);
+        }
+        let mut again = 0i32;
+        let n = transport.try_send(&data[sent..], &mut again)?;
+        if n == 0 {
+            let direction = if again == 0 { 2 } else { again };
+            poll_until_deadline(transport.fd(), direction, deadline)?;
+            continue;
+        }
+        sent += n;
+    }
+    Ok(())
+}
+
+fn poll_until_deadline(fd: i32, again: i32, deadline: Instant) -> Result<()> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err(ErrorCode::Timeout);
+    }
+    let timeout_ms = remaining.as_millis().min(i32::MAX as u128) as i32;
+    if timeout_ms == 0 {
+        return Err(ErrorCode::Timeout);
+    }
+    poll_for_transport_direction(fd, again, timeout_ms)
 }
 
 /// Parse `rtmp://host[:port]/app/streamKey` or `rtmps://host[:port]/app/streamKey`

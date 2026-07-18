@@ -4,6 +4,11 @@ use std::borrow::Cow;
 
 use crate::types::CAPS_EX_MASK_MODEX;
 
+/// Cap chained ModEx extension layers peeled per media frame. Without this a
+/// peer can nest millions of single-byte ModEx wrappers in one max-size message
+/// and force O(payload) normalization work on every frame.
+const MAX_MODEX_CHAIN_LAYERS: usize = 32;
+
 pub fn normalize_modex_payload<'a>(payload: &'a [u8], caps_ex_mask: u32) -> Cow<'a, [u8]> {
     if payload.is_empty()
         || (caps_ex_mask & CAPS_EX_MASK_MODEX) == 0
@@ -15,7 +20,12 @@ pub fn normalize_modex_payload<'a>(payload: &'a [u8], caps_ex_mask: u32) -> Cow<
 
     let mut pos = 1usize;
     let mut reconstructed_header = payload[0];
+    let mut layers = 0usize;
     loop {
+        if layers >= MAX_MODEX_CHAIN_LAYERS {
+            return Cow::Borrowed(payload);
+        }
+        layers += 1;
         if pos >= payload.len() {
             return Cow::Borrowed(payload);
         }
@@ -82,5 +92,18 @@ mod tests {
             normalize_modex_payload(&payload, CAPS_EX_MASK_MODEX).as_ref(),
             payload
         );
+    }
+
+    #[test]
+    fn excessive_modex_chain_is_left_opaque() {
+        let mut payload = vec![0x97];
+        for _ in 0..MAX_MODEX_CHAIN_LAYERS + 4 {
+            payload.extend_from_slice(&[0x00, 0x00, 0x07]);
+        }
+        payload.extend_from_slice(&[0x91, b'a', b'v', b'c', b'1', 0xAA]);
+        assert!(matches!(
+            normalize_modex_payload(&payload, CAPS_EX_MASK_MODEX),
+            Cow::Borrowed(_)
+        ));
     }
 }
