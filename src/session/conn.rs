@@ -155,6 +155,10 @@ pub struct Conn {
     pub on_play_cb: Option<fn(conn_id: u64, app: &str, stream_name: &str) -> bool>,
     /// When set by the built-in server, enforces single-publisher-per-route.
     pub(crate) publish_routes: Option<PublishRouteRegistry>,
+    /// Exact stream-name key currently held in `publish_routes` for this conn.
+    /// Must be released on teardown even when `relay_key` later diverges from
+    /// the RTMP publish name (librtmp2-server pins `relay_key` to the DB id).
+    claimed_publish_route: Option<String>,
     /// Cache keys to evict after the publisher renames its stream.
     pub pending_cache_evictions: Vec<(String, String)>,
     /// Last measured client↔server RTT in milliseconds (RTMP UserControl ping).
@@ -230,6 +234,7 @@ impl Conn {
             on_publish_cb: None,
             on_play_cb: None,
             publish_routes: None,
+            claimed_publish_route: None,
             pending_cache_evictions: Vec::new(),
             rtt_ms: 0.0,
             pending_pings: HashMap::new(),
@@ -304,19 +309,49 @@ impl Conn {
         if !was_publishing {
             return;
         }
-        let route_key = self.relay_route_key();
-        if !route_key.is_empty() {
-            self.release_publish_route(&route_key);
-            self.pending_cache_evictions
-                .push((self.app.clone(), route_key));
+        let claimed_route = self.claimed_publish_route.clone();
+        self.release_claimed_publish_route();
+        // Cached frames are keyed by whatever relay_route_key() was live at
+        // the moment each frame was queued (see RelayFrame::stream_name), so
+        // if an integrator pins relay_key after the route was claimed, cache
+        // entries can exist under both the originally claimed key and the
+        // current one. Evict both to avoid leaving either behind.
+        let live_route_key = self.relay_route_key();
+        let mut evicted = std::collections::HashSet::new();
+        for route_key in [claimed_route, Some(live_route_key)].into_iter().flatten() {
+            if !route_key.is_empty() && evicted.insert(route_key.clone()) {
+                self.pending_cache_evictions
+                    .push((self.app.clone(), route_key));
+            }
         }
         self.clear_detected_stream_metadata();
     }
 
-    fn release_publish_route(&mut self, stream: &str) {
-        if let Some(routes) = self.publish_routes.as_ref() {
-            routes.release(self.conn_id, &self.app, stream);
+    fn release_claimed_publish_route(&mut self) {
+        if let Some(claimed) = self.claimed_publish_route.take() {
+            if let Some(routes) = self.publish_routes.as_ref() {
+                routes.release(self.conn_id, &self.app, &claimed);
+            }
         }
+    }
+
+    fn claim_publish_route(&mut self, stream: &str) -> bool {
+        let Some(routes) = self.publish_routes.as_ref() else {
+            self.claimed_publish_route = Some(stream.to_string());
+            return true;
+        };
+        if !routes.claim(self.conn_id, &self.app, stream) {
+            return false;
+        }
+        match self.claimed_publish_route.take() {
+            Some(prev) if prev == stream => self.claimed_publish_route = Some(prev),
+            Some(prev) => {
+                routes.release(self.conn_id, &self.app, &prev);
+                self.claimed_publish_route = Some(stream.to_string());
+            }
+            None => self.claimed_publish_route = Some(stream.to_string()),
+        }
+        true
     }
 
     fn clear_detected_stream_metadata(&mut self) {
@@ -1254,18 +1289,15 @@ impl Conn {
                 let renaming_route = was_publishing
                     && !prev_route_key.is_empty()
                     && prev_route_key != next_route_key;
-                if let Some(routes) = self.publish_routes.as_ref() {
-                    if !routes.claim(self.conn_id, &self.app, &next_route_key) {
-                        return self.send_onstatus(
-                            0,
-                            "error",
-                            "NetStream.Publish.BadName",
-                            "Route already publishing",
-                        );
-                    }
+                if !self.claim_publish_route(&next_route_key) {
+                    return self.send_onstatus(
+                        0,
+                        "error",
+                        "NetStream.Publish.BadName",
+                        "Route already publishing",
+                    );
                 }
                 if renaming_route {
-                    self.release_publish_route(&prev_route_key);
                     self.pending_cache_evictions
                         .push((self.app.clone(), prev_route_key));
                 }
@@ -1275,6 +1307,7 @@ impl Conn {
                 {
                     if let Some(ref mut stream) = self.current_stream {
                         stream.is_publishing = true;
+                        stream.is_playing = false;
                         stream.name = name_str;
                     }
                     self.clear_detected_stream_metadata();
@@ -2068,6 +2101,43 @@ mod tests {
         // a cache key this connection never created.
         assert!(conn.pending_cache_evictions.is_empty());
         assert_eq!(conn.current_stream.as_ref().unwrap().name, "other");
+        assert!(!conn.current_stream.as_ref().unwrap().is_playing);
+    }
+
+    #[test]
+    fn evict_active_publish_route_evicts_both_claimed_and_pinned_relay_key() {
+        let mut conn = Conn::new();
+        conn.app = "live".to_string();
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+
+        // Publish claims the route under the RTMP name (no relay_key set
+        // yet), so frames get cached under "A".
+        let mut buf = Buffer::with_capacity(128);
+        command::build_publish(&mut buf, "A", "live").unwrap();
+        conn.handle_command(buf.as_slice()).unwrap();
+        assert!(conn.pending_cache_evictions.is_empty());
+
+        // Integrator pins relay_key mid-publish, after the route was
+        // already claimed under "A". New frames from this point on are
+        // cached under "route-pinned" (relay_route_key() is live at
+        // frame-queue time), diverging from the claimed route key.
+        conn.relay_key = "route-pinned".to_string();
+
+        // `play` supersedes the active publish, evicting whatever was
+        // being served. Both the originally claimed key ("A") and the
+        // now-current relay route key ("route-pinned") must be evicted,
+        // since cached frames may exist under either.
+        let mut buf = Buffer::with_capacity(128);
+        command::build_play(&mut buf, "victim").unwrap();
+        conn.handle_command(buf.as_slice()).unwrap();
+
+        assert_eq!(
+            conn.pending_cache_evictions,
+            vec![
+                ("live".to_string(), "A".to_string()),
+                ("live".to_string(), "route-pinned".to_string()),
+            ]
+        );
     }
 
     #[test]

@@ -1,3 +1,21 @@
+librtmp2 (0.4.1-1) UNRELEASED; urgency=medium
+
+  * Track the exact publish-route key claimed per connection and release
+    that same key from the route registry on FCUnpublish/closeStream/play
+    takeover, fixing stale route ownership. Also evict stream_cache entries
+    for both the claimed key and the current relay route key (if pinned to
+    a different value afterward), fixing stale cache replay.
+  * publish() now clears Stream.is_playing, matching play()'s existing
+    is_publishing clear, so a play->publish switch on the same connection
+    is observable by hosts polling stream role flags.
+  * Enforce a single wall-clock deadline across DNS resolution, TCP/TLS
+    connect, the RTMP handshake, and the AMF connect/createStream exchange
+    in Client::connect() (configurable via Client::set_connect_timeout()).
+  * Cap chained ModEx extension unwrapping at 32 layers to prevent CPU
+    amplification from deeply nested wrappers on media frames.
+
+ -- OpenRTMP <info@openrtmp.org>  Sat, 18 Jul 2026 00:00:00 +0000
+
 librtmp2 (0.4.0-1) UNRELEASED; urgency=medium
 
   * Server-side E-RTMP v2 connect negotiation (fourCcList, capsEx bitmask,
