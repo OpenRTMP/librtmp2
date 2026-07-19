@@ -31,7 +31,7 @@ jobs:
 
       - name: Run relay benchmarks
         run: |
-          cargo bench --bench relay --features default -- --sample-size 10 --test-threads 1 --noplot 2>&1 | tee bench-relay.txt
+          cargo bench --bench relay --features default -- --sample-size 10 --noplot 2>&1 | tee bench-relay.txt
 
       - name: Upload benchmark output
         uses: actions/upload-artifact@v7
