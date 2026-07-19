@@ -171,9 +171,8 @@ pub struct Client {
     /// Skip TLS certificate verification for `rtmps://` connections.
     /// Only for testing against self-signed deployments.
     tls_insecure: bool,
-    /// Overall wall-clock budget for `connect()` (DNS + TCP connect + TLS +
-    /// handshake + AMF connect/createStream). `None` uses
-    /// `TCP_CONNECT_TIMEOUT_SECS`.
+    /// Overall wall-clock budget for blocking client I/O during `connect()`,
+    /// `publish()`, and `play()`. `None` uses `TCP_CONNECT_TIMEOUT_SECS`.
     connect_timeout: Option<Duration>,
     inbound_ping_window_start: Option<Instant>,
     inbound_ping_responses: usize,
@@ -209,14 +208,23 @@ impl Client {
         self.tls_insecure = insecure;
     }
 
-    /// Override the overall wall-clock budget for subsequent `connect()`
-    /// calls (DNS resolution, TCP connect, TLS handshake, RTMP handshake, and
-    /// the AMF `connect`/`createStream` exchange all share this one budget).
-    /// Defaults to `TCP_CONNECT_TIMEOUT_SECS` when never called. Useful for
-    /// slower CI hosts or higher-latency TLS handshakes where the default is
-    /// too tight.
+    /// Override the overall wall-clock budget for subsequent blocking client
+    /// calls (`connect()`, `publish()`, and `play()`). DNS resolution, TCP
+    /// connect, TLS handshake, RTMP handshake, and each AMF command exchange
+    /// share this budget within the call they belong to. Defaults to
+    /// `TCP_CONNECT_TIMEOUT_SECS` when never called.
     pub fn set_connect_timeout(&mut self, timeout: Duration) {
         self.connect_timeout = Some(timeout);
+    }
+
+    /// Wall-clock deadline for a single blocking AMF command exchange.
+    fn command_io_deadline(&self) -> Result<Instant> {
+        let timeout = self
+            .connect_timeout
+            .unwrap_or(Duration::from_secs(TCP_CONNECT_TIMEOUT_SECS));
+        Instant::now()
+            .checked_add(timeout)
+            .ok_or(ErrorCode::Internal)
     }
 
     /// Connect to an RTMP(S) server at `rtmp://host[:port]/app/streamKey` or
@@ -303,10 +311,11 @@ impl Client {
         if self.state != ClientState::AppConnected {
             return Err(ErrorCode::Protocol);
         }
+        let deadline = self.command_io_deadline()?;
         let mut amf = Buffer::with_capacity(256);
         command::build_publish(&mut amf, &self.stream_key, "live")?;
-        self.send_command_msg(self.stream_id, amf.as_slice(), None)?;
-        let mut status = self.wait_for_command("onStatus", None)?;
+        self.send_command_msg(self.stream_id, amf.as_slice(), Some(deadline))?;
+        let mut status = self.wait_for_command("onStatus", Some(deadline))?;
         command::read_onstatus(&mut status)?;
         self.state = ClientState::Publishing;
         Ok(())
@@ -357,10 +366,11 @@ impl Client {
         if self.state != ClientState::AppConnected {
             return Err(ErrorCode::Protocol);
         }
+        let deadline = self.command_io_deadline()?;
         let mut amf = Buffer::with_capacity(256);
         command::build_play(&mut amf, &self.stream_key)?;
-        self.send_command_msg(self.stream_id, amf.as_slice(), None)?;
-        let mut status = self.wait_for_command("onStatus", None)?;
+        self.send_command_msg(self.stream_id, amf.as_slice(), Some(deadline))?;
+        let mut status = self.wait_for_command("onStatus", Some(deadline))?;
         command::read_onstatus(&mut status)?;
         self.state = ClientState::Playing;
         Ok(())
@@ -1543,6 +1553,42 @@ mod tests {
         // 64 max-size AMF commands would be 256 MiB without a byte cap.
         assert!(MAX_RECV_BYTES_PER_COMMAND_WAIT < 64 * 4 * 1024 * 1024);
         assert!(MAX_RECV_BYTES_PER_COMMAND_WAIT >= 65536);
+    }
+
+    #[test]
+    fn publish_and_play_honor_command_io_deadline() {
+        use std::os::unix::io::IntoRawFd;
+        use std::os::unix::net::UnixStream;
+        use std::time::Duration;
+
+        let (client_end, _peer) = UnixStream::pair().unwrap();
+        client_end.set_nonblocking(true).unwrap();
+
+        let mut client = Client::new();
+        client.set_connect_timeout(Duration::from_millis(200));
+        client.state = ClientState::AppConnected;
+        client.stream_id = 1;
+        client.stream_key = "stream".to_string();
+        client.transport = Some(Transport::new_plain(client_end.into_raw_fd()));
+
+        let started = Instant::now();
+        assert_eq!(client.publish().unwrap_err(), ErrorCode::Timeout);
+        let publish_elapsed = started.elapsed();
+        assert!(
+            publish_elapsed < Duration::from_secs(2),
+            "publish should time out near the configured deadline, took {:?}",
+            publish_elapsed
+        );
+
+        client.state = ClientState::AppConnected;
+        let started = Instant::now();
+        assert_eq!(client.play().unwrap_err(), ErrorCode::Timeout);
+        let play_elapsed = started.elapsed();
+        assert!(
+            play_elapsed < Duration::from_secs(2),
+            "play should time out near the configured deadline, took {:?}",
+            play_elapsed
+        );
     }
 
     #[test]
