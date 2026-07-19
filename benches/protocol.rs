@@ -43,7 +43,7 @@ fn bench_chunk_roundtrip(c: &mut Criterion) {
                     &mut payload_len,
                 ) {
                     Ok(1) if read_msg.is_complete => break,
-                    Ok(0) => panic!("chunk_read needs more data"),
+                    Ok(0) if buf.available() == 0 => panic!("chunk_read needs more data"),
                     Ok(_) => {}
                     Err(e) => panic!("chunk_read failed: {e:?}"),
                 }
