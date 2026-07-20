@@ -1186,10 +1186,17 @@ impl Conn {
                     )?;
                     return Ok(());
                 }
-                let app_len = info.app.iter().position(|&b| b == 0).unwrap_or(0);
-                self.app = std::str::from_utf8(&info.app[..app_len])
-                    .unwrap_or("")
-                    .to_string();
+                self.app = match command::decode_route_amf_string(&info.app) {
+                    Ok(app) => app,
+                    Err(_) => {
+                        self.send_command_error(
+                            info.transaction_id,
+                            "NetConnection.Connect.Rejected",
+                            "Invalid connect app name.",
+                        )?;
+                        return Ok(());
+                    }
+                };
                 let needs_caps = info.has_four_cc_list
                     || info.has_caps_ex
                     || info.has_video_four_cc_info_map
@@ -1245,10 +1252,17 @@ impl Conn {
                 let mut stream_name = [0u8; 256];
                 let mut publish_type = [0u8; 64];
                 command::read_publish(&mut buf, &mut stream_name, &mut publish_type)?;
-                let name_str = std::str::from_utf8(&stream_name)
-                    .unwrap_or("")
-                    .trim_end_matches('\0')
-                    .to_string();
+                let name_str = match command::decode_route_amf_string(&stream_name) {
+                    Ok(name) => name,
+                    Err(_) => {
+                        return self.send_onstatus(
+                            0,
+                            "error",
+                            "NetStream.Publish.BadName",
+                            "Invalid stream name",
+                        );
+                    }
+                };
                 if self.current_stream.is_none() {
                     return self.send_onstatus(
                         0,
@@ -1323,10 +1337,17 @@ impl Conn {
             "play" => {
                 let mut stream_name = [0u8; 256];
                 command::read_play(&mut buf, &mut stream_name)?;
-                let name_str = std::str::from_utf8(&stream_name)
-                    .unwrap_or("")
-                    .trim_end_matches('\0')
-                    .to_string();
+                let name_str = match command::decode_route_amf_string(&stream_name) {
+                    Ok(name) => name,
+                    Err(_) => {
+                        return self.send_onstatus(
+                            0,
+                            "error",
+                            "NetStream.Play.Failed",
+                            "Invalid stream name",
+                        );
+                    }
+                };
                 if self.current_stream.is_none() {
                     return self.send_onstatus(
                         0,
@@ -1988,6 +2009,73 @@ mod tests {
         conn.handle_command(buf2.as_slice()).unwrap();
         assert_eq!(conn.app, "public");
         assert_eq!(conn.state, ConnState::AppConnected);
+    }
+
+    fn build_publish_with_raw_stream_name(stream_bytes: &[u8]) -> Buffer {
+        let mut buf = Buffer::with_capacity(128);
+        amf0::write_string(&mut buf, "publish").unwrap();
+        amf0::write_number(&mut buf, 1.0).unwrap();
+        amf0::write_null(&mut buf).unwrap();
+        let len = stream_bytes.len();
+        assert!(len <= u16::MAX as usize);
+        buf.write(&[amf0::Amf0Type::String as u8, (len >> 8) as u8, len as u8])
+            .unwrap();
+        buf.write(stream_bytes).unwrap();
+        amf0::write_string(&mut buf, "live").unwrap();
+        buf
+    }
+
+    fn build_connect_with_raw_app(app_bytes: &[u8]) -> Buffer {
+        let mut buf = Buffer::with_capacity(256);
+        amf0::write_string(&mut buf, "connect").unwrap();
+        amf0::write_number(&mut buf, 1.0).unwrap();
+        amf0::write_object_begin(&mut buf).unwrap();
+        amf0::write_object_key(&mut buf, "app").unwrap();
+        let len = app_bytes.len();
+        assert!(len <= u16::MAX as usize);
+        buf.write(&[amf0::Amf0Type::String as u8, (len >> 8) as u8, len as u8])
+            .unwrap();
+        buf.write(app_bytes).unwrap();
+        amf0::write_object_key(&mut buf, "tcUrl").unwrap();
+        amf0::write_string(&mut buf, "rtmp://host/live").unwrap();
+        amf0::write_object_end(&mut buf).unwrap();
+        buf
+    }
+
+    #[test]
+    fn connect_rejects_invalid_utf8_app_name() {
+        let mut conn = Conn::new();
+        let buf = build_connect_with_raw_app(&[0xFF, 0xFE]);
+        conn.handle_command(buf.as_slice()).unwrap();
+        assert_eq!(conn.app, "");
+        assert_eq!(conn.state, ConnState::TcpAccepted);
+    }
+
+    #[test]
+    fn publish_rejects_invalid_utf8_stream_name() {
+        let mut conn = Conn::new();
+        conn.app = "live".to_string();
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+        let buf = build_publish_with_raw_stream_name(&[0x80, 0x81]);
+        conn.handle_command(buf.as_slice()).unwrap();
+        assert!(!conn.current_stream.as_ref().unwrap().is_publishing);
+    }
+
+    #[test]
+    fn invalid_utf8_stream_names_do_not_collide_on_empty_relay_namespace() {
+        let mut first = Conn::new();
+        first.app = "live".to_string();
+        first.current_stream = Some(Box::new(Stream::new(1)));
+        let buf = build_publish_with_raw_stream_name(&[0x80]);
+        first.handle_command(buf.as_slice()).unwrap();
+        assert!(!first.current_stream.as_ref().unwrap().is_publishing);
+
+        let mut second = Conn::new();
+        second.app = "live".to_string();
+        second.current_stream = Some(Box::new(Stream::new(1)));
+        let buf = build_publish_with_raw_stream_name(&[0x81]);
+        second.handle_command(buf.as_slice()).unwrap();
+        assert!(!second.current_stream.as_ref().unwrap().is_publishing);
     }
 
     #[test]

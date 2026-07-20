@@ -596,6 +596,16 @@ fn read_string_checked(buf: &mut Buffer, out: &mut [u8]) -> Result<()> {
     Ok(())
 }
 
+/// Decode a NUL-terminated AMF string buffer into a relay routing key.
+///
+/// Routing keys must be lossless: invalid UTF-8 must not silently collapse
+/// distinct wire values to the same empty namespace.
+pub(crate) fn decode_route_amf_string(out: &[u8]) -> Result<String> {
+    let len = out.iter().position(|&b| b == 0).unwrap_or(out.len());
+    let value = std::str::from_utf8(&out[..len]).map_err(|_| ErrorCode::Amf)?;
+    Ok(value.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -671,6 +681,39 @@ mod tests {
         assert!(read_string_checked(&mut buf, &mut out).is_ok());
         // The string bytes must still be fully consumed from the buffer.
         assert_eq!(buf.available(), 0);
+    }
+
+    #[test]
+    fn decode_route_amf_string_rejects_invalid_utf8() {
+        let mut buf = [0u8; 8];
+        buf[0] = 0xFF;
+        buf[1] = 0xFE;
+        assert_eq!(decode_route_amf_string(&buf), Err(ErrorCode::Amf));
+    }
+
+    #[test]
+    fn decode_route_amf_string_accepts_valid_utf8() {
+        let mut buf = [0u8; 16];
+        buf[..5].copy_from_slice(b"live\0");
+        assert_eq!(decode_route_amf_string(&buf).unwrap(), "live");
+    }
+
+    #[test]
+    fn read_publish_preserves_invalid_utf8_stream_name_bytes() {
+        let mut buf = Buffer::with_capacity(128);
+        amf0::write_string(&mut buf, "publish").unwrap();
+        amf0::write_number(&mut buf, 1.0).unwrap();
+        amf0::write_null(&mut buf).unwrap();
+        buf.write(&[amf0::Amf0Type::String as u8, 0x00, 0x02, 0x80, 0x81])
+            .unwrap();
+        amf0::write_string(&mut buf, "live").unwrap();
+
+        let mut stream_name = [0u8; 256];
+        let mut publish_type = [0u8; 64];
+        read_publish(&mut buf, &mut stream_name, &mut publish_type).unwrap();
+        assert_eq!(stream_name[0], 0x80);
+        assert_eq!(stream_name[1], 0x81);
+        assert_eq!(decode_route_amf_string(&stream_name), Err(ErrorCode::Amf));
     }
 
     #[test]
