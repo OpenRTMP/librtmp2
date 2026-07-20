@@ -592,6 +592,17 @@ fn read_string_checked(buf: &mut Buffer, out: &mut [u8]) -> Result<()> {
     }
 
     buf.read(&mut out[..slen]).map_err(|_| ErrorCode::Amf)?;
+
+    // The NUL byte at `out[slen]` is used as a sentinel by callers (and by
+    // `decode_route_amf_string`) to find the end of the value. An embedded
+    // NUL within the string content itself would let that sentinel scan
+    // stop early, silently truncating the routing key and colliding two
+    // distinct wire values (e.g. "live\0\xff..." and "live") onto the same
+    // relay namespace. Reject embedded NULs outright.
+    if out[..slen].contains(&0) {
+        return Err(ErrorCode::Amf);
+    }
+
     out[slen] = 0;
     Ok(())
 }
@@ -714,6 +725,27 @@ mod tests {
         assert_eq!(stream_name[0], 0x80);
         assert_eq!(stream_name[1], 0x81);
         assert_eq!(decode_route_amf_string(&stream_name), Err(ErrorCode::Amf));
+    }
+
+    #[test]
+    fn read_publish_rejects_stream_names_with_embedded_nul() {
+        // "live\0\xff" must be rejected outright, not silently truncated to
+        // "live" by the NUL sentinel used to mark the end of the value.
+        let mut buf = Buffer::with_capacity(128);
+        amf0::write_string(&mut buf, "publish").unwrap();
+        amf0::write_number(&mut buf, 1.0).unwrap();
+        amf0::write_null(&mut buf).unwrap();
+        buf.write(&[amf0::Amf0Type::String as u8, 0x00, 0x06])
+            .unwrap();
+        buf.write(b"live\0\xff").unwrap();
+        amf0::write_string(&mut buf, "live").unwrap();
+
+        let mut stream_name = [0u8; 256];
+        let mut publish_type = [0u8; 64];
+        assert_eq!(
+            read_publish(&mut buf, &mut stream_name, &mut publish_type),
+            Err(ErrorCode::Amf)
+        );
     }
 
     #[test]
