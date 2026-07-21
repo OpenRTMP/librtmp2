@@ -1,3 +1,19 @@
+librtmp2 (0.4.2-1) UNRELEASED; urgency=medium
+
+  * Bound Client::publish()/play() AMF exchanges with the configured
+    connect timeout, closing a stall window where a malicious server could
+    hold the caller for minutes after connect succeeded.
+  * Reject AMF route strings (connect app, publish/play stream names) that
+    are not valid UTF-8 or contain embedded NUL bytes, preventing distinct
+    wire-level names from colliding onto the same relay route.
+  * Reject empty connect app / publish/play stream names, and gate
+    onMetaData/script relay on on_media_cb being registered.
+  * Track bytes_received as u64 so WindowAckSize pacing stays correct past
+    4 GiB; pass Aggregate sub-tag slices directly in the client play path
+    instead of cloning.
+
+ -- OpenRTMP <info@openrtmp.org>  Tue, 21 Jul 2026 00:00:00 +0000
+
 librtmp2 (0.4.1-1) UNRELEASED; urgency=medium
 
   * Track the exact publish-route key claimed per connection and release

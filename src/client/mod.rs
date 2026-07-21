@@ -632,20 +632,10 @@ impl Client {
             if let Some(cb) = self.on_frame_cb {
                 match tag_type {
                     msg_dispatch::RTMP_MSG_AUDIO => {
-                        self.deliver_av_frame_cb(
-                            cb,
-                            FrameType::Audio,
-                            out_ts,
-                            tag_payload,
-                        )?;
+                        self.deliver_av_frame_cb(cb, FrameType::Audio, out_ts, tag_payload)?;
                     }
                     msg_dispatch::RTMP_MSG_VIDEO => {
-                        self.deliver_av_frame_cb(
-                            cb,
-                            FrameType::Video,
-                            out_ts,
-                            tag_payload,
-                        )?;
+                        self.deliver_av_frame_cb(cb, FrameType::Video, out_ts, tag_payload)?;
                     }
                     msg_dispatch::RTMP_MSG_AMF0_DATA => {
                         self.deliver_script_frame_cb(cb, out_ts, tag_payload);

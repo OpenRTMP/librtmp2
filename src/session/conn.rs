@@ -624,9 +624,7 @@ impl Conn {
         self.recv_buffer
             .write(data)
             .map_err(|_| ErrorCode::Internal)?;
-        self.bytes_received = self
-            .bytes_received
-            .saturating_add(data.len() as u64);
+        self.bytes_received = self.bytes_received.saturating_add(data.len() as u64);
         self.budget_exhausted = false;
         let mut max_iter = 256;
         let mut no_progress = 0;

@@ -13,6 +13,36 @@ begin at `1.0.0`.
 
 ## [Unreleased]
 
+## [0.4.2] — 2026-07-21
+
+### Security
+- `Client::publish()` and `Client::play()` now bound their blocking AMF
+  exchange with the configured connect-timeout wall-clock deadline instead
+  of passing `None`, closing a stall window where a malicious server could
+  hold the caller for up to ~650 seconds (64 recv polls × 10s) after connect
+  succeeded.
+- AMF route strings (connect `app`, publish/play stream names) are now
+  decoded with strict UTF-8 validation and the command is rejected on
+  failure; invalid UTF-8 previously collapsed to an empty string via
+  `unwrap_or`, letting distinct wire-level names collide onto the same
+  `(app, stream)` relay route.
+- `read_string_checked()` now rejects embedded NUL bytes instead of copying
+  them verbatim and letting `decode_route_amf_string()`'s NUL-sentinel scan
+  truncate the value later, which let distinct invalid route values collapse
+  onto the same app/stream route — undermining the UTF-8 collision guard
+  above.
+- The server session layer now rejects empty connect `app` names and empty
+  publish/play stream names, and gates `onMetaData`/script relay to players
+  and the stream cache on `on_media_cb` being registered.
+
+### Fixed
+- `bytes_received` is now tracked as `u64` (was `u32`), so WindowAckSize
+  pacing stays correct once a connection passes 4 GiB of inbound data
+  instead of wrapping.
+- The client's Aggregate-message play path now passes sub-tag slices
+  directly to `on_frame_cb` instead of cloning each sub-tag into a new
+  `Vec`.
+
 ## [0.4.1] — 2026-07-18
 
 ### Changed
@@ -320,7 +350,8 @@ and others.
 - Protocol mapping documents for legacy, E-RTMP v1, and E-RTMP v2
 - `CONTRIBUTING.md` guidelines
 
-[Unreleased]: https://github.com/OpenRTMP/librtmp2/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/OpenRTMP/librtmp2/compare/v0.4.2...HEAD
+[0.4.2]: https://github.com/OpenRTMP/librtmp2/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/OpenRTMP/librtmp2/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/OpenRTMP/librtmp2/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/OpenRTMP/librtmp2/compare/v0.3.0...v0.3.1
