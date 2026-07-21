@@ -112,8 +112,8 @@ pub struct Conn {
     /// is negotiated on the wire.
     active_chunk_size: u32,
     pub window_ack_size: u32,
-    pub bytes_received: u32,
-    pub bytes_at_last_ack: u32,
+    pub bytes_received: u64,
+    pub bytes_at_last_ack: u64,
     /// Audio/video payload bytes received (excludes handshake/control overhead).
     pub media_bytes_received: u64,
     /// Audio/video payload bytes sent to this peer.
@@ -388,6 +388,9 @@ impl Conn {
                 .as_ref()
                 .map(|s| s.is_publishing)
                 .unwrap_or(false);
+        if relay_metadata && !self.media_allowed(FrameType::Script) {
+            return Err(ErrorCode::Auth);
+        }
         self.handle_data_message(payload)?;
         if relay_metadata {
             if let Some(cb) = self.on_frame_cb {
@@ -621,7 +624,9 @@ impl Conn {
         self.recv_buffer
             .write(data)
             .map_err(|_| ErrorCode::Internal)?;
-        self.bytes_received = self.bytes_received.wrapping_add(data.len() as u32);
+        self.bytes_received = self
+            .bytes_received
+            .saturating_add(data.len() as u64);
         self.budget_exhausted = false;
         let mut max_iter = 256;
         let mut no_progress = 0;
@@ -670,9 +675,10 @@ impl Conn {
             }
         }
         if self.window_ack_size > 0
-            && self.bytes_received.wrapping_sub(self.bytes_at_last_ack) >= self.window_ack_size
+            && self.bytes_received.saturating_sub(self.bytes_at_last_ack)
+                >= self.window_ack_size as u64
         {
-            self.send_acknowledgement(self.bytes_received)?;
+            self.send_acknowledgement(self.bytes_received as u32)?;
             self.bytes_at_last_ack = self.bytes_received;
         }
         Ok(())
@@ -1197,6 +1203,14 @@ impl Conn {
                         return Ok(());
                     }
                 };
+                if self.app.is_empty() {
+                    self.send_command_error(
+                        info.transaction_id,
+                        "NetConnection.Connect.Rejected",
+                        "Empty connect app name.",
+                    )?;
+                    return Ok(());
+                }
                 let needs_caps = info.has_four_cc_list
                     || info.has_caps_ex
                     || info.has_video_four_cc_info_map
@@ -1263,6 +1277,14 @@ impl Conn {
                         );
                     }
                 };
+                if name_str.is_empty() {
+                    return self.send_onstatus(
+                        0,
+                        "error",
+                        "NetStream.Publish.BadName",
+                        "Empty stream name",
+                    );
+                }
                 if self.current_stream.is_none() {
                     return self.send_onstatus(
                         0,
@@ -1348,6 +1370,14 @@ impl Conn {
                         );
                     }
                 };
+                if name_str.is_empty() {
+                    return self.send_onstatus(
+                        0,
+                        "error",
+                        "NetStream.Play.Failed",
+                        "Empty stream name",
+                    );
+                }
                 if self.current_stream.is_none() {
                     return self.send_onstatus(
                         0,
@@ -2799,6 +2829,86 @@ mod tests {
         assert_eq!(conn.pending_relay[0].frame_type, FrameType::Script);
         assert_eq!(conn.pending_relay[0].timestamp, 9000);
         assert_eq!(conn.pending_relay[0].payload, payload);
+    }
+
+    #[test]
+    fn on_metadata_relay_honors_on_media_cb() {
+        fn deny_all(_: u64, _: FrameType, _: Option<&str>) -> bool {
+            false
+        }
+
+        let mut conn = Conn::new();
+        conn.app = "live".to_string();
+        conn.relay_enabled = true;
+        conn.on_media_cb = Some(deny_all);
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+        if let Some(ref mut stream) = conn.current_stream {
+            stream.is_publishing = true;
+            stream.name = "stream".to_string();
+        }
+        let payload = build_on_metadata_payload(false, &[("width", 1920.0)], &[]);
+        assert_eq!(
+            conn.handle_publisher_data_message(1, 9000, &payload),
+            Err(ErrorCode::Auth)
+        );
+        assert!(conn.pending_relay.is_empty());
+        assert_eq!(conn.detected_video_width, None);
+    }
+
+    #[test]
+    fn connect_rejects_empty_app_name() {
+        let mut conn = Conn::new();
+        let mut buf = Buffer::with_capacity(256);
+        command::build_connect(
+            &mut buf,
+            "",
+            "rtmp://host/live",
+            "",
+            "",
+            "FMLE/3.0",
+            0,
+            0,
+            None,
+        )
+        .unwrap();
+        conn.handle_command(buf.as_slice()).unwrap();
+        assert!(conn.app.is_empty());
+        assert_eq!(conn.state, ConnState::TcpAccepted);
+        assert!(
+            conn.send_buffer
+                .peek()
+                .windows(b"_error".len())
+                .any(|window| window == b"_error")
+        );
+    }
+
+    #[test]
+    fn publish_rejects_empty_stream_name() {
+        let mut conn = Conn::new();
+        conn.app = "live".to_string();
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+        let mut buf = Buffer::with_capacity(128);
+        command::build_publish(&mut buf, "", "live").unwrap();
+        conn.handle_command(buf.as_slice()).unwrap();
+        assert!(!conn.current_stream.as_ref().unwrap().is_publishing);
+        assert!(
+            conn.send_buffer
+                .peek()
+                .windows(b"BadName".len())
+                .any(|window| window == b"BadName")
+        );
+    }
+
+    #[test]
+    fn bytes_received_ack_uses_u64_after_u32_wrap() {
+        let mut conn = Conn::new();
+        conn.state = ConnState::Connected;
+        conn.window_ack_size = 1024;
+        conn.bytes_received = u32::MAX as u64;
+        conn.bytes_at_last_ack = u32::MAX as u64;
+        conn.recv(&[0u8; 2048]).unwrap();
+        assert_eq!(conn.bytes_received, u32::MAX as u64 + 2048);
+        assert_eq!(conn.bytes_at_last_ack, conn.bytes_received);
     }
 
     #[test]

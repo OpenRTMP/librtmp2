@@ -569,7 +569,7 @@ impl Client {
                             } else {
                                 FrameType::Video
                             };
-                            self.deliver_av_frame_cb(cb, frame_type, msg.timestamp, payload)?;
+                            self.deliver_av_frame_cb(cb, frame_type, msg.timestamp, &payload)?;
                         }
                     } else if msg.msg_type_id == msg_dispatch::RTMP_MSG_AMF0_DATA
                         || msg.msg_type_id == msg_dispatch::RTMP_MSG_AMF3_DATA
@@ -636,7 +636,7 @@ impl Client {
                             cb,
                             FrameType::Audio,
                             out_ts,
-                            tag_payload.to_vec(),
+                            tag_payload,
                         )?;
                     }
                     msg_dispatch::RTMP_MSG_VIDEO => {
@@ -644,7 +644,7 @@ impl Client {
                             cb,
                             FrameType::Video,
                             out_ts,
-                            tag_payload.to_vec(),
+                            tag_payload,
                         )?;
                     }
                     msg_dispatch::RTMP_MSG_AMF0_DATA => {
@@ -669,7 +669,7 @@ impl Client {
         cb: fn(&Frame),
         frame_type: FrameType,
         timestamp: u32,
-        payload: Vec<u8>,
+        payload: &[u8],
     ) -> Result<()> {
         let is_multitrack = is_multitrack_container(frame_type, &payload);
         let parsed_multitrack = foreach_track(frame_type, &payload, |track| {
