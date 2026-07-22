@@ -13,6 +13,8 @@ begin at `1.0.0`.
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-07-22
+
 ### Security
 - The TLS pending-handshake queue's per-address cap is now keyed on the peer
   IP instead of the full `ip:port` peer address, so a single host can no
@@ -28,7 +30,7 @@ begin at `1.0.0`.
   on incomplete TLS handshakes (default `4` when `0`/unset). Deployments
   where many clients share one source IP (NAT, load balancer, proxy) can
   raise this to avoid spurious RTMPS handshake evictions under bursty
-  connect patterns.
+  connect patterns. New `pub` struct field, hence the `0.5.0` bump.
 
 ## [0.4.2] — 2026-07-21
 
