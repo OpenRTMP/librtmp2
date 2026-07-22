@@ -1965,9 +1965,10 @@ mod tests {
         // ephemeral source port, so the cap must be keyed on the peer IP —
         // not the full `ip:port` peer address — or a single host can bypass
         // it by opening from a fresh source port each time.
-        assert!(
-            server.pending_tls_count_for_addr("127.0.0.1") <= MAX_PENDING_TLS_PER_ADDR,
-            "one peer must not monopolize the pending TLS queue"
+        assert_eq!(
+            server.pending_tls_count_for_addr("127.0.0.1"),
+            MAX_PENDING_TLS_PER_ADDR,
+            "one peer should retain exactly the per-IP pending TLS cap"
         );
         assert!(
             server.pending_tls_count() <= MAX_PENDING_TLS_HANDSHAKES,

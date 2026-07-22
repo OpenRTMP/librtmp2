@@ -494,16 +494,6 @@ impl Conn {
             _ => None,
         };
 
-        match frame_type {
-            FrameType::Video if self.detected_video_codec.is_none() => {
-                self.detected_video_codec = current_codec.clone();
-            }
-            FrameType::Audio if self.detected_audio_codec.is_none() => {
-                self.detected_audio_codec = current_codec.clone();
-            }
-            _ => {}
-        }
-
         let is_multitrack = is_multitrack_container(frame_type, parse_payload);
 
         if is_multitrack {
@@ -530,6 +520,19 @@ impl Conn {
             }
         } else if !self.media_allowed(frame_type, current_codec.as_deref()) {
             return Err(ErrorCode::Auth);
+        }
+
+        // Only pin the detected codec once the frame has cleared
+        // authorization, so a rejected frame's codec never lingers in
+        // `detected_video_codec`/`detected_audio_codec` for telemetry readers.
+        match frame_type {
+            FrameType::Video if self.detected_video_codec.is_none() => {
+                self.detected_video_codec = current_codec.clone();
+            }
+            FrameType::Audio if self.detected_audio_codec.is_none() => {
+                self.detected_audio_codec = current_codec.clone();
+            }
+            _ => {}
         }
 
         self.media_bytes_received = self
@@ -2687,6 +2690,38 @@ mod tests {
         ];
         assert_eq!(
             conn.handle_media_frame(1, FrameType::Video, 0, &mixed_codec_frame),
+            Err(ErrorCode::Auth)
+        );
+        assert!(conn.pending_relay.is_empty());
+    }
+
+    #[test]
+    fn on_media_cb_authorizes_shared_codec_in_many_tracks_container() {
+        fn allow_avc1_only(_: u64, frame_type: FrameType, codec: Option<&str>) -> bool {
+            if frame_type == FrameType::Video {
+                return codec == Some("avc1");
+            }
+            true
+        }
+
+        let mut conn = Conn::new();
+        conn.relay_enabled = true;
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+        conn.current_stream.as_mut().unwrap().is_publishing = true;
+        conn.on_media_cb = Some(allow_avc1_only);
+
+        // ManyTracks container: both tracks share the disallowed "vp09"
+        // codec. Even though every track carries the same codec here, this
+        // container type still runs `foreach_track`/`media_allowed` rather
+        // than the single-codec fast path, and must reject the frame.
+        let shared_disallowed_codec_frame = vec![
+            0x86, 0x10, // multitrack video, type=ManyTracks
+            b'v', b'p', b'0', b'9', // shared fourcc: vp09
+            0x00, 0x00, 0x00, 0x01, 0xAA, // track 0
+            0x01, 0x00, 0x00, 0x01, 0xBB, // track 1
+        ];
+        assert_eq!(
+            conn.handle_media_frame(1, FrameType::Video, 0, &shared_disallowed_codec_frame),
             Err(ErrorCode::Auth)
         );
         assert!(conn.pending_relay.is_empty());
