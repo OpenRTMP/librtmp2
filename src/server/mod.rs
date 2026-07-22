@@ -44,6 +44,14 @@ const MAX_CACHED_KEYFRAME_BYTES: usize = 2 * 1024 * 1024;
 #[cfg(feature = "tls")]
 const MAX_PENDING_TLS_HANDSHAKES: usize = 128;
 
+/// Default max incomplete TLS handshakes retained per remote address, used
+/// when `ServerConfig::max_pending_tls_per_addr` is `0` (unset). Prevents one
+/// peer from monopolizing the global pending queue. Deployments where many
+/// clients share one source IP (NAT/load balancer/proxy) can raise this via
+/// `ServerConfig::max_pending_tls_per_addr`.
+#[cfg(feature = "tls")]
+pub const DEFAULT_MAX_PENDING_TLS_PER_ADDR: usize = 4;
+
 /// Drop TLS handshakes that do not complete within this overall budget.
 #[cfg(feature = "tls")]
 const TLS_HANDSHAKE_TIMEOUT_SECS: u64 = 10;
@@ -93,6 +101,10 @@ struct ListenerEntry {
 struct PendingTlsConnection {
     handshake: PendingTlsAccept,
     remote_addr: String,
+    /// Peer IP only (no port), used to key the per-address pending cap so a
+    /// single host can't bypass it by opening connections from distinct
+    /// ephemeral source ports.
+    remote_ip: String,
     deadline: Instant,
 }
 
@@ -309,6 +321,20 @@ impl Server {
         Ok(())
     }
 
+    #[cfg(all(test, feature = "tls"))]
+    fn pending_tls_count_for_addr(&self, remote_addr: &str) -> usize {
+        let remote_ip = Self::peer_ip(remote_addr);
+        self.pending_tls
+            .iter()
+            .filter(|pending| pending.remote_ip == remote_ip)
+            .count()
+    }
+
+    #[cfg(all(test, feature = "tls"))]
+    fn pending_tls_count(&self) -> usize {
+        self.pending_tls.len()
+    }
+
     /// Poll for events (non-blocking).
     pub fn poll(&mut self, timeout_ms: i32) -> Result<()> {
         if !self.running {
@@ -353,6 +379,51 @@ impl Server {
         } else {
             pending >= MAX_PENDING_TLS_HANDSHAKES
         }
+    }
+
+    /// Strips the port from a `SocketAddr::to_string()` output (e.g.
+    /// `"1.2.3.4:5678"` -> `"1.2.3.4"`, `"[::1]:5678"` -> `"[::1]"`) so the
+    /// per-address pending cap is keyed on the peer host, not the peer's
+    /// ephemeral source port.
+    #[cfg(feature = "tls")]
+    fn peer_ip(remote_addr: &str) -> &str {
+        remote_addr
+            .rsplit_once(':')
+            .map(|(ip, _port)| ip)
+            .unwrap_or(remote_addr)
+    }
+
+    /// Effective per-address pending TLS cap: `ServerConfig::max_pending_tls_per_addr`
+    /// if positive, otherwise `DEFAULT_MAX_PENDING_TLS_PER_ADDR`.
+    #[cfg(feature = "tls")]
+    fn max_pending_tls_per_addr(&self) -> usize {
+        if self.config.max_pending_tls_per_addr > 0 {
+            self.config.max_pending_tls_per_addr as usize
+        } else {
+            DEFAULT_MAX_PENDING_TLS_PER_ADDR
+        }
+    }
+
+    #[cfg(feature = "tls")]
+    fn queue_pending_tls(&mut self, conn: PendingTlsConnection) {
+        let same_addr = self
+            .pending_tls
+            .iter()
+            .filter(|pending| pending.remote_ip == conn.remote_ip)
+            .count();
+        if same_addr >= self.max_pending_tls_per_addr() {
+            if let Some(i) = self
+                .pending_tls
+                .iter()
+                .position(|pending| pending.remote_ip == conn.remote_ip)
+            {
+                self.pending_tls.remove(i);
+            }
+        }
+        if self.pending_tls_limit_reached() {
+            self.pending_tls.remove(0);
+        }
+        self.pending_tls.push(conn);
     }
 
     fn allocate_conn_id(&mut self) -> Option<u64> {
@@ -423,6 +494,7 @@ impl Server {
                         self.pending_tls.push(PendingTlsConnection {
                             handshake,
                             remote_addr: pending_conn.remote_addr,
+                            remote_ip: pending_conn.remote_ip,
                             deadline: pending_conn.deadline,
                         });
                     }
@@ -472,13 +544,13 @@ impl Server {
                                         self.add_connection(transport, remote_addr);
                                     }
                                     Ok(TlsAcceptOutcome::WouldBlock(handshake)) => {
-                                        if !self.pending_tls_limit_reached() {
-                                            self.pending_tls.push(PendingTlsConnection {
-                                                handshake,
-                                                remote_addr,
-                                                deadline: Self::tls_handshake_deadline(),
-                                            });
-                                        }
+                                        let remote_ip = Self::peer_ip(&remote_addr).to_string();
+                                        self.queue_pending_tls(PendingTlsConnection {
+                                            handshake,
+                                            remote_addr,
+                                            remote_ip,
+                                            deadline: Self::tls_handshake_deadline(),
+                                        });
                                     }
                                     Err(_) => {}
                                 }
@@ -1292,6 +1364,7 @@ mod tests {
             tls_key_file: std::ptr::null(),
             tls_ca_file: std::ptr::null(),
             tls_insecure: 0,
+            max_pending_tls_per_addr: 0,
         })
         .unwrap()
     }
@@ -1447,6 +1520,7 @@ mod tests {
             tls_key_file: std::ptr::null(),
             tls_ca_file: std::ptr::null(),
             tls_insecure: 0,
+            max_pending_tls_per_addr: 0,
         };
         let mut server = Server::new(config).unwrap();
         server.listen("127.0.0.1:0").unwrap();
@@ -1490,6 +1564,7 @@ mod tests {
             tls_key_file: std::ptr::null(),
             tls_ca_file: std::ptr::null(),
             tls_insecure: 0,
+            max_pending_tls_per_addr: 0,
         };
         let mut server = Server::new(config).unwrap();
         server.listen("127.0.0.1:0").unwrap();
@@ -1822,5 +1897,163 @@ mod tests {
             server.connections[0].relay_enabled,
             "conn_b's publish must succeed in the same batch conn_a's route was freed in"
         );
+    }
+
+    #[cfg(feature = "tls")]
+    fn self_signed_cert_files(cn: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        use openssl::asn1::Asn1Time;
+        use openssl::hash::MessageDigest;
+        use openssl::nid::Nid;
+        use openssl::pkey::PKey;
+        use openssl::rsa::Rsa;
+        use openssl::x509::extension::{BasicConstraints, SubjectAlternativeName};
+        use openssl::x509::{X509NameBuilder, X509};
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let rsa = Rsa::generate(2048).unwrap();
+        let pkey = PKey::from_rsa(rsa).unwrap();
+        let mut name = X509NameBuilder::new().unwrap();
+        name.append_entry_by_nid(Nid::COMMONNAME, cn).unwrap();
+        let name = name.build();
+        let mut builder = X509::builder().unwrap();
+        builder.set_version(2).unwrap();
+        builder.set_subject_name(&name).unwrap();
+        builder.set_issuer_name(&name).unwrap();
+        builder.set_pubkey(&pkey).unwrap();
+        builder
+            .set_not_before(&Asn1Time::days_from_now(0).unwrap())
+            .unwrap();
+        builder
+            .set_not_after(&Asn1Time::days_from_now(1).unwrap())
+            .unwrap();
+        builder
+            .append_extension(BasicConstraints::new().critical().ca().build().unwrap())
+            .unwrap();
+        let san = SubjectAlternativeName::new()
+            .dns(cn)
+            .build(&builder.x509v3_context(None, None))
+            .unwrap();
+        builder.append_extension(san).unwrap();
+        builder.sign(&pkey, MessageDigest::sha256()).unwrap();
+        let cert = builder.build();
+
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let base =
+            std::env::temp_dir().join(format!("librtmp2-server-test-{}-{}-{}", std::process::id(), n, cn));
+        let cert_path = base.with_extension("cert.pem");
+        let key_path = base.with_extension("key.pem");
+        std::fs::write(&cert_path, cert.to_pem().unwrap()).unwrap();
+        std::fs::write(&key_path, pkey.private_key_to_pem_pkcs8().unwrap()).unwrap();
+        (cert_path, key_path)
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn pending_tls_queue_caps_incomplete_handshakes_per_remote_addr() {
+        let (cert_path, key_path) = self_signed_cert_files("pending-tls.test");
+        let mut server = test_server();
+        server
+            .listen_tls("127.0.0.1:0", cert_path.to_str().unwrap(), key_path.to_str().unwrap())
+            .unwrap();
+
+        let port = {
+            let mut addr: libc::sockaddr_in = unsafe { std::mem::zeroed() };
+            let mut len = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
+            let rc = unsafe {
+                libc::getsockname(
+                    server.server_fd,
+                    &mut addr as *mut _ as *mut libc::sockaddr,
+                    &mut len,
+                )
+            };
+            assert_eq!(rc, 0);
+            u16::from_be(addr.sin_port)
+        };
+        let addr = format!("127.0.0.1:{port}");
+
+        let mut clients = Vec::new();
+        for _ in 0..(DEFAULT_MAX_PENDING_TLS_PER_ADDR + 2) {
+            clients.push(std::net::TcpStream::connect(&addr).unwrap());
+            server.accept_new_connections();
+        }
+
+        // Every client above connects from "127.0.0.1" but through a distinct
+        // ephemeral source port, so the cap must be keyed on the peer IP —
+        // not the full `ip:port` peer address — or a single host can bypass
+        // it by opening from a fresh source port each time.
+        assert_eq!(
+            server.pending_tls_count_for_addr("127.0.0.1"),
+            DEFAULT_MAX_PENDING_TLS_PER_ADDR,
+            "one peer should retain exactly the per-IP pending TLS cap"
+        );
+        assert!(
+            server.pending_tls_count() <= MAX_PENDING_TLS_HANDSHAKES,
+            "global pending TLS cap must hold"
+        );
+
+        let _ = std::fs::remove_file(cert_path);
+        let _ = std::fs::remove_file(key_path);
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn pending_tls_per_addr_cap_is_configurable() {
+        const CUSTOM_CAP: usize = 2;
+        let (cert_path, key_path) = self_signed_cert_files("pending-tls-custom-cap.test");
+        let mut server = Server::new(ServerConfig {
+            max_connections: 8,
+            chunk_size: 128,
+            tls_enabled: 0,
+            tls_cert_file: std::ptr::null(),
+            tls_key_file: std::ptr::null(),
+            tls_ca_file: std::ptr::null(),
+            tls_insecure: 0,
+            max_pending_tls_per_addr: CUSTOM_CAP as std::ffi::c_int,
+        })
+        .unwrap();
+        server
+            .listen_tls("127.0.0.1:0", cert_path.to_str().unwrap(), key_path.to_str().unwrap())
+            .unwrap();
+
+        let port = {
+            let mut addr: libc::sockaddr_in = unsafe { std::mem::zeroed() };
+            let mut len = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
+            let rc = unsafe {
+                libc::getsockname(
+                    server.server_fd,
+                    &mut addr as *mut _ as *mut libc::sockaddr,
+                    &mut len,
+                )
+            };
+            assert_eq!(rc, 0);
+            u16::from_be(addr.sin_port)
+        };
+        let addr = format!("127.0.0.1:{port}");
+
+        let mut clients = Vec::new();
+        for _ in 0..(CUSTOM_CAP + 2) {
+            clients.push(std::net::TcpStream::connect(&addr).unwrap());
+            server.accept_new_connections();
+        }
+
+        assert_eq!(
+            server.pending_tls_count_for_addr("127.0.0.1"),
+            CUSTOM_CAP,
+            "a configured max_pending_tls_per_addr must override the built-in default"
+        );
+
+        let _ = std::fs::remove_file(cert_path);
+        let _ = std::fs::remove_file(key_path);
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn peer_ip_strips_port_from_socket_addr_string() {
+        assert_eq!(Server::peer_ip("127.0.0.1:54321"), "127.0.0.1");
+        assert_eq!(Server::peer_ip("[::1]:54321"), "[::1]");
+        assert_eq!(Server::peer_ip("[2001:db8::1]:443"), "[2001:db8::1]");
+        // No port present: falls back to the input unchanged.
+        assert_eq!(Server::peer_ip("127.0.0.1"), "127.0.0.1");
     }
 }

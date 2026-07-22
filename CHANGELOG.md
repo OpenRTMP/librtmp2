@@ -13,6 +13,25 @@ begin at `1.0.0`.
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-07-22
+
+### Security
+- The TLS pending-handshake queue's per-address cap is now keyed on the peer
+  IP instead of the full `ip:port` peer address, so a single host can no
+  longer bypass it by opening incomplete RTMPS handshakes from distinct
+  ephemeral source ports.
+- `on_media_cb` codec authorization now checks every track's codec inside a
+  multitrack (`ManyTracks`/`ManyTracksManyCodecs`) container instead of only
+  the first, closing a path where a disallowed codec could ride along
+  behind an allowed first track.
+
+### Added
+- `ServerConfig::max_pending_tls_per_addr` — configures the per-peer-IP cap
+  on incomplete TLS handshakes (default `4` when `0`/unset). Deployments
+  where many clients share one source IP (NAT, load balancer, proxy) can
+  raise this to avoid spurious RTMPS handshake evictions under bursty
+  connect patterns. New `pub` struct field, hence the `0.5.0` bump.
+
 ## [0.4.2] — 2026-07-21
 
 ### Security
@@ -350,7 +369,8 @@ and others.
 - Protocol mapping documents for legacy, E-RTMP v1, and E-RTMP v2
 - `CONTRIBUTING.md` guidelines
 
-[Unreleased]: https://github.com/OpenRTMP/librtmp2/compare/v0.4.2...HEAD
+[Unreleased]: https://github.com/OpenRTMP/librtmp2/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/OpenRTMP/librtmp2/compare/v0.4.2...v0.5.0
 [0.4.2]: https://github.com/OpenRTMP/librtmp2/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/OpenRTMP/librtmp2/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/OpenRTMP/librtmp2/compare/v0.3.1...v0.4.0
