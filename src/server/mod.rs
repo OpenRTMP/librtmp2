@@ -44,6 +44,11 @@ const MAX_CACHED_KEYFRAME_BYTES: usize = 2 * 1024 * 1024;
 #[cfg(feature = "tls")]
 const MAX_PENDING_TLS_HANDSHAKES: usize = 128;
 
+/// Maximum incomplete TLS handshakes retained per remote address. Prevents one
+/// peer from monopolizing the global pending queue.
+#[cfg(feature = "tls")]
+const MAX_PENDING_TLS_PER_ADDR: usize = 4;
+
 /// Drop TLS handshakes that do not complete within this overall budget.
 #[cfg(feature = "tls")]
 const TLS_HANDSHAKE_TIMEOUT_SECS: u64 = 10;
@@ -309,6 +314,19 @@ impl Server {
         Ok(())
     }
 
+    #[cfg(all(test, feature = "tls"))]
+    fn pending_tls_count_for_addr(&self, remote_addr: &str) -> usize {
+        self.pending_tls
+            .iter()
+            .filter(|pending| pending.remote_addr == remote_addr)
+            .count()
+    }
+
+    #[cfg(all(test, feature = "tls"))]
+    fn pending_tls_count(&self) -> usize {
+        self.pending_tls.len()
+    }
+
     /// Poll for events (non-blocking).
     pub fn poll(&mut self, timeout_ms: i32) -> Result<()> {
         if !self.running {
@@ -353,6 +371,28 @@ impl Server {
         } else {
             pending >= MAX_PENDING_TLS_HANDSHAKES
         }
+    }
+
+    #[cfg(feature = "tls")]
+    fn queue_pending_tls(&mut self, conn: PendingTlsConnection) {
+        let same_addr = self
+            .pending_tls
+            .iter()
+            .filter(|pending| pending.remote_addr == conn.remote_addr)
+            .count();
+        if same_addr >= MAX_PENDING_TLS_PER_ADDR {
+            if let Some(i) = self
+                .pending_tls
+                .iter()
+                .position(|pending| pending.remote_addr == conn.remote_addr)
+            {
+                self.pending_tls.remove(i);
+            }
+        }
+        if self.pending_tls_limit_reached() {
+            self.pending_tls.remove(0);
+        }
+        self.pending_tls.push(conn);
     }
 
     fn allocate_conn_id(&mut self) -> Option<u64> {
@@ -472,13 +512,11 @@ impl Server {
                                         self.add_connection(transport, remote_addr);
                                     }
                                     Ok(TlsAcceptOutcome::WouldBlock(handshake)) => {
-                                        if !self.pending_tls_limit_reached() {
-                                            self.pending_tls.push(PendingTlsConnection {
-                                                handshake,
-                                                remote_addr,
-                                                deadline: Self::tls_handshake_deadline(),
-                                            });
-                                        }
+                                        self.queue_pending_tls(PendingTlsConnection {
+                                            handshake,
+                                            remote_addr,
+                                            deadline: Self::tls_handshake_deadline(),
+                                        });
                                     }
                                     Err(_) => {}
                                 }
@@ -1822,5 +1860,97 @@ mod tests {
             server.connections[0].relay_enabled,
             "conn_b's publish must succeed in the same batch conn_a's route was freed in"
         );
+    }
+
+    #[cfg(feature = "tls")]
+    fn self_signed_cert_files(cn: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        use openssl::asn1::Asn1Time;
+        use openssl::hash::MessageDigest;
+        use openssl::nid::Nid;
+        use openssl::pkey::PKey;
+        use openssl::rsa::Rsa;
+        use openssl::x509::extension::{BasicConstraints, SubjectAlternativeName};
+        use openssl::x509::{X509NameBuilder, X509};
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let rsa = Rsa::generate(2048).unwrap();
+        let pkey = PKey::from_rsa(rsa).unwrap();
+        let mut name = X509NameBuilder::new().unwrap();
+        name.append_entry_by_nid(Nid::COMMONNAME, cn).unwrap();
+        let name = name.build();
+        let mut builder = X509::builder().unwrap();
+        builder.set_version(2).unwrap();
+        builder.set_subject_name(&name).unwrap();
+        builder.set_issuer_name(&name).unwrap();
+        builder.set_pubkey(&pkey).unwrap();
+        builder
+            .set_not_before(&Asn1Time::days_from_now(0).unwrap())
+            .unwrap();
+        builder
+            .set_not_after(&Asn1Time::days_from_now(1).unwrap())
+            .unwrap();
+        builder
+            .append_extension(BasicConstraints::new().critical().ca().build().unwrap())
+            .unwrap();
+        let san = SubjectAlternativeName::new()
+            .dns(cn)
+            .build(&builder.x509v3_context(None, None))
+            .unwrap();
+        builder.append_extension(san).unwrap();
+        builder.sign(&pkey, MessageDigest::sha256()).unwrap();
+        let cert = builder.build();
+
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let base =
+            std::env::temp_dir().join(format!("librtmp2-server-test-{}-{}-{}", std::process::id(), n, cn));
+        let cert_path = base.with_extension("cert.pem");
+        let key_path = base.with_extension("key.pem");
+        std::fs::write(&cert_path, cert.to_pem().unwrap()).unwrap();
+        std::fs::write(&key_path, pkey.private_key_to_pem_pkcs8().unwrap()).unwrap();
+        (cert_path, key_path)
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn pending_tls_queue_caps_incomplete_handshakes_per_remote_addr() {
+        let (cert_path, key_path) = self_signed_cert_files("pending-tls.test");
+        let mut server = test_server();
+        server
+            .listen_tls("127.0.0.1:0", cert_path.to_str().unwrap(), key_path.to_str().unwrap())
+            .unwrap();
+
+        let port = {
+            let mut addr: libc::sockaddr_in = unsafe { std::mem::zeroed() };
+            let mut len = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
+            let rc = unsafe {
+                libc::getsockname(
+                    server.server_fd,
+                    &mut addr as *mut _ as *mut libc::sockaddr,
+                    &mut len,
+                )
+            };
+            assert_eq!(rc, 0);
+            u16::from_be(addr.sin_port)
+        };
+        let addr = format!("127.0.0.1:{port}");
+
+        let mut clients = Vec::new();
+        for _ in 0..(MAX_PENDING_TLS_PER_ADDR + 2) {
+            clients.push(std::net::TcpStream::connect(&addr).unwrap());
+            server.accept_new_connections();
+        }
+
+        assert!(
+            server.pending_tls_count_for_addr(&addr) <= MAX_PENDING_TLS_PER_ADDR,
+            "one peer must not monopolize the pending TLS queue"
+        );
+        assert!(
+            server.pending_tls_count() <= MAX_PENDING_TLS_HANDSHAKES,
+            "global pending TLS cap must hold"
+        );
+
+        let _ = std::fs::remove_file(cert_path);
+        let _ = std::fs::remove_file(key_path);
     }
 }

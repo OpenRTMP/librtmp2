@@ -355,6 +355,8 @@ impl Conn {
     }
 
     fn clear_detected_stream_metadata(&mut self) {
+        self.detected_video_codec = None;
+        self.detected_audio_codec = None;
         self.detected_video_width = None;
         self.detected_video_height = None;
         self.detected_video_framerate = None;
@@ -388,7 +390,7 @@ impl Conn {
                 .as_ref()
                 .map(|s| s.is_publishing)
                 .unwrap_or(false);
-        if relay_metadata && !self.media_allowed(FrameType::Script) {
+        if relay_metadata && !self.media_allowed(FrameType::Script, None) {
             return Err(ErrorCode::Auth);
         }
         self.handle_data_message(payload)?;
@@ -449,14 +451,9 @@ impl Conn {
         Ok(())
     }
 
-    fn media_allowed(&self, frame_type: FrameType) -> bool {
+    fn media_allowed(&self, frame_type: FrameType, codec: Option<&str>) -> bool {
         let Some(cb) = self.on_media_cb else {
             return true;
-        };
-        let codec = match frame_type {
-            FrameType::Video => self.detected_video_codec.as_deref(),
-            FrameType::Audio => self.detected_audio_codec.as_deref(),
-            _ => None,
         };
         cb(self.conn_id, frame_type, codec)
     }
@@ -491,17 +488,23 @@ impl Conn {
             normalize_modex_payload(payload, self.negotiated_caps.caps_ex_mask);
         let parse_payload = normalized_payload.as_ref();
 
+        let current_codec = match frame_type {
+            FrameType::Video => detect_video_codec(parse_payload),
+            FrameType::Audio => detect_audio_codec(parse_payload),
+            _ => None,
+        };
+
         match frame_type {
             FrameType::Video if self.detected_video_codec.is_none() => {
-                self.detected_video_codec = detect_video_codec(parse_payload);
+                self.detected_video_codec = current_codec.clone();
             }
             FrameType::Audio if self.detected_audio_codec.is_none() => {
-                self.detected_audio_codec = detect_audio_codec(parse_payload);
+                self.detected_audio_codec = current_codec.clone();
             }
             _ => {}
         }
 
-        if !self.media_allowed(frame_type) {
+        if !self.media_allowed(frame_type, current_codec.as_deref()) {
             return Err(ErrorCode::Auth);
         }
 
@@ -2604,6 +2607,50 @@ mod tests {
         conn.handle_media_frame(1, FrameType::Video, 0, &payload)
             .unwrap();
         assert_eq!(SEEN_CODEC.lock().unwrap().as_deref(), Some("avc1"));
+    }
+
+    #[test]
+    fn on_media_cb_authorizes_each_frame_codec_not_first_frame_pin() {
+        fn allow_avc1_only(_: u64, frame_type: FrameType, codec: Option<&str>) -> bool {
+            if frame_type == FrameType::Video {
+                return codec == Some("avc1");
+            }
+            true
+        }
+
+        let mut conn = Conn::new();
+        conn.relay_enabled = true;
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+        conn.current_stream.as_mut().unwrap().is_publishing = true;
+        conn.on_media_cb = Some(allow_avc1_only);
+
+        let avc1_multitrack = vec![0x86, 0x10, b'a', b'v', b'c', b'1', 0, 0, 0, 1, 0xAA];
+        conn.handle_media_frame(1, FrameType::Video, 0, &avc1_multitrack)
+            .unwrap();
+        assert_eq!(conn.pending_relay.len(), 1);
+
+        let vp09 = vec![0x90, b'v', b'p', b'0', b'9'];
+        assert_eq!(
+            conn.handle_media_frame(1, FrameType::Video, 1, &vp09),
+            Err(ErrorCode::Auth)
+        );
+        assert_eq!(conn.pending_relay.len(), 1);
+    }
+
+    #[test]
+    fn evict_active_publish_route_clears_detected_codecs() {
+        let mut conn = Conn::new();
+        conn.relay_enabled = true;
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+        conn.current_stream.as_mut().unwrap().is_publishing = true;
+        let payload = vec![0x86, 0x10, b'a', b'v', b'c', b'1', 0, 0, 0, 1, 0xAA];
+        conn.handle_media_frame(1, FrameType::Video, 0, &payload)
+            .unwrap();
+        assert_eq!(conn.detected_video_codec.as_deref(), Some("avc1"));
+
+        conn.evict_active_publish_route();
+        assert!(conn.detected_video_codec.is_none());
+        assert!(conn.detected_audio_codec.is_none());
     }
 
     #[test]
