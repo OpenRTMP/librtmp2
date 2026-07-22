@@ -44,10 +44,13 @@ const MAX_CACHED_KEYFRAME_BYTES: usize = 2 * 1024 * 1024;
 #[cfg(feature = "tls")]
 const MAX_PENDING_TLS_HANDSHAKES: usize = 128;
 
-/// Maximum incomplete TLS handshakes retained per remote address. Prevents one
-/// peer from monopolizing the global pending queue.
+/// Default max incomplete TLS handshakes retained per remote address, used
+/// when `ServerConfig::max_pending_tls_per_addr` is `0` (unset). Prevents one
+/// peer from monopolizing the global pending queue. Deployments where many
+/// clients share one source IP (NAT/load balancer/proxy) can raise this via
+/// `ServerConfig::max_pending_tls_per_addr`.
 #[cfg(feature = "tls")]
-const MAX_PENDING_TLS_PER_ADDR: usize = 4;
+pub const DEFAULT_MAX_PENDING_TLS_PER_ADDR: usize = 4;
 
 /// Drop TLS handshakes that do not complete within this overall budget.
 #[cfg(feature = "tls")]
@@ -390,6 +393,17 @@ impl Server {
             .unwrap_or(remote_addr)
     }
 
+    /// Effective per-address pending TLS cap: `ServerConfig::max_pending_tls_per_addr`
+    /// if positive, otherwise `DEFAULT_MAX_PENDING_TLS_PER_ADDR`.
+    #[cfg(feature = "tls")]
+    fn max_pending_tls_per_addr(&self) -> usize {
+        if self.config.max_pending_tls_per_addr > 0 {
+            self.config.max_pending_tls_per_addr as usize
+        } else {
+            DEFAULT_MAX_PENDING_TLS_PER_ADDR
+        }
+    }
+
     #[cfg(feature = "tls")]
     fn queue_pending_tls(&mut self, conn: PendingTlsConnection) {
         let same_addr = self
@@ -397,7 +411,7 @@ impl Server {
             .iter()
             .filter(|pending| pending.remote_ip == conn.remote_ip)
             .count();
-        if same_addr >= MAX_PENDING_TLS_PER_ADDR {
+        if same_addr >= self.max_pending_tls_per_addr() {
             if let Some(i) = self
                 .pending_tls
                 .iter()
@@ -1350,6 +1364,7 @@ mod tests {
             tls_key_file: std::ptr::null(),
             tls_ca_file: std::ptr::null(),
             tls_insecure: 0,
+            max_pending_tls_per_addr: 0,
         })
         .unwrap()
     }
@@ -1505,6 +1520,7 @@ mod tests {
             tls_key_file: std::ptr::null(),
             tls_ca_file: std::ptr::null(),
             tls_insecure: 0,
+            max_pending_tls_per_addr: 0,
         };
         let mut server = Server::new(config).unwrap();
         server.listen("127.0.0.1:0").unwrap();
@@ -1548,6 +1564,7 @@ mod tests {
             tls_key_file: std::ptr::null(),
             tls_ca_file: std::ptr::null(),
             tls_insecure: 0,
+            max_pending_tls_per_addr: 0,
         };
         let mut server = Server::new(config).unwrap();
         server.listen("127.0.0.1:0").unwrap();
@@ -1956,7 +1973,7 @@ mod tests {
         let addr = format!("127.0.0.1:{port}");
 
         let mut clients = Vec::new();
-        for _ in 0..(MAX_PENDING_TLS_PER_ADDR + 2) {
+        for _ in 0..(DEFAULT_MAX_PENDING_TLS_PER_ADDR + 2) {
             clients.push(std::net::TcpStream::connect(&addr).unwrap());
             server.accept_new_connections();
         }
@@ -1967,12 +1984,63 @@ mod tests {
         // it by opening from a fresh source port each time.
         assert_eq!(
             server.pending_tls_count_for_addr("127.0.0.1"),
-            MAX_PENDING_TLS_PER_ADDR,
+            DEFAULT_MAX_PENDING_TLS_PER_ADDR,
             "one peer should retain exactly the per-IP pending TLS cap"
         );
         assert!(
             server.pending_tls_count() <= MAX_PENDING_TLS_HANDSHAKES,
             "global pending TLS cap must hold"
+        );
+
+        let _ = std::fs::remove_file(cert_path);
+        let _ = std::fs::remove_file(key_path);
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn pending_tls_per_addr_cap_is_configurable() {
+        const CUSTOM_CAP: usize = 2;
+        let (cert_path, key_path) = self_signed_cert_files("pending-tls-custom-cap.test");
+        let mut server = Server::new(ServerConfig {
+            max_connections: 8,
+            chunk_size: 128,
+            tls_enabled: 0,
+            tls_cert_file: std::ptr::null(),
+            tls_key_file: std::ptr::null(),
+            tls_ca_file: std::ptr::null(),
+            tls_insecure: 0,
+            max_pending_tls_per_addr: CUSTOM_CAP as std::ffi::c_int,
+        })
+        .unwrap();
+        server
+            .listen_tls("127.0.0.1:0", cert_path.to_str().unwrap(), key_path.to_str().unwrap())
+            .unwrap();
+
+        let port = {
+            let mut addr: libc::sockaddr_in = unsafe { std::mem::zeroed() };
+            let mut len = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
+            let rc = unsafe {
+                libc::getsockname(
+                    server.server_fd,
+                    &mut addr as *mut _ as *mut libc::sockaddr,
+                    &mut len,
+                )
+            };
+            assert_eq!(rc, 0);
+            u16::from_be(addr.sin_port)
+        };
+        let addr = format!("127.0.0.1:{port}");
+
+        let mut clients = Vec::new();
+        for _ in 0..(CUSTOM_CAP + 2) {
+            clients.push(std::net::TcpStream::connect(&addr).unwrap());
+            server.accept_new_connections();
+        }
+
+        assert_eq!(
+            server.pending_tls_count_for_addr("127.0.0.1"),
+            CUSTOM_CAP,
+            "a configured max_pending_tls_per_addr must override the built-in default"
         );
 
         let _ = std::fs::remove_file(cert_path);

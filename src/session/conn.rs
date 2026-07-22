@@ -149,6 +149,9 @@ pub struct Conn {
     pub max_pending_relay_bytes: usize,
     pub on_frame_cb: Option<fn(&Frame)>,
     /// When set, must return true before audio/video is queued for relay.
+    /// For a multitrack (`ManyTracks`/`ManyTracksManyCodecs`) container, this
+    /// is called once per track with that track's codec, not once per frame —
+    /// any single denial rejects the whole frame.
     pub on_media_cb: Option<fn(u64, FrameType, Option<&str>) -> bool>,
     pub on_connect_cb: Option<fn()>,
     pub on_publish_cb: Option<fn(conn_id: u64, app: &str, stream_name: &str) -> bool>,

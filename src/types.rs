@@ -288,6 +288,12 @@ pub struct ServerConfig {
     pub tls_ca_file: *const u8,
     /// Client: skip certificate verification
     pub tls_insecure: c_int,
+    /// Max incomplete TLS handshakes retained per remote peer IP before the
+    /// oldest is evicted to admit a new one. `0` (or negative) uses the
+    /// built-in default (see `server::DEFAULT_MAX_PENDING_TLS_PER_ADDR`).
+    /// Appended field: see `docs/abi-policy.md` (config struct fields may be
+    /// appended between minor releases).
+    pub max_pending_tls_per_addr: c_int,
 }
 
 /* ── Callback types ── */

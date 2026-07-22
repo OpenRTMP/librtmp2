@@ -13,6 +13,23 @@ begin at `1.0.0`.
 
 ## [Unreleased]
 
+### Security
+- The TLS pending-handshake queue's per-address cap is now keyed on the peer
+  IP instead of the full `ip:port` peer address, so a single host can no
+  longer bypass it by opening incomplete RTMPS handshakes from distinct
+  ephemeral source ports.
+- `on_media_cb` codec authorization now checks every track's codec inside a
+  multitrack (`ManyTracks`/`ManyTracksManyCodecs`) container instead of only
+  the first, closing a path where a disallowed codec could ride along
+  behind an allowed first track.
+
+### Added
+- `ServerConfig::max_pending_tls_per_addr` — configures the per-peer-IP cap
+  on incomplete TLS handshakes (default `4` when `0`/unset). Deployments
+  where many clients share one source IP (NAT, load balancer, proxy) can
+  raise this to avoid spurious RTMPS handshake evictions under bursty
+  connect patterns.
+
 ## [0.4.2] — 2026-07-21
 
 ### Security

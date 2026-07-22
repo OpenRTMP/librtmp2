@@ -39,6 +39,7 @@ fn main() {
         tls_key_file: std::ptr::null(),
         tls_ca_file: std::ptr::null(),
         tls_insecure: 0,
+        max_pending_tls_per_addr: 0,
     };
 
     let mut server = Server::new(config).expect("failed to create server");

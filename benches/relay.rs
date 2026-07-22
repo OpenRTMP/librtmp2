@@ -33,6 +33,7 @@ fn relay_n_frames(frame_count: u32) {
         tls_key_file: std::ptr::null(),
         tls_ca_file: std::ptr::null(),
         tls_insecure: 0,
+        max_pending_tls_per_addr: 0,
     })
     .unwrap();
     server.listen(&format!("127.0.0.1:{RTMP_PORT}")).unwrap();
