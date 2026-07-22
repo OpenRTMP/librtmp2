@@ -98,6 +98,10 @@ struct ListenerEntry {
 struct PendingTlsConnection {
     handshake: PendingTlsAccept,
     remote_addr: String,
+    /// Peer IP only (no port), used to key the per-address pending cap so a
+    /// single host can't bypass it by opening connections from distinct
+    /// ephemeral source ports.
+    remote_ip: String,
     deadline: Instant,
 }
 
@@ -316,9 +320,10 @@ impl Server {
 
     #[cfg(all(test, feature = "tls"))]
     fn pending_tls_count_for_addr(&self, remote_addr: &str) -> usize {
+        let remote_ip = Self::peer_ip(remote_addr);
         self.pending_tls
             .iter()
-            .filter(|pending| pending.remote_addr == remote_addr)
+            .filter(|pending| pending.remote_ip == remote_ip)
             .count()
     }
 
@@ -373,18 +378,30 @@ impl Server {
         }
     }
 
+    /// Strips the port from a `SocketAddr::to_string()` output (e.g.
+    /// `"1.2.3.4:5678"` -> `"1.2.3.4"`, `"[::1]:5678"` -> `"[::1]"`) so the
+    /// per-address pending cap is keyed on the peer host, not the peer's
+    /// ephemeral source port.
+    #[cfg(feature = "tls")]
+    fn peer_ip(remote_addr: &str) -> &str {
+        remote_addr
+            .rsplit_once(':')
+            .map(|(ip, _port)| ip)
+            .unwrap_or(remote_addr)
+    }
+
     #[cfg(feature = "tls")]
     fn queue_pending_tls(&mut self, conn: PendingTlsConnection) {
         let same_addr = self
             .pending_tls
             .iter()
-            .filter(|pending| pending.remote_addr == conn.remote_addr)
+            .filter(|pending| pending.remote_ip == conn.remote_ip)
             .count();
         if same_addr >= MAX_PENDING_TLS_PER_ADDR {
             if let Some(i) = self
                 .pending_tls
                 .iter()
-                .position(|pending| pending.remote_addr == conn.remote_addr)
+                .position(|pending| pending.remote_ip == conn.remote_ip)
             {
                 self.pending_tls.remove(i);
             }
@@ -463,6 +480,7 @@ impl Server {
                         self.pending_tls.push(PendingTlsConnection {
                             handshake,
                             remote_addr: pending_conn.remote_addr,
+                            remote_ip: pending_conn.remote_ip,
                             deadline: pending_conn.deadline,
                         });
                     }
@@ -512,9 +530,11 @@ impl Server {
                                         self.add_connection(transport, remote_addr);
                                     }
                                     Ok(TlsAcceptOutcome::WouldBlock(handshake)) => {
+                                        let remote_ip = Self::peer_ip(&remote_addr).to_string();
                                         self.queue_pending_tls(PendingTlsConnection {
                                             handshake,
                                             remote_addr,
+                                            remote_ip,
                                             deadline: Self::tls_handshake_deadline(),
                                         });
                                     }
@@ -1941,8 +1961,12 @@ mod tests {
             server.accept_new_connections();
         }
 
+        // Every client above connects from "127.0.0.1" but through a distinct
+        // ephemeral source port, so the cap must be keyed on the peer IP —
+        // not the full `ip:port` peer address — or a single host can bypass
+        // it by opening from a fresh source port each time.
         assert!(
-            server.pending_tls_count_for_addr(&addr) <= MAX_PENDING_TLS_PER_ADDR,
+            server.pending_tls_count_for_addr("127.0.0.1") <= MAX_PENDING_TLS_PER_ADDR,
             "one peer must not monopolize the pending TLS queue"
         );
         assert!(
@@ -1952,5 +1976,15 @@ mod tests {
 
         let _ = std::fs::remove_file(cert_path);
         let _ = std::fs::remove_file(key_path);
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn peer_ip_strips_port_from_socket_addr_string() {
+        assert_eq!(Server::peer_ip("127.0.0.1:54321"), "127.0.0.1");
+        assert_eq!(Server::peer_ip("[::1]:54321"), "[::1]");
+        assert_eq!(Server::peer_ip("[2001:db8::1]:443"), "[2001:db8::1]");
+        // No port present: falls back to the input unchanged.
+        assert_eq!(Server::peer_ip("127.0.0.1"), "127.0.0.1");
     }
 }

@@ -504,7 +504,31 @@ impl Conn {
             _ => {}
         }
 
-        if !self.media_allowed(frame_type, current_codec.as_deref()) {
+        let is_multitrack = is_multitrack_container(frame_type, parse_payload);
+
+        if is_multitrack {
+            // A `ManyTracksManyCodecs` container can carry a different codec
+            // per track; `current_codec` only reflects the first one. Check
+            // every track's codec so a publisher can't smuggle a disallowed
+            // codec past authorization by pairing it with an allowed first
+            // track.
+            let mut auth_denied = false;
+            let tracks_valid = foreach_track(frame_type, parse_payload, |track| {
+                if auth_denied {
+                    return;
+                }
+                let track_codec = std::str::from_utf8(&track.fourcc).ok();
+                if !self.media_allowed(frame_type, track_codec) {
+                    auth_denied = true;
+                }
+            });
+            if !tracks_valid {
+                return Err(ErrorCode::Protocol);
+            }
+            if auth_denied {
+                return Err(ErrorCode::Auth);
+            }
+        } else if !self.media_allowed(frame_type, current_codec.as_deref()) {
             return Err(ErrorCode::Auth);
         }
 
@@ -512,7 +536,6 @@ impl Conn {
             .media_bytes_received
             .saturating_add(payload.len() as u64);
 
-        let is_multitrack = is_multitrack_container(frame_type, parse_payload);
         let cb = self.on_frame_cb;
         let parsed_multitrack = foreach_track(frame_type, parse_payload, |track| {
             if let Some(cb) = cb {
@@ -2635,6 +2658,38 @@ mod tests {
             Err(ErrorCode::Auth)
         );
         assert_eq!(conn.pending_relay.len(), 1);
+    }
+
+    #[test]
+    fn on_media_cb_authorizes_every_track_in_many_codecs_container() {
+        fn allow_avc1_only(_: u64, frame_type: FrameType, codec: Option<&str>) -> bool {
+            if frame_type == FrameType::Video {
+                return codec == Some("avc1");
+            }
+            true
+        }
+
+        let mut conn = Conn::new();
+        conn.relay_enabled = true;
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+        conn.current_stream.as_mut().unwrap().is_publishing = true;
+        conn.on_media_cb = Some(allow_avc1_only);
+
+        // ManyTracksManyCodecs container: first track is the allowed "avc1",
+        // second track is the disallowed "vp09". Authorization must inspect
+        // every track, not just the first, or a publisher could smuggle the
+        // disallowed codec past `on_media_cb` by pairing it with an allowed
+        // first track.
+        let mixed_codec_frame = vec![
+            0x86, 0x20, // multitrack video, type=ManyTracksManyCodecs
+            b'a', b'v', b'c', b'1', 0x00, 0x00, 0x00, 0x01, 0xAA, // track 0: avc1
+            b'v', b'p', b'0', b'9', 0x01, 0x00, 0x00, 0x01, 0xBB, // track 1: vp09
+        ];
+        assert_eq!(
+            conn.handle_media_frame(1, FrameType::Video, 0, &mixed_codec_frame),
+            Err(ErrorCode::Auth)
+        );
+        assert!(conn.pending_relay.is_empty());
     }
 
     #[test]
