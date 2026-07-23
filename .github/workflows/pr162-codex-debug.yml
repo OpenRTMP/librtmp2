@@ -1,0 +1,38 @@
+name: Diagnose PR 162 Codex runner
+
+on:
+  pull_request:
+    types: [synchronize]
+
+permissions:
+  contents: write
+
+jobs:
+  diagnose:
+    if: github.event.pull_request.number == 162 && github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          fetch-depth: 1
+          show-progress: false
+
+      - name: Capture extraction result
+        shell: bash
+        run: |
+          set +e
+          sed -n "/python3 <<'PY'/,/^          PY$/p" .github/workflows/pr162-codex-fixes.yml \
+            | sed '1d;$d;s/^          //' > .codex-apply.py 2>.codex-diagnostic.txt
+          extract_status=$?
+          echo "extract_status=$extract_status" >> .codex-diagnostic.txt
+          wc -l .codex-apply.py >> .codex-diagnostic.txt
+          python3 -m py_compile .codex-apply.py >> .codex-diagnostic.txt 2>&1
+          echo "compile_status=$?" >> .codex-diagnostic.txt
+          python3 .codex-apply.py >> .codex-diagnostic.txt 2>&1
+          echo "run_status=$?" >> .codex-diagnostic.txt
+          git config user.name "openai-codex[bot]"
+          git config user.email "openai-codex[bot]@users.noreply.github.com"
+          git add .codex-apply.py .codex-diagnostic.txt
+          git commit -m "chore: capture Codex patch diagnostics"
+          git push origin HEAD:${{ github.head_ref }}
