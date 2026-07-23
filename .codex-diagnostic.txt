@@ -1,0 +1,10 @@
+extract_status=0
+568 .codex-apply.py
+compile_status=0
+src/client/mod.rs: expected exactly one match, found 0
+--- old ---
+                            if msg.msg_type_id == msg_dispatch::RTMP_MSG_AMF3_DATA
+                      && payload.len() > 1
+                      && payload[0] == 0x00
+
+run_status=1
