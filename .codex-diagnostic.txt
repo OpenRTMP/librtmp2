@@ -1,10 +1,6 @@
-extract_status=0
-568 .codex-apply.py
-compile_status=0
-src/client/mod.rs: expected exactly one match, found 0
+src/session/conn.rs: expected exactly one match, found 2
 --- old ---
-                            if msg.msg_type_id == msg_dispatch::RTMP_MSG_AMF3_DATA
-                      && payload.len() > 1
-                      && payload[0] == 0x00
+                    if flag && !was_enabled {
+                        self.request_init_replay();
+                    }
 
-run_status=1
