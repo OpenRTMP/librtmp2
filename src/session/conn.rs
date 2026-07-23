@@ -63,6 +63,9 @@ struct QueuedPing {
 /// Cap inbound Ping-Request reflections per connection to prevent trivial
 /// outbound bandwidth/CPU amplification from unauthenticated peers.
 const MAX_INBOUND_PING_RESPONSES: usize = 8;
+/// Minimum wall-clock gap between init-frame replay requests triggered by
+/// `receiveAudio` / `receiveVideo` re-enable on an already-playing stream.
+const INIT_REPLAY_COOLDOWN: Duration = Duration::from_secs(1);
 const INBOUND_PING_WINDOW: Duration = Duration::from_secs(1);
 /// Close inbound sessions that never complete the AMF `connect` exchange.
 /// Matches the RTMPS accept deadline so a peer cannot hold a connection slot
@@ -134,6 +137,9 @@ pub struct Conn {
     pub send_mutex: Mutex<()>,
     pub pending_relay: Vec<RelayFrame>,
     pub needs_init_frames: bool,
+    /// Last time init frames were replayed to this player (rate-limits
+    /// `receiveAudio` / `receiveVideo` re-enable amplification).
+    last_init_replay: Option<Instant>,
     pub detected_video_codec: Option<String>,
     pub detected_audio_codec: Option<String>,
     pub detected_video_width: Option<u32>,
@@ -221,6 +227,7 @@ impl Conn {
             send_mutex: Mutex::new(()),
             pending_relay: Vec::new(),
             needs_init_frames: false,
+            last_init_replay: None,
             detected_video_codec: None,
             detected_audio_codec: None,
             detected_video_width: None,
@@ -459,6 +466,25 @@ impl Conn {
             return true;
         };
         cb(self.conn_id, frame_type, codec)
+    }
+
+    /// Request a one-shot init-frame replay for a playing client, subject to
+    /// a short cooldown so rapid `receiveAudio` / `receiveVideo` toggles cannot
+    /// force multi-megabyte outbound bursts every poll tick.
+    fn request_init_replay(&mut self) {
+        let now = Instant::now();
+        if let Some(last) = self.last_init_replay {
+            if now.duration_since(last) < INIT_REPLAY_COOLDOWN {
+                return;
+            }
+        }
+        self.needs_init_frames = true;
+    }
+
+    /// Record that init frames were just replayed (called by the server poll
+    /// loop after a successful cache replay).
+    pub(crate) fn note_init_replay(&mut self) {
+        self.last_init_replay = Some(Instant::now());
     }
 
     fn handle_media_frame(
@@ -1436,12 +1462,19 @@ impl Conn {
                     // for), and clear is_publishing so it can't be
                     // mistaken for an active publish by a later command.
                     self.evict_active_publish_route();
+                    let already_playing_same = self
+                        .current_stream
+                        .as_ref()
+                        .map(|s| s.is_playing && s.name == name_str)
+                        .unwrap_or(false);
                     if let Some(ref mut stream) = self.current_stream {
                         stream.is_playing = true;
                         stream.is_publishing = false;
                         stream.name = name_str;
                     }
-                    self.needs_init_frames = true;
+                    if !already_playing_same {
+                        self.request_init_replay();
+                    }
                     let _ = state_machine::conn_transition(&mut self.state, ConnState::Playing);
                     let sid = self
                         .current_stream
@@ -1512,7 +1545,7 @@ impl Conn {
                         stream.receive_audio = flag;
                     }
                     if flag && !was_enabled {
-                        self.needs_init_frames = true;
+                        self.request_init_replay();
                     }
                 }
             }
@@ -1527,7 +1560,7 @@ impl Conn {
                         stream.receive_video = flag;
                     }
                     if flag && !was_enabled {
-                        self.needs_init_frames = true;
+                        self.request_init_replay();
                     }
                 }
             }
@@ -3047,6 +3080,27 @@ mod tests {
         conn.recv(&[0u8; 2048]).unwrap();
         assert_eq!(conn.bytes_received, u32::MAX as u64 + 2048);
         assert_eq!(conn.bytes_at_last_ack, conn.bytes_received);
+    }
+
+    #[test]
+    fn repeated_play_on_same_stream_does_not_request_init_replay() {
+        let mut conn = Conn::new();
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+        {
+            let stream = conn.current_stream.as_mut().unwrap();
+            stream.is_playing = true;
+            stream.name = "room".to_string();
+        }
+        conn.needs_init_frames = false;
+
+        let mut buf = Buffer::new();
+        crate::amf::amf0::write_string(&mut buf, "play").unwrap();
+        crate::amf::amf0::write_number(&mut buf, 1.0).unwrap();
+        crate::amf::amf0::write_null(&mut buf).unwrap();
+        crate::amf::amf0::write_string(&mut buf, "room").unwrap();
+        conn.handle_command(buf.as_slice()).unwrap();
+
+        assert!(!conn.needs_init_frames);
     }
 
     #[test]

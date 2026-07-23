@@ -574,16 +574,17 @@ impl Client {
                     } else if msg.msg_type_id == msg_dispatch::RTMP_MSG_AMF0_DATA
                         || msg.msg_type_id == msg_dispatch::RTMP_MSG_AMF3_DATA
                     {
-                        let data_payload = if msg.msg_type_id == msg_dispatch::RTMP_MSG_AMF3_DATA
-                            && !payload.is_empty()
-                            && payload[0] == 0x00
-                        {
-                            payload[1..].to_vec()
-                        } else {
-                            payload
-                        };
+                        let data_payload: &[u8] =
+                            if msg.msg_type_id == msg_dispatch::RTMP_MSG_AMF3_DATA
+                                && payload.len() > 1
+                                && payload[0] == 0x00
+                            {
+                                &payload[1..]
+                            } else {
+                                &payload
+                            };
                         if let Some(cb) = self.on_frame_cb {
-                            self.deliver_script_frame_cb(cb, msg.timestamp, &data_payload);
+                            self.deliver_script_frame_cb(cb, msg.timestamp, data_payload);
                         }
                     } else if msg.msg_type_id == msg_dispatch::RTMP_MSG_AGGREGATE {
                         self.handle_aggregate_message(msg.timestamp, &payload)?;

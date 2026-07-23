@@ -22,6 +22,8 @@ use crate::types::*;
 
 /// Maximum distinct (app, stream_name) cache entries retained server-wide.
 const MAX_STREAM_CACHE_ENTRIES: usize = 1024;
+/// Maximum distinct (app, stream) cache keys a single publisher may hold.
+const MAX_STREAM_CACHE_KEYS_PER_PUBLISHER: usize = 64;
 
 /// Maximum total bytes retained across all stream_cache entries server-wide.
 const MAX_STREAM_CACHE_BYTES: usize = 64 * 1024 * 1024;
@@ -697,6 +699,7 @@ impl Server {
                 continue;
             }
             conn.needs_init_frames = false;
+            conn.note_init_replay();
             let key = (conn.app.clone(), conn.relay_route_key());
             let receive_audio = conn
                 .current_stream
@@ -940,6 +943,31 @@ impl Server {
         }
     }
 
+    /// Drop another cache entry owned by `publisher_conn_id`, if any.
+    fn evict_stream_cache_for_publisher(
+        &mut self,
+        publisher_conn_id: u64,
+        except_key: &(String, String),
+    ) -> bool {
+        let Some(keys) = self.publisher_cache_keys.get(&publisher_conn_id).cloned() else {
+            return false;
+        };
+        for key in keys {
+            if &key != except_key {
+                self.evict_stream_cache_key(&key);
+                return true;
+            }
+        }
+        false
+    }
+
+    fn publisher_cache_key_count(&self, publisher_conn_id: u64) -> usize {
+        self.publisher_cache_keys
+            .get(&publisher_conn_id)
+            .map(|keys| keys.len())
+            .unwrap_or(0)
+    }
+
     fn stream_cache_is_empty(cache: &StreamCache) -> bool {
         cache.avc_header.is_none()
             && cache.video_track_headers.is_empty()
@@ -971,32 +999,38 @@ impl Server {
         key: &(String, String),
         incoming_len: usize,
         existing_field_len: usize,
+        publisher_conn_id: u64,
     ) -> bool {
-        if self.stream_cache.len() >= MAX_STREAM_CACHE_ENTRIES
-            && !self.stream_cache.contains_key(key)
+        let is_new_key = !self.stream_cache.contains_key(key);
+        if is_new_key
+            && self.publisher_cache_key_count(publisher_conn_id)
+                >= MAX_STREAM_CACHE_KEYS_PER_PUBLISHER
+            && !self.evict_stream_cache_for_publisher(publisher_conn_id, key)
         {
-            if let Some(evict) = self.stream_cache.keys().find(|k| *k != key).cloned() {
-                self.evict_stream_cache_key(&evict);
+            return false;
+        }
+
+        if self.stream_cache.len() >= MAX_STREAM_CACHE_ENTRIES && is_new_key {
+            if !self.evict_stream_cache_for_publisher(publisher_conn_id, key) {
+                return false;
             }
         }
 
         let mut projected_total = self.stream_cache_bytes() + incoming_len - existing_field_len;
         let max_cache_bytes = self.resource_limits.max_stream_cache_bytes;
         if projected_total > max_cache_bytes {
-            let victims: Vec<_> = self
-                .stream_cache
-                .keys()
-                .filter(|k| *k != key)
-                .cloned()
-                .collect();
-            for victim in victims {
-                if projected_total <= max_cache_bytes {
-                    break;
+            while projected_total > max_cache_bytes
+                && self.evict_stream_cache_for_publisher(publisher_conn_id, key)
+            {
+                if let Some(cache) = self.stream_cache.get(key) {
+                    projected_total = self.stream_cache_bytes() + incoming_len
+                        - Self::stream_cache_entry_bytes(cache);
+                } else {
+                    projected_total = self.stream_cache_bytes() + incoming_len;
                 }
-                if let Some(cache) = self.stream_cache.get(&victim) {
-                    projected_total -= Self::stream_cache_entry_bytes(cache);
-                }
-                self.evict_stream_cache_key(&victim);
+            }
+            if projected_total > max_cache_bytes {
+                return false;
             }
         }
 
@@ -1022,7 +1056,12 @@ impl Server {
                 .and_then(|cache| cache.metadata.as_ref())
                 .map(|v| v.len())
                 .unwrap_or(0);
-            if !self.reserve_stream_cache_storage(&key, frame.payload.len(), existing_field_len) {
+            if !self.reserve_stream_cache_storage(
+                &key,
+                frame.payload.len(),
+                existing_field_len,
+                frame.publisher_conn_id,
+            ) {
                 return;
             }
             let cache = self
@@ -1153,7 +1192,12 @@ impl Server {
                 }
             })
             .unwrap_or(0);
-        if !self.reserve_stream_cache_storage(&key, frame.payload.len(), existing_field_len) {
+        if !self.reserve_stream_cache_storage(
+            &key,
+            frame.payload.len(),
+            existing_field_len,
+            frame.publisher_conn_id,
+        ) {
             return;
         }
 
@@ -1370,10 +1414,19 @@ mod tests {
     }
 
     fn relay_frame(frame_type: FrameType, payload: Vec<u8>) -> crate::session::conn::RelayFrame {
+        relay_frame_for_publisher(1, "stream", frame_type, payload)
+    }
+
+    fn relay_frame_for_publisher(
+        publisher_conn_id: u64,
+        stream_name: &str,
+        frame_type: FrameType,
+        payload: Vec<u8>,
+    ) -> crate::session::conn::RelayFrame {
         crate::session::conn::RelayFrame {
             app: "live".to_string(),
-            stream_name: "stream".to_string(),
-            publisher_conn_id: 1,
+            stream_name: stream_name.to_string(),
+            publisher_conn_id,
             frame_type,
             timestamp: 0,
             cache_payload: None,
@@ -1447,6 +1500,35 @@ mod tests {
         server.cache_relay_frame(&relay_frame(FrameType::Script, payload));
         let key = ("live".to_string(), "stream".to_string());
         assert!(server.stream_cache.get(&key).unwrap().metadata.is_some());
+    }
+
+    #[test]
+    fn stream_cache_eviction_is_scoped_to_publisher() {
+        let mut server = test_server();
+        let legit_payload = vec![0x17, 0x00, 0xAA];
+        server.cache_relay_frame(&relay_frame_for_publisher(
+            1,
+            "legit",
+            FrameType::Video,
+            legit_payload,
+        ));
+        let legit_key = ("live".to_string(), "legit".to_string());
+        assert!(server.stream_cache.contains_key(&legit_key));
+
+        for i in 0..=MAX_STREAM_CACHE_KEYS_PER_PUBLISHER {
+            let name = format!("spam-{i}");
+            server.cache_relay_frame(&relay_frame_for_publisher(
+                2,
+                &name,
+                FrameType::Video,
+                vec![0x17, 0x00, 0xBB],
+            ));
+        }
+
+        assert!(
+            server.stream_cache.contains_key(&legit_key),
+            "another publisher's cache entry must not be evicted"
+        );
     }
 
     #[test]
