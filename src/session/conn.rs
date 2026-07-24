@@ -190,8 +190,13 @@ pub struct Conn {
     /// `recv(&[])`) until this clears, or a batch that exceeds the budget can
     /// sit unprocessed until the peer happens to send more bytes.
     budget_exhausted: bool,
-    /// When this inbound TCP session was accepted. Used to reap peers that
-    /// never progress past the legacy handshake / AMF connect setup.
+    /// Start of the current "must become active" grace window: set when
+    /// this inbound TCP session was accepted, and reset every time the
+    /// session goes idle after publishing/playing (`FCUnpublish`,
+    /// `deleteStream`, `closeStream`) so a legitimate client that stops and
+    /// later republishes on the same connection gets a fresh window instead
+    /// of being reaped for the unpublished gap. Used by
+    /// [`Conn::session_setup_timed_out`].
     session_setup_started: Instant,
     /// E-RTMP caps agreed during connect (empty when legacy connect).
     pub negotiated_caps: NegotiatedCaps,
@@ -262,10 +267,14 @@ impl Conn {
         }
     }
 
-    /// True when an inbound peer has held a connection slot without becoming
-    /// an active publisher or player for longer than
-    /// [`RTMP_SESSION_SETUP_TIMEOUT`]. Covers incomplete handshakes *and*
-    /// post-`connect` idle sessions that only answer server pings.
+    /// True when an inbound peer has held a connection slot without being an
+    /// active publisher or player for longer than
+    /// [`RTMP_SESSION_SETUP_TIMEOUT`]. Covers incomplete handshakes, post-
+    /// `connect` idle sessions that only answer server pings, and sessions
+    /// that stopped publishing/playing and haven't resumed within a fresh
+    /// grace window (`session_setup_started` is reset on every such
+    /// transition -- see `FCUnpublish`/`deleteStream`/`closeStream` in
+    /// `handle_command`).
     pub fn session_setup_timed_out(&self) -> bool {
         if self.session_setup_started.elapsed() < RTMP_SESSION_SETUP_TIMEOUT {
             return false;
@@ -1507,6 +1516,14 @@ impl Conn {
                 if let Some(ref mut stream) = self.current_stream {
                     stream.is_publishing = false;
                 }
+                // Give this connection a fresh setup-timeout window now that
+                // it's gone idle, rather than treating the moment it stops
+                // publishing as an immediate setup failure -- otherwise a
+                // client that has been legitimately publishing for a long
+                // time gets reaped the instant it unpublishes if it doesn't
+                // republish within whatever's left of the original 10s
+                // window (see `session_setup_timed_out`).
+                self.session_setup_started = Instant::now();
                 // Clear relay_enabled along with the publish role: with
                 // `defer_media_relay`, the publish handler leaves it
                 // untouched on the next `publish` (the integrator must
@@ -1589,6 +1606,10 @@ impl Conn {
                         stream.is_publishing = false;
                         stream.paused = false;
                     }
+                    // See the matching comment in the FCUnpublish/deleteStream
+                    // arm: give this connection a fresh setup-timeout window
+                    // now that it's gone idle.
+                    self.session_setup_started = Instant::now();
                     self.relay_enabled = false;
                     let _ = self.send_stream_lifecycle_eof(target_id);
                 }
@@ -2469,6 +2490,44 @@ mod tests {
         assert!(
             unpublished.session_setup_timed_out(),
             "peers that unpublished before the deadline must be reaped"
+        );
+    }
+
+    #[test]
+    fn unpublish_grants_a_fresh_setup_timeout_window() {
+        use std::time::{Duration, Instant};
+
+        // Regression test: a client that has been legitimately publishing
+        // for a long time (well past RTMP_SESSION_SETUP_TIMEOUT) must not
+        // be reaped the instant it unpublishes -- it should get a fresh
+        // grace window to republish on the same connection, not be judged
+        // against however little time is left of its original setup
+        // window (which may already be long gone).
+        let mut conn = Conn::new();
+        conn.app = "live".to_string();
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+
+        let mut buf = Buffer::with_capacity(128);
+        command::build_publish(&mut buf, "A", "live").unwrap();
+        conn.handle_command(buf.as_slice()).unwrap();
+        assert!(conn.current_stream.as_ref().unwrap().is_publishing);
+
+        // Simulate having been connected/publishing for a long time already.
+        conn.set_session_setup_started_for_test(Instant::now() - Duration::from_secs(3600));
+        assert!(
+            !conn.session_setup_timed_out(),
+            "an active publisher must not be reaped regardless of connection age"
+        );
+
+        let mut buf = Buffer::with_capacity(128);
+        command::build_fcunpublish(&mut buf, "A").unwrap();
+        conn.handle_command(buf.as_slice()).unwrap();
+        assert!(!conn.current_stream.as_ref().unwrap().is_publishing);
+
+        assert!(
+            !conn.session_setup_timed_out(),
+            "unpublishing must grant a fresh setup-timeout window, not reap \
+             immediately using up whatever remained of the original window"
         );
     }
 
