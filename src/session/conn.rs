@@ -1512,6 +1512,10 @@ impl Conn {
                 // until the TCP connection eventually closes, so a
                 // different connection can immediately republish the same
                 // (app, stream) route.
+                let was_publishing = self
+                    .current_stream
+                    .as_ref()
+                    .is_some_and(|s| s.is_publishing);
                 self.evict_active_publish_route();
                 if let Some(ref mut stream) = self.current_stream {
                     stream.is_publishing = false;
@@ -1522,8 +1526,14 @@ impl Conn {
                 // client that has been legitimately publishing for a long
                 // time gets reaped the instant it unpublishes if it doesn't
                 // republish within whatever's left of the original 10s
-                // window (see `session_setup_timed_out`).
-                self.session_setup_started = Instant::now();
+                // window (see `session_setup_timed_out`). Only reset when
+                // this was a genuine active->idle transition: a peer that
+                // was never publishing gets no reset here, so it can't use
+                // repeated FCUnpublish/deleteStream calls to keep dodging
+                // the reaper forever.
+                if was_publishing {
+                    self.session_setup_started = Instant::now();
+                }
                 // Clear relay_enabled along with the publish role: with
                 // `defer_media_relay`, the publish handler leaves it
                 // untouched on the next `publish` (the integrator must
@@ -1600,6 +1610,10 @@ impl Conn {
                     .or_else(|| self.current_stream.as_ref().map(|s| s.stream_id))
                     .unwrap_or(0);
                 if self.current_stream.as_ref().map(|s| s.stream_id) == Some(target_id) {
+                    let was_active = self
+                        .current_stream
+                        .as_ref()
+                        .is_some_and(|s| s.is_publishing || s.is_playing);
                     self.evict_active_publish_route();
                     if let Some(ref mut stream) = self.current_stream {
                         stream.is_playing = false;
@@ -1608,8 +1622,13 @@ impl Conn {
                     }
                     // See the matching comment in the FCUnpublish/deleteStream
                     // arm: give this connection a fresh setup-timeout window
-                    // now that it's gone idle.
-                    self.session_setup_started = Instant::now();
+                    // now that it's gone idle, but only on a genuine
+                    // active->idle transition -- a peer that was never
+                    // publishing/playing gets no reset, so it can't use
+                    // repeated closeStream calls to dodge the reaper forever.
+                    if was_active {
+                        self.session_setup_started = Instant::now();
+                    }
                     self.relay_enabled = false;
                     let _ = self.send_stream_lifecycle_eof(target_id);
                 }
@@ -2528,6 +2547,40 @@ mod tests {
             !conn.session_setup_timed_out(),
             "unpublishing must grant a fresh setup-timeout window, not reap \
              immediately using up whatever remained of the original window"
+        );
+    }
+
+    #[test]
+    fn teardown_commands_do_not_refresh_timer_for_a_never_active_peer() {
+        use std::time::{Duration, Instant};
+
+        // Regression test: a peer that never published/played must not be
+        // able to keep dodging the setup-timeout reaper forever by
+        // repeatedly sending FCUnpublish/deleteStream/closeStream --
+        // resetting session_setup_started must be conditioned on a genuine
+        // active->idle transition, not fire on every teardown command.
+        let mut conn = Conn::new();
+        conn.app = "live".to_string();
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+        conn.set_session_setup_started_for_test(Instant::now() - Duration::from_secs(11));
+
+        let mut buf = Buffer::with_capacity(128);
+        command::build_fcunpublish(&mut buf, "A").unwrap();
+        conn.handle_command(buf.as_slice()).unwrap();
+        assert!(
+            conn.session_setup_timed_out(),
+            "FCUnpublish on a stream that was never publishing must not reset the timer"
+        );
+
+        conn.set_session_setup_started_for_test(Instant::now() - Duration::from_secs(11));
+        let mut buf = Buffer::with_capacity(128);
+        crate::amf::amf0::write_string(&mut buf, "closeStream").unwrap();
+        crate::amf::amf0::write_number(&mut buf, 2.0).unwrap();
+        crate::amf::amf0::write_null(&mut buf).unwrap();
+        conn.handle_command(buf.as_slice()).unwrap();
+        assert!(
+            conn.session_setup_timed_out(),
+            "closeStream on a stream that was never active must not reset the timer"
         );
     }
 
