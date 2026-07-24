@@ -315,13 +315,31 @@ pub fn chunk_read(
         (effective_length as usize).saturating_sub(stream.reassembly_bytes_read as usize);
     let to_read = remaining.min(chunk_size);
 
-    let mut chunk_data = vec![0u8; to_read];
-    buf.read(&mut chunk_data).map_err(|_| ErrorCode::Io)?;
+    let chunk_data = &mut stream.chunk_read_scratch;
+    if chunk_data.len() != to_read {
+        chunk_data.resize(to_read, 0);
+    }
+    buf.read(&mut chunk_data[..to_read])
+        .map_err(|_| ErrorCode::Io)?;
     stream
         .reassembly_buf
-        .write(&chunk_data)
+        .write(&chunk_data[..to_read])
         .map_err(|_| ErrorCode::Chunk)?;
     stream.reassembly_bytes_read += to_read as u32;
+
+    // Release the scratch buffer's capacity after every chunk (not just on
+    // message completion) so a peer that starts many large messages across
+    // distinct CSIDs and then stalls mid-message can't pin
+    // `max_active_csids * MAX_INBOUND_CHUNK_SIZE` scratch bytes outside
+    // `max_reassembly_bytes` accounting -- the reassembly_buf already holds
+    // the same bytes and is the only copy that needs to persist. Small
+    // scratch buffers are left alone (matches the `last_payload` threshold
+    // pattern) so steady small-chunk traffic reuses its allocation instead
+    // of paying a free/alloc cycle per chunk.
+    stream.chunk_read_scratch.clear();
+    if stream.chunk_read_scratch.capacity() > crate::buffer::BUFFER_RESET_CAPACITY {
+        stream.chunk_read_scratch.shrink_to_fit();
+    }
 
     if stream.reassembly_bytes_read >= effective_length {
         msg.csid = csid;

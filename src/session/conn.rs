@@ -67,10 +67,11 @@ const MAX_INBOUND_PING_RESPONSES: usize = 8;
 /// `receiveAudio` / `receiveVideo` re-enable on an already-playing stream.
 const INIT_REPLAY_COOLDOWN: Duration = Duration::from_secs(1);
 const INBOUND_PING_WINDOW: Duration = Duration::from_secs(1);
-/// Close inbound sessions that never complete the AMF `connect` exchange.
-/// Matches the RTMPS accept deadline so a peer cannot hold a connection slot
-/// indefinitely with a partial legacy handshake or an idle post-handshake TCP
-/// session.
+/// Close inbound sessions that never complete the AMF `connect` exchange or
+/// never start publishing/playing. Matches the RTMPS accept deadline so a
+/// peer cannot hold a connection slot indefinitely with a partial legacy
+/// handshake, an idle post-handshake TCP session, or ping responses alone
+/// after `connect`.
 pub(crate) const RTMP_SESSION_SETUP_TIMEOUT: Duration = Duration::from_secs(10);
 /// Cap sub-tags unpacked from a single Aggregate message (mirrors
 /// `message::message::MAX_AGGREGATE_SUBTAGS`).
@@ -189,8 +190,13 @@ pub struct Conn {
     /// `recv(&[])`) until this clears, or a batch that exceeds the budget can
     /// sit unprocessed until the peer happens to send more bytes.
     budget_exhausted: bool,
-    /// When this inbound TCP session was accepted. Used to reap peers that
-    /// never progress past the legacy handshake / AMF connect setup.
+    /// Start of the current "must become active" grace window: set when
+    /// this inbound TCP session was accepted, and reset every time the
+    /// session goes idle after publishing/playing (`FCUnpublish`,
+    /// `deleteStream`, `closeStream`) so a legitimate client that stops and
+    /// later republishes on the same connection gets a fresh window instead
+    /// of being reaped for the unpublished gap. Used by
+    /// [`Conn::session_setup_timed_out`].
     session_setup_started: Instant,
     /// E-RTMP caps agreed during connect (empty when legacy connect).
     pub negotiated_caps: NegotiatedCaps,
@@ -261,11 +267,26 @@ impl Conn {
         }
     }
 
-    /// True when an inbound peer has held a connection slot without reaching
-    /// `AppConnected` for longer than [`RTMP_SESSION_SETUP_TIMEOUT`].
+    /// True when an inbound peer has held a connection slot without being an
+    /// active publisher or player for longer than
+    /// [`RTMP_SESSION_SETUP_TIMEOUT`]. Covers incomplete handshakes, post-
+    /// `connect` idle sessions that only answer server pings, and sessions
+    /// that stopped publishing/playing and haven't resumed within a fresh
+    /// grace window (`session_setup_started` is reset on every such
+    /// transition -- see `FCUnpublish`/`deleteStream`/`closeStream` in
+    /// `handle_command`).
     pub fn session_setup_timed_out(&self) -> bool {
-        self.state < ConnState::AppConnected
-            && self.session_setup_started.elapsed() >= RTMP_SESSION_SETUP_TIMEOUT
+        if self.session_setup_started.elapsed() < RTMP_SESSION_SETUP_TIMEOUT {
+            return false;
+        }
+        // `ConnState` only moves forward, so a peer that briefly published
+        // (or played) and then unpublished before the deadline would stay
+        // "exempt" forever if this checked `self.state`. Check the current
+        // stream's active flags instead -- they're cleared on unpublish.
+        !self
+            .current_stream
+            .as_ref()
+            .is_some_and(|s| s.is_publishing || s.is_playing)
     }
 
     #[cfg(test)]
@@ -1486,14 +1507,42 @@ impl Conn {
                 }
             }
             "FCUnpublish" | "deleteStream" => {
-                // The client is explicitly tearing down its publish role;
-                // release the claimed route now rather than holding it
-                // until the TCP connection eventually closes, so a
+                // The client is explicitly tearing down its publish or play
+                // role -- deleteStream is sent by both publishers and
+                // players, not just publishers, so this must clear
+                // is_playing too or a player using deleteStream would never
+                // be considered idle (see `session_setup_timed_out`).
+                // Release the claimed publish route now rather than holding
+                // it until the TCP connection eventually closes, so a
                 // different connection can immediately republish the same
                 // (app, stream) route.
+                let was_active = self
+                    .current_stream
+                    .as_ref()
+                    .is_some_and(|s| s.is_publishing || s.is_playing);
                 self.evict_active_publish_route();
                 if let Some(ref mut stream) = self.current_stream {
                     stream.is_publishing = false;
+                    stream.is_playing = false;
+                    // Matches closeStream: play() never resets `paused`, so
+                    // a stale true here would leave a later play on this
+                    // connection silently receiving no relayed frames
+                    // (relay delivery is gated on !paused).
+                    stream.paused = false;
+                }
+                // Give this connection a fresh setup-timeout window now that
+                // it's gone idle, rather than treating the moment it stops
+                // publishing/playing as an immediate setup failure --
+                // otherwise a client that has been legitimately active for a
+                // long time gets reaped the instant it tears down if it
+                // doesn't restart within whatever's left of the original 10s
+                // window (see `session_setup_timed_out`). Only reset when
+                // this was a genuine active->idle transition: a peer that
+                // was never active gets no reset here, so it can't use
+                // repeated FCUnpublish/deleteStream calls to keep dodging
+                // the reaper forever.
+                if was_active {
+                    self.session_setup_started = Instant::now();
                 }
                 // Clear relay_enabled along with the publish role: with
                 // `defer_media_relay`, the publish handler leaves it
@@ -1571,11 +1620,24 @@ impl Conn {
                     .or_else(|| self.current_stream.as_ref().map(|s| s.stream_id))
                     .unwrap_or(0);
                 if self.current_stream.as_ref().map(|s| s.stream_id) == Some(target_id) {
+                    let was_active = self
+                        .current_stream
+                        .as_ref()
+                        .is_some_and(|s| s.is_publishing || s.is_playing);
                     self.evict_active_publish_route();
                     if let Some(ref mut stream) = self.current_stream {
                         stream.is_playing = false;
                         stream.is_publishing = false;
                         stream.paused = false;
+                    }
+                    // See the matching comment in the FCUnpublish/deleteStream
+                    // arm: give this connection a fresh setup-timeout window
+                    // now that it's gone idle, but only on a genuine
+                    // active->idle transition -- a peer that was never
+                    // publishing/playing gets no reset, so it can't use
+                    // repeated closeStream calls to dodge the reaper forever.
+                    if was_active {
+                        self.session_setup_started = Instant::now();
                     }
                     self.relay_enabled = false;
                     let _ = self.send_stream_lifecycle_eof(target_id);
@@ -2419,6 +2481,186 @@ mod tests {
         assert!(
             matches!(ping(99), Err(ErrorCode::Protocol)),
             "9th ping in one second must be rejected"
+        );
+    }
+
+    #[test]
+    fn post_connect_idle_without_publish_or_play_times_out() {
+        use std::time::{Duration, Instant};
+
+        let mut conn = Conn::new();
+        conn.state = ConnState::AppConnected;
+        conn.set_session_setup_started_for_test(Instant::now() - Duration::from_secs(11));
+        assert!(
+            conn.session_setup_timed_out(),
+            "AppConnected peers that never publish/play must be reaped"
+        );
+
+        let mut publishing = Conn::new();
+        publishing.state = ConnState::Publishing;
+        publishing.current_stream = Some(Box::new(Stream {
+            is_publishing: true,
+            ..Stream::new(1)
+        }));
+        publishing.set_session_setup_started_for_test(Instant::now() - Duration::from_secs(11));
+        assert!(
+            !publishing.session_setup_timed_out(),
+            "active publishers must not be reaped by the setup timer"
+        );
+
+        // A peer that published and then unpublished before the deadline
+        // must not be exempted forever just because `ConnState` only moves
+        // forward -- the exemption must track the *current* is_publishing
+        // flag, not the monotonic state.
+        let mut unpublished = Conn::new();
+        unpublished.state = ConnState::Publishing;
+        unpublished.current_stream = Some(Box::new(Stream::new(1)));
+        unpublished.set_session_setup_started_for_test(Instant::now() - Duration::from_secs(11));
+        assert!(
+            unpublished.session_setup_timed_out(),
+            "peers that unpublished before the deadline must be reaped"
+        );
+    }
+
+    #[test]
+    fn unpublish_grants_a_fresh_setup_timeout_window() {
+        use std::time::{Duration, Instant};
+
+        // Regression test: a client that has been legitimately publishing
+        // for a long time (well past RTMP_SESSION_SETUP_TIMEOUT) must not
+        // be reaped the instant it unpublishes -- it should get a fresh
+        // grace window to republish on the same connection, not be judged
+        // against however little time is left of its original setup
+        // window (which may already be long gone).
+        let mut conn = Conn::new();
+        conn.app = "live".to_string();
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+
+        let mut buf = Buffer::with_capacity(128);
+        command::build_publish(&mut buf, "A", "live").unwrap();
+        conn.handle_command(buf.as_slice()).unwrap();
+        assert!(conn.current_stream.as_ref().unwrap().is_publishing);
+
+        // Simulate having been connected/publishing for a long time already.
+        conn.set_session_setup_started_for_test(Instant::now() - Duration::from_secs(3600));
+        assert!(
+            !conn.session_setup_timed_out(),
+            "an active publisher must not be reaped regardless of connection age"
+        );
+
+        let mut buf = Buffer::with_capacity(128);
+        command::build_fcunpublish(&mut buf, "A").unwrap();
+        conn.handle_command(buf.as_slice()).unwrap();
+        assert!(!conn.current_stream.as_ref().unwrap().is_publishing);
+
+        assert!(
+            !conn.session_setup_timed_out(),
+            "unpublishing must grant a fresh setup-timeout window, not reap \
+             immediately using up whatever remained of the original window"
+        );
+    }
+
+    #[test]
+    fn teardown_commands_do_not_refresh_timer_for_a_never_active_peer() {
+        use std::time::{Duration, Instant};
+
+        // Regression test: a peer that never published/played must not be
+        // able to keep dodging the setup-timeout reaper forever by
+        // repeatedly sending FCUnpublish/deleteStream/closeStream --
+        // resetting session_setup_started must be conditioned on a genuine
+        // active->idle transition, not fire on every teardown command.
+        let mut conn = Conn::new();
+        conn.app = "live".to_string();
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+        conn.set_session_setup_started_for_test(Instant::now() - Duration::from_secs(11));
+
+        let mut buf = Buffer::with_capacity(128);
+        command::build_fcunpublish(&mut buf, "A").unwrap();
+        conn.handle_command(buf.as_slice()).unwrap();
+        assert!(
+            conn.session_setup_timed_out(),
+            "FCUnpublish on a stream that was never publishing must not reset the timer"
+        );
+
+        conn.set_session_setup_started_for_test(Instant::now() - Duration::from_secs(11));
+        let mut buf = Buffer::with_capacity(128);
+        command::build_deletestream(&mut buf, 2.0, 1).unwrap();
+        conn.handle_command(buf.as_slice()).unwrap();
+        assert!(
+            conn.session_setup_timed_out(),
+            "deleteStream on a stream that was never active must not reset the timer"
+        );
+
+        conn.set_session_setup_started_for_test(Instant::now() - Duration::from_secs(11));
+        let mut buf = Buffer::with_capacity(128);
+        crate::amf::amf0::write_string(&mut buf, "closeStream").unwrap();
+        crate::amf::amf0::write_number(&mut buf, 2.0).unwrap();
+        crate::amf::amf0::write_null(&mut buf).unwrap();
+        conn.handle_command(buf.as_slice()).unwrap();
+        assert!(
+            conn.session_setup_timed_out(),
+            "closeStream on a stream that was never active must not reset the timer"
+        );
+    }
+
+    #[test]
+    fn delete_stream_clears_is_playing_and_grants_a_fresh_window() {
+        use std::time::{Duration, Instant};
+
+        // Regression test: deleteStream is sent by players, not just
+        // publishers. The FCUnpublish/deleteStream arm must clear
+        // is_playing too (not just is_publishing), otherwise a player that
+        // tears down via deleteStream would never be considered idle and
+        // could hold its slot forever.
+        let mut conn = Conn::new();
+        conn.app = "live".to_string();
+        conn.current_stream = Some(Box::new(Stream {
+            is_playing: true,
+            ..Stream::new(1)
+        }));
+        conn.set_session_setup_started_for_test(Instant::now() - Duration::from_secs(3600));
+        assert!(
+            !conn.session_setup_timed_out(),
+            "an active player must not be reaped regardless of connection age"
+        );
+
+        let mut buf = Buffer::with_capacity(128);
+        command::build_deletestream(&mut buf, 2.0, 1).unwrap();
+        conn.handle_command(buf.as_slice()).unwrap();
+
+        assert!(
+            !conn.current_stream.as_ref().unwrap().is_playing,
+            "deleteStream must clear is_playing"
+        );
+        assert!(
+            !conn.session_setup_timed_out(),
+            "tearing down an active player via deleteStream must grant a fresh setup-timeout \
+             window, not reap immediately"
+        );
+    }
+
+    #[test]
+    fn delete_stream_clears_paused_flag() {
+        // Regression test: deleteStream must reset `paused` like
+        // closeStream does. play() never resets `paused` on its own, and
+        // relay delivery is gated on !paused, so a pause -> deleteStream ->
+        // play sequence on the same connection would otherwise leave
+        // playback silently stuck with no relayed frames.
+        let mut conn = Conn::new();
+        conn.app = "live".to_string();
+        conn.current_stream = Some(Box::new(Stream {
+            is_playing: true,
+            paused: true,
+            ..Stream::new(1)
+        }));
+
+        let mut buf = Buffer::with_capacity(128);
+        command::build_deletestream(&mut buf, 2.0, 1).unwrap();
+        conn.handle_command(buf.as_slice()).unwrap();
+
+        assert!(
+            !conn.current_stream.as_ref().unwrap().paused,
+            "deleteStream must clear paused"
         );
     }
 

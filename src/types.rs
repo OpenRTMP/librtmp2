@@ -294,6 +294,13 @@ pub struct ServerConfig {
     /// Appended field: see `docs/abi-policy.md` (config struct fields may be
     /// appended between minor releases).
     pub max_pending_tls_per_addr: c_int,
+    /// Max active (already-accepted) connections retained per remote peer
+    /// IP. `0` (or negative) uses the built-in default (see
+    /// `server::DEFAULT_MAX_CONNECTIONS_PER_ADDR`). Kept independent of
+    /// `max_pending_tls_per_addr` so tuning one does not change the other:
+    /// they defend different resources (the connection table vs. the
+    /// pending-handshake queue). Appended field: see `docs/abi-policy.md`.
+    pub max_connections_per_addr: c_int,
 }
 
 /* ── Callback types ── */
