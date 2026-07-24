@@ -365,6 +365,11 @@ impl Server {
         // removed in this very tick anyway.
         self.process_connections()?;
         self.accept_new_connections();
+        // Give sockets accepted just above their first processing pass in
+        // this same poll() call, rather than leaving them untouched through
+        // the sleep below until the next call -- otherwise every new
+        // connection's handshake is delayed by a full poll cycle.
+        self.process_connections()?;
         if timeout_ms > 0 {
             std::thread::sleep(std::time::Duration::from_millis(timeout_ms as u64));
         }
@@ -1765,6 +1770,7 @@ mod tests {
         let _first = std::net::TcpStream::connect(&addr).unwrap();
         server.accept_new_connections();
         assert_eq!(server.connections.len(), 1);
+        let first_conn_id = server.connections[0].conn_id;
         server.connections[0].state = ConnState::AppConnected;
         server.connections[0]
             .set_session_setup_started_for_test(Instant::now() - Duration::from_secs(11));
@@ -1776,6 +1782,11 @@ mod tests {
             1,
             "the same-IP reconnect must be admitted once the stale predecessor is reaped, \
              not rejected by the per-IP cap for a connection dying in this same tick"
+        );
+        assert_ne!(
+            server.connections[0].conn_id, first_conn_id,
+            "the surviving connection must be the new reconnect, not the stale \
+             predecessor left in place while the reconnect was rejected by the cap"
         );
     }
 
