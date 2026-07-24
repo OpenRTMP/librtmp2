@@ -358,8 +358,13 @@ impl Server {
         if !self.running {
             return Err(ErrorCode::Internal);
         }
-        self.accept_new_connections();
+        // Reap stale/timed-out connections before enforcing per-IP/global
+        // admission caps below -- otherwise a peer reconnecting from the
+        // same source IP right as its old sockets die can be rejected by
+        // `max_connections_per_addr` for connections that are about to be
+        // removed in this very tick anyway.
         self.process_connections()?;
+        self.accept_new_connections();
         if timeout_ms > 0 {
             std::thread::sleep(std::time::Duration::from_millis(timeout_ms as u64));
         }
@@ -1717,6 +1722,60 @@ mod tests {
             server.connections.len(),
             2,
             "third connection from the same IP must be rejected"
+        );
+    }
+
+    #[test]
+    fn poll_reaps_stale_connections_before_enforcing_per_ip_cap() {
+        use std::time::{Duration, Instant};
+
+        // Regression test: `poll()` must reap timed-out connections before
+        // admitting new ones, so a same-IP reconnect landing in the same
+        // tick as its predecessor's reap isn't spuriously rejected by
+        // max_connections_per_addr.
+        let config = ServerConfig {
+            max_connections: 16,
+            chunk_size: 128,
+            tls_enabled: 0,
+            tls_cert_file: std::ptr::null(),
+            tls_key_file: std::ptr::null(),
+            tls_ca_file: std::ptr::null(),
+            tls_insecure: 0,
+            max_pending_tls_per_addr: 0,
+            max_connections_per_addr: 1,
+        };
+        let mut server = Server::new(config).unwrap();
+        server.listen("127.0.0.1:0").unwrap();
+
+        let port = {
+            let mut addr: libc::sockaddr_in = unsafe { std::mem::zeroed() };
+            let mut len = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
+            let rc = unsafe {
+                libc::getsockname(
+                    server.server_fd,
+                    &mut addr as *mut _ as *mut libc::sockaddr,
+                    &mut len,
+                )
+            };
+            assert_eq!(rc, 0);
+            u16::from_be(addr.sin_port)
+        };
+        let addr = format!("127.0.0.1:{port}");
+
+        let _first = std::net::TcpStream::connect(&addr).unwrap();
+        server.accept_new_connections();
+        assert_eq!(server.connections.len(), 1);
+        server.connections[0].state = ConnState::AppConnected;
+        server.connections[0]
+            .set_session_setup_started_for_test(Instant::now() - Duration::from_secs(11));
+
+        let _second = std::net::TcpStream::connect(&addr).unwrap();
+        server.poll(0).unwrap();
+        assert_eq!(
+            server.connections.len(),
+            1,
+            "the same-IP reconnect must be admitted once the stale predecessor is reaped, \
+             not rejected by the per-IP cap for a connection dying in this same tick"
         );
     }
 
