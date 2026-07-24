@@ -13,7 +13,7 @@ begin at `1.0.0`.
 
 ## [Unreleased]
 
-## [0.5.0] — 2026-07-22
+## [0.5.0] — 2026-07-24
 
 ### Security
 - The TLS pending-handshake queue's per-address cap is now keyed on the peer
@@ -24,13 +24,55 @@ begin at `1.0.0`.
   multitrack (`ManyTracks`/`ManyTracksManyCodecs`) container instead of only
   the first, closing a path where a disallowed codec could ride along
   behind an allowed first track.
+- Duplicate `play` commands and rapid `receiveAudio`/`receiveVideo` re-enable
+  toggles can no longer repeatedly trigger multi-megabyte cached init-frame
+  replay. Replay requests are deduplicated and independently rate-limited per
+  media type.
+- Stream-cache growth and eviction are scoped to the publishing connection,
+  preventing one publisher from evicting another publisher's cached codec
+  headers, metadata, or keyframes.
+- Connections that finish AMF `connect` but never publish or play are closed
+  after the setup deadline. Active connections are also limited per source IP,
+  independently from the pending-TLS-handshake cap, and the accept loop has a
+  per-poll budget so rejected connection floods cannot starve established
+  sessions.
+- Per-CSID chunk-read scratch allocations are released after copying and are
+  bounded with the existing buffer-retention threshold, preventing stalled
+  partial messages from retaining large duplicate buffers outside the normal
+  reassembly accounting.
 
 ### Added
 - `ServerConfig::max_pending_tls_per_addr` — configures the per-peer-IP cap
   on incomplete TLS handshakes (default `4` when `0`/unset). Deployments
   where many clients share one source IP (NAT, load balancer, proxy) can
   raise this to avoid spurious RTMPS handshake evictions under bursty
-  connect patterns. New `pub` struct field, hence the `0.5.0` bump.
+  connect patterns.
+- `ServerConfig::max_connections_per_addr` — independently configures the
+  maximum number of active plaintext/RTMPS connections accepted from one
+  source IP (default `4` when `0`/unset). This is a new public struct field,
+  so downstream Rust struct literals and FFI callers that allocate
+  `ServerConfig` by value must be recompiled for `0.5.0`.
+
+### Changed
+- `Server::poll()` now processes stale connections before enforcing admission
+  caps, accepts only a bounded number of sockets per pass, and immediately
+  processes newly accepted sockets in the same poll tick.
+- The ABI policy now explicitly distinguishes source compatibility from binary
+  re-link compatibility when fields are appended to `#[repr(C)]`
+  configuration structs. Existing binaries compiled against an older,
+  smaller `ServerConfig` layout must be rebuilt before using this release.
+
+### Fixed
+- Client AMF3 data delivery no longer creates an unnecessary intermediate
+  payload copy before invoking the frame callback.
+- `FCUnpublish`, `deleteStream`, and `closeStream` now consistently clear
+  publish/play/paused state and only restart the idle grace window after a
+  genuine active-to-idle transition. This prevents both premature disconnects
+  of reusable connections and timeout bypasses from repeated teardown commands.
+- Reconnects are no longer spuriously rejected by the per-IP cap when an old
+  socket is already stale and due to be removed in the same poll cycle.
+- Newly accepted connections receive their first processing pass immediately
+  instead of waiting for the next poll interval.
 
 ## [0.4.2] — 2026-07-21
 
