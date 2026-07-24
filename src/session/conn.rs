@@ -1507,31 +1507,36 @@ impl Conn {
                 }
             }
             "FCUnpublish" | "deleteStream" => {
-                // The client is explicitly tearing down its publish role;
-                // release the claimed route now rather than holding it
-                // until the TCP connection eventually closes, so a
+                // The client is explicitly tearing down its publish or play
+                // role -- deleteStream is sent by both publishers and
+                // players, not just publishers, so this must clear
+                // is_playing too or a player using deleteStream would never
+                // be considered idle (see `session_setup_timed_out`).
+                // Release the claimed publish route now rather than holding
+                // it until the TCP connection eventually closes, so a
                 // different connection can immediately republish the same
                 // (app, stream) route.
-                let was_publishing = self
+                let was_active = self
                     .current_stream
                     .as_ref()
-                    .is_some_and(|s| s.is_publishing);
+                    .is_some_and(|s| s.is_publishing || s.is_playing);
                 self.evict_active_publish_route();
                 if let Some(ref mut stream) = self.current_stream {
                     stream.is_publishing = false;
+                    stream.is_playing = false;
                 }
                 // Give this connection a fresh setup-timeout window now that
                 // it's gone idle, rather than treating the moment it stops
-                // publishing as an immediate setup failure -- otherwise a
-                // client that has been legitimately publishing for a long
-                // time gets reaped the instant it unpublishes if it doesn't
-                // republish within whatever's left of the original 10s
+                // publishing/playing as an immediate setup failure --
+                // otherwise a client that has been legitimately active for a
+                // long time gets reaped the instant it tears down if it
+                // doesn't restart within whatever's left of the original 10s
                 // window (see `session_setup_timed_out`). Only reset when
                 // this was a genuine active->idle transition: a peer that
-                // was never publishing gets no reset here, so it can't use
+                // was never active gets no reset here, so it can't use
                 // repeated FCUnpublish/deleteStream calls to keep dodging
                 // the reaper forever.
-                if was_publishing {
+                if was_active {
                     self.session_setup_started = Instant::now();
                 }
                 // Clear relay_enabled along with the publish role: with
@@ -2574,6 +2579,17 @@ mod tests {
 
         conn.set_session_setup_started_for_test(Instant::now() - Duration::from_secs(11));
         let mut buf = Buffer::with_capacity(128);
+        crate::amf::amf0::write_string(&mut buf, "deleteStream").unwrap();
+        crate::amf::amf0::write_number(&mut buf, 2.0).unwrap();
+        crate::amf::amf0::write_null(&mut buf).unwrap();
+        conn.handle_command(buf.as_slice()).unwrap();
+        assert!(
+            conn.session_setup_timed_out(),
+            "deleteStream on a stream that was never active must not reset the timer"
+        );
+
+        conn.set_session_setup_started_for_test(Instant::now() - Duration::from_secs(11));
+        let mut buf = Buffer::with_capacity(128);
         crate::amf::amf0::write_string(&mut buf, "closeStream").unwrap();
         crate::amf::amf0::write_number(&mut buf, 2.0).unwrap();
         crate::amf::amf0::write_null(&mut buf).unwrap();
@@ -2581,6 +2597,44 @@ mod tests {
         assert!(
             conn.session_setup_timed_out(),
             "closeStream on a stream that was never active must not reset the timer"
+        );
+    }
+
+    #[test]
+    fn delete_stream_clears_is_playing_and_grants_a_fresh_window() {
+        use std::time::{Duration, Instant};
+
+        // Regression test: deleteStream is sent by players, not just
+        // publishers. The FCUnpublish/deleteStream arm must clear
+        // is_playing too (not just is_publishing), otherwise a player that
+        // tears down via deleteStream would never be considered idle and
+        // could hold its slot forever.
+        let mut conn = Conn::new();
+        conn.app = "live".to_string();
+        conn.current_stream = Some(Box::new(Stream {
+            is_playing: true,
+            ..Stream::new(1)
+        }));
+        conn.set_session_setup_started_for_test(Instant::now() - Duration::from_secs(3600));
+        assert!(
+            !conn.session_setup_timed_out(),
+            "an active player must not be reaped regardless of connection age"
+        );
+
+        let mut buf = Buffer::with_capacity(128);
+        crate::amf::amf0::write_string(&mut buf, "deleteStream").unwrap();
+        crate::amf::amf0::write_number(&mut buf, 2.0).unwrap();
+        crate::amf::amf0::write_null(&mut buf).unwrap();
+        conn.handle_command(buf.as_slice()).unwrap();
+
+        assert!(
+            !conn.current_stream.as_ref().unwrap().is_playing,
+            "deleteStream must clear is_playing"
+        );
+        assert!(
+            !conn.session_setup_timed_out(),
+            "tearing down an active player via deleteStream must grant a fresh setup-timeout \
+             window, not reap immediately"
         );
     }
 
