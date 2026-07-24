@@ -157,6 +157,7 @@ mod ffi_tests {
             tls_ca_file: std::ptr::null(),
             tls_insecure: 0,
             max_pending_tls_per_addr: 0,
+            max_connections_per_addr: 0,
         };
         let server = NonNull::new(unsafe { lrtmp2_server_create(&config) })
             .expect("lrtmp2_server_create returned null");
@@ -180,6 +181,7 @@ mod ffi_tests {
             tls_ca_file: std::ptr::null(),
             tls_insecure: 0,
             max_pending_tls_per_addr: 0,
+            max_connections_per_addr: 0,
         };
         let server = NonNull::new(unsafe { lrtmp2_server_create(&config) })
             .expect("lrtmp2_server_create returned null");
@@ -203,6 +205,7 @@ mod ffi_tests {
             tls_ca_file: std::ptr::null(),
             tls_insecure: 0,
             max_pending_tls_per_addr: 0,
+            max_connections_per_addr: 0,
         };
         let server = Server::new(config).unwrap();
         assert_eq!(server.config.max_connections, 0);
@@ -219,6 +222,7 @@ mod ffi_tests {
             tls_ca_file: std::ptr::null(),
             tls_insecure: 0,
             max_pending_tls_per_addr: 0,
+            max_connections_per_addr: 0,
         };
         let server = NonNull::new(unsafe { lrtmp2_server_create(&config) })
             .expect("lrtmp2_server_create returned null");

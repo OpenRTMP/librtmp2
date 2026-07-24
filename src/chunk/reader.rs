@@ -315,11 +315,12 @@ pub fn chunk_read(
         (effective_length as usize).saturating_sub(stream.reassembly_bytes_read as usize);
     let to_read = remaining.min(chunk_size);
 
-    let mut chunk_data = &mut stream.chunk_read_scratch;
+    let chunk_data = &mut stream.chunk_read_scratch;
     if chunk_data.len() != to_read {
         chunk_data.resize(to_read, 0);
     }
-    buf.read(&mut chunk_data[..to_read]).map_err(|_| ErrorCode::Io)?;
+    buf.read(&mut chunk_data[..to_read])
+        .map_err(|_| ErrorCode::Io)?;
     stream
         .reassembly_buf
         .write(&chunk_data[..to_read])
@@ -347,6 +348,12 @@ pub fn chunk_read(
 
         stream.reassembly_bytes_read = 0;
         stream.reassembly_buf.reset();
+        // Release the scratch buffer's capacity between messages so an idle
+        // CSID doesn't keep pinning up to MAX_INBOUND_CHUNK_SIZE bytes --
+        // otherwise max_reassembly_bytes no longer bounds a peer that sends
+        // one large chunk on each of many CSIDs and then goes idle.
+        stream.chunk_read_scratch.clear();
+        stream.chunk_read_scratch.shrink_to_fit();
 
         Ok(1)
     } else {

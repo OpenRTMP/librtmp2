@@ -270,7 +270,14 @@ impl Conn {
         if self.session_setup_started.elapsed() < RTMP_SESSION_SETUP_TIMEOUT {
             return false;
         }
-        !matches!(self.state, ConnState::Publishing | ConnState::Playing)
+        // `ConnState` only moves forward, so a peer that briefly published
+        // (or played) and then unpublished before the deadline would stay
+        // "exempt" forever if this checked `self.state`. Check the current
+        // stream's active flags instead -- they're cleared on unpublish.
+        !self
+            .current_stream
+            .as_ref()
+            .is_some_and(|s| s.is_publishing || s.is_playing)
     }
 
     #[cfg(test)]
@@ -2441,10 +2448,27 @@ mod tests {
 
         let mut publishing = Conn::new();
         publishing.state = ConnState::Publishing;
+        publishing.current_stream = Some(Box::new(Stream {
+            is_publishing: true,
+            ..Stream::new(1)
+        }));
         publishing.set_session_setup_started_for_test(Instant::now() - Duration::from_secs(11));
         assert!(
             !publishing.session_setup_timed_out(),
             "active publishers must not be reaped by the setup timer"
+        );
+
+        // A peer that published and then unpublished before the deadline
+        // must not be exempted forever just because `ConnState` only moves
+        // forward -- the exemption must track the *current* is_publishing
+        // flag, not the monotonic state.
+        let mut unpublished = Conn::new();
+        unpublished.state = ConnState::Publishing;
+        unpublished.current_stream = Some(Box::new(Stream::new(1)));
+        unpublished.set_session_setup_started_for_test(Instant::now() - Duration::from_secs(11));
+        assert!(
+            unpublished.session_setup_timed_out(),
+            "peers that unpublished before the deadline must be reaped"
         );
     }
 

@@ -71,6 +71,15 @@ const TLS_HANDSHAKE_TIMEOUT_SECS: u64 = 10;
 /// until its socket buffer is empty.
 const MAX_RECV_BYTES_PER_CONN_PER_POLL: usize = 256 * 1024;
 
+/// Maximum number of `accept()` calls serviced per `accept_new_connections()`
+/// pass. Without this cap, a source IP that keeps the listen backlog full
+/// (e.g. by opening connections faster than the per-IP cap admits them)
+/// would make `accept_new_connections` loop accepting-and-immediately-
+/// closing sockets until the backlog empties, starving `process_connections`
+/// of time within the same `poll()` call. Any backlog left over after the
+/// budget is exhausted is serviced on the next `poll()` pass instead.
+const MAX_ACCEPTS_PER_POLL: usize = 256;
+
 /// Maximum number of extra budget-only `recv(&[])` passes used to drain
 /// already-buffered messages left over from `Conn`'s per-recv message cap.
 /// Each pass affords another full message budget, so this bounds one
@@ -402,8 +411,8 @@ impl Server {
     }
 
     fn max_connections_per_addr(&self) -> usize {
-        if self.config.max_pending_tls_per_addr > 0 {
-            self.config.max_pending_tls_per_addr as usize
+        if self.config.max_connections_per_addr > 0 {
+            self.config.max_connections_per_addr as usize
         } else {
             DEFAULT_MAX_CONNECTIONS_PER_ADDR
         }
@@ -418,7 +427,11 @@ impl Server {
 
     #[cfg(feature = "tls")]
     fn max_pending_tls_per_addr(&self) -> usize {
-        self.max_connections_per_addr()
+        if self.config.max_pending_tls_per_addr > 0 {
+            self.config.max_pending_tls_per_addr as usize
+        } else {
+            DEFAULT_MAX_PENDING_TLS_PER_ADDR
+        }
     }
 
     #[cfg(feature = "tls")]
@@ -543,6 +556,7 @@ impl Server {
         }
         self.next_listener_accept %= listener_count;
 
+        let mut accepts_serviced = 0usize;
         loop {
             let mut accepted_any = false;
 
@@ -550,10 +564,14 @@ impl Server {
                 if self.max_connections_reached() {
                     return;
                 }
+                if accepts_serviced >= MAX_ACCEPTS_PER_POLL {
+                    return;
+                }
                 let i = (self.next_listener_accept + offset) % listener_count;
                 match self.listeners[i].tcp.accept() {
                     Ok((stream, addr)) => {
                         accepted_any = true;
+                        accepts_serviced += 1;
                         self.next_listener_accept = (i + 1) % listener_count;
                         let remote_addr = addr.to_string();
                         let tls_ctx = self.listeners[i].tls_ctx.clone();
@@ -1428,6 +1446,7 @@ mod tests {
             tls_ca_file: std::ptr::null(),
             tls_insecure: 0,
             max_pending_tls_per_addr: 0,
+            max_connections_per_addr: 0,
         })
         .unwrap()
     }
@@ -1622,6 +1641,7 @@ mod tests {
             tls_ca_file: std::ptr::null(),
             tls_insecure: 0,
             max_pending_tls_per_addr: 0,
+            max_connections_per_addr: 0,
         };
         let mut server = Server::new(config).unwrap();
         server.listen("127.0.0.1:0").unwrap();
@@ -1663,7 +1683,8 @@ mod tests {
             tls_key_file: std::ptr::null(),
             tls_ca_file: std::ptr::null(),
             tls_insecure: 0,
-            max_pending_tls_per_addr: 2,
+            max_pending_tls_per_addr: 0,
+            max_connections_per_addr: 2,
         };
         let mut server = Server::new(config).unwrap();
         server.listen("127.0.0.1:0").unwrap();
@@ -1700,6 +1721,53 @@ mod tests {
     }
 
     #[test]
+    fn max_pending_tls_per_addr_does_not_affect_active_connection_cap() {
+        // Regression test: the active per-IP connection cap and the TLS
+        // pending-handshake cap must be independently configurable. Raising
+        // max_pending_tls_per_addr alone must not also raise the number of
+        // plaintext connections one IP can hold.
+        let config = ServerConfig {
+            max_connections: 16,
+            chunk_size: 128,
+            tls_enabled: 0,
+            tls_cert_file: std::ptr::null(),
+            tls_key_file: std::ptr::null(),
+            tls_ca_file: std::ptr::null(),
+            tls_insecure: 0,
+            max_pending_tls_per_addr: 64,
+            max_connections_per_addr: 0,
+        };
+        let mut server = Server::new(config).unwrap();
+        server.listen("127.0.0.1:0").unwrap();
+
+        let port = {
+            let mut addr: libc::sockaddr_in = unsafe { std::mem::zeroed() };
+            let mut len = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
+            let rc = unsafe {
+                libc::getsockname(
+                    server.server_fd,
+                    &mut addr as *mut _ as *mut libc::sockaddr,
+                    &mut len,
+                )
+            };
+            assert_eq!(rc, 0);
+            u16::from_be(addr.sin_port)
+        };
+        let addr = format!("127.0.0.1:{port}");
+
+        let mut streams = Vec::new();
+        for _ in 0..(DEFAULT_MAX_CONNECTIONS_PER_ADDR + 2) {
+            streams.push(std::net::TcpStream::connect(&addr).unwrap());
+        }
+        server.accept_new_connections();
+        assert_eq!(
+            server.connections.len(),
+            DEFAULT_MAX_CONNECTIONS_PER_ADDR,
+            "a large max_pending_tls_per_addr must not raise the active per-IP connection cap"
+        );
+    }
+
+    #[test]
     fn stale_pre_connect_sessions_are_closed_during_poll() {
         use std::time::{Duration, Instant};
 
@@ -1712,6 +1780,7 @@ mod tests {
             tls_ca_file: std::ptr::null(),
             tls_insecure: 0,
             max_pending_tls_per_addr: 0,
+            max_connections_per_addr: 0,
         };
         let mut server = Server::new(config).unwrap();
         server.listen("127.0.0.1:0").unwrap();
@@ -1756,6 +1825,7 @@ mod tests {
             tls_ca_file: std::ptr::null(),
             tls_insecure: 0,
             max_pending_tls_per_addr: 0,
+            max_connections_per_addr: 0,
         };
         let mut server = Server::new(config).unwrap();
         server.listen("127.0.0.1:0").unwrap();
@@ -2098,7 +2168,7 @@ mod tests {
         use openssl::pkey::PKey;
         use openssl::rsa::Rsa;
         use openssl::x509::extension::{BasicConstraints, SubjectAlternativeName};
-        use openssl::x509::{X509NameBuilder, X509};
+        use openssl::x509::{X509, X509NameBuilder};
         use std::sync::atomic::{AtomicU32, Ordering};
 
         let rsa = Rsa::generate(2048).unwrap();
@@ -2130,8 +2200,12 @@ mod tests {
 
         static COUNTER: AtomicU32 = AtomicU32::new(0);
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let base =
-            std::env::temp_dir().join(format!("librtmp2-server-test-{}-{}-{}", std::process::id(), n, cn));
+        let base = std::env::temp_dir().join(format!(
+            "librtmp2-server-test-{}-{}-{}",
+            std::process::id(),
+            n,
+            cn
+        ));
         let cert_path = base.with_extension("cert.pem");
         let key_path = base.with_extension("key.pem");
         std::fs::write(&cert_path, cert.to_pem().unwrap()).unwrap();
@@ -2145,7 +2219,11 @@ mod tests {
         let (cert_path, key_path) = self_signed_cert_files("pending-tls.test");
         let mut server = test_server();
         server
-            .listen_tls("127.0.0.1:0", cert_path.to_str().unwrap(), key_path.to_str().unwrap())
+            .listen_tls(
+                "127.0.0.1:0",
+                cert_path.to_str().unwrap(),
+                key_path.to_str().unwrap(),
+            )
             .unwrap();
 
         let port = {
@@ -2201,10 +2279,15 @@ mod tests {
             tls_ca_file: std::ptr::null(),
             tls_insecure: 0,
             max_pending_tls_per_addr: CUSTOM_CAP as std::ffi::c_int,
+            max_connections_per_addr: 0,
         })
         .unwrap();
         server
-            .listen_tls("127.0.0.1:0", cert_path.to_str().unwrap(), key_path.to_str().unwrap())
+            .listen_tls(
+                "127.0.0.1:0",
+                cert_path.to_str().unwrap(),
+                key_path.to_str().unwrap(),
+            )
             .unwrap();
 
         let port = {
