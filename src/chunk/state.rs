@@ -79,6 +79,7 @@ impl ChunkStream {
         self.reassembly_bytes_read = 0;
         self.reassembly_buf.reset();
         self.chunk_read_scratch.clear();
+        self.chunk_read_scratch.shrink_to_fit();
         self.last_payload.clear();
         self.last_payload.shrink_to_fit();
         self.chunk_size = default_chunk_size;

@@ -47,10 +47,10 @@ const MAX_CACHED_KEYFRAME_BYTES: usize = 2 * 1024 * 1024;
 const MAX_PENDING_TLS_HANDSHAKES: usize = 128;
 
 /// Default max simultaneous connections accepted per remote address when
-/// `ServerConfig::max_pending_tls_per_addr` is `0` (unset). Prevents one peer
+/// `ServerConfig::max_connections_per_addr` is `0` (unset). Prevents one peer
 /// from monopolizing the global connection table on plaintext listeners.
 /// Deployments where many clients share one source IP (NAT/load balancer/proxy)
-/// can raise this via `ServerConfig::max_pending_tls_per_addr`.
+/// can raise this via `ServerConfig::max_connections_per_addr`.
 pub const DEFAULT_MAX_CONNECTIONS_PER_ADDR: usize = 4;
 
 /// Default max incomplete TLS handshakes retained per remote address, used
