@@ -46,13 +46,20 @@ const MAX_CACHED_KEYFRAME_BYTES: usize = 2 * 1024 * 1024;
 #[cfg(feature = "tls")]
 const MAX_PENDING_TLS_HANDSHAKES: usize = 128;
 
+/// Default max simultaneous connections accepted per remote address when
+/// `ServerConfig::max_pending_tls_per_addr` is `0` (unset). Prevents one peer
+/// from monopolizing the global connection table on plaintext listeners.
+/// Deployments where many clients share one source IP (NAT/load balancer/proxy)
+/// can raise this via `ServerConfig::max_pending_tls_per_addr`.
+pub const DEFAULT_MAX_CONNECTIONS_PER_ADDR: usize = 4;
+
 /// Default max incomplete TLS handshakes retained per remote address, used
 /// when `ServerConfig::max_pending_tls_per_addr` is `0` (unset). Prevents one
 /// peer from monopolizing the global pending queue. Deployments where many
 /// clients share one source IP (NAT/load balancer/proxy) can raise this via
 /// `ServerConfig::max_pending_tls_per_addr`.
 #[cfg(feature = "tls")]
-pub const DEFAULT_MAX_PENDING_TLS_PER_ADDR: usize = 4;
+pub const DEFAULT_MAX_PENDING_TLS_PER_ADDR: usize = DEFAULT_MAX_CONNECTIONS_PER_ADDR;
 
 /// Drop TLS handshakes that do not complete within this overall budget.
 #[cfg(feature = "tls")]
@@ -385,9 +392,8 @@ impl Server {
 
     /// Strips the port from a `SocketAddr::to_string()` output (e.g.
     /// `"1.2.3.4:5678"` -> `"1.2.3.4"`, `"[::1]:5678"` -> `"[::1]"`) so the
-    /// per-address pending cap is keyed on the peer host, not the peer's
+    /// per-address connection cap is keyed on the peer host, not the peer's
     /// ephemeral source port.
-    #[cfg(feature = "tls")]
     fn peer_ip(remote_addr: &str) -> &str {
         remote_addr
             .rsplit_once(':')
@@ -395,15 +401,24 @@ impl Server {
             .unwrap_or(remote_addr)
     }
 
-    /// Effective per-address pending TLS cap: `ServerConfig::max_pending_tls_per_addr`
-    /// if positive, otherwise `DEFAULT_MAX_PENDING_TLS_PER_ADDR`.
-    #[cfg(feature = "tls")]
-    fn max_pending_tls_per_addr(&self) -> usize {
+    fn max_connections_per_addr(&self) -> usize {
         if self.config.max_pending_tls_per_addr > 0 {
             self.config.max_pending_tls_per_addr as usize
         } else {
-            DEFAULT_MAX_PENDING_TLS_PER_ADDR
+            DEFAULT_MAX_CONNECTIONS_PER_ADDR
         }
+    }
+
+    fn active_connections_for_ip(&self, remote_ip: &str) -> usize {
+        self.connections
+            .iter()
+            .filter(|conn| Self::peer_ip(&conn.remote_addr) == remote_ip)
+            .count()
+    }
+
+    #[cfg(feature = "tls")]
+    fn max_pending_tls_per_addr(&self) -> usize {
+        self.max_connections_per_addr()
     }
 
     #[cfg(feature = "tls")]
@@ -440,6 +455,10 @@ impl Server {
 
     fn add_connection(&mut self, transport: Transport, remote_addr: String) -> bool {
         if self.max_connections_reached() {
+            return false;
+        }
+        let remote_ip = Self::peer_ip(&remote_addr);
+        if self.active_connections_for_ip(remote_ip) >= self.max_connections_per_addr() {
             return false;
         }
         let Some(conn_id) = self.allocate_conn_id() else {
@@ -1635,6 +1654,52 @@ mod tests {
     }
 
     #[test]
+    fn per_ip_connection_cap_limits_plaintext_accepts() {
+        let config = ServerConfig {
+            max_connections: 16,
+            chunk_size: 128,
+            tls_enabled: 0,
+            tls_cert_file: std::ptr::null(),
+            tls_key_file: std::ptr::null(),
+            tls_ca_file: std::ptr::null(),
+            tls_insecure: 0,
+            max_pending_tls_per_addr: 2,
+        };
+        let mut server = Server::new(config).unwrap();
+        server.listen("127.0.0.1:0").unwrap();
+
+        let port = {
+            let mut addr: libc::sockaddr_in = unsafe { std::mem::zeroed() };
+            let mut len = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
+            let rc = unsafe {
+                libc::getsockname(
+                    server.server_fd,
+                    &mut addr as *mut _ as *mut libc::sockaddr,
+                    &mut len,
+                )
+            };
+            assert_eq!(rc, 0);
+            u16::from_be(addr.sin_port)
+        };
+        let addr = format!("127.0.0.1:{port}");
+
+        let mut streams = Vec::new();
+        for _ in 0..2 {
+            streams.push(std::net::TcpStream::connect(&addr).unwrap());
+        }
+        server.accept_new_connections();
+        assert_eq!(server.connections.len(), 2);
+
+        let _third = std::net::TcpStream::connect(&addr).unwrap();
+        server.accept_new_connections();
+        assert_eq!(
+            server.connections.len(),
+            2,
+            "third connection from the same IP must be rejected"
+        );
+    }
+
+    #[test]
     fn stale_pre_connect_sessions_are_closed_during_poll() {
         use std::time::{Duration, Instant};
 
@@ -1671,6 +1736,50 @@ mod tests {
         assert_eq!(server.connections.len(), 1);
 
         server.connections[0].state = ConnState::Handshake;
+        server.connections[0]
+            .set_session_setup_started_for_test(Instant::now() - Duration::from_secs(11));
+
+        server.process_connections().unwrap();
+        assert_eq!(server.connections.len(), 0);
+    }
+
+    #[test]
+    fn post_connect_idle_sessions_are_closed_during_poll() {
+        use std::time::{Duration, Instant};
+
+        let config = ServerConfig {
+            max_connections: 4,
+            chunk_size: 128,
+            tls_enabled: 0,
+            tls_cert_file: std::ptr::null(),
+            tls_key_file: std::ptr::null(),
+            tls_ca_file: std::ptr::null(),
+            tls_insecure: 0,
+            max_pending_tls_per_addr: 0,
+        };
+        let mut server = Server::new(config).unwrap();
+        server.listen("127.0.0.1:0").unwrap();
+
+        let port = {
+            let mut addr: libc::sockaddr_in = unsafe { std::mem::zeroed() };
+            let mut len = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
+            let rc = unsafe {
+                libc::getsockname(
+                    server.server_fd,
+                    &mut addr as *mut _ as *mut libc::sockaddr,
+                    &mut len,
+                )
+            };
+            assert_eq!(rc, 0);
+            u16::from_be(addr.sin_port)
+        };
+        let addr = format!("127.0.0.1:{port}");
+
+        let _stream = std::net::TcpStream::connect(&addr).unwrap();
+        server.accept_new_connections();
+        assert_eq!(server.connections.len(), 1);
+
+        server.connections[0].state = ConnState::AppConnected;
         server.connections[0]
             .set_session_setup_started_for_test(Instant::now() - Duration::from_secs(11));
 

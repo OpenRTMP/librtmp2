@@ -67,10 +67,11 @@ const MAX_INBOUND_PING_RESPONSES: usize = 8;
 /// `receiveAudio` / `receiveVideo` re-enable on an already-playing stream.
 const INIT_REPLAY_COOLDOWN: Duration = Duration::from_secs(1);
 const INBOUND_PING_WINDOW: Duration = Duration::from_secs(1);
-/// Close inbound sessions that never complete the AMF `connect` exchange.
-/// Matches the RTMPS accept deadline so a peer cannot hold a connection slot
-/// indefinitely with a partial legacy handshake or an idle post-handshake TCP
-/// session.
+/// Close inbound sessions that never complete the AMF `connect` exchange or
+/// never start publishing/playing. Matches the RTMPS accept deadline so a
+/// peer cannot hold a connection slot indefinitely with a partial legacy
+/// handshake, an idle post-handshake TCP session, or ping responses alone
+/// after `connect`.
 pub(crate) const RTMP_SESSION_SETUP_TIMEOUT: Duration = Duration::from_secs(10);
 /// Cap sub-tags unpacked from a single Aggregate message (mirrors
 /// `message::message::MAX_AGGREGATE_SUBTAGS`).
@@ -261,11 +262,15 @@ impl Conn {
         }
     }
 
-    /// True when an inbound peer has held a connection slot without reaching
-    /// `AppConnected` for longer than [`RTMP_SESSION_SETUP_TIMEOUT`].
+    /// True when an inbound peer has held a connection slot without becoming
+    /// an active publisher or player for longer than
+    /// [`RTMP_SESSION_SETUP_TIMEOUT`]. Covers incomplete handshakes *and*
+    /// post-`connect` idle sessions that only answer server pings.
     pub fn session_setup_timed_out(&self) -> bool {
-        self.state < ConnState::AppConnected
-            && self.session_setup_started.elapsed() >= RTMP_SESSION_SETUP_TIMEOUT
+        if self.session_setup_started.elapsed() < RTMP_SESSION_SETUP_TIMEOUT {
+            return false;
+        }
+        !matches!(self.state, ConnState::Publishing | ConnState::Playing)
     }
 
     #[cfg(test)]
@@ -2419,6 +2424,27 @@ mod tests {
         assert!(
             matches!(ping(99), Err(ErrorCode::Protocol)),
             "9th ping in one second must be rejected"
+        );
+    }
+
+    #[test]
+    fn post_connect_idle_without_publish_or_play_times_out() {
+        use std::time::{Duration, Instant};
+
+        let mut conn = Conn::new();
+        conn.state = ConnState::AppConnected;
+        conn.set_session_setup_started_for_test(Instant::now() - Duration::from_secs(11));
+        assert!(
+            conn.session_setup_timed_out(),
+            "AppConnected peers that never publish/play must be reaped"
+        );
+
+        let mut publishing = Conn::new();
+        publishing.state = ConnState::Publishing;
+        publishing.set_session_setup_started_for_test(Instant::now() - Duration::from_secs(11));
+        assert!(
+            !publishing.session_setup_timed_out(),
+            "active publishers must not be reaped by the setup timer"
         );
     }
 

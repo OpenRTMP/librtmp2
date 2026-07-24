@@ -39,6 +39,8 @@ pub struct ChunkStream {
     pub reassembly_bytes_read: u32,
     /// buffer for reassembling partial messages
     pub reassembly_buf: Buffer,
+    /// Scratch space reused for each continuation chunk read on this CSID.
+    pub(crate) chunk_read_scratch: Vec<u8>,
     /// Last completed payload on this CSID. Copied before reassembly_buf is
     /// reset/shrunk so callers can read via the returned pointer safely.
     pub last_payload: Vec<u8>,
@@ -58,6 +60,7 @@ impl Default for ChunkStream {
             last_delta: 0,
             reassembly_bytes_read: 0,
             reassembly_buf: Buffer::new(),
+            chunk_read_scratch: Vec::new(),
             last_payload: Vec::new(),
             in_use: false,
         }
@@ -75,6 +78,7 @@ impl ChunkStream {
         self.last_delta = 0;
         self.reassembly_bytes_read = 0;
         self.reassembly_buf.reset();
+        self.chunk_read_scratch.clear();
         self.last_payload.clear();
         self.last_payload.shrink_to_fit();
         self.chunk_size = default_chunk_size;
