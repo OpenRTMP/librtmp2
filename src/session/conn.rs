@@ -1524,6 +1524,11 @@ impl Conn {
                 if let Some(ref mut stream) = self.current_stream {
                     stream.is_publishing = false;
                     stream.is_playing = false;
+                    // Matches closeStream: play() never resets `paused`, so
+                    // a stale true here would leave a later play on this
+                    // connection silently receiving no relayed frames
+                    // (relay delivery is gated on !paused).
+                    stream.paused = false;
                 }
                 // Give this connection a fresh setup-timeout window now that
                 // it's gone idle, rather than treating the moment it stops
@@ -2635,6 +2640,33 @@ mod tests {
             !conn.session_setup_timed_out(),
             "tearing down an active player via deleteStream must grant a fresh setup-timeout \
              window, not reap immediately"
+        );
+    }
+
+    #[test]
+    fn delete_stream_clears_paused_flag() {
+        // Regression test: deleteStream must reset `paused` like
+        // closeStream does. play() never resets `paused` on its own, and
+        // relay delivery is gated on !paused, so a pause -> deleteStream ->
+        // play sequence on the same connection would otherwise leave
+        // playback silently stuck with no relayed frames.
+        let mut conn = Conn::new();
+        conn.app = "live".to_string();
+        conn.current_stream = Some(Box::new(Stream {
+            is_playing: true,
+            paused: true,
+            ..Stream::new(1)
+        }));
+
+        let mut buf = Buffer::with_capacity(128);
+        crate::amf::amf0::write_string(&mut buf, "deleteStream").unwrap();
+        crate::amf::amf0::write_number(&mut buf, 2.0).unwrap();
+        crate::amf::amf0::write_null(&mut buf).unwrap();
+        conn.handle_command(buf.as_slice()).unwrap();
+
+        assert!(
+            !conn.current_stream.as_ref().unwrap().paused,
+            "deleteStream must clear paused"
         );
     }
 
