@@ -2584,9 +2584,7 @@ mod tests {
 
         conn.set_session_setup_started_for_test(Instant::now() - Duration::from_secs(11));
         let mut buf = Buffer::with_capacity(128);
-        crate::amf::amf0::write_string(&mut buf, "deleteStream").unwrap();
-        crate::amf::amf0::write_number(&mut buf, 2.0).unwrap();
-        crate::amf::amf0::write_null(&mut buf).unwrap();
+        command::build_deletestream(&mut buf, 2.0, 1).unwrap();
         conn.handle_command(buf.as_slice()).unwrap();
         assert!(
             conn.session_setup_timed_out(),
@@ -2627,9 +2625,7 @@ mod tests {
         );
 
         let mut buf = Buffer::with_capacity(128);
-        crate::amf::amf0::write_string(&mut buf, "deleteStream").unwrap();
-        crate::amf::amf0::write_number(&mut buf, 2.0).unwrap();
-        crate::amf::amf0::write_null(&mut buf).unwrap();
+        command::build_deletestream(&mut buf, 2.0, 1).unwrap();
         conn.handle_command(buf.as_slice()).unwrap();
 
         assert!(
@@ -2659,9 +2655,7 @@ mod tests {
         }));
 
         let mut buf = Buffer::with_capacity(128);
-        crate::amf::amf0::write_string(&mut buf, "deleteStream").unwrap();
-        crate::amf::amf0::write_number(&mut buf, 2.0).unwrap();
-        crate::amf::amf0::write_null(&mut buf).unwrap();
+        command::build_deletestream(&mut buf, 2.0, 1).unwrap();
         conn.handle_command(buf.as_slice()).unwrap();
 
         assert!(
