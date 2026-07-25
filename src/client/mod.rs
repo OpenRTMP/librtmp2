@@ -320,8 +320,10 @@ impl Client {
         let mut amf = Buffer::with_capacity(256);
         command::build_publish(&mut amf, &self.stream_key, "live")?;
         self.send_command_msg(self.stream_id, amf.as_slice(), Some(deadline))?;
+        let mut recv_budget = MAX_RECV_BYTES_PER_COMMAND_WAIT;
         loop {
-            let mut status = self.wait_for_command("onStatus", Some(deadline))?;
+            let mut status =
+                self.wait_for_command_with_budget("onStatus", Some(deadline), &mut recv_budget)?;
             if command::read_onstatus(&mut status, "NetStream.Publish.Start")? {
                 break;
             }
@@ -379,8 +381,10 @@ impl Client {
         let mut amf = Buffer::with_capacity(256);
         command::build_play(&mut amf, &self.stream_key)?;
         self.send_command_msg(self.stream_id, amf.as_slice(), Some(deadline))?;
+        let mut recv_budget = MAX_RECV_BYTES_PER_COMMAND_WAIT;
         loop {
-            let mut status = self.wait_for_command("onStatus", Some(deadline))?;
+            let mut status =
+                self.wait_for_command_with_budget("onStatus", Some(deadline), &mut recv_budget)?;
             if command::read_onstatus(&mut status, "NetStream.Play.Start")? {
                 break;
             }
@@ -1004,10 +1008,31 @@ impl Client {
     }
 
     /// Block until an AMF0 command named `want` is received, returning its payload buffer.
+    ///
+    /// Allocates a fresh [`MAX_RECV_BYTES_PER_COMMAND_WAIT`] budget for this
+    /// single call. Callers that loop (waiting for a specific status among
+    /// several `onStatus` messages) must use
+    /// [`Self::wait_for_command_with_budget`] with one shared budget across
+    /// the whole loop instead -- otherwise each retry gets its own fresh
+    /// budget and a peer can multiply total inbound bytes processed per
+    /// command exchange by sending many non-matching messages.
     fn wait_for_command(&mut self, want: &str, deadline: Option<Instant>) -> Result<Buffer> {
         let mut recv_budget = MAX_RECV_BYTES_PER_COMMAND_WAIT;
+        self.wait_for_command_with_budget(want, deadline, &mut recv_budget)
+    }
+
+    /// Like [`Self::wait_for_command`], but draws from a caller-supplied,
+    /// caller-owned byte budget so repeated calls (e.g. skipping transitional
+    /// `onStatus` messages while waiting for a terminal one) share a single
+    /// per-exchange cap instead of each getting a fresh one.
+    fn wait_for_command_with_budget(
+        &mut self,
+        want: &str,
+        deadline: Option<Instant>,
+        recv_budget: &mut usize,
+    ) -> Result<Buffer> {
         for _ in 0..64 {
-            let (msg, payload) = self.recv_message(&mut recv_budget, deadline)?;
+            let (msg, payload) = self.recv_message(recv_budget, deadline)?;
             if msg.msg_type_id != msg_dispatch::RTMP_MSG_AMF0_COMMAND {
                 continue;
             }
@@ -1640,6 +1665,68 @@ mod tests {
 
         client.play().unwrap();
         assert_eq!(client.state, ClientState::Playing);
+    }
+
+    #[test]
+    fn play_fails_fast_when_transitional_status_flood_exceeds_recv_budget() {
+        // A peer that keeps sending non-terminal `status`-level onStatus
+        // messages (never the terminal NetStream.Play.Start) must not let
+        // play()'s retry loop hand out a fresh MAX_RECV_BYTES_PER_COMMAND_WAIT
+        // budget on every iteration -- that would let it process unbounded
+        // inbound bytes for a single play() call. The shared budget should
+        // exhaust and fail well before the command I/O deadline.
+        use std::io::Write;
+        use std::os::unix::io::IntoRawFd;
+        use std::os::unix::net::UnixStream;
+        use std::time::Duration;
+
+        fn onstatus_chunk(level: &str, code: &str) -> Vec<u8> {
+            let mut payload = Buffer::new();
+            command::build_onstatus(&mut payload, level, code, "").unwrap();
+            let payload_len = payload.available();
+            let mut wire = Buffer::new();
+            let mut cmsg = ChunkMessage::default();
+            cmsg.csid = 3;
+            cmsg.fmt = 0;
+            cmsg.msg_length = payload_len as u32;
+            cmsg.msg_type_id = msg_dispatch::RTMP_MSG_AMF0_COMMAND;
+            cmsg.msg_stream_id = 1;
+            chunk_write(&mut wire, &cmsg, payload.as_slice(), payload_len, 128).unwrap();
+            wire.peek().to_vec()
+        }
+
+        let (client_end, mut peer) = UnixStream::pair().unwrap();
+        client_end.set_nonblocking(true).unwrap();
+
+        let reset_chunk = onstatus_chunk("status", "NetStream.Play.Reset");
+        let flood_bytes = MAX_RECV_BYTES_PER_COMMAND_WAIT + reset_chunk.len() * 4;
+        let writer = std::thread::spawn(move || {
+            let mut sent = 0usize;
+            while sent < flood_bytes {
+                if peer.write_all(&reset_chunk).is_err() {
+                    break;
+                }
+                sent += reset_chunk.len();
+            }
+        });
+
+        let mut client = Client::new();
+        client.state = ClientState::AppConnected;
+        client.stream_id = 1;
+        client.stream_key = "stream".to_string();
+        client.transport = Some(Transport::new_plain(client_end.into_raw_fd()));
+
+        let started = Instant::now();
+        assert!(client.play().is_err());
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "should fail once the shared recv budget is exhausted, not wait for the \
+             command I/O deadline, took {:?}",
+            elapsed
+        );
+
+        let _ = writer.join();
     }
 
     #[test]
