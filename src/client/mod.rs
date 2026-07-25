@@ -1697,6 +1697,11 @@ mod tests {
 
         let (client_end, mut peer) = UnixStream::pair().unwrap();
         client_end.set_nonblocking(true).unwrap();
+        // Bound the writer's blocking write_all() calls: once play() stops
+        // draining (budget exhausted), nothing reads the socket anymore, so
+        // an unbounded write_all() could block the writer thread -- and this
+        // test's join() -- forever.
+        peer.set_write_timeout(Some(Duration::from_secs(2))).unwrap();
 
         let reset_chunk = onstatus_chunk("status", "NetStream.Play.Reset");
         let flood_bytes = MAX_RECV_BYTES_PER_COMMAND_WAIT + reset_chunk.len() * 4;
@@ -1717,7 +1722,8 @@ mod tests {
         client.transport = Some(Transport::new_plain(client_end.into_raw_fd()));
 
         let started = Instant::now();
-        assert!(client.play().is_err());
+        let err = client.play().unwrap_err();
+        assert_eq!(err, ErrorCode::Timeout);
         let elapsed = started.elapsed();
         assert!(
             elapsed < Duration::from_secs(5),
