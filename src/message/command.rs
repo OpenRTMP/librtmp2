@@ -509,8 +509,16 @@ pub fn read_create_stream_result(buf: &mut Buffer) -> Result<(f64, f64)> {
     Ok((txn, stream_id))
 }
 
-/// Read an onStatus command. Returns [`ErrorCode::Auth`] when level is `error`.
-pub fn read_onstatus(buf: &mut Buffer) -> Result<()> {
+/// Read an onStatus command. Returns [`ErrorCode::Auth`] when `level` is not
+/// `status` (e.g. `error`/`warning`). When `level` is `status`, returns
+/// `Ok(true)` if `code` matches `expected_code` (e.g. `NetStream.Publish.Start`
+/// after publish) and `Ok(false)` for any other status-level code.
+///
+/// A real server commonly sends a transitional status (e.g.
+/// `NetStream.Play.Reset`) before the terminal one -- callers must keep
+/// waiting for further `onStatus` messages on `Ok(false)` rather than
+/// treating it as failure.
+pub fn read_onstatus(buf: &mut Buffer, expected_code: &str) -> Result<bool> {
     let mut name = [0u8; 64];
     amf0::read_string(buf, &mut name)?;
     read_number_value(buf)?;
@@ -519,6 +527,8 @@ pub fn read_onstatus(buf: &mut Buffer) -> Result<()> {
     amf0::read_object_begin(buf)?;
     let mut level = [0u8; 32];
     let mut level_len = 0usize;
+    let mut code = [0u8; 128];
+    let mut code_len = 0usize;
     let mut keys = 0usize;
     while !amf0::is_object_end(buf) {
         keys += 1;
@@ -530,6 +540,8 @@ pub fn read_onstatus(buf: &mut Buffer) -> Result<()> {
         let key_str = std::str::from_utf8(&key[..key_len]).unwrap_or("");
         if key_str == "level" {
             level_len = amf0::read_string(buf, &mut level)?;
+        } else if key_str == "code" {
+            code_len = amf0::read_string(buf, &mut code)?;
         } else {
             amf0::skip_value(buf)?;
         }
@@ -539,10 +551,11 @@ pub fn read_onstatus(buf: &mut Buffer) -> Result<()> {
     buf.read(&mut end).map_err(|_| ErrorCode::Amf)?;
 
     let level_str = std::str::from_utf8(&level[..level_len]).unwrap_or("");
-    if level_str == "error" {
+    if level_str != "status" {
         return Err(ErrorCode::Auth);
     }
-    Ok(())
+    let code_str = std::str::from_utf8(&code[..code_len]).unwrap_or("");
+    Ok(code_str == expected_code)
 }
 
 /* ── Helpers ── */
@@ -772,7 +785,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(read_onstatus(&mut buf), Err(ErrorCode::Auth));
+        assert_eq!(read_onstatus(&mut buf, "NetStream.Publish.Start"), Err(ErrorCode::Auth));
     }
 
     #[test]
@@ -780,7 +793,39 @@ mod tests {
         let mut buf = Buffer::new();
         build_onstatus(&mut buf, "status", "NetStream.Publish.Start", "Publishing").unwrap();
 
-        assert!(read_onstatus(&mut buf).is_ok());
+        assert_eq!(read_onstatus(&mut buf, "NetStream.Publish.Start"), Ok(true));
+    }
+
+    #[test]
+    fn read_onstatus_reports_non_matching_status_code_as_not_matched() {
+        // A transitional status-level code (e.g. what a real server sends as
+        // `NetStream.Play.Reset` before `NetStream.Play.Start`) is not a
+        // failure -- callers must keep waiting for the expected code rather
+        // than aborting.
+        let mut buf = Buffer::new();
+        build_onstatus(
+            &mut buf,
+            "status",
+            "NetStream.Publish.BadName",
+            "Publish not authorized",
+        )
+        .unwrap();
+
+        assert_eq!(read_onstatus(&mut buf, "NetStream.Publish.Start"), Ok(false));
+    }
+
+    #[test]
+    fn read_onstatus_rejects_missing_level() {
+        let mut buf = Buffer::new();
+        amf0::write_string(&mut buf, "onStatus").unwrap();
+        amf0::write_number(&mut buf, 1.0).unwrap();
+        amf0::write_null(&mut buf).unwrap();
+        amf0::write_object_begin(&mut buf).unwrap();
+        amf0::write_object_key(&mut buf, "code").unwrap();
+        amf0::write_string(&mut buf, "NetStream.Publish.Start").unwrap();
+        amf0::write_object_end(&mut buf).unwrap();
+
+        assert_eq!(read_onstatus(&mut buf, "NetStream.Publish.Start"), Err(ErrorCode::Auth));
     }
 
     #[test]
@@ -799,7 +844,7 @@ mod tests {
         amf0::write_string(&mut buf, "status").unwrap();
         amf0::write_object_end(&mut buf).unwrap();
 
-        assert_eq!(read_onstatus(&mut buf), Err(ErrorCode::Amf));
+        assert_eq!(read_onstatus(&mut buf, "NetStream.Publish.Start"), Err(ErrorCode::Amf));
     }
 
     #[test]

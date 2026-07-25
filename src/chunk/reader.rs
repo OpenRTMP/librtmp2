@@ -232,100 +232,115 @@ pub fn chunk_read(
         } else {
             0
         };
-        let total: usize = reg
-            .streams
-            .iter()
-            .filter(|s| s.in_use)
-            .map(|s| s.reassembly_buf.available())
-            .sum();
-        if total.saturating_sub(replaced) + to_read > reg.max_reassembly_bytes {
+        if reg.reassembly_bytes_in_use().saturating_sub(replaced) + to_read > reg.max_reassembly_bytes
+        {
             return Err(ErrorCode::Chunk);
         }
     }
 
-    let stream = reg.get_or_create(csid)?;
+    let stream_idx = reg.get_or_create_index(csid)?;
 
     // fmt 0/1 start a fresh message on this CSID; discard any partial
     // reassembly left over from an abandoned prior message.
     if fmt == 0 || fmt == 1 {
+        reg.release_stream_reassembly(stream_idx);
+        let stream = &mut reg.streams[stream_idx];
         stream.reassembly_bytes_read = 0;
         stream.reassembly_buf.reset();
     }
 
-    // fmt=2/3 inherit length/type/stream-id from prior state on this CSID.
-    // After a complete message, reassembly_bytes_read is 0 but inherited
-    // header fields remain — that is valid for the next constant-size frame
-    // (common for AAC) or a fmt=3 header reuse per RTMP spec.
-    if (fmt == 2 || fmt == 3) && stream.reassembly_bytes_read == 0 && stream.type0_msg_length == 0 {
-        return Err(ErrorCode::Chunk);
+    let (effective_ts, effective_length, effective_type_id, effective_stream_id, to_read) = {
+        let stream = &mut reg.streams[stream_idx];
+
+        // fmt=2/3 inherit length/type/stream-id from prior state on this CSID.
+        // After a complete message, reassembly_bytes_read is 0 but inherited
+        // header fields remain — that is valid for the next constant-size frame
+        // (common for AAC) or a fmt=3 header reuse per RTMP spec.
+        if (fmt == 2 || fmt == 3)
+            && stream.reassembly_bytes_read == 0
+            && stream.type0_msg_length == 0
+        {
+            return Err(ErrorCode::Chunk);
+        }
+
+        // fmt=3 can be either a continuation chunk or a complete new chunk that
+        // legitimately reuses the previous message header context on this CSID.
+        // The chunk layer cannot distinguish an intentionally reused fmt=3 header
+        // from a peer-controlled message with the same inherited metadata, so it
+        // must accept fmt=3 when the CSID has valid prior state. Higher layers must
+        // validate command semantics and authorization for the resulting message.
+        //
+        // A fmt=3 chunk is a *new-message start* (as opposed to a continuation of
+        // an in-flight message) exactly when no message is currently being
+        // reassembled on this CSID -- reassembly_bytes_read is only 0 between
+        // messages, never mid-message.
+        let fmt3_starts_new_message = fmt == 3 && stream.reassembly_bytes_read == 0;
+
+        match fmt {
+            0 => {
+                stream.type0_timestamp = final_timestamp;
+                stream.type0_msg_length = msg_length;
+                stream.type0_msg_type_id = msg_type_id;
+                stream.type0_msg_stream_id = msg_stream_id;
+                stream.type0_ext_ts = ext_ts;
+                stream.last_delta = 0;
+            }
+            1 => {
+                // fmt=1 carries a timestamp DELTA (RTMP spec 5.3.1.1), not an
+                // absolute value -- it must be added to the running timestamp.
+                stream.type0_timestamp = stream.type0_timestamp.wrapping_add(final_timestamp);
+                stream.type0_msg_length = msg_length;
+                stream.type0_msg_type_id = msg_type_id;
+                stream.type0_ext_ts = ext_ts;
+                stream.last_delta = final_timestamp;
+            }
+            2 => {
+                // fmt=2 also carries a timestamp DELTA, same as fmt=1.
+                stream.type0_timestamp = stream.type0_timestamp.wrapping_add(final_timestamp);
+                stream.type0_ext_ts = ext_ts;
+                stream.last_delta = final_timestamp;
+            }
+            3 if fmt3_starts_new_message => {
+                // Per RTMP spec 5.3.1.3, a fmt=3 chunk that starts a new message
+                // (rather than continuing one) implicitly repeats the previous
+                // delta -- it does not freeze the timestamp at its old value.
+                stream.type0_timestamp = stream.type0_timestamp.wrapping_add(stream.last_delta);
+            }
+            _ => {}
+        }
+
+        let effective_ts = stream.type0_timestamp;
+        let effective_length = stream.type0_msg_length;
+        let effective_type_id = stream.type0_msg_type_id;
+        let effective_stream_id = stream.type0_msg_stream_id;
+        let chunk_size = stream.chunk_size as usize;
+        let remaining =
+            (effective_length as usize).saturating_sub(stream.reassembly_bytes_read as usize);
+        let to_read = remaining.min(chunk_size);
+        (
+            effective_ts,
+            effective_length,
+            effective_type_id,
+            effective_stream_id,
+            to_read,
+        )
+    };
+
+    {
+        let stream = &mut reg.streams[stream_idx];
+        let chunk_data = &mut stream.chunk_read_scratch;
+        if chunk_data.len() != to_read {
+            chunk_data.resize(to_read, 0);
+        }
+        buf.read(&mut chunk_data[..to_read])
+            .map_err(|_| ErrorCode::Io)?;
+        stream
+            .reassembly_buf
+            .write(&chunk_data[..to_read])
+            .map_err(|_| ErrorCode::Chunk)?;
+        stream.reassembly_bytes_read += to_read as u32;
     }
-
-    // fmt=3 can be either a continuation chunk or a complete new chunk that
-    // legitimately reuses the previous message header context on this CSID.
-    // The chunk layer cannot distinguish an intentionally reused fmt=3 header
-    // from a peer-controlled message with the same inherited metadata, so it
-    // must accept fmt=3 when the CSID has valid prior state. Higher layers must
-    // validate command semantics and authorization for the resulting message.
-    //
-    // A fmt=3 chunk is a *new-message start* (as opposed to a continuation of
-    // an in-flight message) exactly when no message is currently being
-    // reassembled on this CSID -- reassembly_bytes_read is only 0 between
-    // messages, never mid-message.
-    let fmt3_starts_new_message = fmt == 3 && stream.reassembly_bytes_read == 0;
-
-    match fmt {
-        0 => {
-            stream.type0_timestamp = final_timestamp;
-            stream.type0_msg_length = msg_length;
-            stream.type0_msg_type_id = msg_type_id;
-            stream.type0_msg_stream_id = msg_stream_id;
-            stream.type0_ext_ts = ext_ts;
-            stream.last_delta = 0;
-        }
-        1 => {
-            // fmt=1 carries a timestamp DELTA (RTMP spec 5.3.1.1), not an
-            // absolute value -- it must be added to the running timestamp.
-            stream.type0_timestamp = stream.type0_timestamp.wrapping_add(final_timestamp);
-            stream.type0_msg_length = msg_length;
-            stream.type0_msg_type_id = msg_type_id;
-            stream.type0_ext_ts = ext_ts;
-            stream.last_delta = final_timestamp;
-        }
-        2 => {
-            // fmt=2 also carries a timestamp DELTA, same as fmt=1.
-            stream.type0_timestamp = stream.type0_timestamp.wrapping_add(final_timestamp);
-            stream.type0_ext_ts = ext_ts;
-            stream.last_delta = final_timestamp;
-        }
-        3 if fmt3_starts_new_message => {
-            // Per RTMP spec 5.3.1.3, a fmt=3 chunk that starts a new message
-            // (rather than continuing one) implicitly repeats the previous
-            // delta -- it does not freeze the timestamp at its old value.
-            stream.type0_timestamp = stream.type0_timestamp.wrapping_add(stream.last_delta);
-        }
-        _ => {}
-    }
-
-    let effective_ts = stream.type0_timestamp;
-    let effective_length = stream.type0_msg_length;
-    let effective_type_id = stream.type0_msg_type_id;
-    let effective_stream_id = stream.type0_msg_stream_id;
-    let chunk_size = stream.chunk_size as usize;
-    let remaining =
-        (effective_length as usize).saturating_sub(stream.reassembly_bytes_read as usize);
-    let to_read = remaining.min(chunk_size);
-
-    let chunk_data = &mut stream.chunk_read_scratch;
-    if chunk_data.len() != to_read {
-        chunk_data.resize(to_read, 0);
-    }
-    buf.read(&mut chunk_data[..to_read])
-        .map_err(|_| ErrorCode::Io)?;
-    stream
-        .reassembly_buf
-        .write(&chunk_data[..to_read])
-        .map_err(|_| ErrorCode::Chunk)?;
-    stream.reassembly_bytes_read += to_read as u32;
+    reg.note_reassembly_growth(to_read);
 
     // Release the scratch buffer's capacity after every chunk (not just on
     // message completion) so a peer that starts many large messages across
@@ -336,12 +351,16 @@ pub fn chunk_read(
     // scratch buffers are left alone (matches the `last_payload` threshold
     // pattern) so steady small-chunk traffic reuses its allocation instead
     // of paying a free/alloc cycle per chunk.
-    stream.chunk_read_scratch.clear();
-    if stream.chunk_read_scratch.capacity() > crate::buffer::BUFFER_RESET_CAPACITY {
-        stream.chunk_read_scratch.shrink_to_fit();
-    }
+    let message_complete = {
+        let stream = &mut reg.streams[stream_idx];
+        stream.chunk_read_scratch.clear();
+        if stream.chunk_read_scratch.capacity() > crate::buffer::BUFFER_RESET_CAPACITY {
+            stream.chunk_read_scratch.shrink_to_fit();
+        }
+        stream.reassembly_bytes_read >= effective_length
+    };
 
-    if stream.reassembly_bytes_read >= effective_length {
+    if message_complete {
         msg.csid = csid;
         msg.fmt = fmt;
         msg.timestamp = effective_ts;
@@ -353,15 +372,18 @@ pub fn chunk_read(
         // Copy out before reset: shrinking the reassembly buffer would
         // invalidate a pointer into its storage. Reuse last_payload's
         // allocation to avoid allocator churn on every complete message.
-        stream.last_payload.clear();
-        stream
-            .last_payload
-            .extend_from_slice(stream.reassembly_buf.peek());
-        *payload_len = stream.last_payload.len();
-        *payload = stream.last_payload.as_ptr();
-
-        stream.reassembly_bytes_read = 0;
-        stream.reassembly_buf.reset();
+        {
+            let stream = &mut reg.streams[stream_idx];
+            stream.last_payload.clear();
+            stream
+                .last_payload
+                .extend_from_slice(stream.reassembly_buf.peek());
+            *payload_len = stream.last_payload.len();
+            *payload = stream.last_payload.as_ptr();
+            stream.reassembly_bytes_read = 0;
+        }
+        reg.release_stream_reassembly(stream_idx);
+        reg.streams[stream_idx].reassembly_buf.reset();
 
         Ok(1)
     } else {

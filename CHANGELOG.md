@@ -13,6 +13,37 @@ begin at `1.0.0`.
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-07-25
+
+### Security
+- Client `onStatus` handling now requires `level == "status"` and the exact
+  expected success `code` (`NetStream.Publish.Start` / `NetStream.Play.Start`)
+  before treating `publish()`/`play()` as successful, instead of only
+  rejecting `level == "error"`. A malicious server could previously omit
+  `level` entirely or return an unrelated success-shaped status to make a
+  failed publish/play look successful to the caller.
+- Client-side `Frame` codec metadata for ModEx-wrapped E-RTMP v2 payloads is
+  now derived from the negotiated `capsEx` and the unwrapped inner codec
+  header instead of the raw ModEx wrapper, matching the server's existing
+  behavior.
+- `ChunkRegistry` CSID lookups are now O(1) via a `HashMap` index instead of
+  a linear scan, closing a DoS path where a peer opening many chunk streams
+  multiplied per-chunk registry-scan cost.
+- `Client::publish()`/`play()` no longer abort on a transitional `status`-level
+  `onStatus` code (e.g. `NetStream.Play.Reset`, sent by real-world servers
+  before the terminal status) — they keep waiting for the expected terminal
+  code instead, sharing one bounded inbound-byte budget across the retry so
+  the added tolerance can't be used to process unbounded inbound data for a
+  single publish/play exchange.
+
+### Changed
+- `message::command::read_onstatus` now takes an `expected_code: &str`
+  parameter and returns `Result<bool>` (matched vs. non-matching status)
+  instead of `Result<()>`. `ChunkRegistry` gained private fields for the CSID
+  index and reassembly-byte accounting. Both are internal (non-`extern "C"`)
+  API changes, permitted at this `0.x` stage per `docs/abi-policy.md`; the
+  `extern "C"` FFI surface is unaffected.
+
 ## [0.5.0] — 2026-07-24
 
 ### Security
@@ -411,7 +442,8 @@ and others.
 - Protocol mapping documents for legacy, E-RTMP v1, and E-RTMP v2
 - `CONTRIBUTING.md` guidelines
 
-[Unreleased]: https://github.com/OpenRTMP/librtmp2/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/OpenRTMP/librtmp2/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/OpenRTMP/librtmp2/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/OpenRTMP/librtmp2/compare/v0.4.2...v0.5.0
 [0.4.2]: https://github.com/OpenRTMP/librtmp2/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/OpenRTMP/librtmp2/compare/v0.4.0...v0.4.1
