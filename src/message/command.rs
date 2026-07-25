@@ -509,10 +509,32 @@ pub fn read_create_stream_result(buf: &mut Buffer) -> Result<(f64, f64)> {
     Ok((txn, stream_id))
 }
 
+/// Read an onStatus command. Returns [`ErrorCode::Auth`] when level is `error`.
+pub fn read_onstatus(buf: &mut Buffer) -> Result<()> {
+    let (level, _code) = parse_onstatus(buf)?;
+    if level == "error" {
+        return Err(ErrorCode::Auth);
+    }
+    Ok(())
+}
+
 /// Read an onStatus command. Returns [`ErrorCode::Auth`] unless `level` is
 /// exactly `status` and `code` matches `expected_code` (e.g.
-/// `NetStream.Publish.Start` after publish).
-pub fn read_onstatus(buf: &mut Buffer, expected_code: &str) -> Result<()> {
+/// `NetStream.Publish.Start` after publish). A `level` of `status` with a
+/// different `code` returns [`ErrorCode::Protocol`] so callers can skip
+/// intermediate statuses such as `NetStream.Play.Reset`.
+pub fn read_onstatus_with_code(buf: &mut Buffer, expected_code: &str) -> Result<()> {
+    let (level, code) = parse_onstatus(buf)?;
+    if level != "status" {
+        return Err(ErrorCode::Auth);
+    }
+    if code != expected_code {
+        return Err(ErrorCode::Protocol);
+    }
+    Ok(())
+}
+
+fn parse_onstatus(buf: &mut Buffer) -> Result<(String, String)> {
     let mut name = [0u8; 64];
     amf0::read_string(buf, &mut name)?;
     read_number_value(buf)?;
@@ -544,15 +566,9 @@ pub fn read_onstatus(buf: &mut Buffer, expected_code: &str) -> Result<()> {
     let mut end = [0u8; 3];
     buf.read(&mut end).map_err(|_| ErrorCode::Amf)?;
 
-    let level_str = std::str::from_utf8(&level[..level_len]).unwrap_or("");
-    if level_str != "status" {
-        return Err(ErrorCode::Auth);
-    }
-    let code_str = std::str::from_utf8(&code[..code_len]).unwrap_or("");
-    if code_str != expected_code {
-        return Err(ErrorCode::Auth);
-    }
-    Ok(())
+    let level_str = std::str::from_utf8(&level[..level_len]).unwrap_or("").to_string();
+    let code_str = std::str::from_utf8(&code[..code_len]).unwrap_or("").to_string();
+    Ok((level_str, code_str))
 }
 
 /* ── Helpers ── */
@@ -782,7 +798,19 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(read_onstatus(&mut buf, "NetStream.Publish.Start"), Err(ErrorCode::Auth));
+        assert_eq!(read_onstatus(&mut buf), Err(ErrorCode::Auth));
+        let mut buf = Buffer::new();
+        build_onstatus(
+            &mut buf,
+            "error",
+            "NetStream.Publish.BadName",
+            "Publish not authorized",
+        )
+        .unwrap();
+        assert_eq!(
+            read_onstatus_with_code(&mut buf, "NetStream.Publish.Start"),
+            Err(ErrorCode::Auth)
+        );
     }
 
     #[test]
@@ -790,7 +818,10 @@ mod tests {
         let mut buf = Buffer::new();
         build_onstatus(&mut buf, "status", "NetStream.Publish.Start", "Publishing").unwrap();
 
-        assert!(read_onstatus(&mut buf, "NetStream.Publish.Start").is_ok());
+        assert!(read_onstatus(&mut buf).is_ok());
+        let mut buf = Buffer::new();
+        build_onstatus(&mut buf, "status", "NetStream.Publish.Start", "Publishing").unwrap();
+        assert!(read_onstatus_with_code(&mut buf, "NetStream.Publish.Start").is_ok());
     }
 
     #[test]
@@ -804,7 +835,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(read_onstatus(&mut buf, "NetStream.Publish.Start"), Err(ErrorCode::Auth));
+        assert_eq!(
+            read_onstatus_with_code(&mut buf, "NetStream.Publish.Start"),
+            Err(ErrorCode::Protocol)
+        );
     }
 
     #[test]
@@ -818,7 +852,10 @@ mod tests {
         amf0::write_string(&mut buf, "NetStream.Publish.Start").unwrap();
         amf0::write_object_end(&mut buf).unwrap();
 
-        assert_eq!(read_onstatus(&mut buf, "NetStream.Publish.Start"), Err(ErrorCode::Auth));
+        assert_eq!(
+            read_onstatus_with_code(&mut buf, "NetStream.Publish.Start"),
+            Err(ErrorCode::Auth)
+        );
     }
 
     #[test]
@@ -837,7 +874,10 @@ mod tests {
         amf0::write_string(&mut buf, "status").unwrap();
         amf0::write_object_end(&mut buf).unwrap();
 
-        assert_eq!(read_onstatus(&mut buf, "NetStream.Publish.Start"), Err(ErrorCode::Amf));
+        assert_eq!(
+            read_onstatus_with_code(&mut buf, "NetStream.Publish.Start"),
+            Err(ErrorCode::Amf)
+        );
     }
 
     #[test]

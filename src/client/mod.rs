@@ -321,7 +321,7 @@ impl Client {
         command::build_publish(&mut amf, &self.stream_key, "live")?;
         self.send_command_msg(self.stream_id, amf.as_slice(), Some(deadline))?;
         let mut status = self.wait_for_command("onStatus", Some(deadline))?;
-        command::read_onstatus(&mut status, "NetStream.Publish.Start")?;
+        command::read_onstatus_with_code(&mut status, "NetStream.Publish.Start")?;
         self.state = ClientState::Publishing;
         Ok(())
     }
@@ -375,8 +375,21 @@ impl Client {
         let mut amf = Buffer::with_capacity(256);
         command::build_play(&mut amf, &self.stream_key)?;
         self.send_command_msg(self.stream_id, amf.as_slice(), Some(deadline))?;
-        let mut status = self.wait_for_command("onStatus", Some(deadline))?;
-        command::read_onstatus(&mut status, "NetStream.Play.Start")?;
+        let mut play_started = false;
+        for _ in 0..64 {
+            let mut status = self.wait_for_command("onStatus", Some(deadline))?;
+            match command::read_onstatus_with_code(&mut status, "NetStream.Play.Start") {
+                Ok(()) => {
+                    play_started = true;
+                    break;
+                }
+                Err(ErrorCode::Protocol) => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        if !play_started {
+            return Err(ErrorCode::Timeout);
+        }
         self.state = ClientState::Playing;
         Ok(())
     }

@@ -243,7 +243,6 @@ pub fn chunk_read(
     // fmt 0/1 start a fresh message on this CSID; discard any partial
     // reassembly left over from an abandoned prior message.
     if fmt == 0 || fmt == 1 {
-        reg.release_stream_reassembly(stream_idx);
         let stream = &mut reg.streams[stream_idx];
         stream.reassembly_bytes_read = 0;
         stream.reassembly_buf.reset();
@@ -340,7 +339,6 @@ pub fn chunk_read(
             .map_err(|_| ErrorCode::Chunk)?;
         stream.reassembly_bytes_read += to_read as u32;
     }
-    reg.note_reassembly_growth(to_read);
 
     // Release the scratch buffer's capacity after every chunk (not just on
     // message completion) so a peer that starts many large messages across
@@ -382,7 +380,6 @@ pub fn chunk_read(
             *payload = stream.last_payload.as_ptr();
             stream.reassembly_bytes_read = 0;
         }
-        reg.release_stream_reassembly(stream_idx);
         reg.streams[stream_idx].reassembly_buf.reset();
 
         Ok(1)

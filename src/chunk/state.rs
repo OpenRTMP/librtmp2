@@ -2,8 +2,6 @@
 //!
 //! Mirrors `src/chunk/chunk_state.h` and `src/chunk/chunk_state.c`.
 
-use std::collections::HashMap;
-
 use crate::buffer::Buffer;
 use crate::message::control::MAX_INBOUND_CHUNK_SIZE;
 use crate::types::ErrorCode;
@@ -92,10 +90,6 @@ impl ChunkStream {
 #[derive(Debug)]
 pub struct ChunkRegistry {
     pub streams: Vec<ChunkStream>,
-    /// O(1) lookup from CSID to `streams` index.
-    csid_index: HashMap<u32, usize>,
-    /// Running total of `reassembly_buf` bytes across active streams.
-    reassembly_bytes_in_use: usize,
     /// Chunk size applied to new streams
     pub default_chunk_size: u32,
     /// Reject message bodies larger than this (bytes).
@@ -118,8 +112,6 @@ impl ChunkRegistry {
     pub fn new() -> Self {
         Self {
             streams: Vec::new(),
-            csid_index: HashMap::new(),
-            reassembly_bytes_in_use: 0,
             default_chunk_size: DEFAULT_CHUNK_SIZE,
             max_msg_length: DEFAULT_MAX_MSG_LENGTH,
             max_active_csids: DEFAULT_MAX_ACTIVE_CSIDS,
@@ -143,11 +135,8 @@ impl ChunkRegistry {
     /// Like [`Self::get_or_create`], but returns the slot index to avoid
     /// overlapping borrows when updating registry-wide reassembly accounting.
     pub(crate) fn get_or_create_index(&mut self, csid: u32) -> Result<usize> {
-        if let Some(&idx) = self.csid_index.get(&csid) {
-            let stream = &self.streams[idx];
-            if stream.in_use && stream.csid == csid {
-                return Ok(idx);
-            }
+        if let Some(i) = self.streams.iter().position(|s| s.csid == csid && s.in_use) {
+            return Ok(i);
         }
 
         let active = self.streams.iter().filter(|s| s.in_use).count();
@@ -155,17 +144,10 @@ impl ChunkRegistry {
             return Err(ErrorCode::Chunk);
         }
 
-        // Reuse a free slot before growing the vec; this prevents the stream
-        // count from monotonically climbing to MAX_CHUNK_STREAMS on connections
-        // that open and close many streams across their lifetime.
         if let Some(i) = self.streams.iter().position(|s| !s.in_use) {
-            if self.streams[i].in_use {
-                self.release_stream_reassembly(i);
-            }
             self.streams[i].csid = csid;
             self.streams[i].in_use = true;
             self.streams[i].reset(self.default_chunk_size);
-            self.csid_index.insert(csid, i);
             return Ok(i);
         }
 
@@ -177,56 +159,27 @@ impl ChunkRegistry {
         stream.csid = csid;
         stream.in_use = true;
         stream.chunk_size = self.default_chunk_size;
-        let idx = self.streams.len();
         self.streams.push(stream);
-        self.csid_index.insert(csid, idx);
-        Ok(idx)
+        Ok(self.streams.len() - 1)
     }
 
     /// Get a chunk stream by csid (returns None if not found).
     pub fn get(&self, csid: u32) -> Option<&ChunkStream> {
-        let idx = *self.csid_index.get(&csid)?;
-        let stream = &self.streams[idx];
-        if stream.in_use && stream.csid == csid {
-            Some(stream)
-        } else {
-            None
-        }
+        self.streams.iter().find(|s| s.csid == csid && s.in_use)
     }
 
     /// Get a mutable chunk stream by csid.
     pub fn get_mut(&mut self, csid: u32) -> Option<&mut ChunkStream> {
-        let idx = *self.csid_index.get(&csid)?;
-        let stream = &self.streams[idx];
-        if stream.in_use && stream.csid == csid {
-            Some(&mut self.streams[idx])
-        } else {
-            None
-        }
+        self.streams.iter_mut().find(|s| s.csid == csid && s.in_use)
     }
 
     /// Total reassembly bytes currently buffered across all active CSIDs.
     pub(crate) fn reassembly_bytes_in_use(&self) -> usize {
-        self.reassembly_bytes_in_use
-    }
-
-    /// Release a stream's reassembly buffer from the running total.
-    pub(crate) fn release_stream_reassembly_by_csid(&mut self, csid: u32) -> usize {
-        let Some(idx) = self.csid_index.get(&csid).copied() else {
-            return 0;
-        };
-        self.release_stream_reassembly(idx)
-    }
-
-    pub(crate) fn release_stream_reassembly(&mut self, idx: usize) -> usize {
-        let released = self.streams[idx].reassembly_buf.available();
-        self.reassembly_bytes_in_use = self.reassembly_bytes_in_use.saturating_sub(released);
-        released
-    }
-
-    /// Account for newly written reassembly bytes on a stream.
-    pub(crate) fn note_reassembly_growth(&mut self, nbytes: usize) {
-        self.reassembly_bytes_in_use = self.reassembly_bytes_in_use.saturating_add(nbytes);
+        self.streams
+            .iter()
+            .filter(|s| s.in_use)
+            .map(|s| s.reassembly_buf.available())
+            .sum()
     }
 
     /// Set chunk size for all streams. Values outside the RTMP-valid inbound
@@ -245,7 +198,7 @@ impl ChunkRegistry {
 
     /// Check if a stream can grow its reassembly buffer.
     pub fn can_grow_reassembly(&self, cs: &ChunkStream, additional: u32) -> Result<()> {
-        if self.reassembly_bytes_in_use + additional as usize > self.max_reassembly_bytes {
+        if self.reassembly_bytes_in_use() + additional as usize > self.max_reassembly_bytes {
             return Err(ErrorCode::Chunk);
         }
         let _ = cs;
@@ -254,19 +207,14 @@ impl ChunkRegistry {
 
     /// Reset a specific stream.
     pub fn reset_stream(&mut self, csid: u32) {
-        if let Some(idx) = self.csid_index.get(&csid).copied() {
-            if self.streams[idx].in_use && self.streams[idx].csid == csid {
-                self.release_stream_reassembly(idx);
-                self.streams[idx].reset(self.default_chunk_size);
-            }
+        if let Some(stream) = self.streams.iter_mut().find(|s| s.csid == csid && s.in_use) {
+            stream.reset(self.default_chunk_size);
         }
     }
 
     /// Destroy the registry.
     pub fn destroy(&mut self) {
         self.streams.clear();
-        self.csid_index.clear();
-        self.reassembly_bytes_in_use = 0;
         self.initialized = false;
     }
 }
