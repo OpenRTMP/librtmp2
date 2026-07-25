@@ -1626,7 +1626,6 @@ mod tests {
 
         let (client_end, mut peer) = UnixStream::pair().unwrap();
         client_end.set_nonblocking(true).unwrap();
-        peer.set_nonblocking(true).unwrap();
 
         peer.write_all(&onstatus_chunk("status", "NetStream.Play.Reset"))
             .unwrap();
