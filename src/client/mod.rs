@@ -13,7 +13,9 @@ use crate::chunk::state::{ChunkRegistry, DEFAULT_MAX_MSG_LENGTH};
 use crate::chunk::writer::chunk_write;
 use crate::ertmp::multitrack_media::{foreach_track, is_multitrack_container};
 use crate::handshake::{self, Handshake};
-use crate::media::{is_on_metadata_payload, populate_av_frame, populate_multitrack_frame};
+use crate::media::{
+    is_on_metadata_payload, normalize_modex_payload, populate_av_frame, populate_multitrack_frame,
+};
 use crate::message::command;
 use crate::message::control;
 use crate::message::message as msg_dispatch;
@@ -176,6 +178,8 @@ pub struct Client {
     connect_timeout: Option<Duration>,
     inbound_ping_window_start: Option<Instant>,
     inbound_ping_responses: usize,
+    /// E-RTMP capabilities negotiated during `connect` (used for ModEx unwrap).
+    negotiated_caps: NegotiatedCaps,
 }
 
 impl Client {
@@ -199,6 +203,7 @@ impl Client {
             connect_timeout: None,
             inbound_ping_window_start: None,
             inbound_ping_responses: 0,
+            negotiated_caps: NegotiatedCaps::default(),
         }
     }
 
@@ -316,7 +321,7 @@ impl Client {
         command::build_publish(&mut amf, &self.stream_key, "live")?;
         self.send_command_msg(self.stream_id, amf.as_slice(), Some(deadline))?;
         let mut status = self.wait_for_command("onStatus", Some(deadline))?;
-        command::read_onstatus(&mut status)?;
+        command::read_onstatus(&mut status, "NetStream.Publish.Start")?;
         self.state = ClientState::Publishing;
         Ok(())
     }
@@ -348,7 +353,7 @@ impl Client {
         )?;
         self.send_command_msg(0, connect_amf.as_slice(), Some(deadline))?;
         let mut result = self.wait_for_command("_result", Some(deadline))?;
-        command::read_connect_result(&mut result)?;
+        command::read_connect_result_with_caps(&mut result, Some(&mut self.negotiated_caps))?;
 
         let mut create_stream_amf = Buffer::with_capacity(64);
         command::build_create_stream(&mut create_stream_amf, 2.0)?;
@@ -371,7 +376,7 @@ impl Client {
         command::build_play(&mut amf, &self.stream_key)?;
         self.send_command_msg(self.stream_id, amf.as_slice(), Some(deadline))?;
         let mut status = self.wait_for_command("onStatus", Some(deadline))?;
-        command::read_onstatus(&mut status)?;
+        command::read_onstatus(&mut status, "NetStream.Play.Start")?;
         self.state = ClientState::Playing;
         Ok(())
     }
@@ -662,8 +667,11 @@ impl Client {
         timestamp: u32,
         payload: &[u8],
     ) -> Result<()> {
-        let is_multitrack = is_multitrack_container(frame_type, &payload);
-        let parsed_multitrack = foreach_track(frame_type, &payload, |track| {
+        let normalized =
+            normalize_modex_payload(payload, self.negotiated_caps.caps_ex_mask);
+        let parse_payload = normalized.as_ref();
+        let is_multitrack = is_multitrack_container(frame_type, parse_payload);
+        let parsed_multitrack = foreach_track(frame_type, parse_payload, |track| {
             self.invoke_multitrack_on_frame_cb(
                 cb,
                 frame_type,
@@ -679,7 +687,7 @@ impl Client {
             return Err(ErrorCode::Protocol);
         }
         if !is_multitrack {
-            self.invoke_on_frame_cb(cb, frame_type, timestamp, u8::MAX, &payload);
+            self.invoke_on_frame_cb(cb, frame_type, timestamp, u8::MAX, parse_payload);
         }
         Ok(())
     }
@@ -933,6 +941,7 @@ impl Client {
         self.stream_id = 0;
         self.inbound_ping_window_start = None;
         self.inbound_ping_responses = 0;
+        self.negotiated_caps = NegotiatedCaps::default();
     }
 
     /// Drive the legacy C0/C1/C2 client handshake to completion over `transport`.
