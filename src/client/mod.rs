@@ -320,8 +320,12 @@ impl Client {
         let mut amf = Buffer::with_capacity(256);
         command::build_publish(&mut amf, &self.stream_key, "live")?;
         self.send_command_msg(self.stream_id, amf.as_slice(), Some(deadline))?;
-        let mut status = self.wait_for_command("onStatus", Some(deadline))?;
-        command::read_onstatus(&mut status, "NetStream.Publish.Start")?;
+        loop {
+            let mut status = self.wait_for_command("onStatus", Some(deadline))?;
+            if command::read_onstatus(&mut status, "NetStream.Publish.Start")? {
+                break;
+            }
+        }
         self.state = ClientState::Publishing;
         Ok(())
     }
@@ -375,8 +379,12 @@ impl Client {
         let mut amf = Buffer::with_capacity(256);
         command::build_play(&mut amf, &self.stream_key)?;
         self.send_command_msg(self.stream_id, amf.as_slice(), Some(deadline))?;
-        let mut status = self.wait_for_command("onStatus", Some(deadline))?;
-        command::read_onstatus(&mut status, "NetStream.Play.Start")?;
+        loop {
+            let mut status = self.wait_for_command("onStatus", Some(deadline))?;
+            if command::read_onstatus(&mut status, "NetStream.Play.Start")? {
+                break;
+            }
+        }
         self.state = ClientState::Playing;
         Ok(())
     }
@@ -1589,6 +1597,50 @@ mod tests {
             "play should time out near the configured deadline, took {:?}",
             play_elapsed
         );
+    }
+
+    #[test]
+    fn play_succeeds_after_transitional_status_before_start() {
+        // A real RTMP server commonly sends a transitional onStatus (e.g.
+        // `NetStream.Play.Reset`) before the terminal `NetStream.Play.Start`.
+        // That must not be treated as a failure -- play() should keep
+        // waiting for the expected code instead of aborting.
+        use std::io::Write;
+        use std::os::unix::io::IntoRawFd;
+        use std::os::unix::net::UnixStream;
+
+        fn onstatus_chunk(level: &str, code: &str) -> Vec<u8> {
+            let mut payload = Buffer::new();
+            command::build_onstatus(&mut payload, level, code, "").unwrap();
+            let payload_len = payload.available();
+            let mut wire = Buffer::new();
+            let mut cmsg = ChunkMessage::default();
+            cmsg.csid = 3;
+            cmsg.fmt = 0;
+            cmsg.msg_length = payload_len as u32;
+            cmsg.msg_type_id = msg_dispatch::RTMP_MSG_AMF0_COMMAND;
+            cmsg.msg_stream_id = 1;
+            chunk_write(&mut wire, &cmsg, payload.as_slice(), payload_len, 128).unwrap();
+            wire.peek().to_vec()
+        }
+
+        let (client_end, mut peer) = UnixStream::pair().unwrap();
+        client_end.set_nonblocking(true).unwrap();
+        peer.set_nonblocking(true).unwrap();
+
+        peer.write_all(&onstatus_chunk("status", "NetStream.Play.Reset"))
+            .unwrap();
+        peer.write_all(&onstatus_chunk("status", "NetStream.Play.Start"))
+            .unwrap();
+
+        let mut client = Client::new();
+        client.state = ClientState::AppConnected;
+        client.stream_id = 1;
+        client.stream_key = "stream".to_string();
+        client.transport = Some(Transport::new_plain(client_end.into_raw_fd()));
+
+        client.play().unwrap();
+        assert_eq!(client.state, ClientState::Playing);
     }
 
     #[test]
