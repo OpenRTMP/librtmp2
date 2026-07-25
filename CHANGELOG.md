@@ -442,7 +442,8 @@ and others.
 - Protocol mapping documents for legacy, E-RTMP v1, and E-RTMP v2
 - `CONTRIBUTING.md` guidelines
 
-[Unreleased]: https://github.com/OpenRTMP/librtmp2/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/OpenRTMP/librtmp2/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/OpenRTMP/librtmp2/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/OpenRTMP/librtmp2/compare/v0.4.2...v0.5.0
 [0.4.2]: https://github.com/OpenRTMP/librtmp2/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/OpenRTMP/librtmp2/compare/v0.4.0...v0.4.1
