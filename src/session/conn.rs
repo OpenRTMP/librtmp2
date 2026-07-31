@@ -283,10 +283,15 @@ impl Conn {
         // (or played) and then unpublished before the deadline would stay
         // "exempt" forever if this checked `self.state`. Check the current
         // stream's active flags instead -- they're cleared on unpublish.
-        !self
-            .current_stream
-            .as_ref()
-            .is_some_and(|s| s.is_publishing || s.is_playing)
+        let Some(stream) = self.current_stream.as_ref() else {
+            return true;
+        };
+        if stream.is_publishing {
+            // A peer that claims a publish route but never sends media can
+            // otherwise squat the route indefinitely by keeping TCP alive.
+            return self.media_bytes_received == 0;
+        }
+        !stream.is_playing
     }
 
     #[cfg(test)]
@@ -1370,6 +1375,14 @@ impl Conn {
                         "No stream created",
                     );
                 }
+                if self.on_publish_cb.is_none() && self.on_play_cb.is_some() {
+                    return self.send_onstatus(
+                        0,
+                        "error",
+                        "NetStream.Publish.BadName",
+                        "Publish not authorized",
+                    );
+                }
                 if let Some(cb) = self.on_publish_cb {
                     if !cb(self.conn_id, &self.app, &name_str) {
                         return self.send_onstatus(
@@ -1414,7 +1427,7 @@ impl Conn {
                     self.pending_cache_evictions
                         .push((self.app.clone(), prev_route_key));
                 }
-                if !self.defer_media_relay || self.on_publish_cb.is_none() {
+                if !self.defer_media_relay {
                     self.relay_enabled = true;
                 }
                 {
@@ -1473,7 +1486,7 @@ impl Conn {
                         );
                     }
                 }
-                if !self.defer_media_relay || self.on_play_cb.is_none() {
+                if !self.defer_media_relay {
                     self.relay_enabled = true;
                 }
                 {
@@ -2217,6 +2230,45 @@ mod tests {
     }
 
     #[test]
+    fn publish_rejects_play_only_connections_when_publish_cb_missing() {
+        let mut conn = Conn::new();
+        conn.app = "live".to_string();
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+        conn.on_play_cb = Some(|_, _, _| true);
+
+        let mut play = Buffer::with_capacity(128);
+        command::build_play(&mut play, "viewer").unwrap();
+        conn.handle_command(play.as_slice()).unwrap();
+        assert!(conn.current_stream.as_ref().unwrap().is_playing);
+
+        let mut publish = Buffer::with_capacity(128);
+        command::build_publish(&mut publish, "inject", "live").unwrap();
+        conn.handle_command(publish.as_slice()).unwrap();
+        assert!(
+            !conn.current_stream.as_ref().unwrap().is_publishing,
+            "play-authorized peers must not publish when on_publish_cb is unset"
+        );
+    }
+
+    #[test]
+    fn defer_media_relay_keeps_relay_disabled_without_publish_cb() {
+        let mut conn = Conn::new();
+        conn.app = "live".to_string();
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+        conn.defer_media_relay = true;
+
+        let mut publish = Buffer::with_capacity(128);
+        command::build_publish(&mut publish, "stream", "live").unwrap();
+        conn.handle_command(publish.as_slice()).unwrap();
+
+        assert!(conn.current_stream.as_ref().unwrap().is_publishing);
+        assert!(
+            !conn.relay_enabled,
+            "defer_media_relay must hold relay off until the integrator enables it"
+        );
+    }
+
+    #[test]
     fn invalid_utf8_stream_names_do_not_collide_on_empty_relay_namespace() {
         let mut first = Conn::new();
         first.app = "live".to_string();
@@ -2502,10 +2554,23 @@ mod tests {
             is_publishing: true,
             ..Stream::new(1)
         }));
+        publishing.media_bytes_received = 1;
         publishing.set_session_setup_started_for_test(Instant::now() - Duration::from_secs(11));
         assert!(
             !publishing.session_setup_timed_out(),
-            "active publishers must not be reaped by the setup timer"
+            "publishers that have sent media must not be reaped by the setup timer"
+        );
+
+        let mut squatting = Conn::new();
+        squatting.state = ConnState::Publishing;
+        squatting.current_stream = Some(Box::new(Stream {
+            is_publishing: true,
+            ..Stream::new(1)
+        }));
+        squatting.set_session_setup_started_for_test(Instant::now() - Duration::from_secs(11));
+        assert!(
+            squatting.session_setup_timed_out(),
+            "publishers that never send media must be reaped so they cannot squat routes"
         );
 
         // A peer that published and then unpublished before the deadline
@@ -2540,6 +2605,7 @@ mod tests {
         command::build_publish(&mut buf, "A", "live").unwrap();
         conn.handle_command(buf.as_slice()).unwrap();
         assert!(conn.current_stream.as_ref().unwrap().is_publishing);
+        conn.media_bytes_received = 1;
 
         // Simulate having been connected/publishing for a long time already.
         conn.set_session_setup_started_for_test(Instant::now() - Duration::from_secs(3600));
