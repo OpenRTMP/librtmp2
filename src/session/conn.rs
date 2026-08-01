@@ -1476,6 +1476,14 @@ impl Conn {
                         "No stream created",
                     );
                 }
+                if self.on_play_cb.is_none() && self.on_publish_cb.is_some() {
+                    return self.send_onstatus(
+                        0,
+                        "error",
+                        "NetStream.Play.Failed",
+                        "Play not authorized",
+                    );
+                }
                 if let Some(cb) = self.on_play_cb {
                     if !cb(self.conn_id, &self.app, &name_str) {
                         return self.send_onstatus(
@@ -2247,6 +2255,26 @@ mod tests {
         assert!(
             !conn.current_stream.as_ref().unwrap().is_publishing,
             "play-authorized peers must not publish when on_publish_cb is unset"
+        );
+    }
+
+    #[test]
+    fn play_rejects_publish_only_connections_when_play_cb_missing() {
+        let mut conn = Conn::new();
+        conn.app = "live".to_string();
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+        conn.on_publish_cb = Some(|_, _, _| true);
+
+        let mut play = Buffer::with_capacity(128);
+        command::build_play(&mut play, "viewer").unwrap();
+        conn.handle_command(play.as_slice()).unwrap();
+        assert!(
+            !conn.current_stream.as_ref().unwrap().is_playing,
+            "publish-authorized peers must not play when on_play_cb is unset"
+        );
+        assert!(
+            !conn.relay_enabled,
+            "relay must stay disabled when play is rejected on a publish-only server"
         );
     }
 
