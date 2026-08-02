@@ -291,7 +291,13 @@ impl Conn {
             // otherwise squat the route indefinitely by keeping TCP alive.
             return self.media_bytes_received == 0;
         }
-        !stream.is_playing
+        if stream.is_playing {
+            // Paused players opt out of relay delivery, so they never hit the
+            // slow-reader disconnect path that would otherwise reap idle play
+            // connections. Treat them like post-play idle after the grace window.
+            return stream.paused;
+        }
+        true
     }
 
     #[cfg(test)]
@@ -1580,6 +1586,12 @@ impl Conn {
             "pause" => {
                 if let Ok(pause_flag) = command::read_pause(&mut buf) {
                     if let Some(ref mut stream) = self.current_stream {
+                        if pause_flag && stream.is_playing && !stream.paused {
+                            // Give paused players the same setup-timeout grace
+                            // window as FCUnpublish/deleteStream so a brief pause
+                            // during playback is not reaped immediately.
+                            self.session_setup_started = Instant::now();
+                        }
                         stream.paused = pause_flag;
                     }
                     let sid = self
@@ -2612,6 +2624,32 @@ mod tests {
         assert!(
             unpublished.session_setup_timed_out(),
             "peers that unpublished before the deadline must be reaped"
+        );
+
+        let mut paused_player = Conn::new();
+        paused_player.state = ConnState::Playing;
+        paused_player.current_stream = Some(Box::new(Stream {
+            is_playing: true,
+            paused: true,
+            ..Stream::new(1)
+        }));
+        paused_player.set_session_setup_started_for_test(Instant::now() - Duration::from_secs(11));
+        assert!(
+            paused_player.session_setup_timed_out(),
+            "paused players must be reaped after the setup grace window"
+        );
+
+        let mut active_player = Conn::new();
+        active_player.state = ConnState::Playing;
+        active_player.current_stream = Some(Box::new(Stream {
+            is_playing: true,
+            paused: false,
+            ..Stream::new(1)
+        }));
+        active_player.set_session_setup_started_for_test(Instant::now() - Duration::from_secs(11));
+        assert!(
+            !active_player.session_setup_timed_out(),
+            "unpaused players must not be reaped by the setup timer"
         );
     }
 
