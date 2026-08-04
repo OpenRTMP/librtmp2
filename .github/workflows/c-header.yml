@@ -73,7 +73,7 @@ jobs:
 
       - name: Upload generated header for pull requests
         if: github.event_name == 'pull_request'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: librtmp2-c-header
           path: include/librtmp2/librtmp2.h
