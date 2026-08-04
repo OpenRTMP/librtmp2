@@ -63,9 +63,10 @@ struct QueuedPing {
 /// Cap inbound Ping-Request reflections per connection to prevent trivial
 /// outbound bandwidth/CPU amplification from unauthenticated peers.
 const MAX_INBOUND_PING_RESPONSES: usize = 8;
-/// Minimum wall-clock gap between init-frame replay requests triggered by
-/// `receiveAudio` / `receiveVideo` re-enable on an already-playing stream.
-const INIT_REPLAY_COOLDOWN: Duration = Duration::from_secs(1);
+/// Close publishers that claimed a route but never sent media. Shorter than
+/// [`RTMP_SESSION_SETUP_TIMEOUT`] so squatters cannot block legitimate
+/// publishers for the full post-connect grace window.
+const PUBLISH_MEDIA_REQUIRED_TIMEOUT: Duration = Duration::from_secs(2);
 const INBOUND_PING_WINDOW: Duration = Duration::from_secs(1);
 /// Close inbound sessions that never complete the AMF `connect` exchange or
 /// never start publishing/playing. Matches the RTMPS accept deadline so a
@@ -138,9 +139,6 @@ pub struct Conn {
     pub send_mutex: Mutex<()>,
     pub pending_relay: Vec<RelayFrame>,
     pub needs_init_frames: bool,
-    /// Last time init frames were replayed to this player (rate-limits
-    /// `receiveAudio` / `receiveVideo` re-enable amplification).
-    last_init_replay: Option<Instant>,
     pub detected_video_codec: Option<String>,
     pub detected_audio_codec: Option<String>,
     pub detected_video_width: Option<u32>,
@@ -233,7 +231,6 @@ impl Conn {
             send_mutex: Mutex::new(()),
             pending_relay: Vec::new(),
             needs_init_frames: false,
-            last_init_replay: None,
             detected_video_codec: None,
             detected_audio_codec: None,
             detected_video_width: None,
@@ -276,20 +273,23 @@ impl Conn {
     /// transition -- see `FCUnpublish`/`deleteStream`/`closeStream` in
     /// `handle_command`).
     pub fn session_setup_timed_out(&self) -> bool {
-        if self.session_setup_started.elapsed() < RTMP_SESSION_SETUP_TIMEOUT {
-            return false;
-        }
         // `ConnState` only moves forward, so a peer that briefly published
         // (or played) and then unpublished before the deadline would stay
         // "exempt" forever if this checked `self.state`. Check the current
         // stream's active flags instead -- they're cleared on unpublish.
         let Some(stream) = self.current_stream.as_ref() else {
-            return true;
+            return self.session_setup_started.elapsed() >= RTMP_SESSION_SETUP_TIMEOUT;
         };
         if stream.is_publishing {
             // A peer that claims a publish route but never sends media can
             // otherwise squat the route indefinitely by keeping TCP alive.
-            return self.media_bytes_received == 0;
+            if self.media_bytes_received == 0 {
+                return self.session_setup_started.elapsed() >= PUBLISH_MEDIA_REQUIRED_TIMEOUT;
+            }
+            return false;
+        }
+        if self.session_setup_started.elapsed() < RTMP_SESSION_SETUP_TIMEOUT {
+            return false;
         }
         if stream.is_playing {
             // Paused players opt out of relay delivery, so they never hit the
@@ -500,23 +500,9 @@ impl Conn {
         cb(self.conn_id, frame_type, codec)
     }
 
-    /// Request a one-shot init-frame replay for a playing client, subject to
-    /// a short cooldown so rapid `receiveAudio` / `receiveVideo` toggles cannot
-    /// force multi-megabyte outbound bursts every poll tick.
+    /// Request a one-shot init-frame replay for a playing client.
     fn request_init_replay(&mut self) {
-        let now = Instant::now();
-        if let Some(last) = self.last_init_replay {
-            if now.duration_since(last) < INIT_REPLAY_COOLDOWN {
-                return;
-            }
-        }
         self.needs_init_frames = true;
-    }
-
-    /// Record that init frames were just replayed (called by the server poll
-    /// loop after a successful cache replay).
-    pub(crate) fn note_init_replay(&mut self) {
-        self.last_init_replay = Some(Instant::now());
     }
 
     fn handle_media_frame(
@@ -1429,6 +1415,10 @@ impl Conn {
                         "Route already publishing",
                     );
                 }
+                // Start the publish-media deadline from the moment the route
+                // is claimed so squatters cannot consume the full post-connect
+                // setup grace window before being reaped.
+                self.session_setup_started = Instant::now();
                 if renaming_route {
                     self.pending_cache_evictions
                         .push((self.app.clone(), prev_route_key));
@@ -1618,31 +1608,15 @@ impl Conn {
             }
             "receiveAudio" => {
                 if let Ok(flag) = command::read_bool_command(&mut buf) {
-                    let was_enabled = self
-                        .current_stream
-                        .as_ref()
-                        .map(|stream| stream.receive_audio)
-                        .unwrap_or(true);
                     if let Some(ref mut stream) = self.current_stream {
                         stream.receive_audio = flag;
-                    }
-                    if flag && !was_enabled {
-                        self.request_init_replay();
                     }
                 }
             }
             "receiveVideo" => {
                 if let Ok(flag) = command::read_bool_command(&mut buf) {
-                    let was_enabled = self
-                        .current_stream
-                        .as_ref()
-                        .map(|stream| stream.receive_video)
-                        .unwrap_or(true);
                     if let Some(ref mut stream) = self.current_stream {
                         stream.receive_video = flag;
-                    }
-                    if flag && !was_enabled {
-                        self.request_init_replay();
                     }
                 }
             }
@@ -2607,7 +2581,7 @@ mod tests {
             is_publishing: true,
             ..Stream::new(1)
         }));
-        squatting.set_session_setup_started_for_test(Instant::now() - Duration::from_secs(11));
+        squatting.set_session_setup_started_for_test(Instant::now() - Duration::from_secs(3));
         assert!(
             squatting.session_setup_timed_out(),
             "publishers that never send media must be reaped so they cannot squat routes"
@@ -3478,7 +3452,7 @@ mod tests {
     }
 
     #[test]
-    fn receive_video_reenable_requests_cached_replay() {
+    fn receive_video_reenable_does_not_request_cached_replay() {
         let mut conn = Conn::new();
         conn.current_stream = Some(Box::new(Stream::new(1)));
         {
@@ -3496,7 +3470,10 @@ mod tests {
         conn.handle_command(buf.as_slice()).unwrap();
 
         assert!(conn.current_stream.as_ref().unwrap().receive_video);
-        assert!(conn.needs_init_frames);
+        assert!(
+            !conn.needs_init_frames,
+            "receiveAudio/receiveVideo toggles must not schedule init-cache replay"
+        );
     }
 
     #[test]
