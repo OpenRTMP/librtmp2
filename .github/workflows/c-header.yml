@@ -26,6 +26,9 @@ concurrency:
   group: c-header-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  CBINDGEN_VERSION: "0.27.0"
+
 jobs:
   generate:
     runs-on: ubuntu-latest
@@ -35,6 +38,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.ref }}
+          persist-credentials: false
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -45,12 +49,12 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cargo/bin/cbindgen
-          key: ${{ runner.os }}-cbindgen-${{ hashFiles('cbindgen.toml') }}
+          key: ${{ runner.os }}-cbindgen-${{ env.CBINDGEN_VERSION }}
 
       - name: Install cbindgen
         run: |
-          if ! command -v cbindgen >/dev/null 2>&1; then
-            cargo install --locked cbindgen
+          if ! command -v cbindgen >/dev/null 2>&1 || [ "$(cbindgen --version)" != "cbindgen ${CBINDGEN_VERSION}" ]; then
+            cargo install --locked --version "${CBINDGEN_VERSION}" --force cbindgen
           fi
 
       - name: Generate header
@@ -76,6 +80,8 @@ jobs:
 
       - name: Commit generated header
         if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           if git diff --quiet -- include/librtmp2/librtmp2.h && git ls-files --error-unmatch include/librtmp2/librtmp2.h >/dev/null 2>&1; then
             echo "Header is already up to date."
@@ -84,6 +90,27 @@ jobs:
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+
           git add include/librtmp2/librtmp2.h
           git commit -m "Update generated C header"
-          git push
+
+          for attempt in 1 2 3 4 5; do
+            if git push; then
+              exit 0
+            fi
+
+            echo "Push rejected (attempt ${attempt}); rebasing onto latest ${GITHUB_REF_NAME} and retrying..."
+            git fetch origin "${GITHUB_REF_NAME}"
+            git rebase "origin/${GITHUB_REF_NAME}"
+            bash scripts/generate-header.sh
+            if git diff --quiet -- include/librtmp2/librtmp2.h; then
+              echo "Header now matches latest ${GITHUB_REF_NAME}; nothing to push."
+              exit 0
+            fi
+            git add include/librtmp2/librtmp2.h
+            git commit --amend --no-edit
+          done
+
+          echo "Failed to push generated header after multiple retries." >&2
+          exit 1
