@@ -1,0 +1,89 @@
+name: Generate C header
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "src/**"
+      - "Cargo.toml"
+      - "cbindgen.toml"
+      - "scripts/generate-header.sh"
+      - ".github/workflows/c-header.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "src/**"
+      - "Cargo.toml"
+      - "cbindgen.toml"
+      - "scripts/generate-header.sh"
+      - ".github/workflows/c-header.yml"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: c-header-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.ref }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.93"
+
+      - name: Cache cbindgen
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cbindgen
+          key: ${{ runner.os }}-cbindgen-${{ hashFiles('cbindgen.toml') }}
+
+      - name: Install cbindgen
+        run: |
+          if ! command -v cbindgen >/dev/null 2>&1; then
+            cargo install --locked cbindgen
+          fi
+
+      - name: Generate header
+        run: bash scripts/generate-header.sh
+
+      - name: Verify generated header compiles
+        run: |
+          cat > /tmp/librtmp2-header-check.c <<'EOF'
+          #include "librtmp2/librtmp2.h"
+
+          int main(void) {
+              return 0;
+          }
+          EOF
+          cc -std=c11 -Wall -Wextra -Werror -Iinclude -fsyntax-only /tmp/librtmp2-header-check.c
+
+      - name: Upload generated header for pull requests
+        if: github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: librtmp2-c-header
+          path: include/librtmp2/librtmp2.h
+
+      - name: Commit generated header
+        if: github.event_name != 'pull_request'
+        run: |
+          if git diff --quiet -- include/librtmp2/librtmp2.h && git ls-files --error-unmatch include/librtmp2/librtmp2.h >/dev/null 2>&1; then
+            echo "Header is already up to date."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add include/librtmp2/librtmp2.h
+          git commit -m "Update generated C header"
+          git push
