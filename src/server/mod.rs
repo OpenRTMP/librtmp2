@@ -746,7 +746,6 @@ impl Server {
                 continue;
             }
             conn.needs_init_frames = false;
-            conn.note_init_replay();
             let key = (conn.app.clone(), conn.relay_route_key());
             let receive_audio = conn
                 .current_stream
