@@ -43,7 +43,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.93"
+          toolchain: "1.97"
 
       - name: Cache cbindgen
         uses: actions/cache@v4
@@ -103,7 +103,7 @@ jobs:
         if: env.SKIP != '1'
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.93"
+          toolchain: "1.97"
 
       - name: Cache cbindgen
         if: env.SKIP != '1'
