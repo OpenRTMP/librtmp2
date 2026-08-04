@@ -63,6 +63,10 @@ struct QueuedPing {
 /// Cap inbound Ping-Request reflections per connection to prevent trivial
 /// outbound bandwidth/CPU amplification from unauthenticated peers.
 const MAX_INBOUND_PING_RESPONSES: usize = 8;
+/// Minimum wall-clock gap between init-frame replay requests caused by
+/// switching play routes. This prevents a client from alternating stream
+/// names to force cached headers and keyframes to be resent every poll batch.
+const INIT_REPLAY_COOLDOWN: Duration = Duration::from_secs(1);
 /// Close publishers that claimed a route but never sent media. Shorter than
 /// [`RTMP_SESSION_SETUP_TIMEOUT`] so squatters cannot block legitimate
 /// publishers for the full post-connect grace window.
@@ -139,6 +143,8 @@ pub struct Conn {
     pub send_mutex: Mutex<()>,
     pub pending_relay: Vec<RelayFrame>,
     pub needs_init_frames: bool,
+    /// Last play-route change that requested cached init frames.
+    last_init_replay_request: Option<Instant>,
     pub detected_video_codec: Option<String>,
     pub detected_audio_codec: Option<String>,
     pub detected_video_width: Option<u32>,
@@ -231,6 +237,7 @@ impl Conn {
             send_mutex: Mutex::new(()),
             pending_relay: Vec::new(),
             needs_init_frames: false,
+            last_init_replay_request: None,
             detected_video_codec: None,
             detected_audio_codec: None,
             detected_video_width: None,
@@ -500,8 +507,17 @@ impl Conn {
         cb(self.conn_id, frame_type, codec)
     }
 
-    /// Request a one-shot init-frame replay for a playing client.
+    /// Request a one-shot init-frame replay for a playing client,
+    /// rate-limited so rapid play-route changes cannot amplify cached data.
     fn request_init_replay(&mut self) {
+        let now = Instant::now();
+        if self
+            .last_init_replay_request
+            .is_some_and(|last| now.duration_since(last) < INIT_REPLAY_COOLDOWN)
+        {
+            return;
+        }
+        self.last_init_replay_request = Some(now);
         self.needs_init_frames = true;
     }
 
@@ -1415,10 +1431,12 @@ impl Conn {
                         "Route already publishing",
                     );
                 }
-                // Start the publish-media deadline from the moment the route
-                // is claimed so squatters cannot consume the full post-connect
-                // setup grace window before being reaped.
-                self.session_setup_started = Instant::now();
+                // Start a publish-media deadline only for a genuinely new
+                // publish session or route. Repeating `publish` for the route
+                // already owned by this connection must not refresh the timer.
+                if !was_publishing || renaming_route {
+                    self.session_setup_started = Instant::now();
+                }
                 if renaming_route {
                     self.pending_cache_evictions
                         .push((self.app.clone(), prev_route_key));
@@ -2628,6 +2646,31 @@ mod tests {
     }
 
     #[test]
+    fn repeated_publish_same_route_does_not_refresh_media_deadline() {
+        use std::time::{Duration, Instant};
+
+        let mut conn = Conn::new();
+        conn.app = "live".to_string();
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+
+        let mut buf = Buffer::with_capacity(128);
+        command::build_publish(&mut buf, "room", "live").unwrap();
+        conn.handle_command(buf.as_slice()).unwrap();
+        assert!(conn.current_stream.as_ref().unwrap().is_publishing);
+
+        conn.set_session_setup_started_for_test(Instant::now() - Duration::from_secs(3));
+
+        let mut buf = Buffer::with_capacity(128);
+        command::build_publish(&mut buf, "room", "live").unwrap();
+        conn.handle_command(buf.as_slice()).unwrap();
+
+        assert!(
+            conn.session_setup_timed_out(),
+            "repeating publish for the already-owned route must not refresh the media deadline"
+        );
+    }
+
+    #[test]
     fn unpublish_grants_a_fresh_setup_timeout_window() {
         use std::time::{Duration, Instant};
 
@@ -3428,6 +3471,41 @@ mod tests {
         conn.recv(&[0u8; 2048]).unwrap();
         assert_eq!(conn.bytes_received, u32::MAX as u64 + 2048);
         assert_eq!(conn.bytes_at_last_ack, conn.bytes_received);
+    }
+
+    #[test]
+    fn play_route_changes_are_init_replay_rate_limited() {
+        use std::time::{Duration, Instant};
+
+        let mut conn = Conn::new();
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+
+        let play = |conn: &mut Conn, stream_name: &str| {
+            let mut buf = Buffer::new();
+            crate::amf::amf0::write_string(&mut buf, "play").unwrap();
+            crate::amf::amf0::write_number(&mut buf, 1.0).unwrap();
+            crate::amf::amf0::write_null(&mut buf).unwrap();
+            crate::amf::amf0::write_string(&mut buf, stream_name).unwrap();
+            conn.handle_command(buf.as_slice()).unwrap();
+        };
+
+        play(&mut conn, "room-a");
+        assert!(conn.needs_init_frames);
+        conn.needs_init_frames = false;
+
+        play(&mut conn, "room-b");
+        assert!(
+            !conn.needs_init_frames,
+            "rapid play-route changes must not request another cached replay"
+        );
+
+        conn.last_init_replay_request =
+            Some(Instant::now() - INIT_REPLAY_COOLDOWN - Duration::from_millis(1));
+        play(&mut conn, "room-c");
+        assert!(
+            conn.needs_init_frames,
+            "a route change after the cooldown should request cached init frames"
+        );
     }
 
     #[test]
