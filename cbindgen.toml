@@ -37,6 +37,13 @@ item_types = [
     "functions"
 ]
 
+[export.rename]
+"Server" = "lrtmp2_server_t"
+"ServerConfig" = "lrtmp2_server_config_t"
+"Client" = "lrtmp2_client_t"
+"Frame" = "lrtmp2_frame_t"
+"Conn" = "lrtmp2_conn_t"
+
 [fn]
 rename_args = "None"
 

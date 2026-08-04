@@ -96,6 +96,28 @@ jobs:
       - name: Build release libraries
         run: cargo build --release --all-features --verbose
 
+      - name: Resolve cbindgen version
+        id: cbindgen_ver
+        run: |
+          VERSION=$(grep -oP 'CBINDGEN_VERSION="\K[0-9.]+' scripts/generate-header.sh)
+          test -n "$VERSION" || { echo "::error::Could not resolve CBINDGEN_VERSION from scripts/generate-header.sh"; exit 1; }
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Cache cbindgen
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cbindgen
+          key: ${{ runner.os }}-cbindgen-${{ steps.cbindgen_ver.outputs.version }}
+
+      - name: Install cbindgen
+        run: |
+          if ! command -v cbindgen >/dev/null 2>&1 || [ "$(cbindgen --version)" != "cbindgen ${{ steps.cbindgen_ver.outputs.version }}" ]; then
+            cargo install --locked --version "${{ steps.cbindgen_ver.outputs.version }}" --force cbindgen
+          fi
+
+      - name: Generate C header
+        run: bash scripts/generate-header.sh
+
       - name: Stage dist tree
         run: |
           DIST_DIR="dist/librtmp2-${{ steps.ver.outputs.version }}"
@@ -107,6 +129,7 @@ jobs:
             }
             cp "target/release/$artifact" "$DIST_DIR/lib/"
           done
+          cp -r include "$DIST_DIR/"
           cp README.md LICENSE Cargo.toml "$DIST_DIR/"
 
       - name: Create binary tarball
@@ -119,12 +142,15 @@ jobs:
 
       - name: Create source tarball
         run: |
-          git archive --format=tar.gz \
-            --prefix="librtmp2-${{ steps.ver.outputs.version }}/" \
-            -o "dist/librtmp2-${{ steps.ver.outputs.version }}-src.tar.gz" HEAD
+          VERSION="${{ steps.ver.outputs.version }}"
+          STAGE_DIR="$(mktemp -d)/librtmp2-${VERSION}"
+          mkdir -p "$STAGE_DIR"
+          git archive HEAD | tar -x -C "$STAGE_DIR"
+          cp -r include "$STAGE_DIR/"
+          tar czf "dist/librtmp2-${VERSION}-src.tar.gz" -C "$(dirname "$STAGE_DIR")" "librtmp2-${VERSION}"
           cd dist
-          sha256sum "librtmp2-${{ steps.ver.outputs.version }}-src.tar.gz" \
-            > "librtmp2-${{ steps.ver.outputs.version }}-src.tar.gz.sha256"
+          sha256sum "librtmp2-${VERSION}-src.tar.gz" \
+            > "librtmp2-${VERSION}-src.tar.gz.sha256"
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v7
