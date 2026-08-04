@@ -227,7 +227,9 @@ mod ffi_tests {
         let server = NonNull::new(unsafe { lrtmp2_server_create(&config) })
             .expect("lrtmp2_server_create returned null");
         let invalid = [0xFF, b':', b'1', b'9', b'3', b'5', 0];
-        let rc = unsafe { lrtmp2_server_listen(server.as_ptr(), invalid.as_ptr()) };
+        let rc = unsafe {
+            lrtmp2_server_listen(server.as_ptr(), invalid.as_ptr() as *const std::ffi::c_char)
+        };
         unsafe {
             lrtmp2_server_destroy(server.as_ptr());
         }
@@ -292,13 +294,13 @@ pub unsafe extern "C" fn lrtmp2_server_destroy(server: *mut server::Server) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn lrtmp2_server_listen(
     server: *mut server::Server,
-    bind_addr: *const u8,
+    bind_addr: *const std::ffi::c_char,
 ) -> i32 {
     if server.is_null() || bind_addr.is_null() {
         return ErrorCode::Internal as i32;
     }
     let s = unsafe { &mut *server };
-    let addr = unsafe { std::ffi::CStr::from_ptr(bind_addr as *const std::ffi::c_char) };
+    let addr = unsafe { std::ffi::CStr::from_ptr(bind_addr) };
     let addr_str = match addr.to_str() {
         Ok(s) => s,
         // Invalid UTF-8 must not fall back to "" (which binds 0.0.0.0).
@@ -368,12 +370,15 @@ pub unsafe extern "C" fn lrtmp2_client_destroy(c: *mut client::Client) {
 
 /// Connect (FFI-compatible).
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrtmp2_client_connect(c: *mut client::Client, url: *const u8) -> i32 {
+pub unsafe extern "C" fn lrtmp2_client_connect(
+    c: *mut client::Client,
+    url: *const std::ffi::c_char,
+) -> i32 {
     if c.is_null() || url.is_null() {
         return ErrorCode::Internal as i32;
     }
     let client = unsafe { &mut *c };
-    let url_str = unsafe { std::ffi::CStr::from_ptr(url as *const std::ffi::c_char) };
+    let url_str = unsafe { std::ffi::CStr::from_ptr(url) };
     match client.connect(url_str.to_str().unwrap_or("")) {
         Ok(()) => 0,
         Err(e) => e as i32,
@@ -464,8 +469,8 @@ pub extern "C" fn lrtmp2_tls_supported() -> i32 {
 
 /// Get version string (FFI-compatible).
 #[unsafe(no_mangle)]
-pub extern "C" fn lrtmp2_version_string() -> *const u8 {
-    concat!(env!("CARGO_PKG_VERSION"), "\0").as_ptr()
+pub extern "C" fn lrtmp2_version_string() -> *const std::ffi::c_char {
+    concat!(env!("CARGO_PKG_VERSION"), "\0").as_ptr() as *const std::ffi::c_char
 }
 
 /// Get major version (FFI-compatible).
@@ -493,6 +498,6 @@ pub extern "C" fn lrtmp2_version_patch() -> i32 {
 /// cannot construct an invalid enum discriminant, which would be undefined
 /// behavior.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrtmp2_error_string(code: i32) -> *const u8 {
-    error_c_string(error_code_from_raw(code)).as_ptr()
+pub unsafe extern "C" fn lrtmp2_error_string(code: i32) -> *const std::ffi::c_char {
+    error_c_string(error_code_from_raw(code)).as_ptr() as *const std::ffi::c_char
 }

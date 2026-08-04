@@ -48,6 +48,8 @@ override_dh_auto_install:
 		debian/librtmp2-dev/usr/lib/$(DEB_HOST_MULTIARCH)/liblibrtmp2.a
 	ln -s $(SONAME) \
 		debian/librtmp2-dev/usr/lib/$(DEB_HOST_MULTIARCH)/liblibrtmp2.so
+	install -D -m0644 include/librtmp2/librtmp2.h \
+		debian/librtmp2-dev/usr/include/librtmp2/librtmp2.h
 	sed -e 's/@VERSION@/$(UPSTREAM_VERSION)/' \
 		-e 's/@MULTIARCH@/$(DEB_HOST_MULTIARCH)/' \
 		debian/librtmp2.pc.in > debian/librtmp2.pc

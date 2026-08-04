@@ -119,6 +119,23 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Resolve cbindgen version
+        id: cbindgen_ver
+        run: |
+          VERSION=$(grep -oP 'CBINDGEN_VERSION="\K[0-9.]+' scripts/generate-header.sh)
+          test -n "$VERSION" || { echo "::error::Could not resolve CBINDGEN_VERSION from scripts/generate-header.sh"; exit 1; }
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Install cbindgen
+        run: cargo install --locked --version "${{ steps.cbindgen_ver.outputs.version }}" cbindgen
+
+      - name: Generate C header
+        # The PPA builder has no network access and cannot install cbindgen
+        # itself, so the header is generated here (from the exact tagged
+        # source) and shipped as a plain file in the Debian source package;
+        # debian/rules just installs it.
+        run: bash scripts/generate-header.sh
+
       - name: Vendor cargo dependencies for an offline build
         run: |
           mkdir -p .cargo

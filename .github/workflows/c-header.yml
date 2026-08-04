@@ -1,0 +1,158 @@
+name: Generate C header
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "src/**"
+      - "Cargo.toml"
+      - "cbindgen.toml"
+      - "scripts/generate-header.sh"
+      - ".github/workflows/c-header.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "src/**"
+      - "Cargo.toml"
+      - "cbindgen.toml"
+      - "scripts/generate-header.sh"
+      - ".github/workflows/c-header.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: c-header-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CBINDGEN_VERSION: "0.29.4"
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.ref }}
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.93"
+
+      - name: Cache cbindgen
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cbindgen
+          key: ${{ runner.os }}-cbindgen-${{ env.CBINDGEN_VERSION }}
+
+      - name: Install cbindgen
+        run: |
+          if ! command -v cbindgen >/dev/null 2>&1 || [ "$(cbindgen --version)" != "cbindgen ${CBINDGEN_VERSION}" ]; then
+            cargo install --locked --version "${CBINDGEN_VERSION}" --force cbindgen
+          fi
+
+      - name: Generate header
+        run: bash scripts/generate-header.sh
+
+      - name: Verify generated header compiles
+        run: |
+          cat > /tmp/librtmp2-header-check.c <<'EOF'
+          #include "librtmp2/librtmp2.h"
+
+          int main(void) {
+              return 0;
+          }
+          EOF
+          cc -std=c11 -Wall -Wextra -Werror -Iinclude -fsyntax-only /tmp/librtmp2-header-check.c
+
+      - name: Upload generated header for pull requests
+        if: github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: librtmp2-c-header
+          path: include/librtmp2/librtmp2.h
+
+  publish:
+    needs: generate
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Check ref is a branch
+        run: |
+          if [ "${GITHUB_REF#refs/heads/}" = "${GITHUB_REF}" ]; then
+            echo "::notice::${GITHUB_REF} is not a branch (e.g. a tag ref from a manual run); skipping header commit."
+            echo "SKIP=1" >> "$GITHUB_ENV"
+          fi
+
+      - name: Checkout
+        if: env.SKIP != '1'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+
+      - name: Install Rust
+        if: env.SKIP != '1'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.93"
+
+      - name: Cache cbindgen
+        if: env.SKIP != '1'
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cbindgen
+          key: ${{ runner.os }}-cbindgen-${{ env.CBINDGEN_VERSION }}
+
+      - name: Install cbindgen
+        if: env.SKIP != '1'
+        run: |
+          if ! command -v cbindgen >/dev/null 2>&1 || [ "$(cbindgen --version)" != "cbindgen ${CBINDGEN_VERSION}" ]; then
+            cargo install --locked --version "${CBINDGEN_VERSION}" --force cbindgen
+          fi
+
+      - name: Generate header
+        if: env.SKIP != '1'
+        run: bash scripts/generate-header.sh
+
+      - name: Commit generated header
+        if: env.SKIP != '1'
+        run: |
+          if git diff --quiet -- include/librtmp2/librtmp2.h && git ls-files --error-unmatch include/librtmp2/librtmp2.h >/dev/null 2>&1; then
+            echo "Header is already up to date."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add include/librtmp2/librtmp2.h
+          git commit -m "Update generated C header"
+
+          for attempt in 1 2 3 4 5; do
+            if git push; then
+              exit 0
+            fi
+
+            echo "Push rejected (attempt ${attempt}); rebasing onto latest ${GITHUB_REF_NAME} and retrying..."
+            git fetch origin "${GITHUB_REF_NAME}"
+            git rebase "origin/${GITHUB_REF_NAME}"
+            bash scripts/generate-header.sh
+            if git diff --quiet -- include/librtmp2/librtmp2.h; then
+              echo "Header now matches latest ${GITHUB_REF_NAME}; nothing to push."
+              continue
+            fi
+            git add include/librtmp2/librtmp2.h
+            git commit --amend --no-edit
+          done
+
+          echo "Failed to push generated header after multiple retries." >&2
+          exit 1
