@@ -5,6 +5,7 @@ include_version = true
 documentation = true
 usize_is_size_t = true
 style = "both"
+cpp_compat = true
 
 header = """
 /*
