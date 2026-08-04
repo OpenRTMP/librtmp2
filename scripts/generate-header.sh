@@ -8,7 +8,7 @@ OUTPUT_FILE="${OUTPUT_DIR}/librtmp2.h"
 
 # Keep in sync with CBINDGEN_VERSION in .github/workflows/c-header.yml so
 # local and CI header generation stay reproducible.
-CBINDGEN_VERSION="${CBINDGEN_VERSION:-0.27.0}"
+CBINDGEN_VERSION="0.29.4"
 
 if ! command -v cbindgen >/dev/null 2>&1; then
     echo "Error: cbindgen is not installed." >&2

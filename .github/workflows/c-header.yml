@@ -27,7 +27,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  CBINDGEN_VERSION: "0.27.0"
+  CBINDGEN_VERSION: "0.29.4"
 
 jobs:
   generate:
@@ -106,7 +106,7 @@ jobs:
             bash scripts/generate-header.sh
             if git diff --quiet -- include/librtmp2/librtmp2.h; then
               echo "Header now matches latest ${GITHUB_REF_NAME}; nothing to push."
-              exit 0
+              continue
             fi
             git add include/librtmp2/librtmp2.h
             git commit --amend --no-edit
