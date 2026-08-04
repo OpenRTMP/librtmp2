@@ -108,7 +108,7 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Cache cbindgen
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cargo/bin/cbindgen
           key: ${{ runner.os }}-cbindgen-${{ steps.cbindgen_ver.outputs.version }}
