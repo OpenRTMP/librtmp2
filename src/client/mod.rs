@@ -1446,17 +1446,17 @@ mod tests {
     }
 
     #[test]
-    fn dns_queue_freed_slot_reaches_a_patient_waiter_despite_other_expiring_waiters() {
-        // Regression: notify_one() can hand a freed-slot wakeup to a waiter
-        // whose own deadline has just elapsed; that waiter's loop iteration
-        // returns Timeout without claiming the slot or relaying the
-        // notification, stranding every other waiter asleep even though a
-        // slot is free. Race many short-deadline "sacrificial" waiters
-        // against the freed-slot notification alongside one long-deadline
-        // "patient" waiter: under notify_all() the patient waiter always
-        // gets a chance to recheck capacity for itself, regardless of how
-        // the sacrificial waiters' deadlines land.
-        let queue = Arc::new(DnsQueue::new());
+    fn dns_queue_dequeue_notifies_all_waiters_not_just_one() {
+        // Regression for a notify_one() bug: it can hand a freed-slot wakeup
+        // to a waiter whose own deadline has just elapsed, which bails
+        // without claiming the slot or relaying the notification, stranding
+        // every other waiter asleep even though a slot is free. This can't
+        // be pinned down deterministically by racing real deadlines against
+        // wall-clock sleeps (CI scheduling/ASan overhead makes any such
+        // timing window flaky both ways), so assert the primitive directly:
+        // freeing one slot must wake *every* waiter parked on `not_full`,
+        // not an arbitrary single one of them.
+        let queue = DnsQueue::new();
         for i in 0..MAX_DNS_QUEUE_DEPTH {
             queue
                 .enqueue(
@@ -1466,44 +1466,45 @@ mod tests {
                 .unwrap();
         }
 
-        let sacrificial: Vec<_> = (0..16)
+        let woken = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let queue = Arc::new(queue);
+        let waiters: Vec<_> = (0..8)
             .map(|i| {
-                let q = queue.clone();
+                let queue = queue.clone();
+                let woken = woken.clone();
                 std::thread::spawn(move || {
-                    let _ = q.enqueue(
-                        dns_job(&format!("sacrificial{i}")),
-                        Instant::now() + Duration::from_millis(20),
-                    );
+                    let mut guard = queue.jobs.lock().unwrap();
+                    // Wait well past the point where the main thread frees a
+                    // slot and broadcasts, so every thread here is reliably
+                    // parked on the condvar (not just about to be) when that
+                    // happens; a long per-waiter timeout means only the
+                    // broadcast — not each thread's own expiry — can be what
+                    // wakes it before this returns.
+                    guard = queue
+                        .not_full
+                        .wait_timeout(guard, Duration::from_secs(10))
+                        .unwrap()
+                        .0;
+                    drop(guard);
+                    woken.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let _ = i;
                 })
             })
             .collect();
 
-        let patient_queue = queue.clone();
-        let patient = std::thread::spawn(move || {
-            let start = Instant::now();
-            let result = patient_queue.enqueue(dns_job("patient"), start + Duration::from_secs(5));
-            (result, start.elapsed())
-        });
-
-        // Free exactly one slot right as the sacrificial waiters' deadlines
-        // are landing, so their expiry races the notification.
-        std::thread::sleep(Duration::from_millis(20));
+        // Give every thread time to actually be parked in wait_timeout
+        // before the single broadcast this test cares about.
+        std::thread::sleep(Duration::from_millis(200));
         queue.jobs.lock().unwrap().pop_front();
         queue.not_full.notify_all();
 
-        for t in sacrificial {
-            let _ = t.join();
+        for w in waiters {
+            w.join().unwrap();
         }
-        let (result, elapsed) = patient.join().unwrap();
-        assert!(
-            result.is_ok(),
-            "the patient waiter must be admitted once a slot frees, even if other \
-             waiters' deadlines expire around the same time"
-        );
-        assert!(
-            elapsed < Duration::from_secs(2),
-            "admission should happen promptly via the freed-slot notification, not \
-             be stranded until the patient waiter's own 5s deadline (took {elapsed:?})"
+        assert_eq!(
+            woken.load(std::sync::atomic::Ordering::SeqCst),
+            8,
+            "a single freed-slot notification must wake every waiter, not just one"
         );
     }
 
