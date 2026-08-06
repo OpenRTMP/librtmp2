@@ -117,6 +117,16 @@ impl DnsQueue {
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
+                // This wakeup may have been meant for another waiter (e.g.
+                // our deadline elapsed right as a slot freed up). notify_one
+                // wakes exactly one waiter per freed slot; if we're bailing
+                // while a slot is actually free, relay the notification so
+                // it isn't stranded on every other waiter, rather than
+                // broadcasting to all waiters on every dequeue regardless of
+                // whether anyone is bailing.
+                if guard.len() < MAX_DNS_QUEUE_DEPTH {
+                    self.not_full.notify_one();
+                }
                 return Err(ErrorCode::Timeout);
             }
             if guard.len() < MAX_DNS_QUEUE_DEPTH {
@@ -133,28 +143,30 @@ impl DnsQueue {
         }
     }
 
+    /// Pop the next queued job, blocking (without polling) while empty, and
+    /// notify one producer that a slot has freed up. Split out from `run()`
+    /// so tests can exercise the real pop-and-notify path without paying for
+    /// (or depending on the timing of) an actual DNS lookup.
+    fn dequeue_one(&self) -> DnsJob {
+        let mut guard = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
+        let job = loop {
+            if let Some(job) = guard.pop_front() {
+                break job;
+            }
+            guard = self
+                .not_empty
+                .wait(guard)
+                .unwrap_or_else(|e| e.into_inner());
+        };
+        drop(guard);
+        self.not_full.notify_one();
+        job
+    }
+
     /// Drain jobs one at a time, blocking (without polling) while empty.
     fn run(&self) {
         loop {
-            let mut guard = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
-            let job = loop {
-                if let Some(job) = guard.pop_front() {
-                    break job;
-                }
-                guard = self
-                    .not_empty
-                    .wait(guard)
-                    .unwrap_or_else(|e| e.into_inner());
-            };
-            drop(guard);
-            // notify_all, not notify_one: a woken waiter whose own deadline
-            // has just expired returns immediately without claiming the
-            // freed slot or relaying the notification, which would strand
-            // it (and every other waiter) asleep under notify_one. Waking
-            // every waiter lets each recheck capacity for itself, so the
-            // slot is never stranded as long as any live waiter remains.
-            self.not_full.notify_all();
-
+            let job = self.dequeue_one();
             let result = (job.host.as_str(), job.port)
                 .to_socket_addrs()
                 .map(|iter| iter.collect::<Vec<_>>())
@@ -1446,17 +1458,12 @@ mod tests {
     }
 
     #[test]
-    fn dns_queue_dequeue_notifies_all_waiters_not_just_one() {
-        // Regression for a notify_one() bug: it can hand a freed-slot wakeup
-        // to a waiter whose own deadline has just elapsed, which bails
-        // without claiming the slot or relaying the notification, stranding
-        // every other waiter asleep even though a slot is free. This can't
-        // be pinned down deterministically by racing real deadlines against
-        // wall-clock sleeps (CI scheduling/ASan overhead makes any such
-        // timing window flaky both ways), so assert the primitive directly:
-        // freeing one slot must wake *every* waiter parked on `not_full`,
-        // not an arbitrary single one of them.
-        let queue = DnsQueue::new();
+    fn dns_queue_dequeue_one_wakes_the_sole_waiter_via_the_real_production_path() {
+        // Exercises the real production pop-and-notify path (not a
+        // hand-rolled notify in the test): if `run()`/`dequeue_one()`
+        // regresses to not notifying at all, this test catches it, without
+        // paying for (or depending on the timing of) a real DNS lookup.
+        let queue = Arc::new(DnsQueue::new());
         for i in 0..MAX_DNS_QUEUE_DEPTH {
             queue
                 .enqueue(
@@ -1466,45 +1473,84 @@ mod tests {
                 .unwrap();
         }
 
-        let woken = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let queue = Arc::new(queue);
-        let waiters: Vec<_> = (0..8)
-            .map(|i| {
-                let queue = queue.clone();
-                let woken = woken.clone();
-                std::thread::spawn(move || {
-                    let mut guard = queue.jobs.lock().unwrap();
-                    // Wait well past the point where the main thread frees a
-                    // slot and broadcasts, so every thread here is reliably
-                    // parked on the condvar (not just about to be) when that
-                    // happens; a long per-waiter timeout means only the
-                    // broadcast — not each thread's own expiry — can be what
-                    // wakes it before this returns.
-                    guard = queue
-                        .not_full
-                        .wait_timeout(guard, Duration::from_secs(10))
-                        .unwrap()
-                        .0;
-                    drop(guard);
-                    woken.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    let _ = i;
-                })
-            })
-            .collect();
+        let waiter_queue = queue.clone();
+        let waiter = std::thread::spawn(move || {
+            let start = Instant::now();
+            let result = waiter_queue.enqueue(dns_job("waiter"), start + Duration::from_secs(5));
+            (result, start.elapsed())
+        });
+        std::thread::sleep(Duration::from_millis(50));
 
-        // Give every thread time to actually be parked in wait_timeout
-        // before the single broadcast this test cares about.
-        std::thread::sleep(Duration::from_millis(200));
-        queue.jobs.lock().unwrap().pop_front();
-        queue.not_full.notify_all();
+        let job = queue.dequeue_one();
+        assert_eq!(job.host, "filler0");
 
-        for w in waiters {
-            w.join().unwrap();
+        let (result, elapsed) = waiter.join().unwrap();
+        assert!(
+            result.is_ok(),
+            "the waiter must be woken by dequeue_one()'s real notify"
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "admission should happen promptly via the notification, not be \
+             stranded until the waiter's own 5s deadline (took {elapsed:?})"
+        );
+    }
+
+    #[test]
+    fn dns_queue_enqueue_relays_freed_slot_when_bailing_on_an_already_expired_deadline() {
+        // Regression: notify_one() wakes exactly one waiter per freed slot.
+        // If that waiter's own deadline has already elapsed, it must relay
+        // the notification onward (since a slot really is free) instead of
+        // silently dropping it — otherwise a different waiter with plenty of
+        // time left can be stranded asleep despite the free slot.
+        //
+        // This can't be pinned down by racing two real deadlines against
+        // wall-clock sleeps: Condvar::wait_timeout self-wakes independently
+        // once *its own* deadline elapses, so a short-deadline waiter
+        // reliably times out on its own long before an unrelated later
+        // dequeue event, never actually contending for that dequeue's
+        // notify_one() at all (confirmed by trying exactly that approach:
+        // it kept passing even with the relay deliberately reverted).
+        // Instead, drive the exact "woke up and immediately bailed" moment
+        // directly and deterministically: free a slot without notifying
+        // anyone (simulating the instant right after a dequeue, before any
+        // wakeup is delivered), then call `enqueue()` with an already-past
+        // deadline — the same state a woken-but-expired waiter observes.
+        let queue = Arc::new(DnsQueue::new());
+        for i in 0..MAX_DNS_QUEUE_DEPTH {
+            queue
+                .enqueue(
+                    dns_job(&format!("filler{i}")),
+                    Instant::now() + Duration::from_secs(5),
+                )
+                .unwrap();
         }
-        assert_eq!(
-            woken.load(std::sync::atomic::Ordering::SeqCst),
-            8,
-            "a single freed-slot notification must wake every waiter, not just one"
+
+        let patient_queue = queue.clone();
+        let patient = std::thread::spawn(move || {
+            let start = Instant::now();
+            let result =
+                patient_queue.enqueue(dns_job("patient"), start + Duration::from_millis(500));
+            (result, start.elapsed())
+        });
+        // Let patient actually park on `not_full` (queue is still full here).
+        std::thread::sleep(Duration::from_millis(50));
+
+        queue.jobs.lock().unwrap().pop_front();
+        let already_expired = Instant::now() - Duration::from_millis(1);
+        let expiring_result = queue.enqueue(dns_job("expiring"), already_expired);
+        assert!(matches!(expiring_result, Err(ErrorCode::Timeout)));
+
+        let (result, elapsed) = patient.join().unwrap();
+        assert!(
+            result.is_ok(),
+            "the patient waiter must be admitted via the relay, even though the \
+             other caller's deadline had already expired when the slot freed"
+        );
+        assert!(
+            elapsed < Duration::from_millis(400),
+            "admission should happen promptly via the relay, not be stranded \
+             until the patient waiter's own 500ms deadline (took {elapsed:?})"
         );
     }
 
