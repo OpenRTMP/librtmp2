@@ -10,15 +10,52 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Version tag to build (e.g. v0.1.0)'
+        description: 'Version tag to build (e.g. v0.1.0). Created and pushed automatically if it does not exist yet.'
         required: true
 
 permissions:
   contents: write
 
 jobs:
+  ensure-tag:
+    name: ensure release tag exists
+    # Only manual runs need this: a `push: tags:` run only fires once the tag
+    # already exists. workflow_dispatch's `tag` input is just a string GitHub
+    # does not turn into a real ref, so create and push it here before any
+    # other job tries to check it out.
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Create and push tag if missing
+        env:
+          TAG: ${{ github.event.inputs.tag }}
+        run: |
+          if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+            echo "Tag ${TAG} already exists, nothing to do."
+            exit 0
+          fi
+
+          CARGO_VERSION=$(grep -m1 '^version' Cargo.toml | grep -oP '"\K[0-9]+\.[0-9]+\.[0-9]+')
+          if [ "${TAG#v}" != "$CARGO_VERSION" ]; then
+            echo "::error::Tag (${TAG}) does not match version in Cargo.toml ($CARGO_VERSION)"
+            exit 1
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "${TAG}" -m "Release ${TAG}"
+          git push origin "${TAG}"
+
   verify:
     name: verify before release
+    needs: ensure-tag
+    # ensure-tag is skipped (not failed) on a `push: tags:` run - let this
+    # job proceed in that case, only stop if tag creation actually failed.
+    if: always() && needs.ensure-tag.result != 'failure' && needs.ensure-tag.result != 'cancelled'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
