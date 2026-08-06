@@ -147,7 +147,13 @@ impl DnsQueue {
                     .unwrap_or_else(|e| e.into_inner());
             };
             drop(guard);
-            self.not_full.notify_one();
+            // notify_all, not notify_one: a woken waiter whose own deadline
+            // has just expired returns immediately without claiming the
+            // freed slot or relaying the notification, which would strand
+            // it (and every other waiter) asleep under notify_one. Waking
+            // every waiter lets each recheck capacity for itself, so the
+            // slot is never stranded as long as any live waiter remains.
+            self.not_full.notify_all();
 
             let result = (job.host.as_str(), job.port)
                 .to_socket_addrs()
@@ -1437,6 +1443,68 @@ mod tests {
         let result = queue.enqueue(dns_job("waiter"), expired);
         assert!(matches!(result, Err(ErrorCode::Timeout)));
         assert!(queue.jobs.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn dns_queue_freed_slot_reaches_a_patient_waiter_despite_other_expiring_waiters() {
+        // Regression: notify_one() can hand a freed-slot wakeup to a waiter
+        // whose own deadline has just elapsed; that waiter's loop iteration
+        // returns Timeout without claiming the slot or relaying the
+        // notification, stranding every other waiter asleep even though a
+        // slot is free. Race many short-deadline "sacrificial" waiters
+        // against the freed-slot notification alongside one long-deadline
+        // "patient" waiter: under notify_all() the patient waiter always
+        // gets a chance to recheck capacity for itself, regardless of how
+        // the sacrificial waiters' deadlines land.
+        let queue = Arc::new(DnsQueue::new());
+        for i in 0..MAX_DNS_QUEUE_DEPTH {
+            queue
+                .enqueue(
+                    dns_job(&format!("filler{i}")),
+                    Instant::now() + Duration::from_secs(5),
+                )
+                .unwrap();
+        }
+
+        let sacrificial: Vec<_> = (0..16)
+            .map(|i| {
+                let q = queue.clone();
+                std::thread::spawn(move || {
+                    let _ = q.enqueue(
+                        dns_job(&format!("sacrificial{i}")),
+                        Instant::now() + Duration::from_millis(20),
+                    );
+                })
+            })
+            .collect();
+
+        let patient_queue = queue.clone();
+        let patient = std::thread::spawn(move || {
+            let start = Instant::now();
+            let result = patient_queue.enqueue(dns_job("patient"), start + Duration::from_secs(5));
+            (result, start.elapsed())
+        });
+
+        // Free exactly one slot right as the sacrificial waiters' deadlines
+        // are landing, so their expiry races the notification.
+        std::thread::sleep(Duration::from_millis(20));
+        queue.jobs.lock().unwrap().pop_front();
+        queue.not_full.notify_all();
+
+        for t in sacrificial {
+            let _ = t.join();
+        }
+        let (result, elapsed) = patient.join().unwrap();
+        assert!(
+            result.is_ok(),
+            "the patient waiter must be admitted once a slot frees, even if other \
+             waiters' deadlines expire around the same time"
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "admission should happen promptly via the freed-slot notification, not \
+             be stranded until the patient waiter's own 5s deadline (took {elapsed:?})"
+        );
     }
 
     fn rtmp_user_control_ping_chunk(token: u32) -> Vec<u8> {
