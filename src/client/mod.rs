@@ -121,13 +121,25 @@ fn resolve_socket_addrs(
     };
 
     let (reply_tx, reply_rx) = mpsc::channel();
-    tx.try_send(DnsJob {
+    let mut job = DnsJob {
         host: host.to_string(),
         port,
         reply: reply_tx,
-    })
-    .map_err(|_| ErrorCode::Timeout)?;
-
+    };
+    loop {
+        match tx.try_send(job) {
+            Ok(()) => break,
+            Err(mpsc::TrySendError::Full(pending)) => {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Err(ErrorCode::Timeout);
+                }
+                job = pending;
+                std::thread::sleep(Duration::from_millis(1).min(remaining));
+            }
+            Err(mpsc::TrySendError::Disconnected(_)) => return Err(ErrorCode::Io),
+        }
+    }
     let remaining = deadline.saturating_duration_since(Instant::now());
     match reply_rx.recv_timeout(remaining) {
         Ok(Ok(addrs)) if !addrs.is_empty() => Ok(addrs),

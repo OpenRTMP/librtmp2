@@ -759,7 +759,9 @@ impl Server {
                 .unwrap_or(true);
             if let Some(cache) = self.stream_cache.get(&key) {
                 let mut send_failed = false;
-                if let Some(ref md) = cache.metadata.clone() {
+                if (receive_audio || receive_video)
+                    && let Some(ref md) = cache.metadata.clone()
+                {
                     send_failed |= conn.send_data_message(0, md).is_err();
                 }
                 if receive_video {
@@ -924,6 +926,12 @@ impl Server {
             return false;
         }
         if frame.frame_type == FrameType::Video && !stream.receive_video {
+            return false;
+        }
+        if matches!(frame.frame_type, FrameType::Script | FrameType::Metadata)
+            && !stream.receive_audio
+            && !stream.receive_video
+        {
             return false;
         }
         if matches!(frame.frame_type, FrameType::Audio | FrameType::Video)
@@ -1462,6 +1470,43 @@ mod tests {
 
     fn relay_frame(frame_type: FrameType, payload: Vec<u8>) -> crate::session::conn::RelayFrame {
         relay_frame_for_publisher(1, "stream", frame_type, payload)
+    }
+
+    #[test]
+    fn script_metadata_relay_respects_receive_audio_and_video_toggles() {
+        use crate::session::stream::Stream;
+        use crate::transport::Transport;
+        use std::os::unix::io::IntoRawFd;
+        use std::os::unix::net::UnixStream;
+
+        let (server_end, _peer_end) = UnixStream::pair().unwrap();
+        server_end.set_nonblocking(true).unwrap();
+
+        let mut player = Conn::new();
+        player.app = "live".to_string();
+        player.relay_enabled = true;
+        player.transport = Some(Transport::new_plain(server_end.into_raw_fd()));
+        player.current_stream = Some(Box::new(Stream {
+            stream_id: 1,
+            name: "stream".to_string(),
+            is_publishing: false,
+            is_playing: true,
+            paused: false,
+            receive_audio: false,
+            receive_video: false,
+        }));
+
+        let script = relay_frame(FrameType::Script, vec![0x12, 0x00, 0x0A, b'o', b'n', b'M', b'e', b't', b'a']);
+        assert!(
+            !Server::conn_will_receive_relay_frame(&player, &script),
+            "script/metadata must not relay when both receiveAudio and receiveVideo are false"
+        );
+
+        player.current_stream.as_mut().unwrap().receive_video = true;
+        assert!(
+            Server::conn_will_receive_relay_frame(&player, &script),
+            "script/metadata should relay when at least one receive toggle is true"
+        );
     }
 
     fn relay_frame_for_publisher(
