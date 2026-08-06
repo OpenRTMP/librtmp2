@@ -115,15 +115,15 @@ impl DnsQueue {
     fn enqueue(&self, job: DnsJob, deadline: Instant) -> std::result::Result<(), ErrorCode> {
         let mut guard = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
         loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(ErrorCode::Timeout);
+            }
             if guard.len() < MAX_DNS_QUEUE_DEPTH {
                 guard.push_back(job);
                 drop(guard);
                 self.not_empty.notify_one();
                 return Ok(());
-            }
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                return Err(ErrorCode::Timeout);
             }
             guard = self
                 .not_full
@@ -1425,6 +1425,18 @@ mod tests {
         assert!(matches!(result, Err(ErrorCode::Timeout)));
         assert!(start.elapsed() >= Duration::from_millis(90));
         assert!(start.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn dns_queue_enqueue_rejects_already_expired_deadline_even_with_room() {
+        // An already-expired deadline must not admit the job, even though the
+        // queue has plenty of free capacity: doing so would waste a worker
+        // resolution and a queue slot on a caller that has already given up.
+        let queue = DnsQueue::new();
+        let expired = Instant::now() - Duration::from_millis(1);
+        let result = queue.enqueue(dns_job("waiter"), expired);
+        assert!(matches!(result, Err(ErrorCode::Timeout)));
+        assert!(queue.jobs.lock().unwrap().is_empty());
     }
 
     fn rtmp_user_control_ping_chunk(token: u32) -> Vec<u8> {

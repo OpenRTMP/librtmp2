@@ -1496,16 +1496,89 @@ mod tests {
             receive_video: false,
         }));
 
-        let script = relay_frame(FrameType::Script, vec![0x12, 0x00, 0x0A, b'o', b'n', b'M', b'e', b't', b'a']);
+        let script = relay_frame(
+            FrameType::Script,
+            vec![0x12, 0x00, 0x0A, b'o', b'n', b'M', b'e', b't', b'a'],
+        );
+        let metadata = relay_frame(
+            FrameType::Metadata,
+            vec![0x12, 0x00, 0x0A, b'o', b'n', b'M', b'e', b't', b'a'],
+        );
         assert!(
             !Server::conn_will_receive_relay_frame(&player, &script),
-            "script/metadata must not relay when both receiveAudio and receiveVideo are false"
+            "script must not relay when both receiveAudio and receiveVideo are false"
+        );
+        assert!(
+            !Server::conn_will_receive_relay_frame(&player, &metadata),
+            "metadata must not relay when both receiveAudio and receiveVideo are false"
         );
 
         player.current_stream.as_mut().unwrap().receive_video = true;
         assert!(
             Server::conn_will_receive_relay_frame(&player, &script),
-            "script/metadata should relay when at least one receive toggle is true"
+            "script should relay when at least one receive toggle is true"
+        );
+        assert!(
+            Server::conn_will_receive_relay_frame(&player, &metadata),
+            "metadata should relay when at least one receive toggle is true"
+        );
+    }
+
+    #[test]
+    fn cached_metadata_replay_respects_receive_audio_and_video_toggles() {
+        use crate::session::stream::Stream;
+        use crate::transport::Transport;
+        use std::io::Read;
+        use std::os::unix::io::IntoRawFd;
+        use std::os::unix::net::UnixStream;
+
+        let mut server = test_server();
+        let mut payload = vec![0x02, 0x00, 0x0A];
+        payload.extend_from_slice(b"onMetaData");
+        payload.push(crate::amf::amf0::Amf0Type::Object as u8);
+        payload.extend_from_slice(&[0x00, 0x00, 0x09]);
+        server.cache_relay_frame(&relay_frame(FrameType::Script, payload));
+
+        let (server_end, mut peer_end) = UnixStream::pair().unwrap();
+        server_end.set_nonblocking(true).unwrap();
+        peer_end.set_nonblocking(true).unwrap();
+
+        let mut player = Conn::new();
+        player.app = "live".to_string();
+        player.relay_enabled = true;
+        player.needs_init_frames = true;
+        player.client_fd = 0;
+        player.transport = Some(Transport::new_plain(server_end.into_raw_fd()));
+        player.current_stream = Some(Box::new(Stream {
+            stream_id: 1,
+            name: "stream".to_string(),
+            is_publishing: false,
+            is_playing: true,
+            paused: false,
+            receive_audio: false,
+            receive_video: false,
+        }));
+        server.connections = vec![player];
+
+        server.process_connections().unwrap();
+        let mut buf = [0u8; 64];
+        let read = peer_end.read(&mut buf);
+        assert!(
+            matches!(&read, Err(e) if e.kind() == std::io::ErrorKind::WouldBlock),
+            "cached metadata must not be replayed when both receiveAudio and receiveVideo are false, got {read:?}"
+        );
+
+        server.connections[0].needs_init_frames = true;
+        server.connections[0]
+            .current_stream
+            .as_mut()
+            .unwrap()
+            .receive_video = true;
+        server.process_connections().unwrap();
+        let read = peer_end.read(&mut buf);
+        assert!(
+            matches!(&read, Ok(n) if *n > 0),
+            "cached metadata should be replayed once at least one receive toggle is true, got {read:?}"
         );
     }
 
