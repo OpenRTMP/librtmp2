@@ -13,6 +13,73 @@ begin at `1.0.0`.
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-08-06
+
+### Security
+- The server now reaps a publisher that claims a route but sends no media
+  within a short setup deadline, closing a route-squatting window where a
+  connection could hold a publish route indefinitely without ever streaming;
+  the deadline restarts only for a genuinely new publish session or route,
+  not for a repeated `publish` command on the route the connection already
+  owns.
+- `play` is now rejected on connections authorized only via `on_publish_cb`,
+  mirroring the existing guard that already rejected `publish` on
+  play-only-configured hosts — closes a play-to-publish authorization bypass.
+- `defer_media_relay` is now honored even when publish/play auth callbacks
+  are unset, closing a bypass where relay could start before the host's
+  deferred-authorization step ran.
+- Paused play clients are now reaped after the session setup timeout like
+  other idle connections; pausing no longer lets a client sit outside relay
+  delivery — and thus outside the slow-reader disconnect path — indefinitely.
+  The grace window resets when `pause(true)` is received.
+- Init-cache replay is no longer rescheduled on every `receiveAudio`/
+  `receiveVideo` toggle; it fires once on first play, and repeated
+  play-route changes on the same connection are now rate-limited to one
+  cached-header replay per second, closing a DoS path where a client could
+  force repeated multi-megabyte replays. Script/metadata live relay and
+  init-cache metadata replay are also now skipped entirely for connections
+  with both `receiveAudio` and `receiveVideo` disabled, closing a bandwidth
+  amplification path.
+- `Client::connect()`'s DNS resolution queue now retries admission until the
+  connect deadline elapses instead of failing outright once the shared
+  32-slot queue is full. The queue itself was reworked from a busy-poll +
+  `mpsc` channel (which woke every blocked caller roughly once per
+  millisecond) to a `Mutex`/`Condvar`-based bounded queue, so callers block
+  until a real state change instead of spinning. Already-expired deadlines
+  are now rejected before queue admission instead of after, and a freed slot
+  is relayed to the next waiter with a still-valid deadline instead of being
+  stranded behind a waiter whose deadline has already elapsed.
+
+### Added
+- Automated C header generation: `cbindgen.toml`, `scripts/generate-header.sh`,
+  and `.github/workflows/c-header.yml` regenerate, verify (compile under
+  `-Wall -Wextra -Werror`), and commit `include/librtmp2/librtmp2.h` on
+  `src`/config changes, with the header staged into both source and binary
+  release tarballs and Debian packaging (`librtmp2-dev`).
+
+### Changed
+- `lrtmp2_server_listen`'s `bind_addr`, `lrtmp2_client_connect`'s `url`, and
+  the `lrtmp2_version_string()`/`lrtmp2_error_string()` return types are now
+  `*const std::ffi::c_char` instead of `*const u8` in the exported C API,
+  matching what README.md already documented and what the generated header
+  now reflects. Behavior is unchanged (these were always NUL-terminated C
+  strings internally), but this is a signature change to `extern "C"`
+  functions, so downstream C/FFI callers should recompile against the
+  regenerated header.
+- The generated header now wraps declarations in `extern "C" { ... }`
+  (cbindgen `cpp_compat`) so C++ translation units link against the correct
+  unmangled symbols, and opaque types are renamed to match the names
+  README.md documents (`lrtmp2_server_t`, `lrtmp2_server_config_t`,
+  `lrtmp2_client_t`, `lrtmp2_frame_t`, `lrtmp2_conn_t`) instead of raw Rust
+  identifiers.
+
+### Fixed
+- The release workflow now checks out `inputs.tag` (falling back to the
+  triggering ref) in both its build and packaging jobs, instead of always
+  building the workflow's triggering ref while labeling artifacts with the
+  requested tag — a manual `workflow_dispatch` release with a tag input
+  could previously ship the wrong commit.
+
 ## [0.6.0] — 2026-07-25
 
 ### Security
@@ -442,7 +509,8 @@ and others.
 - Protocol mapping documents for legacy, E-RTMP v1, and E-RTMP v2
 - `CONTRIBUTING.md` guidelines
 
-[Unreleased]: https://github.com/OpenRTMP/librtmp2/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/OpenRTMP/librtmp2/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/OpenRTMP/librtmp2/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/OpenRTMP/librtmp2/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/OpenRTMP/librtmp2/compare/v0.4.2...v0.5.0
 [0.4.2]: https://github.com/OpenRTMP/librtmp2/compare/v0.4.1...v0.4.2
