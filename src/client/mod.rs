@@ -2,9 +2,10 @@
 //!
 //! Mirrors `src/client/client.h` and `src/client/client.c`.
 
+use std::collections::VecDeque;
 use std::net::{TcpStream, ToSocketAddrs};
 use std::os::unix::io::IntoRawFd;
-use std::sync::{Mutex, mpsc};
+use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use crate::buffer::Buffer;
@@ -82,6 +83,81 @@ const INBOUND_PING_WINDOW: Duration = Duration::from_secs(1);
 /// Max DNS jobs waiting on the shared resolver thread.
 const MAX_DNS_QUEUE_DEPTH: usize = 32;
 
+struct DnsJob {
+    host: String,
+    port: u16,
+    reply: mpsc::Sender<std::result::Result<Vec<std::net::SocketAddr>, ()>>,
+}
+
+/// Bounded work queue for the shared DNS resolver thread. Producers block on
+/// `not_full` when the queue is at `MAX_DNS_QUEUE_DEPTH` and are woken as
+/// soon as the worker dequeues a job, rather than polling: with many
+/// concurrent `Client::connect()` calls outrunning the queue, a poll loop
+/// would wake every blocked caller on a fixed interval regardless of whether
+/// room actually opened up, burning CPU in proportion to the number of
+/// waiters instead of the number of state changes.
+struct DnsQueue {
+    jobs: Mutex<VecDeque<DnsJob>>,
+    not_empty: Condvar,
+    not_full: Condvar,
+}
+
+impl DnsQueue {
+    fn new() -> Self {
+        Self {
+            jobs: Mutex::new(VecDeque::new()),
+            not_empty: Condvar::new(),
+            not_full: Condvar::new(),
+        }
+    }
+
+    /// Block until `job` is enqueued or `deadline` elapses, without polling.
+    fn enqueue(&self, job: DnsJob, deadline: Instant) -> std::result::Result<(), ErrorCode> {
+        let mut guard = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
+        loop {
+            if guard.len() < MAX_DNS_QUEUE_DEPTH {
+                guard.push_back(job);
+                drop(guard);
+                self.not_empty.notify_one();
+                return Ok(());
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(ErrorCode::Timeout);
+            }
+            guard = self
+                .not_full
+                .wait_timeout(guard, remaining)
+                .unwrap_or_else(|e| e.into_inner())
+                .0;
+        }
+    }
+
+    /// Drain jobs one at a time, blocking (without polling) while empty.
+    fn run(&self) {
+        loop {
+            let mut guard = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
+            let job = loop {
+                if let Some(job) = guard.pop_front() {
+                    break job;
+                }
+                guard = self
+                    .not_empty
+                    .wait(guard)
+                    .unwrap_or_else(|e| e.into_inner());
+            };
+            drop(guard);
+            self.not_full.notify_one();
+
+            let result = (job.host.as_str(), job.port)
+                .to_socket_addrs()
+                .map(|iter| iter.collect::<Vec<_>>())
+                .map_err(|_| ());
+            let _ = job.reply.send(result);
+        }
+    }
+}
+
 /// Resolve `host:port` with a wall-clock deadline so DNS cannot block longer
 /// than the TCP connect budget. Lookups run on a single shared worker thread
 /// so timed-out requests do not spawn unbounded detached resolver threads.
@@ -90,56 +166,33 @@ fn resolve_socket_addrs(
     port: u16,
     deadline: Instant,
 ) -> Result<Vec<std::net::SocketAddr>> {
-    struct DnsJob {
-        host: String,
-        port: u16,
-        reply: mpsc::Sender<std::result::Result<Vec<std::net::SocketAddr>, ()>>,
-    }
-
-    static DNS_TX: Mutex<Option<mpsc::SyncSender<DnsJob>>> = Mutex::new(None);
-    let tx = {
-        let mut guard = DNS_TX.lock().map_err(|_| ErrorCode::Internal)?;
-        if let Some(tx) = guard.as_ref() {
-            tx.clone()
+    static DNS_QUEUE: Mutex<Option<Arc<DnsQueue>>> = Mutex::new(None);
+    let queue = {
+        let mut guard = DNS_QUEUE.lock().map_err(|_| ErrorCode::Internal)?;
+        if let Some(queue) = guard.as_ref() {
+            queue.clone()
         } else {
-            let (job_tx, job_rx) = mpsc::sync_channel::<DnsJob>(MAX_DNS_QUEUE_DEPTH);
+            let queue = Arc::new(DnsQueue::new());
+            let worker = queue.clone();
             std::thread::Builder::new()
                 .name("lrtmp2-dns".into())
-                .spawn(move || {
-                    while let Ok(job) = job_rx.recv() {
-                        let result = (job.host.as_str(), job.port)
-                            .to_socket_addrs()
-                            .map(|iter| iter.collect::<Vec<_>>())
-                            .map_err(|_| ());
-                        let _ = job.reply.send(result);
-                    }
-                })
+                .spawn(move || worker.run())
                 .map_err(|_| ErrorCode::Internal)?;
-            *guard = Some(job_tx.clone());
-            job_tx
+            *guard = Some(queue.clone());
+            queue
         }
     };
 
     let (reply_tx, reply_rx) = mpsc::channel();
-    let mut job = DnsJob {
-        host: host.to_string(),
-        port,
-        reply: reply_tx,
-    };
-    loop {
-        match tx.try_send(job) {
-            Ok(()) => break,
-            Err(mpsc::TrySendError::Full(pending)) => {
-                let remaining = deadline.saturating_duration_since(Instant::now());
-                if remaining.is_zero() {
-                    return Err(ErrorCode::Timeout);
-                }
-                job = pending;
-                std::thread::sleep(Duration::from_millis(1).min(remaining));
-            }
-            Err(mpsc::TrySendError::Disconnected(_)) => return Err(ErrorCode::Io),
-        }
-    }
+    queue.enqueue(
+        DnsJob {
+            host: host.to_string(),
+            port,
+            reply: reply_tx,
+        },
+        deadline,
+    )?;
+
     let remaining = deadline.saturating_duration_since(Instant::now());
     match reply_rx.recv_timeout(remaining) {
         Ok(Ok(addrs)) if !addrs.is_empty() => Ok(addrs),
@@ -1314,6 +1367,65 @@ impl Drop for Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn dns_job(host: &str) -> DnsJob {
+        let (reply, _rx) = mpsc::channel();
+        DnsJob {
+            host: host.to_string(),
+            port: 0,
+            reply,
+        }
+    }
+
+    #[test]
+    fn dns_queue_enqueue_wakes_promptly_on_notify_instead_of_polling_to_deadline() {
+        let queue = Arc::new(DnsQueue::new());
+        for i in 0..MAX_DNS_QUEUE_DEPTH {
+            queue
+                .enqueue(
+                    dns_job(&format!("filler{i}")),
+                    Instant::now() + Duration::from_secs(5),
+                )
+                .unwrap();
+        }
+
+        let freer = queue.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            freer.jobs.lock().unwrap().pop_front();
+            freer.not_full.notify_one();
+        });
+
+        let start = Instant::now();
+        let result = queue.enqueue(dns_job("waiter"), start + Duration::from_secs(5));
+        assert!(result.is_ok());
+        assert!(
+            start.elapsed() < Duration::from_millis(500),
+            "enqueue should be woken by the freed-slot notification almost immediately, \
+             not only discover it near the 5s deadline (took {:?})",
+            start.elapsed()
+        );
+    }
+
+    #[test]
+    fn dns_queue_enqueue_times_out_at_deadline_when_no_slot_frees() {
+        let queue = DnsQueue::new();
+        for i in 0..MAX_DNS_QUEUE_DEPTH {
+            queue
+                .enqueue(
+                    dns_job(&format!("filler{i}")),
+                    Instant::now() + Duration::from_secs(5),
+                )
+                .unwrap();
+        }
+
+        let start = Instant::now();
+        let deadline = start + Duration::from_millis(100);
+        let result = queue.enqueue(dns_job("waiter"), deadline);
+        assert!(matches!(result, Err(ErrorCode::Timeout)));
+        assert!(start.elapsed() >= Duration::from_millis(90));
+        assert!(start.elapsed() < Duration::from_secs(2));
+    }
 
     fn rtmp_user_control_ping_chunk(token: u32) -> Vec<u8> {
         let mut payload = Buffer::with_capacity(6);
