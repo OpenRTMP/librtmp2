@@ -30,6 +30,12 @@ begin at `1.0.0`.
   routes.
 - Pending-relay byte limits count `app` / `stream_name` string storage; inject
   rejects payloads above `DEFAULT_MAX_MSG_LENGTH`.
+- Stream-cache pressure can evict other external routes (per-route IDs blocked
+  same-owner eviction); empty `publisher_cache_keys` rows are pruned.
+- Socket-less inject claims `(app, stream_name)` in `active_publish_routes` so
+  inject and local publishers cannot share one route's init cache.
+- `Conn::inject_relay_frame` counts audio/video toward publisher liveness
+  (`injected_media_bytes`) without changing socket receive telemetry.
 
 ### Removed
 - Accidental `scripts/docker_cargo_test.py` helper (local Windows Docker

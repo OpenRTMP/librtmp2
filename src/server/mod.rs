@@ -419,6 +419,8 @@ impl Server {
     /// `resource_limits.max_pending_relay_bytes`), counting payload plus route
     /// string storage. Payloads larger than `DEFAULT_MAX_MSG_LENGTH` and route
     /// components longer than `MAX_INJECT_ROUTE_COMPONENT_BYTES` are rejected.
+    /// Conflicts with a socket publisher already owning `(app, stream_name)`
+    /// (or another external id) are rejected via `active_publish_routes`.
     pub fn inject_relay_frame(
         &mut self,
         app: &str,
@@ -435,6 +437,7 @@ impl Server {
         {
             return Err(ErrorCode::Internal);
         }
+        let publisher_conn_id = external_publisher_id_for_route(app, stream_name);
         let normalized = normalize_modex_payload(payload, CAPS_EX_MASK_MODEX);
         let cache_payload = if normalized.as_ref().len() == payload.len()
             && std::ptr::eq(normalized.as_ref().as_ptr(), payload.as_ptr())
@@ -459,6 +462,20 @@ impl Server {
         {
             return Err(ErrorCode::Internal);
         }
+        {
+            let Ok(mut routes) = self.active_publish_routes.lock() else {
+                return Err(ErrorCode::Internal);
+            };
+            let key = (app.to_string(), stream_name.to_string());
+            match routes.get(&key) {
+                Some(&owner) if owner != publisher_conn_id => {
+                    return Err(ErrorCode::Internal);
+                }
+                _ => {
+                    routes.insert(key, publisher_conn_id);
+                }
+            }
+        }
         self.pending_injected_relay.push(RelayFrame {
             frame_type,
             timestamp,
@@ -466,7 +483,7 @@ impl Server {
             cache_payload,
             app: app.to_string(),
             stream_name: stream_name.to_string(),
-            publisher_conn_id: external_publisher_id_for_route(app, stream_name),
+            publisher_conn_id,
         });
         Ok(())
     }
@@ -1250,6 +1267,24 @@ impl Server {
         for keys in self.publisher_cache_keys.values_mut() {
             keys.retain(|k| k != key);
         }
+        // External inject has no connection teardown; drop empty owner rows so
+        // `publisher_cache_keys` cannot grow without bound across routes.
+        self.publisher_cache_keys.retain(|_, keys| !keys.is_empty());
+        // Free the publish-route claim when an external owner lost its last
+        // cache entry for this key and no inject frames are still queued.
+        let still_pending = self
+            .pending_injected_relay
+            .iter()
+            .any(|f| f.app == key.0 && f.stream_name == key.1);
+        if !still_pending {
+            if let Ok(mut routes) = self.active_publish_routes.lock() {
+                if let Some(&owner) = routes.get(key) {
+                    if is_external_publisher_id(owner) {
+                        routes.remove(key);
+                    }
+                }
+            }
+        }
     }
 
     /// Drop another cache entry owned by `publisher_conn_id`, if any.
@@ -1268,6 +1303,38 @@ impl Server {
             }
         }
         false
+    }
+
+    /// Evict any external-owned cache route other than `except_key`.
+    ///
+    /// Per-route external publisher IDs mean same-owner eviction cannot free
+    /// older inject routes when the global entry/byte cap is hit.
+    fn evict_any_external_stream_cache(&mut self, except_key: &(String, String)) -> bool {
+        let mut victim: Option<(String, String)> = None;
+        for (pub_id, keys) in &self.publisher_cache_keys {
+            if !is_external_publisher_id(*pub_id) {
+                continue;
+            }
+            if let Some(key) = keys.iter().find(|k| *k != except_key) {
+                victim = Some(key.clone());
+                break;
+            }
+        }
+        if let Some(key) = victim {
+            self.evict_stream_cache_key(&key);
+            return true;
+        }
+        false
+    }
+
+    /// Prefer same-owner eviction; fall back to other external routes.
+    fn evict_for_stream_cache_pressure(
+        &mut self,
+        publisher_conn_id: u64,
+        except_key: &(String, String),
+    ) -> bool {
+        self.evict_stream_cache_for_publisher(publisher_conn_id, except_key)
+            || self.evict_any_external_stream_cache(except_key)
     }
 
     fn publisher_cache_key_count(&self, publisher_conn_id: u64) -> usize {
@@ -1314,13 +1381,13 @@ impl Server {
         if is_new_key
             && self.publisher_cache_key_count(publisher_conn_id)
                 >= MAX_STREAM_CACHE_KEYS_PER_PUBLISHER
-            && !self.evict_stream_cache_for_publisher(publisher_conn_id, key)
+            && !self.evict_for_stream_cache_pressure(publisher_conn_id, key)
         {
             return false;
         }
 
         if self.stream_cache.len() >= MAX_STREAM_CACHE_ENTRIES && is_new_key {
-            if !self.evict_stream_cache_for_publisher(publisher_conn_id, key) {
+            if !self.evict_for_stream_cache_pressure(publisher_conn_id, key) {
                 return false;
             }
         }
@@ -1338,7 +1405,7 @@ impl Server {
         let max_cache_bytes = self.resource_limits.max_stream_cache_bytes;
         if projected_total > max_cache_bytes {
             while projected_total > max_cache_bytes
-                && self.evict_stream_cache_for_publisher(publisher_conn_id, key)
+                && self.evict_for_stream_cache_pressure(publisher_conn_id, key)
             {
                 if let Some(cache) = self.stream_cache.get(key) {
                     // Keep route-key bytes accounted; replace payload side with
@@ -1599,6 +1666,9 @@ impl Server {
                 }
                 if let Some(keys) = self.publisher_cache_keys.get_mut(&conn.conn_id) {
                     keys.retain(|k| k != &key);
+                    if keys.is_empty() {
+                        self.publisher_cache_keys.remove(&conn.conn_id);
+                    }
                 }
                 // A different conn_id can still be tracking this exact
                 // (app, stream_name) (two publishers sharing a route name).
@@ -3357,6 +3427,97 @@ mod tests {
         assert_eq!(conn.pending_relay[0].timestamp, 10);
         assert_eq!(conn.pending_relay[0].payload, vec![0x17, 0x01, 0xAA]);
         assert!(!unsafe { MEDIA_CB_HIT }, "inject must skip on_media_cb");
+    }
+
+    #[test]
+    fn inject_rejects_route_owned_by_socket_publisher() {
+        let mut server = test_server();
+        let route = ("live".to_string(), "stream".to_string());
+        server
+            .active_publish_routes
+            .lock()
+            .unwrap()
+            .insert(route, 7);
+        assert!(
+            server
+                .inject_relay_frame("live", "stream", FrameType::Video, 0, &[0x17, 0x01])
+                .is_err(),
+            "inject must not share a route claimed by a socket publisher"
+        );
+    }
+
+    #[test]
+    fn inject_claims_route_blocking_socket_registry() {
+        let mut server = test_server();
+        server
+            .inject_relay_frame("live", "stream", FrameType::Video, 0, &[0x17, 0x00, 0x01])
+            .unwrap();
+        let external_id = super::external_publisher_id_for_route("live", "stream");
+        let owner = *server
+            .active_publish_routes
+            .lock()
+            .unwrap()
+            .get(&("live".to_string(), "stream".to_string()))
+            .unwrap();
+        assert_eq!(owner, external_id);
+        let registry = PublishRouteRegistry::new(Arc::clone(&server.active_publish_routes));
+        assert!(
+            !registry.claim(42, "live", "stream"),
+            "socket publisher must not claim an inject-owned route"
+        );
+    }
+
+    #[test]
+    fn stream_cache_evicts_stale_external_routes_under_entry_cap() {
+        let mut server = test_server();
+        // Manually fill to the entry cap with distinct external owners so
+        // same-owner eviction cannot free space without the external fallback.
+        for i in 0..super::MAX_STREAM_CACHE_ENTRIES {
+            let name = format!("s{i}");
+            let key = ("live".to_string(), name.clone());
+            let pub_id = super::external_publisher_id_for_route("live", &name);
+            server
+                .stream_cache
+                .insert(key.clone(), super::empty_stream_cache());
+            server.publisher_cache_keys.insert(pub_id, vec![key]);
+        }
+        assert_eq!(server.stream_cache.len(), super::MAX_STREAM_CACHE_ENTRIES);
+        server
+            .inject_relay_frame("live", "overflow", FrameType::Video, 0, &[0x17, 0x00, 0x02])
+            .unwrap();
+        server.process_connections().unwrap();
+        assert!(
+            server
+                .stream_cache
+                .contains_key(&("live".to_string(), "overflow".to_string())),
+            "new external route must evict an older external cache entry"
+        );
+        assert!(
+            server.stream_cache.len() <= super::MAX_STREAM_CACHE_ENTRIES,
+            "cache must stay within the entry cap"
+        );
+    }
+
+    #[test]
+    fn prune_empty_external_publisher_cache_keys_after_oversized_evict() {
+        let mut server = test_server();
+        server
+            .inject_relay_frame("live", "cam", FrameType::Video, 0, &[0x17, 0x00, 0x01])
+            .unwrap();
+        server.process_connections().unwrap();
+        let external_id = super::external_publisher_id_for_route("live", "cam");
+        assert!(server.publisher_cache_keys.contains_key(&external_id));
+        // Oversized AVC sequence header clears the cached field then drops the entry.
+        let mut big = vec![0x17, 0x00];
+        big.extend(std::iter::repeat(0xABu8).take(super::MAX_CACHED_INIT_FRAME_BYTES));
+        server
+            .inject_relay_frame("live", "cam", FrameType::Video, 1, &big)
+            .unwrap();
+        server.process_connections().unwrap();
+        assert!(
+            !server.publisher_cache_keys.contains_key(&external_id),
+            "empty external owner row must be pruned"
+        );
     }
 
     #[test]

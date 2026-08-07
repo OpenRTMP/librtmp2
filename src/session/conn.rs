@@ -144,6 +144,10 @@ pub struct Conn {
     pub bytes_at_last_ack: u64,
     /// Audio/video payload bytes received (excludes handshake/control overhead).
     pub media_bytes_received: u64,
+    /// Audio/video bytes accepted via [`Conn::inject_relay_frame`] (socket
+    /// telemetry stays in `media_bytes_received`; this counts trusted injects
+    /// toward publisher liveness so route squatters still time out).
+    pub injected_media_bytes: u64,
     /// Audio/video payload bytes sent to this peer.
     pub media_bytes_sent: u64,
     pub client_fd: i32,
@@ -243,6 +247,7 @@ impl Conn {
             bytes_received: 0,
             bytes_at_last_ack: 0,
             media_bytes_received: 0,
+            injected_media_bytes: 0,
             media_bytes_sent: 0,
             client_fd: -1,
             conn_id: 0,
@@ -309,7 +314,9 @@ impl Conn {
         if stream.is_publishing {
             // A peer that claims a publish route but never sends media can
             // otherwise squat the route indefinitely by keeping TCP alive.
-            if self.media_bytes_received == 0 {
+            // Trusted injects count toward liveness without polluting socket
+            // receive telemetry (`media_bytes_received`).
+            if self.media_bytes_received == 0 && self.injected_media_bytes == 0 {
                 return self.session_setup_started.elapsed() >= PUBLISH_MEDIA_REQUIRED_TIMEOUT;
             }
             return false;
@@ -497,7 +504,14 @@ impl Conn {
             return Err(ErrorCode::Internal);
         }
         let normalized = normalize_modex_payload(payload, self.negotiated_caps.caps_ex_mask);
-        self.queue_relay_frame(frame_type, timestamp, payload, normalized.as_ref())
+        self.queue_relay_frame(frame_type, timestamp, payload, normalized.as_ref())?;
+        // Count audio/video injects as publisher activity for squat timeout.
+        if matches!(frame_type, FrameType::Audio | FrameType::Video) {
+            self.injected_media_bytes = self
+                .injected_media_bytes
+                .saturating_add(payload.len() as u64);
+        }
+        Ok(())
     }
 
     fn queue_relay_frame(
@@ -2638,6 +2652,23 @@ mod tests {
         assert!(
             !publishing.session_setup_timed_out(),
             "publishers that have sent media must not be reaped by the setup timer"
+        );
+
+        let mut injected_only = Conn::new();
+        injected_only.state = ConnState::Publishing;
+        injected_only.current_stream = Some(Box::new(Stream {
+            is_publishing: true,
+            ..Stream::new(1)
+        }));
+        injected_only
+            .inject_relay_frame(FrameType::Video, 0, &[0x17, 0x01, 0xAA])
+            .unwrap();
+        injected_only.set_session_setup_started_for_test(Instant::now() - Duration::from_secs(11));
+        assert_eq!(injected_only.media_bytes_received, 0);
+        assert!(injected_only.injected_media_bytes > 0);
+        assert!(
+            !injected_only.session_setup_timed_out(),
+            "trusted inject must count toward publisher liveness"
         );
 
         let mut squatting = Conn::new();
