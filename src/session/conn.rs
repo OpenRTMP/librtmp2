@@ -2680,8 +2680,10 @@ mod tests {
 
         let mut injected_only = Conn::new();
         injected_only.state = ConnState::Publishing;
+        injected_only.app = "live".to_string();
         injected_only.current_stream = Some(Box::new(Stream {
             is_publishing: true,
+            name: "cam".to_string(),
             ..Stream::new(1)
         }));
         injected_only
@@ -2712,7 +2714,11 @@ mod tests {
         // paths that call evict while !was_publishing.
         let mut idle_inject = Conn::new();
         idle_inject.state = ConnState::StreamCreated;
-        idle_inject.current_stream = Some(Box::new(Stream::new(1)));
+        idle_inject.app = "live".to_string();
+        idle_inject.current_stream = Some(Box::new(Stream {
+            name: "cam".to_string(),
+            ..Stream::new(1)
+        }));
         idle_inject
             .inject_relay_frame(FrameType::Video, 0, &[0x17, 0x01, 0xAA])
             .unwrap();
