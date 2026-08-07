@@ -1,3 +1,60 @@
+librtmp2 (0.7.0-1) UNRELEASED; urgency=medium
+
+  * Add public relay export / socket-less inject APIs (RelayFrame,
+    enable_relay_export / drain_exported_relay_frames, inject_relay_frame,
+    release_injected_route / release_all_injected_routes,
+    stream_init_snapshot) for external media mesh integrators.
+  * Harden export/inject: fair rotating inject↔local interleave; flush
+    budget-deferred export on publisher disconnect; no re-export of
+    send-budget deferred frames; clear export buffer on oversized drop.
+  * Per-route external publisher ids (is_external_publisher_id); claim
+    routes until explicit release; soft-cap new claims at
+    MAX_EXTERNAL_PUBLISH_ROUTES (1024); record cache ownership only after
+    successful reservation.
+  * Stream-cache: key-string byte accounting; peer eviction under pressure;
+    irreducible size includes retained same-route fields; reject impossible
+    reservations without wiping peers; prune empty publisher_cache_keys.
+  * Inject payload limits honor chunk_reg.max_msg_length capped at the
+    24-bit RTMP wire maximum; pending-relay limits count route string
+    storage; Conn inject counts toward publisher liveness and resets on
+    publish/eviction paths.
+  * set_conn_id_base / allocate_conn_id reject high-bit ids that would
+    collide with external publisher ids; remove accidental
+    scripts/docker_cargo_test.py helper.
+
+ -- OpenRTMP <info@openrtmp.org>  Fri, 07 Aug 2026 00:00:00 +0000
+
+librtmp2 (0.6.0-1) UNRELEASED; urgency=medium
+
+  * Security: strict client onStatus success matching; ModEx codec metadata
+    from negotiated capsEx; O(1) ChunkRegistry CSID index; publisher
+    setup-deadline reap; play rejected on publish-only auth; honor
+    defer_media_relay without auth callbacks; reap paused players; rate-limit
+    init-cache replay and skip metadata when A/V both disabled; Condvar DNS
+    queue with deadline-aware admission.
+  * Add automated C header generation (cbindgen) into source/binary tarballs
+    and librtmp2-dev packaging.
+  * C API pointer types use *const c_char; generated header gains extern "C"
+    and documented opaque type names; fix release workflow tag checkout.
+
+ -- OpenRTMP <info@openrtmp.org>  Thu, 06 Aug 2026 00:00:00 +0000
+
+librtmp2 (0.5.0-1) UNRELEASED; urgency=medium
+
+  * Security: TLS pending-handshake cap keyed on peer IP; multitrack codec
+    auth checks every track; dedupe/rate-limit init-cache replay; scoped
+    stream-cache eviction; setup-deadline for connect-without-publish/play;
+    per-IP active connection cap and per-poll accept budget; release
+    per-CSID chunk-read scratch after copy.
+  * Add ServerConfig::max_pending_tls_per_addr and max_connections_per_addr
+    (ABI: rebuild callers that allocate ServerConfig by value).
+  * Poll processes stale connections before admission; accept budget and
+    immediate first pass for new sockets; FCUnpublish/deleteStream/closeStream
+    idle-grace fixes; no spurious reconnect reject when stale socket reaped
+    in the same poll.
+
+ -- OpenRTMP <info@openrtmp.org>  Fri, 24 Jul 2026 00:00:00 +0000
+
 librtmp2 (0.4.2-1) UNRELEASED; urgency=medium
 
   * Bound Client::publish()/play() AMF exchanges with the configured
