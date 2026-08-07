@@ -15,8 +15,16 @@ begin at `1.0.0`.
 
 ### Fixed
 - Relay export no longer re-exports frames deferred by the per-poll send budget.
-- Socket-less injects are queued ahead of fresh local publisher frames so they
-  are not starved under sustained fan-out.
+- Injected and local publisher frames are fair-interleaved when merging the
+  relay queue so neither source starves under a tight send budget.
+- Oversized export frames clear the export buffer before being skipped, so
+  drainers do not keep only stale pre-overflow data.
+- Stream-cache ownership is recorded only after a successful storage
+  reservation, so failed external injects do not grow `publisher_cache_keys`.
+- `set_conn_id_base` / `allocate_conn_id` reject IDs with the high bit set so
+  socket conn ids cannot collide with `is_external_publisher_id`.
+- Stream-cache byte accounting includes `(app, stream_name)` key string
+  storage; inject rejects oversized route component strings.
 - External inject cache ownership uses a stable per-route publisher id in the
   high-bit range (`is_external_publisher_id`) instead of one shared id for all
   routes.

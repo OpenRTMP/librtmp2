@@ -67,6 +67,11 @@ const MAX_CACHED_INIT_FRAME_BYTES: usize = 64 * 1024;
 /// on a single message) rather than left unbounded.
 const MAX_CACHED_KEYFRAME_BYTES: usize = 2 * 1024 * 1024;
 
+/// Cap on `app` / `stream_name` length accepted by socket-less inject.
+/// Prevents multi-megabyte route strings from bloating `stream_cache` keys
+/// and `publisher_cache_keys` when an integrator feeds untrusted names.
+const MAX_INJECT_ROUTE_COMPONENT_BYTES: usize = 1024;
+
 /// Maximum number of incomplete TLS handshakes retained when `max_connections`
 /// is unlimited. When `max_connections` is set, active connections and pending
 /// handshakes share that configured cap instead.
@@ -178,8 +183,11 @@ impl RelayExportBuffer {
         }
         let frame_bytes = frame.retained_bytes();
         if frame_bytes > self.max_bytes {
-            // Single frame exceeds the byte budget: drop oldest and skip it
-            // so the buffer never grows unbounded.
+            // Single frame exceeds the byte budget: clear stale buffered
+            // frames so a later drain does not return only pre-overflow data,
+            // then skip this frame so the buffer never grows unbounded.
+            self.frames.clear();
+            self.bytes = 0;
             return;
         }
         while !self.frames.is_empty()
@@ -355,13 +363,14 @@ impl Server {
     /// listeners numbers all of its connections from one counter already, so
     /// this is unnecessary in that case. Call right after [`Server::new`].
     ///
-    /// Panics if `base` is zero, cannot leave room for an increment, or if any
-    /// connection ID has already been issued.
+    /// Panics if `base` is zero, has the high bit set (reserved for
+    /// [`is_external_publisher_id`]), or if any connection ID has already been
+    /// issued.
     pub fn set_conn_id_base(&mut self, base: u64) {
         assert!(base != 0, "conn_id base must be non-zero");
         assert!(
-            base < u64::MAX,
-            "conn_id base must leave room for at least one later connection ID"
+            base < EXTERNAL_PUBLISHER_ID_BIT,
+            "conn_id base must stay below the external publisher id range (high bit reserved)"
         );
         assert!(
             !self.conn_ids_issued && self.connections.is_empty(),
@@ -408,7 +417,8 @@ impl Server {
     /// id ([`is_external_publisher_id`]). Resource limits mirror per-connection
     /// pending-relay caps (`MAX_PENDING_RELAY_FRAMES` and
     /// `resource_limits.max_pending_relay_bytes`), counting payload plus route
-    /// string storage. Payloads larger than `DEFAULT_MAX_MSG_LENGTH` are rejected.
+    /// string storage. Payloads larger than `DEFAULT_MAX_MSG_LENGTH` and route
+    /// components longer than `MAX_INJECT_ROUTE_COMPONENT_BYTES` are rejected.
     pub fn inject_relay_frame(
         &mut self,
         app: &str,
@@ -418,6 +428,11 @@ impl Server {
         payload: &[u8],
     ) -> Result<()> {
         if payload.len() > DEFAULT_MAX_MSG_LENGTH as usize {
+            return Err(ErrorCode::Internal);
+        }
+        if app.len() > MAX_INJECT_ROUTE_COMPONENT_BYTES
+            || stream_name.len() > MAX_INJECT_ROUTE_COMPONENT_BYTES
+        {
             return Err(ErrorCode::Internal);
         }
         let normalized = normalize_modex_payload(payload, CAPS_EX_MASK_MODEX);
@@ -683,7 +698,9 @@ impl Server {
 
     fn allocate_conn_id(&mut self) -> Option<u64> {
         let conn_id = self.next_conn_id;
-        if conn_id == 0 || conn_id == u64::MAX {
+        // Reserve the high bit for socket-less inject publisher ids so a
+        // socket conn_id can never collide with `is_external_publisher_id`.
+        if conn_id == 0 || conn_id >= EXTERNAL_PUBLISHER_ID_BIT {
             return None;
         }
         self.next_conn_id = conn_id + 1;
@@ -939,15 +956,16 @@ impl Server {
         // identical (app, name) is unaffected.
         let abandoned_this_batch = self.drain_pending_cache_evictions();
 
-        // Collect publisher frames, then merge socket-less injects **in front**
-        // so deferred injects are not starved behind sustained local fan-out.
-        let mut local_frames: Vec<_> = self
+        // Interleave socket-less injects with local publisher frames so neither
+        // source starves the other under a tight relay-send budget. Relative
+        // order within each source is preserved.
+        let local_frames: Vec<_> = self
             .connections
             .iter_mut()
             .flat_map(|c| c.pending_relay.drain(..))
             .collect();
-        let mut relay_frames = std::mem::take(&mut self.pending_injected_relay);
-        relay_frames.append(&mut local_frames);
+        let injected_frames = std::mem::take(&mut self.pending_injected_relay);
+        let mut relay_frames = interleave_relay_sources(injected_frames, local_frames);
 
         // Replay cached codec headers and last keyframe to newly-joined players
         // using the pre-batch cache state, so init frames always precede live
@@ -1187,33 +1205,43 @@ impl Server {
         }
     }
 
-    /// Bytes retained by a single stream_cache entry.
-    fn stream_cache_entry_bytes(cache: &StreamCache) -> usize {
-        cache.avc_header.as_ref().map(|v| v.len()).unwrap_or(0)
-            + cache
-                .video_track_headers
-                .values()
-                .map(|v| v.len())
-                .sum::<usize>()
-            + cache.aac_header.as_ref().map(|v| v.len()).unwrap_or(0)
-            + cache
-                .audio_track_headers
-                .values()
-                .map(|v| v.len())
-                .sum::<usize>()
-            + cache.metadata.as_ref().map(|v| v.len()).unwrap_or(0)
-            + cache
-                .last_keyframe
-                .as_ref()
-                .map(|(_, v)| v.len())
-                .unwrap_or(0)
+    /// Bytes retained by a single stream_cache entry, including HashMap key
+    /// string storage for `(app, stream_name)`.
+    fn stream_cache_entry_bytes(key: &(String, String), cache: &StreamCache) -> usize {
+        key.0
+            .len()
+            .saturating_add(key.1.len())
+            .saturating_add(cache.avc_header.as_ref().map(|v| v.len()).unwrap_or(0))
+            .saturating_add(
+                cache
+                    .video_track_headers
+                    .values()
+                    .map(|v| v.len())
+                    .sum::<usize>(),
+            )
+            .saturating_add(cache.aac_header.as_ref().map(|v| v.len()).unwrap_or(0))
+            .saturating_add(
+                cache
+                    .audio_track_headers
+                    .values()
+                    .map(|v| v.len())
+                    .sum::<usize>(),
+            )
+            .saturating_add(cache.metadata.as_ref().map(|v| v.len()).unwrap_or(0))
+            .saturating_add(
+                cache
+                    .last_keyframe
+                    .as_ref()
+                    .map(|(_, v)| v.len())
+                    .unwrap_or(0),
+            )
     }
 
     /// Total bytes currently retained across all stream_cache entries.
     fn stream_cache_bytes(&self) -> usize {
         self.stream_cache
-            .values()
-            .map(Self::stream_cache_entry_bytes)
+            .iter()
+            .map(|(key, cache)| Self::stream_cache_entry_bytes(key, cache))
             .sum()
     }
 
@@ -1297,17 +1325,36 @@ impl Server {
             }
         }
 
-        let mut projected_total = self.stream_cache_bytes() + incoming_len - existing_field_len;
+        let route_key_bytes = if is_new_key {
+            key.0.len().saturating_add(key.1.len())
+        } else {
+            0
+        };
+        let mut projected_total = self
+            .stream_cache_bytes()
+            .saturating_add(incoming_len)
+            .saturating_add(route_key_bytes)
+            .saturating_sub(existing_field_len);
         let max_cache_bytes = self.resource_limits.max_stream_cache_bytes;
         if projected_total > max_cache_bytes {
             while projected_total > max_cache_bytes
                 && self.evict_stream_cache_for_publisher(publisher_conn_id, key)
             {
                 if let Some(cache) = self.stream_cache.get(key) {
-                    projected_total = self.stream_cache_bytes() + incoming_len
-                        - Self::stream_cache_entry_bytes(cache);
+                    // Keep route-key bytes accounted; replace payload side with
+                    // the incoming field length only.
+                    let key_bytes = key.0.len().saturating_add(key.1.len());
+                    projected_total = self
+                        .stream_cache_bytes()
+                        .saturating_add(incoming_len)
+                        .saturating_add(key_bytes)
+                        .saturating_sub(Self::stream_cache_entry_bytes(key, cache));
                 } else {
-                    projected_total = self.stream_cache_bytes() + incoming_len;
+                    projected_total = self
+                        .stream_cache_bytes()
+                        .saturating_add(incoming_len)
+                        .saturating_add(key.0.len())
+                        .saturating_add(key.1.len());
                 }
             }
             if projected_total > max_cache_bytes {
@@ -1324,13 +1371,6 @@ impl Server {
                 return;
             }
             let key = (frame.app.clone(), frame.stream_name.clone());
-            let publisher_keys = self
-                .publisher_cache_keys
-                .entry(frame.publisher_conn_id)
-                .or_default();
-            if !publisher_keys.iter().any(|k| k == &key) {
-                publisher_keys.push(key.clone());
-            }
             let existing_field_len = self
                 .stream_cache
                 .get(&key)
@@ -1345,6 +1385,11 @@ impl Server {
             ) {
                 return;
             }
+            Self::track_publisher_cache_key(
+                &mut self.publisher_cache_keys,
+                frame.publisher_conn_id,
+                &key,
+            );
             let cache = self
                 .stream_cache
                 .entry(key)
@@ -1420,14 +1465,6 @@ impl Server {
             return;
         }
 
-        let publisher_keys = self
-            .publisher_cache_keys
-            .entry(frame.publisher_conn_id)
-            .or_default();
-        if !publisher_keys.iter().any(|k| k == &key) {
-            publisher_keys.push(key.clone());
-        }
-
         let existing_field_len = self
             .stream_cache
             .get(&key)
@@ -1481,6 +1518,11 @@ impl Server {
         ) {
             return;
         }
+        Self::track_publisher_cache_key(
+            &mut self.publisher_cache_keys,
+            frame.publisher_conn_id,
+            &key,
+        );
 
         let cache = self
             .stream_cache
@@ -1574,6 +1616,47 @@ impl Server {
         }
         abandoned
     }
+    fn track_publisher_cache_key(
+        publisher_cache_keys: &mut HashMap<u64, Vec<(String, String)>>,
+        publisher_conn_id: u64,
+        key: &(String, String),
+    ) {
+        let publisher_keys = publisher_cache_keys.entry(publisher_conn_id).or_default();
+        if !publisher_keys.iter().any(|k| k == key) {
+            publisher_keys.push(key.clone());
+        }
+    }
+}
+
+/// Round-robin merge of inject and local relay frames, preserving relative
+/// order within each source (inject first within each pair).
+fn interleave_relay_sources(
+    injected: Vec<RelayFrame>,
+    local: Vec<RelayFrame>,
+) -> Vec<RelayFrame> {
+    let mut out = Vec::with_capacity(injected.len() + local.len());
+    let mut inj = injected.into_iter();
+    let mut loc = local.into_iter();
+    loop {
+        match (inj.next(), loc.next()) {
+            (Some(a), Some(b)) => {
+                out.push(a);
+                out.push(b);
+            }
+            (Some(a), None) => {
+                out.push(a);
+                out.extend(inj);
+                break;
+            }
+            (None, Some(b)) => {
+                out.push(b);
+                out.extend(loc);
+                break;
+            }
+            (None, None) => break,
+        }
+    }
+    out
 }
 
 fn empty_stream_cache() -> StreamCache {
@@ -2896,6 +2979,116 @@ mod tests {
         assert_eq!(exported.len(), 2);
         assert_eq!(exported[0].payload, vec![0xBB, 0xBB, 0xBB]);
         assert_eq!(exported[1].payload, vec![0xCC, 0xCC, 0xCC]);
+    }
+
+    #[test]
+    fn relay_export_clears_buffer_when_frame_exceeds_budget() {
+        let mut server = test_server();
+        // Budget fits one small frame (1 + 4 + 6 = 11) but not a 32-byte payload
+        // frame (32 + 10 = 42).
+        server.enable_relay_export(16, 20);
+
+        let mut publisher = Conn::new();
+        publisher.conn_id = 1;
+        publisher.app = "live".to_string();
+        publisher.pending_relay.extend([
+            relay_frame(FrameType::Video, vec![0x01]),
+            relay_frame(FrameType::Video, vec![0xFF; 32]),
+        ]);
+        server.connections = vec![publisher];
+        server.process_connections().unwrap();
+
+        assert!(
+            server.drain_exported_relay_frames().is_empty(),
+            "oversized frame must clear stale buffered exports before skip"
+        );
+    }
+
+    #[test]
+    fn relay_fairly_interleaves_inject_and_local_frames() {
+        use crate::session::stream::Stream;
+        use crate::transport::Transport;
+        use std::os::unix::io::IntoRawFd;
+        use std::os::unix::net::UnixStream;
+
+        fn attached(conn_id: u64, publishing: bool) -> (Conn, UnixStream) {
+            let (server_end, peer_end) = UnixStream::pair().unwrap();
+            server_end.set_nonblocking(true).unwrap();
+            peer_end.set_nonblocking(true).unwrap();
+            let mut conn = Conn::new();
+            conn.conn_id = conn_id;
+            conn.app = "live".to_string();
+            conn.relay_enabled = true;
+            conn.transport = Some(Transport::new_plain(server_end.into_raw_fd()));
+            conn.current_stream = Some(Box::new(Stream {
+                stream_id: 1,
+                name: "stream".to_string(),
+                is_publishing: publishing,
+                is_playing: !publishing,
+                paused: false,
+                receive_audio: true,
+                receive_video: true,
+            }));
+            (conn, peer_end)
+        }
+
+        let (mut publisher, _publisher_peer) = attached(1, true);
+        publisher.pending_relay.extend([
+            relay_frame(FrameType::Video, vec![0xB1]),
+            relay_frame(FrameType::Video, vec![0xB2]),
+        ]);
+        let (player, _player_peer) = attached(2, false);
+
+        let mut server = test_server();
+        // One eligible player => each frame costs 1 send. Budget 2 processes
+        // the first inject+local pair under fair interleave (I1, L1, I2, L2).
+        server.max_relay_sends_per_poll = 2;
+        server.enable_relay_export(16, 1024);
+        server.connections = vec![publisher, player];
+        server
+            .inject_relay_frame("live", "stream", FrameType::Video, 1, &[0xA1])
+            .unwrap();
+        server
+            .inject_relay_frame("live", "stream", FrameType::Video, 2, &[0xA2])
+            .unwrap();
+
+        server.process_connections().unwrap();
+
+        let exported = server.drain_exported_relay_frames();
+        assert_eq!(
+            exported.len(),
+            1,
+            "fair interleave must process one local frame in the first pair"
+        );
+        assert_eq!(exported[0].payload, vec![0xB1]);
+
+        // Remaining inject (A2) and local (B2) must both still be pending —
+        // inject-first would have consumed both injects and left both locals.
+        assert_eq!(server.pending_injected_relay.len(), 1);
+        assert_eq!(server.pending_injected_relay[0].payload, vec![0xA2]);
+        assert_eq!(server.connections[0].pending_relay.len(), 1);
+        assert_eq!(server.connections[0].pending_relay[0].payload, vec![0xB2]);
+    }
+
+    #[test]
+    #[should_panic(expected = "external publisher id range")]
+    fn set_conn_id_base_rejects_high_bit() {
+        let mut server = test_server();
+        server.set_conn_id_base(EXTERNAL_PUBLISHER_ID_BIT);
+    }
+
+    #[test]
+    fn inject_relay_frame_rejects_oversized_route_component() {
+        let mut server = test_server();
+        let long_name = "x".repeat(MAX_INJECT_ROUTE_COMPONENT_BYTES + 1);
+        assert_eq!(
+            server.inject_relay_frame(&long_name, "stream", FrameType::Video, 0, b"x"),
+            Err(ErrorCode::Internal)
+        );
+        assert_eq!(
+            server.inject_relay_frame("live", &long_name, FrameType::Video, 0, b"x"),
+            Err(ErrorCode::Internal)
+        );
     }
 
     #[test]
