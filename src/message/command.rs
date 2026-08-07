@@ -785,7 +785,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(read_onstatus(&mut buf, "NetStream.Publish.Start"), Err(ErrorCode::Auth));
+        assert_eq!(
+            read_onstatus(&mut buf, "NetStream.Publish.Start"),
+            Err(ErrorCode::Auth)
+        );
     }
 
     #[test]
@@ -811,7 +814,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(read_onstatus(&mut buf, "NetStream.Publish.Start"), Ok(false));
+        assert_eq!(
+            read_onstatus(&mut buf, "NetStream.Publish.Start"),
+            Ok(false)
+        );
     }
 
     #[test]
@@ -825,7 +831,10 @@ mod tests {
         amf0::write_string(&mut buf, "NetStream.Publish.Start").unwrap();
         amf0::write_object_end(&mut buf).unwrap();
 
-        assert_eq!(read_onstatus(&mut buf, "NetStream.Publish.Start"), Err(ErrorCode::Auth));
+        assert_eq!(
+            read_onstatus(&mut buf, "NetStream.Publish.Start"),
+            Err(ErrorCode::Auth)
+        );
     }
 
     #[test]
@@ -844,7 +853,10 @@ mod tests {
         amf0::write_string(&mut buf, "status").unwrap();
         amf0::write_object_end(&mut buf).unwrap();
 
-        assert_eq!(read_onstatus(&mut buf, "NetStream.Publish.Start"), Err(ErrorCode::Amf));
+        assert_eq!(
+            read_onstatus(&mut buf, "NetStream.Publish.Start"),
+            Err(ErrorCode::Amf)
+        );
     }
 
     #[test]

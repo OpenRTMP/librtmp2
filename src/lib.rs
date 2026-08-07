@@ -27,6 +27,7 @@ pub mod transport;
 pub mod types;
 
 // Re-exports for convenience
+pub use session::RelayFrame;
 pub use types::*;
 
 /// Library version string.

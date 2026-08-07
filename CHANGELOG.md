@@ -13,6 +13,26 @@ begin at `1.0.0`.
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-08-07
+
+### Added
+- Public integrator APIs for external media export and socket-less inject:
+  - `RelayFrame` is part of the crate root / `session` public API (documented fields).
+  - `Server::enable_relay_export` / `disable_relay_export` /
+    `drain_exported_relay_frames` — bounded drainable export of publisher
+    relay frames (disabled by default = zero extra copies; overflow drops
+    oldest frames).
+  - `Server::inject_relay_frame` — inject media into the local relay /
+    init-cache / player fan-out path without a socket (`EXTERNAL_RELAY_PUBLISHER_ID`).
+  - `Conn::inject_relay_frame` — queue frames on an existing publisher
+    connection (skips `on_media_cb`; integrator-trusted).
+  - `Server::stream_init_snapshot` + `StreamInitSnapshot` — copy cached
+    metadata / codec headers / last keyframe for late joiners or remote
+    subscribers.
+
+### Changed
+- Crate version `0.6.0` → `0.7.0`.
+
 ## [0.6.0] — 2026-08-06
 
 ### Security
@@ -503,7 +523,8 @@ and others.
 - Protocol mapping documents for legacy, E-RTMP v1, and E-RTMP v2
 - `CONTRIBUTING.md` guidelines
 
-[Unreleased]: https://github.com/OpenRTMP/librtmp2/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/OpenRTMP/librtmp2/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/OpenRTMP/librtmp2/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/OpenRTMP/librtmp2/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/OpenRTMP/librtmp2/compare/v0.4.2...v0.5.0
 [0.4.2]: https://github.com/OpenRTMP/librtmp2/compare/v0.4.1...v0.4.2

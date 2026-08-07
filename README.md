@@ -114,6 +114,33 @@ Without TLS:
 librtmp2 = { path = "../librtmp2", default-features = false }
 ```
 
+### External media export / inject (Rust)
+
+Integrators can observe or feed the same local relay path used by publishers
+and players — without sockets or cluster concepts:
+
+```rust
+use librtmp2::server::{Server, StreamInitSnapshot, EXTERNAL_RELAY_PUBLISHER_ID};
+use librtmp2::{FrameType, RelayFrame, ServerConfig};
+
+// Bounded export of publisher frames (disabled by default = no clones).
+server.enable_relay_export(/*max_frames*/ 256, /*max_bytes*/ 4 * 1024 * 1024);
+let frames: Vec<RelayFrame> = server.drain_exported_relay_frames();
+
+// Socket-less inject into cache + player fan-out for (app, stream).
+server.inject_relay_frame("live", "cam1", FrameType::Video, ts, &payload)?;
+
+// Late-joiner / remote-subscriber init snapshot from StreamCache.
+if let Some(snap) = server.stream_init_snapshot("live", "cam1") {
+    let _: &StreamInitSnapshot = &snap;
+    let _ = snap.avc_header;
+    let _ = EXTERNAL_RELAY_PUBLISHER_ID;
+}
+```
+
+On an existing local publisher `Conn`, `Conn::inject_relay_frame` queues into
+that connection's `pending_relay` (skips media auth callbacks).
+
 ---
 
 ## Using via the `extern "C"` FFI

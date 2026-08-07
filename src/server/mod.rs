@@ -2,7 +2,7 @@
 //!
 //! Mirrors `src/server/server.h` and `src/server/server.c`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::net::TcpListener;
 use std::os::unix::io::{AsRawFd, IntoRawFd};
 use std::sync::{Arc, Mutex};
@@ -13,12 +13,16 @@ use crate::chunk::state::DEFAULT_CHUNK_SIZE;
 use crate::ertmp::multitrack_media::{foreach_track, is_multitrack_container};
 use crate::media::{CacheFrameKind, classify_cache_frame, normalize_modex_payload};
 use crate::net;
-use crate::session::conn::Conn;
+use crate::session::conn::{Conn, MAX_PENDING_RELAY_FRAMES, RelayFrame};
 use crate::session::publish_route::PublishRouteRegistry;
 #[cfg(feature = "tls")]
 use crate::transport::{PendingTlsAccept, TlsAcceptOutcome};
 use crate::transport::{TlsCtx, Transport};
 use crate::types::*;
+
+/// `RelayFrame::publisher_conn_id` value used by
+/// [`Server::inject_relay_frame`] for socket-less external media.
+pub const EXTERNAL_RELAY_PUBLISHER_ID: u64 = u64::MAX;
 
 /// Maximum distinct (app, stream_name) cache entries retained server-wide.
 const MAX_STREAM_CACHE_ENTRIES: usize = 1024;
@@ -107,6 +111,77 @@ struct StreamCache {
     last_keyframe: Option<(u32, Vec<u8>)>,
 }
 
+/// Public snapshot of a stream's init-cache contents for late joiners or
+/// remote subscribers.
+#[derive(Clone, Debug, Default)]
+pub struct StreamInitSnapshot {
+    /// Last cached `onMetaData` / script payload, if any.
+    pub metadata: Option<Vec<u8>>,
+    /// Legacy / single-track AVC (or enhanced) video sequence header.
+    pub avc_header: Option<Vec<u8>>,
+    /// Legacy / single-track AAC (or enhanced) audio sequence header.
+    pub aac_header: Option<Vec<u8>>,
+    /// Per-track video sequence headers `(track_id, payload)`, sorted by track id.
+    pub video_track_headers: Vec<(u8, Vec<u8>)>,
+    /// Per-track audio sequence headers `(track_id, payload)`, sorted by track id.
+    pub audio_track_headers: Vec<(u8, Vec<u8>)>,
+    /// Most recent cached video keyframe as `(timestamp, payload)`.
+    pub last_keyframe: Option<(u32, Vec<u8>)>,
+}
+
+/// Bounded ring of cloned publisher [`RelayFrame`]s for integrator export.
+/// On overflow the oldest frames are dropped so the buffer stays within
+/// `max_frames` / `max_bytes`.
+struct RelayExportBuffer {
+    frames: VecDeque<RelayFrame>,
+    max_frames: usize,
+    max_bytes: usize,
+    bytes: usize,
+}
+
+impl RelayExportBuffer {
+    fn new(max_frames: usize, max_bytes: usize) -> Self {
+        Self {
+            frames: VecDeque::new(),
+            max_frames,
+            max_bytes,
+            bytes: 0,
+        }
+    }
+
+    fn push_clone(&mut self, frame: &RelayFrame) {
+        if self.max_frames == 0 {
+            return;
+        }
+        let frame_bytes = frame.retained_bytes();
+        if frame_bytes > self.max_bytes {
+            // Single frame exceeds the byte budget: drop oldest and skip it
+            // so the buffer never grows unbounded.
+            return;
+        }
+        while !self.frames.is_empty()
+            && (self.frames.len() >= self.max_frames
+                || self.bytes.saturating_add(frame_bytes) > self.max_bytes)
+        {
+            if let Some(old) = self.frames.pop_front() {
+                self.bytes = self.bytes.saturating_sub(old.retained_bytes());
+            }
+        }
+        if self.frames.len() >= self.max_frames
+            || self.bytes.saturating_add(frame_bytes) > self.max_bytes
+        {
+            return;
+        }
+        self.bytes = self.bytes.saturating_add(frame_bytes);
+        self.frames.push_back(frame.clone());
+    }
+
+    fn drain(&mut self) -> Vec<RelayFrame> {
+        self.bytes = 0;
+        self.frames.drain(..).collect()
+    }
+}
+
 /// One bound listener socket plus the TLS context (if any) new connections
 /// accepted on it should use. A `Server` holds one of these per call to
 /// [`Server::listen`] / [`Server::listen_tls`].
@@ -184,6 +259,12 @@ pub struct Server {
     pub defer_media_relay: bool,
     /// Active publish routes: (app, stream_name) -> owning conn_id.
     pub(crate) active_publish_routes: Arc<Mutex<HashMap<(String, String), u64>>>,
+    /// Optional bounded export of publisher relay frames. `None` = disabled
+    /// (default): no extra clones.
+    relay_export: Option<RelayExportBuffer>,
+    /// Socket-less frames waiting to enter the same cache + fan-out path as
+    /// publisher `pending_relay` drains.
+    pending_injected_relay: Vec<RelayFrame>,
 }
 
 impl Server {
@@ -231,6 +312,8 @@ impl Server {
             conn_ids_issued: false,
             defer_media_relay: false,
             active_publish_routes: Arc::new(Mutex::new(HashMap::new())),
+            relay_export: None,
+            pending_injected_relay: Vec::new(),
         })
     }
 
@@ -267,6 +350,108 @@ impl Server {
             "set_conn_id_base must be called before accepting any connections"
         );
         self.next_conn_id = base;
+    }
+
+    /// Enable bounded export of publisher relay frames.
+    ///
+    /// Disabled by default (`None`): zero extra copies. When enabled, each
+    /// publisher frame drained in [`Server::process_connections`] is cloned
+    /// into an internal buffer capped by `max_frames` and `max_bytes`. On
+    /// overflow the oldest frames are dropped so the buffer stays bounded.
+    /// Injected (socket-less) frames are not exported, to avoid echo loops.
+    pub fn enable_relay_export(&mut self, max_frames: usize, max_bytes: usize) {
+        self.relay_export = Some(RelayExportBuffer::new(max_frames, max_bytes));
+    }
+
+    /// Disable relay export and discard any buffered frames.
+    pub fn disable_relay_export(&mut self) {
+        self.relay_export = None;
+    }
+
+    /// Drain and return all currently buffered export frames (empty when
+    /// export is disabled).
+    pub fn drain_exported_relay_frames(&mut self) -> Vec<RelayFrame> {
+        match self.relay_export.as_mut() {
+            Some(buf) => buf.drain(),
+            None => Vec::new(),
+        }
+    }
+
+    /// Inject media into the local relay / init-cache / player fan-out path
+    /// for `(app, stream_name)` without creating a socket connection.
+    ///
+    /// Uses the same `cache_relay_frame` + player delivery path as a local
+    /// publisher. Frames are tagged with [`EXTERNAL_RELAY_PUBLISHER_ID`].
+    /// Resource limits mirror per-connection pending-relay caps
+    /// (`MAX_PENDING_RELAY_FRAMES` and `resource_limits.max_pending_relay_bytes`).
+    pub fn inject_relay_frame(
+        &mut self,
+        app: &str,
+        stream_name: &str,
+        frame_type: FrameType,
+        timestamp: u32,
+        payload: &[u8],
+    ) -> Result<()> {
+        let normalized = normalize_modex_payload(payload, CAPS_EX_MASK_MODEX);
+        let cache_payload = if normalized.as_ref().len() == payload.len()
+            && std::ptr::eq(normalized.as_ref().as_ptr(), payload.as_ptr())
+        {
+            None
+        } else {
+            Some(normalized.into_owned())
+        };
+        let retained_bytes = payload
+            .len()
+            .saturating_add(cache_payload.as_ref().map(|p| p.len()).unwrap_or(0));
+        let pending_bytes: usize = self
+            .pending_injected_relay
+            .iter()
+            .map(RelayFrame::retained_bytes)
+            .sum();
+        if self.pending_injected_relay.len() >= MAX_PENDING_RELAY_FRAMES
+            || pending_bytes.saturating_add(retained_bytes)
+                > self.resource_limits.max_pending_relay_bytes
+        {
+            return Err(ErrorCode::Internal);
+        }
+        self.pending_injected_relay.push(RelayFrame {
+            frame_type,
+            timestamp,
+            payload: payload.to_vec(),
+            cache_payload,
+            app: app.to_string(),
+            stream_name: stream_name.to_string(),
+            publisher_conn_id: EXTERNAL_RELAY_PUBLISHER_ID,
+        });
+        Ok(())
+    }
+
+    /// Copy the current init-cache snapshot for `(app, stream_name)`, if any
+    /// entry exists (even when all fields are empty after partial eviction).
+    pub fn stream_init_snapshot(&self, app: &str, stream_name: &str) -> Option<StreamInitSnapshot> {
+        let cache = self
+            .stream_cache
+            .get(&(app.to_string(), stream_name.to_string()))?;
+        let mut video_track_headers: Vec<(u8, Vec<u8>)> = cache
+            .video_track_headers
+            .iter()
+            .map(|(id, payload)| (*id, payload.clone()))
+            .collect();
+        video_track_headers.sort_by_key(|(id, _)| *id);
+        let mut audio_track_headers: Vec<(u8, Vec<u8>)> = cache
+            .audio_track_headers
+            .iter()
+            .map(|(id, payload)| (*id, payload.clone()))
+            .collect();
+        audio_track_headers.sort_by_key(|(id, _)| *id);
+        Some(StreamInitSnapshot {
+            metadata: cache.metadata.clone(),
+            avc_header: cache.avc_header.clone(),
+            aac_header: cache.aac_header.clone(),
+            video_track_headers,
+            audio_track_headers,
+            last_keyframe: cache.last_keyframe.clone(),
+        })
     }
 
     /// Resolve a "host:port" (default port 1935) string into a bindable address.
@@ -732,6 +917,17 @@ impl Server {
             .flat_map(|c| c.pending_relay.drain(..))
             .collect();
 
+        // Export publisher frames only (before inject merge) so remote→local
+        // injects are not echoed back out through the export buffer.
+        if let Some(export) = self.relay_export.as_mut() {
+            for frame in &relay_frames {
+                export.push_clone(frame);
+            }
+        }
+
+        // Socket-less injects share the same init-cache + fan-out path.
+        relay_frames.extend(self.pending_injected_relay.drain(..));
+
         // Replay cached codec headers and last keyframe to newly-joined players
         // using the pre-batch cache state, so init frames always precede live
         // frames from the current batch.
@@ -906,10 +1102,7 @@ impl Server {
         Ok(())
     }
 
-    fn conn_will_receive_relay_frame(
-        conn: &Conn,
-        frame: &crate::session::conn::RelayFrame,
-    ) -> bool {
+    fn conn_will_receive_relay_frame(conn: &Conn, frame: &RelayFrame) -> bool {
         let Some(stream) = conn.current_stream.as_ref() else {
             return false;
         };
@@ -943,14 +1136,18 @@ impl Server {
         true
     }
 
-    fn count_relay_players(&self, frame: &crate::session::conn::RelayFrame) -> usize {
+    fn count_relay_players(&self, frame: &RelayFrame) -> usize {
         self.connections
             .iter()
             .filter(|conn| Self::conn_will_receive_relay_frame(conn, frame))
             .count()
     }
 
-    fn requeue_relay_frame(&mut self, frame: crate::session::conn::RelayFrame) {
+    fn requeue_relay_frame(&mut self, frame: RelayFrame) {
+        if frame.publisher_conn_id == EXTERNAL_RELAY_PUBLISHER_ID {
+            self.pending_injected_relay.push(frame);
+            return;
+        }
         if let Some(conn) = self
             .connections
             .iter_mut()
@@ -1091,7 +1288,7 @@ impl Server {
         projected_total <= max_cache_bytes
     }
 
-    fn cache_relay_frame(&mut self, frame: &crate::session::conn::RelayFrame) {
+    fn cache_relay_frame(&mut self, frame: &RelayFrame) {
         if frame.frame_type == FrameType::Script || frame.frame_type == FrameType::Metadata {
             if frame.payload.len() > MAX_CACHED_INIT_FRAME_BYTES {
                 return;
@@ -2567,5 +2764,322 @@ mod tests {
         assert_eq!(Server::peer_ip("[2001:db8::1]:443"), "[2001:db8::1]");
         // No port present: falls back to the input unchanged.
         assert_eq!(Server::peer_ip("127.0.0.1"), "127.0.0.1");
+    }
+
+    #[test]
+    fn relay_export_disabled_drains_empty() {
+        let mut server = test_server();
+        assert!(server.drain_exported_relay_frames().is_empty());
+
+        let mut publisher = Conn::new();
+        publisher.conn_id = 1;
+        publisher.app = "live".to_string();
+        publisher
+            .pending_relay
+            .push(relay_frame(FrameType::Video, vec![0x17, 0x01, 0xAA]));
+        server.connections = vec![publisher];
+        server.process_connections().unwrap();
+        assert!(
+            server.drain_exported_relay_frames().is_empty(),
+            "disabled export must not retain clones"
+        );
+    }
+
+    #[test]
+    fn relay_export_captures_publisher_media_kinds() {
+        let mut server = test_server();
+        server.enable_relay_export(64, 1024 * 1024);
+
+        let mut metadata = vec![0x02, 0x00, 0x0A];
+        metadata.extend_from_slice(b"onMetaData");
+        metadata.push(crate::amf::amf0::Amf0Type::Object as u8);
+        metadata.extend_from_slice(&[0x00, 0x00, 0x09]);
+
+        let mut publisher = Conn::new();
+        publisher.conn_id = 1;
+        publisher.app = "live".to_string();
+        publisher.pending_relay.extend([
+            relay_frame(FrameType::Script, metadata.clone()),
+            relay_frame(FrameType::Audio, vec![0xAF, 0x00, 0x11, 0x90]),
+            relay_frame(FrameType::Video, vec![0x17, 0x00, 0x01, 0x02]),
+            relay_frame(FrameType::Video, vec![0x17, 0x01, 0xDE, 0xAD]),
+        ]);
+        server.connections = vec![publisher];
+        server.process_connections().unwrap();
+
+        let exported = server.drain_exported_relay_frames();
+        assert_eq!(exported.len(), 4);
+        assert_eq!(exported[0].frame_type, FrameType::Script);
+        assert_eq!(exported[0].payload, metadata);
+        assert_eq!(exported[1].frame_type, FrameType::Audio);
+        assert_eq!(exported[2].frame_type, FrameType::Video);
+        assert_eq!(exported[2].payload, vec![0x17, 0x00, 0x01, 0x02]);
+        assert_eq!(exported[3].frame_type, FrameType::Video);
+        assert_eq!(exported[3].payload, vec![0x17, 0x01, 0xDE, 0xAD]);
+        assert!(
+            server.drain_exported_relay_frames().is_empty(),
+            "second drain must be empty"
+        );
+    }
+
+    #[test]
+    fn relay_export_drops_oldest_on_overflow() {
+        let mut server = test_server();
+        server.enable_relay_export(2, 1024);
+
+        let mut publisher = Conn::new();
+        publisher.conn_id = 1;
+        publisher.app = "live".to_string();
+        publisher.pending_relay.extend([
+            relay_frame(FrameType::Video, vec![0x01]),
+            relay_frame(FrameType::Video, vec![0x02]),
+            relay_frame(FrameType::Video, vec![0x03]),
+        ]);
+        server.connections = vec![publisher];
+        server.process_connections().unwrap();
+
+        let exported = server.drain_exported_relay_frames();
+        assert_eq!(exported.len(), 2);
+        assert_eq!(exported[0].payload, vec![0x02]);
+        assert_eq!(exported[1].payload, vec![0x03]);
+    }
+
+    #[test]
+    fn relay_export_respects_byte_budget() {
+        let mut server = test_server();
+        // Two 3-byte frames fit; a third 3-byte frame forces dropping oldest.
+        server.enable_relay_export(16, 6);
+
+        let mut publisher = Conn::new();
+        publisher.conn_id = 1;
+        publisher.app = "live".to_string();
+        publisher.pending_relay.extend([
+            relay_frame(FrameType::Video, vec![0xAA, 0xAA, 0xAA]),
+            relay_frame(FrameType::Video, vec![0xBB, 0xBB, 0xBB]),
+            relay_frame(FrameType::Video, vec![0xCC, 0xCC, 0xCC]),
+        ]);
+        server.connections = vec![publisher];
+        server.process_connections().unwrap();
+
+        let exported = server.drain_exported_relay_frames();
+        assert_eq!(exported.len(), 2);
+        assert_eq!(exported[0].payload, vec![0xBB, 0xBB, 0xBB]);
+        assert_eq!(exported[1].payload, vec![0xCC, 0xCC, 0xCC]);
+    }
+
+    #[test]
+    fn inject_relay_frame_reaches_local_player() {
+        use crate::session::stream::Stream;
+        use crate::transport::Transport;
+        use std::io::Read;
+        use std::os::unix::io::IntoRawFd;
+        use std::os::unix::net::UnixStream;
+
+        let (server_end, mut peer_end) = UnixStream::pair().unwrap();
+        server_end.set_nonblocking(true).unwrap();
+        peer_end.set_nonblocking(true).unwrap();
+
+        let mut player = Conn::new();
+        player.conn_id = 2;
+        player.app = "live".to_string();
+        player.relay_enabled = true;
+        player.client_fd = 0;
+        player.transport = Some(Transport::new_plain(server_end.into_raw_fd()));
+        player.current_stream = Some(Box::new(Stream {
+            stream_id: 1,
+            name: "stream".to_string(),
+            is_publishing: false,
+            is_playing: true,
+            paused: false,
+            receive_audio: true,
+            receive_video: true,
+        }));
+
+        let mut server = test_server();
+        server.connections = vec![player];
+        server
+            .inject_relay_frame("live", "stream", FrameType::Video, 40, &[0x27, 0x01, 0xBE])
+            .unwrap();
+        server.process_connections().unwrap();
+
+        let mut buf = [0u8; 4096];
+        let n = peer_end
+            .read(&mut buf)
+            .expect("player should receive injected frame");
+        assert!(n > 0, "injected video must reach the playing client");
+    }
+
+    #[test]
+    fn inject_headers_and_keyframe_seed_init_cache_for_late_player() {
+        use crate::session::stream::Stream;
+        use crate::transport::Transport;
+        use std::io::Read;
+        use std::os::unix::io::IntoRawFd;
+        use std::os::unix::net::UnixStream;
+
+        let mut server = test_server();
+        server
+            .inject_relay_frame("live", "stream", FrameType::Video, 0, &[0x17, 0x00, 0x01])
+            .unwrap();
+        server
+            .inject_relay_frame(
+                "live",
+                "stream",
+                FrameType::Audio,
+                0,
+                &[0xAF, 0x00, 0x11, 0x90],
+            )
+            .unwrap();
+        server
+            .inject_relay_frame("live", "stream", FrameType::Video, 100, &[0x17, 0x01, 0xDE])
+            .unwrap();
+        server.process_connections().unwrap();
+
+        let snap = server
+            .stream_init_snapshot("live", "stream")
+            .expect("cache entry after inject");
+        assert!(snap.avc_header.is_some());
+        assert!(snap.aac_header.is_some());
+        assert!(snap.last_keyframe.is_some());
+        assert_eq!(snap.last_keyframe.as_ref().unwrap().0, 100);
+
+        let (server_end, mut peer_end) = UnixStream::pair().unwrap();
+        server_end.set_nonblocking(true).unwrap();
+        peer_end.set_nonblocking(true).unwrap();
+
+        let mut player = Conn::new();
+        player.conn_id = 3;
+        player.app = "live".to_string();
+        player.relay_enabled = true;
+        player.needs_init_frames = true;
+        player.client_fd = 0;
+        player.transport = Some(Transport::new_plain(server_end.into_raw_fd()));
+        player.current_stream = Some(Box::new(Stream {
+            stream_id: 1,
+            name: "stream".to_string(),
+            is_publishing: false,
+            is_playing: true,
+            paused: false,
+            receive_audio: true,
+            receive_video: true,
+        }));
+        server.connections = vec![player];
+        server.process_connections().unwrap();
+
+        let mut buf = [0u8; 8192];
+        let n = peer_end
+            .read(&mut buf)
+            .expect("late joiner should get init replay");
+        assert!(n > 0, "cached headers/keyframe must replay to late player");
+    }
+
+    #[test]
+    fn inject_relay_frame_respects_pending_limits() {
+        let mut server = test_server();
+        server.resource_limits.max_pending_relay_bytes = 4;
+        assert!(
+            server
+                .inject_relay_frame("live", "stream", FrameType::Video, 0, b"abcd")
+                .is_ok()
+        );
+        assert_eq!(
+            server.inject_relay_frame("live", "stream", FrameType::Video, 0, b"x"),
+            Err(ErrorCode::Internal)
+        );
+    }
+
+    #[test]
+    fn injected_frames_respect_receive_audio_video() {
+        use crate::session::stream::Stream;
+        use crate::transport::Transport;
+        use std::os::unix::io::IntoRawFd;
+        use std::os::unix::net::UnixStream;
+
+        let (server_end, _peer_end) = UnixStream::pair().unwrap();
+        server_end.set_nonblocking(true).unwrap();
+
+        let mut player = Conn::new();
+        player.app = "live".to_string();
+        player.relay_enabled = true;
+        player.transport = Some(Transport::new_plain(server_end.into_raw_fd()));
+        player.current_stream = Some(Box::new(Stream {
+            stream_id: 1,
+            name: "stream".to_string(),
+            is_publishing: false,
+            is_playing: true,
+            paused: false,
+            receive_audio: false,
+            receive_video: true,
+        }));
+
+        let audio = RelayFrame {
+            app: "live".to_string(),
+            stream_name: "stream".to_string(),
+            publisher_conn_id: EXTERNAL_RELAY_PUBLISHER_ID,
+            frame_type: FrameType::Audio,
+            timestamp: 0,
+            cache_payload: None,
+            payload: vec![0xAF, 0x01, 0x00],
+        };
+        let video = RelayFrame {
+            app: "live".to_string(),
+            stream_name: "stream".to_string(),
+            publisher_conn_id: EXTERNAL_RELAY_PUBLISHER_ID,
+            frame_type: FrameType::Video,
+            timestamp: 0,
+            cache_payload: None,
+            payload: vec![0x27, 0x01, 0x00],
+        };
+        assert!(!Server::conn_will_receive_relay_frame(&player, &audio));
+        assert!(Server::conn_will_receive_relay_frame(&player, &video));
+
+        player.current_stream.as_mut().unwrap().receive_video = false;
+        player.current_stream.as_mut().unwrap().receive_audio = true;
+        assert!(Server::conn_will_receive_relay_frame(&player, &audio));
+        assert!(!Server::conn_will_receive_relay_frame(&player, &video));
+    }
+
+    #[test]
+    fn conn_inject_relay_frame_queues_without_auth_callback() {
+        static mut MEDIA_CB_HIT: bool = false;
+        fn deny_media(_conn_id: u64, _ft: FrameType, _codec: Option<&str>) -> bool {
+            unsafe {
+                MEDIA_CB_HIT = true;
+            }
+            false
+        }
+
+        let mut conn = Conn::new();
+        conn.app = "live".to_string();
+        conn.current_stream = Some(Box::new(crate::session::stream::Stream {
+            stream_id: 1,
+            name: "cam".to_string(),
+            is_publishing: false,
+            is_playing: false,
+            paused: false,
+            receive_audio: true,
+            receive_video: true,
+        }));
+        conn.on_media_cb = Some(deny_media);
+        conn.inject_relay_frame(FrameType::Video, 10, &[0x17, 0x01, 0xAA])
+            .unwrap();
+        assert_eq!(conn.pending_relay.len(), 1);
+        assert_eq!(conn.pending_relay[0].timestamp, 10);
+        assert_eq!(conn.pending_relay[0].payload, vec![0x17, 0x01, 0xAA]);
+        assert!(!unsafe { MEDIA_CB_HIT }, "inject must skip on_media_cb");
+    }
+
+    #[test]
+    fn inject_is_not_echoed_through_relay_export() {
+        let mut server = test_server();
+        server.enable_relay_export(16, 1024);
+        server
+            .inject_relay_frame("live", "stream", FrameType::Video, 0, &[0x27, 0x01, 0x01])
+            .unwrap();
+        server.process_connections().unwrap();
+        assert!(
+            server.drain_exported_relay_frames().is_empty(),
+            "injected frames must not be exported"
+        );
     }
 }

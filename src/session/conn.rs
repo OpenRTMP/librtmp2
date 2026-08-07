@@ -82,15 +82,29 @@ pub(crate) const RTMP_SESSION_SETUP_TIMEOUT: Duration = Duration::from_secs(10);
 /// `message::message::MAX_AGGREGATE_SUBTAGS`).
 const MAX_AGGREGATE_SUBTAGS: usize = 4096;
 
+/// One media/script frame queued for local relay, stream-cache update, and
+/// optional export to integrators.
+///
+/// Constructed by publishers (via the session media path), by
+/// [`Conn::inject_relay_frame`], or by [`crate::server::Server::inject_relay_frame`].
+/// Integrators that drain export buffers receive clones of these frames.
+#[derive(Clone)]
 pub struct RelayFrame {
+    /// Audio, video, script (`onMetaData`), or metadata classification.
     pub frame_type: FrameType,
+    /// RTMP message timestamp (milliseconds).
     pub timestamp: u32,
+    /// Wire payload as received or injected (relayed to players unchanged).
     pub payload: Vec<u8>,
     /// ModEx-normalized bytes used only for codec parsing and cache classification.
     /// `None` means the normalized bytes are identical to `payload`.
     pub cache_payload: Option<Vec<u8>>,
+    /// Application name used as the first half of the relay route key.
     pub app: String,
+    /// Stream / relay-route key used to match publishers to players.
     pub stream_name: String,
+    /// Owning publisher connection id, or
+    /// [`crate::server::EXTERNAL_RELAY_PUBLISHER_ID`] for socket-less injects.
     pub publisher_conn_id: u64,
 }
 
@@ -100,7 +114,7 @@ impl RelayFrame {
         self.cache_payload.as_deref().unwrap_or(&self.payload)
     }
 
-    fn retained_bytes(&self) -> usize {
+    pub(crate) fn retained_bytes(&self) -> usize {
         self.payload.len().saturating_add(
             self.cache_payload
                 .as_ref()
@@ -460,6 +474,22 @@ impl Conn {
             self.queue_relay_frame(FrameType::Script, timestamp, payload, payload)?;
         }
         Ok(())
+    }
+
+    /// Inject media into this connection's pending relay queue as if it were
+    /// published locally.
+    ///
+    /// Uses the same ModEx-normalize + `queue_relay_frame` path as inbound
+    /// publisher media, but skips `on_media_cb` / `on_frame_cb` (integrator-
+    /// trusted). Does not require `is_publishing` or `relay_enabled`.
+    pub fn inject_relay_frame(
+        &mut self,
+        frame_type: FrameType,
+        timestamp: u32,
+        payload: &[u8],
+    ) -> Result<()> {
+        let normalized = normalize_modex_payload(payload, self.negotiated_caps.caps_ex_mask);
+        self.queue_relay_frame(frame_type, timestamp, payload, normalized.as_ref())
     }
 
     fn queue_relay_frame(

@@ -674,15 +674,15 @@ impl Client {
                     } else if msg.msg_type_id == msg_dispatch::RTMP_MSG_AMF0_DATA
                         || msg.msg_type_id == msg_dispatch::RTMP_MSG_AMF3_DATA
                     {
-                        let data_payload: &[u8] =
-                            if msg.msg_type_id == msg_dispatch::RTMP_MSG_AMF3_DATA
-                                && payload.len() > 1
-                                && payload[0] == 0x00
-                            {
-                                &payload[1..]
-                            } else {
-                                &payload
-                            };
+                        let data_payload: &[u8] = if msg.msg_type_id
+                            == msg_dispatch::RTMP_MSG_AMF3_DATA
+                            && payload.len() > 1
+                            && payload[0] == 0x00
+                        {
+                            &payload[1..]
+                        } else {
+                            &payload
+                        };
                         if let Some(cb) = self.on_frame_cb {
                             self.deliver_script_frame_cb(cb, msg.timestamp, data_payload);
                         }
@@ -762,8 +762,7 @@ impl Client {
         timestamp: u32,
         payload: &[u8],
     ) -> Result<()> {
-        let normalized =
-            normalize_modex_payload(payload, self.negotiated_caps.caps_ex_mask);
+        let normalized = normalize_modex_payload(payload, self.negotiated_caps.caps_ex_mask);
         let parse_payload = normalized.as_ref();
         let is_multitrack = is_multitrack_container(frame_type, parse_payload);
         let parsed_multitrack = foreach_track(frame_type, parse_payload, |track| {
@@ -1952,7 +1951,8 @@ mod tests {
         // draining (budget exhausted), nothing reads the socket anymore, so
         // an unbounded write_all() could block the writer thread -- and this
         // test's join() -- forever.
-        peer.set_write_timeout(Some(Duration::from_secs(2))).unwrap();
+        peer.set_write_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
 
         let reset_chunk = onstatus_chunk("status", "NetStream.Play.Reset");
         let flood_bytes = MAX_RECV_BYTES_PER_COMMAND_WAIT + reset_chunk.len() * 4;
