@@ -40,6 +40,12 @@ begin at `1.0.0`.
   never touch the init cache; cache-budget projection subtracts only the
   replaced field after peer eviction.
 - Injected liveness is reset on new/renamed publish and publish-route eviction.
+- Fair inject↔local interleave alternates which source leads each poll so a
+  budget of 1 cannot permanently starve one side.
+- Relay export flushes budget-deferred frames when their publisher connection
+  is removed in the same poll.
+- `Conn` relay/inject payload limits follow `chunk_reg.max_msg_length` instead
+  of a hard-coded default.
 
 ### Removed
 - Accidental `scripts/docker_cargo_test.py` helper (local Windows Docker

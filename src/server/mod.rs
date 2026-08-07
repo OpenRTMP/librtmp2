@@ -296,6 +296,9 @@ pub struct Server {
     /// Socket-less frames waiting to enter the same cache + fan-out path as
     /// publisher `pending_relay` drains.
     pending_injected_relay: Vec<RelayFrame>,
+    /// Alternates which source leads fair inject↔local interleave each poll,
+    /// so a budget of 1 cannot permanently starve local (or inject) frames.
+    relay_interleave_inject_first: bool,
 }
 
 impl Server {
@@ -345,6 +348,7 @@ impl Server {
             active_publish_routes: Arc::new(Mutex::new(HashMap::new())),
             relay_export: None,
             pending_injected_relay: Vec::new(),
+            relay_interleave_inject_first: true,
         })
     }
 
@@ -1031,7 +1035,10 @@ impl Server {
             .flat_map(|c| c.pending_relay.drain(..))
             .collect();
         let injected_frames = std::mem::take(&mut self.pending_injected_relay);
-        let mut relay_frames = interleave_relay_sources(injected_frames, local_frames);
+        let inject_first = self.relay_interleave_inject_first;
+        self.relay_interleave_inject_first = !inject_first;
+        let mut relay_frames =
+            interleave_relay_sources(injected_frames, local_frames, inject_first);
 
         // Replay cached codec headers and last keyframe to newly-joined players
         // using the pre-batch cache state, so init frames always precede live
@@ -1190,6 +1197,16 @@ impl Server {
         closed.sort_unstable();
         closed.dedup();
         for i in closed.into_iter().rev() {
+            // Budget-deferred local frames live on the connection again; export
+            // them before teardown so integrators do not permanently miss
+            // frames that were already drained once this poll.
+            if let Some(export) = self.relay_export.as_mut() {
+                for frame in self.connections[i].pending_relay.drain(..) {
+                    if !is_external_publisher_id(frame.publisher_conn_id) {
+                        export.push_clone(&frame);
+                    }
+                }
+            }
             let conn = &self.connections[i];
             self.release_all_publish_routes(conn.conn_id);
             // Tracking must be cleared unconditionally: a publisher can issue
@@ -1746,28 +1763,44 @@ impl Server {
 }
 
 /// Round-robin merge of inject and local relay frames, preserving relative
-/// order within each source (inject first within each pair).
+/// order within each source. `inject_first` selects which source leads each
+/// pair; callers should alternate it across polls so a tiny send budget cannot
+/// starve one source forever.
 fn interleave_relay_sources(
     injected: Vec<RelayFrame>,
     local: Vec<RelayFrame>,
+    inject_first: bool,
 ) -> Vec<RelayFrame> {
     let mut out = Vec::with_capacity(injected.len() + local.len());
     let mut inj = injected.into_iter();
     let mut loc = local.into_iter();
     loop {
-        match (inj.next(), loc.next()) {
+        let (first, second) = if inject_first {
+            (inj.next(), loc.next())
+        } else {
+            (loc.next(), inj.next())
+        };
+        match (first, second) {
             (Some(a), Some(b)) => {
                 out.push(a);
                 out.push(b);
             }
             (Some(a), None) => {
                 out.push(a);
-                out.extend(inj);
+                if inject_first {
+                    out.extend(inj);
+                } else {
+                    out.extend(loc);
+                }
                 break;
             }
             (None, Some(b)) => {
                 out.push(b);
-                out.extend(loc);
+                if inject_first {
+                    out.extend(loc);
+                } else {
+                    out.extend(inj);
+                }
                 break;
             }
             (None, None) => break,

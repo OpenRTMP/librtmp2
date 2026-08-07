@@ -501,7 +501,7 @@ impl Conn {
         timestamp: u32,
         payload: &[u8],
     ) -> Result<()> {
-        if payload.len() > DEFAULT_MAX_MSG_LENGTH as usize {
+        if payload.len() > self.chunk_reg.max_msg_length as usize {
             return Err(ErrorCode::Internal);
         }
         let normalized = normalize_modex_payload(payload, self.negotiated_caps.caps_ex_mask);
@@ -522,7 +522,7 @@ impl Conn {
         payload: &[u8],
         cache_payload: &[u8],
     ) -> Result<()> {
-        if payload.len() > DEFAULT_MAX_MSG_LENGTH as usize {
+        if payload.len() > self.chunk_reg.max_msg_length as usize {
             return Err(ErrorCode::Internal);
         }
         let cache_payload = if cache_payload.len() == payload.len()
