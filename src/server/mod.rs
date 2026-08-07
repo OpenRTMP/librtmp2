@@ -488,6 +488,55 @@ impl Server {
         Ok(())
     }
 
+    /// Release a socket-less inject claim on `(app, stream_name)`.
+    ///
+    /// Call when an external feed ends so socket publishers can reclaim the
+    /// route. Also drops any init-cache entry owned solely by that external id
+    /// and pending inject frames for the route.
+    pub fn release_injected_route(&mut self, app: &str, stream_name: &str) {
+        let key = (app.to_string(), stream_name.to_string());
+        let external_id = external_publisher_id_for_route(app, stream_name);
+        self.pending_injected_relay
+            .retain(|f| !(f.app == key.0 && f.stream_name == key.1));
+        if let Some(keys) = self.publisher_cache_keys.remove(&external_id) {
+            for k in keys {
+                let still_owned = self.publisher_cache_keys.values().any(|v| v.contains(&k));
+                if !still_owned {
+                    self.stream_cache.remove(&k);
+                }
+            }
+        }
+        if let Ok(mut routes) = self.active_publish_routes.lock() {
+            if routes.get(&key) == Some(&external_id) {
+                routes.remove(&key);
+            }
+        }
+    }
+
+    /// Drop external publish-route claims that have neither pending inject
+    /// frames nor stream-cache ownership (non-cacheable-only feeds).
+    fn reap_idle_external_publish_routes(&mut self) {
+        let pending: std::collections::HashSet<(String, String)> = self
+            .pending_injected_relay
+            .iter()
+            .map(|f| (f.app.clone(), f.stream_name.clone()))
+            .collect();
+        let cached_external: std::collections::HashSet<(String, String)> = self
+            .publisher_cache_keys
+            .iter()
+            .filter(|(id, _)| is_external_publisher_id(**id))
+            .flat_map(|(_, keys)| keys.iter().cloned())
+            .collect();
+        if let Ok(mut routes) = self.active_publish_routes.lock() {
+            routes.retain(|key, owner| {
+                if !is_external_publisher_id(*owner) {
+                    return true;
+                }
+                pending.contains(key) || cached_external.contains(key)
+            });
+        }
+    }
+
     /// Copy the current init-cache snapshot for `(app, stream_name)`, if any
     /// entry exists (even when all fields are empty after partial eviction).
     pub fn stream_init_snapshot(&self, app: &str, stream_name: &str) -> Option<StreamInitSnapshot> {
@@ -1164,6 +1213,7 @@ impl Server {
             }
             self.connections.remove(i);
         }
+        self.reap_idle_external_publish_routes();
         Ok(())
     }
 
@@ -1407,22 +1457,19 @@ impl Server {
             while projected_total > max_cache_bytes
                 && self.evict_for_stream_cache_pressure(publisher_conn_id, key)
             {
-                if let Some(cache) = self.stream_cache.get(key) {
-                    // Keep route-key bytes accounted; replace payload side with
-                    // the incoming field length only.
-                    let key_bytes = key.0.len().saturating_add(key.1.len());
-                    projected_total = self
-                        .stream_cache_bytes()
-                        .saturating_add(incoming_len)
-                        .saturating_add(key_bytes)
-                        .saturating_sub(Self::stream_cache_entry_bytes(key, cache));
+                // After evicting *other* routes, recompute from the live total.
+                // Subtract only the field being replaced — not the whole entry
+                // for `key`, whose other headers/keyframe remain in the map.
+                let add_key_bytes = if is_new_key && !self.stream_cache.contains_key(key) {
+                    key.0.len().saturating_add(key.1.len())
                 } else {
-                    projected_total = self
-                        .stream_cache_bytes()
-                        .saturating_add(incoming_len)
-                        .saturating_add(key.0.len())
-                        .saturating_add(key.1.len());
-                }
+                    0
+                };
+                projected_total = self
+                    .stream_cache_bytes()
+                    .saturating_add(incoming_len)
+                    .saturating_add(add_key_bytes)
+                    .saturating_sub(existing_field_len);
             }
             if projected_total > max_cache_bytes {
                 return false;
@@ -3517,6 +3564,49 @@ mod tests {
         assert!(
             !server.publisher_cache_keys.contains_key(&external_id),
             "empty external owner row must be pruned"
+        );
+    }
+
+    #[test]
+    fn release_injected_route_frees_publish_claim() {
+        let mut server = test_server();
+        server
+            .inject_relay_frame("live", "ephemeral", FrameType::Video, 0, &[0x27, 0x01, 0x01])
+            .unwrap();
+        assert!(server
+            .active_publish_routes
+            .lock()
+            .unwrap()
+            .contains_key(&("live".to_string(), "ephemeral".to_string())));
+        // Explicit release while frames are still pending.
+        server.release_injected_route("live", "ephemeral");
+        assert!(
+            !server
+                .active_publish_routes
+                .lock()
+                .unwrap()
+                .contains_key(&("live".to_string(), "ephemeral".to_string())),
+            "release_injected_route must free the claim"
+        );
+        assert!(server.pending_injected_relay.is_empty());
+        let registry = PublishRouteRegistry::new(Arc::clone(&server.active_publish_routes));
+        assert!(registry.claim(99, "live", "ephemeral"));
+    }
+
+    #[test]
+    fn idle_external_claims_are_reaped_after_process() {
+        let mut server = test_server();
+        server
+            .inject_relay_frame("live", "ephemeral", FrameType::Video, 0, &[0x27, 0x01, 0x01])
+            .unwrap();
+        server.process_connections().unwrap();
+        assert!(
+            !server
+                .active_publish_routes
+                .lock()
+                .unwrap()
+                .contains_key(&("live".to_string(), "ephemeral".to_string())),
+            "non-cacheable inject must not leave a permanent route claim"
         );
     }
 

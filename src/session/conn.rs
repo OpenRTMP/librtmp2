@@ -400,6 +400,7 @@ impl Conn {
             }
         }
         self.clear_detected_stream_metadata();
+        self.injected_media_bytes = 0;
     }
 
     fn release_claimed_publish_route(&mut self) {
@@ -1497,6 +1498,9 @@ impl Conn {
                 // already owned by this connection must not refresh the timer.
                 if !was_publishing || renaming_route {
                     self.session_setup_started = Instant::now();
+                    // Injected activity from a prior publish/idle epoch must
+                    // not exempt a new empty publish from the media deadline.
+                    self.injected_media_bytes = 0;
                 }
                 if renaming_route {
                     self.pending_cache_evictions
@@ -2669,6 +2673,19 @@ mod tests {
         assert!(
             !injected_only.session_setup_timed_out(),
             "trusted inject must count toward publisher liveness"
+        );
+
+        // Injected bytes from a prior epoch must not exempt a later empty publish.
+        injected_only.evict_active_publish_route();
+        injected_only.current_stream = Some(Box::new(Stream {
+            is_publishing: true,
+            ..Stream::new(2)
+        }));
+        injected_only.set_session_setup_started_for_test(Instant::now() - Duration::from_secs(3));
+        assert_eq!(injected_only.injected_media_bytes, 0);
+        assert!(
+            injected_only.session_setup_timed_out(),
+            "new publish epoch without media must still time out"
         );
 
         let mut squatting = Conn::new();

@@ -36,6 +36,10 @@ begin at `1.0.0`.
   inject and local publishers cannot share one route's init cache.
 - `Conn::inject_relay_frame` counts audio/video toward publisher liveness
   (`injected_media_bytes`) without changing socket receive telemetry.
+- `release_injected_route` plus idle reaping drops external publish claims that
+  never touch the init cache; cache-budget projection subtracts only the
+  replaced field after peer eviction.
+- Injected liveness is reset on new/renamed publish and publish-route eviction.
 
 ### Removed
 - Accidental `scripts/docker_cargo_test.py` helper (local Windows Docker
