@@ -1950,8 +1950,7 @@ mod tests {
             FrameType::Video,
             vec![0xB1],
         )];
-        let inj_first =
-            interleave_relay_sources(injected.clone(), local.clone(), true);
+        let inj_first = interleave_relay_sources(injected.clone(), local.clone(), true);
         assert_eq!(inj_first[0].payload, vec![0xA1]);
         assert_eq!(inj_first[1].payload, vec![0xB1]);
         let loc_first = interleave_relay_sources(injected, local, false);
@@ -3746,13 +3745,21 @@ mod tests {
     fn release_injected_route_frees_publish_claim() {
         let mut server = test_server();
         server
-            .inject_relay_frame("live", "ephemeral", FrameType::Video, 0, &[0x27, 0x01, 0x01])
+            .inject_relay_frame(
+                "live",
+                "ephemeral",
+                FrameType::Video,
+                0,
+                &[0x27, 0x01, 0x01],
+            )
             .unwrap();
-        assert!(server
-            .active_publish_routes
-            .lock()
-            .unwrap()
-            .contains_key(&("live".to_string(), "ephemeral".to_string())));
+        assert!(
+            server
+                .active_publish_routes
+                .lock()
+                .unwrap()
+                .contains_key(&("live".to_string(), "ephemeral".to_string()))
+        );
         // Explicit release while frames are still pending.
         server.release_injected_route("live", "ephemeral");
         assert!(
@@ -3772,7 +3779,13 @@ mod tests {
     fn external_inject_claim_persists_until_release() {
         let mut server = test_server();
         server
-            .inject_relay_frame("live", "ephemeral", FrameType::Video, 0, &[0x27, 0x01, 0x01])
+            .inject_relay_frame(
+                "live",
+                "ephemeral",
+                FrameType::Video,
+                0,
+                &[0x27, 0x01, 0x01],
+            )
             .unwrap();
         server.process_connections().unwrap();
         assert!(
@@ -3851,9 +3864,11 @@ mod tests {
             .inject_relay_frame("live", "peer", FrameType::Video, 0, &[0x17, 0x00, 0x01])
             .unwrap();
         server.process_connections().unwrap();
-        assert!(server
-            .stream_cache
-            .contains_key(&("live".to_string(), "peer".to_string())));
+        assert!(
+            server
+                .stream_cache
+                .contains_key(&("live".to_string(), "peer".to_string()))
+        );
 
         // Cap below the irreducible size of the incoming field alone so peer
         // eviction cannot make this reservation fit.

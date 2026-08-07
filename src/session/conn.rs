@@ -385,7 +385,11 @@ impl Conn {
             .unwrap_or(false);
         if !was_publishing {
             // Idle/prior-epoch inject must not survive createStream / play /
-            // FCUnpublish into a later empty publish's media deadline.
+            // FCUnpublish into a later empty publish's media deadline. A
+            // connection-level inject can claim a route without ever
+            // transitioning to Publishing, so release that claim here too or
+            // the route stays unavailable to socket publishers until close.
+            self.release_claimed_publish_route();
             self.injected_media_bytes = 0;
             return;
         }
@@ -506,10 +510,7 @@ impl Conn {
         timestamp: u32,
         payload: &[u8],
     ) -> Result<()> {
-        let max_len = self
-            .chunk_reg
-            .max_msg_length
-            .min(RTMP_WIRE_MAX_MSG_LENGTH) as usize;
+        let max_len = self.chunk_reg.max_msg_length.min(RTMP_WIRE_MAX_MSG_LENGTH) as usize;
         if payload.len() > max_len {
             return Err(ErrorCode::Internal);
         }
@@ -517,11 +518,24 @@ impl Conn {
         if self.app.is_empty() || stream_name.is_empty() {
             return Err(ErrorCode::Internal);
         }
+        let already_owned_route =
+            self.claimed_publish_route.as_deref() == Some(stream_name.as_str());
         if !self.claim_publish_route(&stream_name) {
             return Err(ErrorCode::Internal);
         }
         let normalized = normalize_modex_payload(payload, self.negotiated_caps.caps_ex_mask);
-        self.queue_relay_frame(frame_type, timestamp, payload, normalized.as_ref())?;
+        if let Err(e) = self.queue_relay_frame(frame_type, timestamp, payload, normalized.as_ref())
+        {
+            // Don't let a rejected frame (e.g. over the pending-byte budget)
+            // leave a route claimed that this connection never actually
+            // delivered anything on — that would block a real publisher.
+            // Only roll back a claim we just took; a claim already held from
+            // an earlier successful inject stays intact.
+            if !already_owned_route {
+                self.release_claimed_publish_route();
+            }
+            return Err(e);
+        }
         // Count audio/video injects as publisher activity for squat timeout.
         if matches!(frame_type, FrameType::Audio | FrameType::Video) {
             self.injected_media_bytes = self
@@ -538,10 +552,7 @@ impl Conn {
         payload: &[u8],
         cache_payload: &[u8],
     ) -> Result<()> {
-        let max_len = self
-            .chunk_reg
-            .max_msg_length
-            .min(RTMP_WIRE_MAX_MSG_LENGTH) as usize;
+        let max_len = self.chunk_reg.max_msg_length.min(RTMP_WIRE_MAX_MSG_LENGTH) as usize;
         if payload.len() > max_len {
             return Err(ErrorCode::Internal);
         }
@@ -3304,6 +3315,124 @@ mod tests {
         conn.evict_active_publish_route();
         assert!(conn.detected_video_codec.is_none());
         assert!(conn.detected_audio_codec.is_none());
+    }
+
+    #[test]
+    fn evict_active_publish_route_releases_idle_inject_claim() {
+        use std::collections::HashMap;
+        use std::sync::{Arc, Mutex};
+
+        let routes = Arc::new(Mutex::new(HashMap::new()));
+        let registry = PublishRouteRegistry::new(Arc::clone(&routes));
+        let key = ("live".to_string(), "cam".to_string());
+
+        let mut conn = Conn::new();
+        conn.conn_id = 7;
+        conn.app = "live".to_string();
+        conn.current_stream = Some(Box::new(Stream {
+            name: "cam".to_string(),
+            ..Stream::new(1)
+        }));
+        conn.publish_routes = Some(registry);
+
+        conn.inject_relay_frame(FrameType::Video, 0, &[0x17, 0x01, 0xAA])
+            .unwrap();
+        assert_eq!(routes.lock().unwrap().get(&key), Some(&7));
+
+        // No publish/play command ever ran (current_stream.is_publishing is
+        // still false), but a later createStream/play/teardown still calls
+        // evict_active_publish_route(); the claim from the idle inject must
+        // not survive it, or the route stays unavailable to a real publisher
+        // until this connection closes.
+        conn.evict_active_publish_route();
+        assert!(
+            routes.lock().unwrap().get(&key).is_none(),
+            "route claimed by an idle inject must be released on stream replacement"
+        );
+    }
+
+    #[test]
+    fn inject_relay_frame_releases_fresh_claim_when_queueing_fails() {
+        use std::collections::HashMap;
+        use std::sync::{Arc, Mutex};
+
+        let routes = Arc::new(Mutex::new(HashMap::new()));
+        let registry = PublishRouteRegistry::new(Arc::clone(&routes));
+        let key = ("live".to_string(), "cam".to_string());
+
+        let mut conn = Conn::new();
+        conn.conn_id = 7;
+        conn.app = "live".to_string();
+        conn.current_stream = Some(Box::new(Stream {
+            name: "cam".to_string(),
+            ..Stream::new(1)
+        }));
+        conn.publish_routes = Some(registry);
+        conn.max_pending_relay_bytes = 0;
+
+        assert!(
+            conn.inject_relay_frame(FrameType::Video, 0, &[0x17, 0x01, 0xAA])
+                .is_err(),
+            "queueing must fail once the pending-relay byte budget is exhausted"
+        );
+        assert!(
+            routes.lock().unwrap().get(&key).is_none(),
+            "a claim taken only to service a rejected frame must not be left behind"
+        );
+
+        // A different connection must now be able to claim the route.
+        let mut other = Conn::new();
+        other.conn_id = 9;
+        other.app = "live".to_string();
+        other.current_stream = Some(Box::new(Stream {
+            name: "cam".to_string(),
+            ..Stream::new(1)
+        }));
+        other.publish_routes = Some(PublishRouteRegistry::new(Arc::clone(&routes)));
+        assert!(
+            other
+                .inject_relay_frame(FrameType::Video, 0, &[0x17, 0x01, 0xAA])
+                .is_ok(),
+            "a rolled-back claim must not block a subsequent legitimate claim"
+        );
+    }
+
+    #[test]
+    fn inject_relay_frame_keeps_prior_claim_when_a_later_frame_is_rejected() {
+        use std::collections::HashMap;
+        use std::sync::{Arc, Mutex};
+
+        let routes = Arc::new(Mutex::new(HashMap::new()));
+        let registry = PublishRouteRegistry::new(Arc::clone(&routes));
+        let key = ("live".to_string(), "cam".to_string());
+
+        let mut conn = Conn::new();
+        conn.conn_id = 7;
+        conn.app = "live".to_string();
+        conn.current_stream = Some(Box::new(Stream {
+            name: "cam".to_string(),
+            ..Stream::new(1)
+        }));
+        conn.publish_routes = Some(registry);
+
+        conn.inject_relay_frame(FrameType::Video, 0, &[0x17, 0x01, 0xAA])
+            .unwrap();
+        assert_eq!(routes.lock().unwrap().get(&key), Some(&7));
+
+        // Starve the budget so the next frame is rejected.
+        conn.max_pending_relay_bytes = 0;
+        assert!(
+            conn.inject_relay_frame(FrameType::Video, 0, &[0x17, 0x01, 0xAA])
+                .is_err()
+        );
+
+        // The connection already legitimately owned this route from the
+        // first successful inject; a later rejected frame must not evict it.
+        assert_eq!(
+            routes.lock().unwrap().get(&key),
+            Some(&7),
+            "an already-owned route must survive a subsequent rejected frame"
+        );
     }
 
     #[test]
