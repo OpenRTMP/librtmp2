@@ -4,7 +4,9 @@ use std::time::{Duration, Instant};
 
 use crate::buffer::Buffer;
 use crate::chunk::reader::{ChunkMessage, chunk_read_owned};
-use crate::chunk::state::{ChunkRegistry, DEFAULT_CHUNK_SIZE, DEFAULT_MAX_MSG_LENGTH};
+use crate::chunk::state::{
+    ChunkRegistry, DEFAULT_CHUNK_SIZE, DEFAULT_MAX_MSG_LENGTH, RTMP_WIRE_MAX_MSG_LENGTH,
+};
 use crate::chunk::writer::chunk_write;
 use crate::ertmp::connect_amf::{negotiate_caps, write_negotiated_caps};
 use crate::ertmp::multitrack_media::{first_track_fourcc, foreach_track, is_multitrack_container};
@@ -504,7 +506,11 @@ impl Conn {
         timestamp: u32,
         payload: &[u8],
     ) -> Result<()> {
-        if payload.len() > self.chunk_reg.max_msg_length as usize {
+        let max_len = self
+            .chunk_reg
+            .max_msg_length
+            .min(RTMP_WIRE_MAX_MSG_LENGTH) as usize;
+        if payload.len() > max_len {
             return Err(ErrorCode::Internal);
         }
         let normalized = normalize_modex_payload(payload, self.negotiated_caps.caps_ex_mask);
@@ -525,7 +531,11 @@ impl Conn {
         payload: &[u8],
         cache_payload: &[u8],
     ) -> Result<()> {
-        if payload.len() > self.chunk_reg.max_msg_length as usize {
+        let max_len = self
+            .chunk_reg
+            .max_msg_length
+            .min(RTMP_WIRE_MAX_MSG_LENGTH) as usize;
+        if payload.len() > max_len {
             return Err(ErrorCode::Internal);
         }
         let cache_payload = if cache_payload.len() == payload.len()

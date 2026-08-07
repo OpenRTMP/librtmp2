@@ -17,6 +17,9 @@ pub const MAX_CHUNK_STREAMS: usize = 4096;
 pub const MAX_REASSEMBLY_BYTES_PER_CONN: usize = 32 * 1024 * 1024;
 /// Default cap on a single RTMP message body (24-bit length field allows 16 MiB).
 pub const DEFAULT_MAX_MSG_LENGTH: u32 = 4 * 1024 * 1024;
+
+/// Hard ceiling of the RTMP chunk message-length field (`hton24` / `msg_length`).
+pub const RTMP_WIRE_MAX_MSG_LENGTH: u32 = 0x00FF_FFFF;
 /// Default cap on concurrently active chunk-stream ids per connection.
 pub const DEFAULT_MAX_ACTIVE_CSIDS: usize = 256;
 

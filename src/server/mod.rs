@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 #[cfg(feature = "tls")]
 use std::time::{Duration, Instant};
 
-use crate::chunk::state::{DEFAULT_CHUNK_SIZE, DEFAULT_MAX_MSG_LENGTH};
+use crate::chunk::state::{DEFAULT_CHUNK_SIZE, DEFAULT_MAX_MSG_LENGTH, RTMP_WIRE_MAX_MSG_LENGTH};
 use crate::ertmp::multitrack_media::{foreach_track, is_multitrack_container};
 use crate::media::{CacheFrameKind, classify_cache_frame, normalize_modex_payload};
 use crate::net;
@@ -429,7 +429,8 @@ impl Server {
     /// id ([`is_external_publisher_id`]). Resource limits mirror per-connection
     /// pending-relay caps (`MAX_PENDING_RELAY_FRAMES` and
     /// `resource_limits.max_pending_relay_bytes`), counting payload plus route
-    /// string storage. Payloads larger than `DEFAULT_MAX_MSG_LENGTH` and route
+    /// string storage. Payloads larger than the RTMP 24-bit wire length
+    /// ([`RTMP_WIRE_MAX_MSG_LENGTH`]) and route
     /// components longer than `MAX_INJECT_ROUTE_COMPONENT_BYTES` are rejected.
     /// Conflicts with a socket publisher already owning `(app, stream_name)`
     /// (or another external id) are rejected via `active_publish_routes`.
@@ -446,7 +447,7 @@ impl Server {
         timestamp: u32,
         payload: &[u8],
     ) -> Result<()> {
-        if payload.len() > DEFAULT_MAX_MSG_LENGTH as usize {
+        if payload.len() > RTMP_WIRE_MAX_MSG_LENGTH as usize {
             return Err(ErrorCode::Internal);
         }
         if app.len() > MAX_INJECT_ROUTE_COMPONENT_BYTES
@@ -1460,11 +1461,15 @@ impl Server {
         };
         let max_cache_bytes = self.resource_limits.max_stream_cache_bytes;
         // This reservation's own contribution cannot shrink by evicting peers.
-        // Reject before wiping other routes when even an empty cache could not
-        // hold `incoming` (replacing `existing_field_len` on the same key).
-        let irreducible = incoming_len
-            .saturating_add(route_key_bytes)
-            .saturating_sub(existing_field_len);
+        // Include other fields already retained on the same route so we reject
+        // before wiping unrelated streams when the updated entry still cannot fit.
+        let irreducible = if let Some(cache) = self.stream_cache.get(key) {
+            Self::stream_cache_entry_bytes(key, cache)
+                .saturating_sub(existing_field_len)
+                .saturating_add(incoming_len)
+        } else {
+            incoming_len.saturating_add(route_key_bytes)
+        };
         if irreducible > max_cache_bytes {
             return false;
         }
@@ -3417,7 +3422,7 @@ mod tests {
     #[test]
     fn inject_relay_frame_rejects_oversized_payload() {
         let mut server = test_server();
-        let oversized = vec![0u8; DEFAULT_MAX_MSG_LENGTH as usize + 1];
+        let oversized = vec![0u8; RTMP_WIRE_MAX_MSG_LENGTH as usize + 1];
         assert_eq!(
             server.inject_relay_frame("live", "stream", FrameType::Video, 0, &oversized),
             Err(ErrorCode::Internal)

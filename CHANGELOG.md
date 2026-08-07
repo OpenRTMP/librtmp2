@@ -29,7 +29,7 @@ begin at `1.0.0`.
   high-bit range (`is_external_publisher_id`) instead of one shared id for all
   routes.
 - Pending-relay byte limits count `app` / `stream_name` string storage; inject
-  rejects payloads above `DEFAULT_MAX_MSG_LENGTH`.
+  rejects payloads above the RTMP 24-bit wire maximum (`RTMP_WIRE_MAX_MSG_LENGTH`).
 - Stream-cache pressure can evict other external routes (per-route IDs blocked
   same-owner eviction); empty `publisher_cache_keys` rows are pruned.
 - Socket-less inject claims `(app, stream_name)` in `active_publish_routes` so
@@ -43,16 +43,17 @@ begin at `1.0.0`.
   so cycling routes without release cannot grow `active_publish_routes`
   without bound.
 - Cache-budget projection subtracts only the replaced field after peer
-  eviction; reservations whose own irreducible size exceeds
-  `max_stream_cache_bytes` reject without wiping peer routes.
+  eviction; reservations whose own irreducible size (including other fields
+  retained on the same route) exceeds `max_stream_cache_bytes` reject without
+  wiping peer routes.
 - Injected liveness is reset on new/renamed publish and on every
   publish-route eviction path (including idle `!was_publishing` teardown).
 - Fair inject↔local interleave alternates which source leads each poll so a
   budget of 1 cannot permanently starve one side.
 - Relay export flushes budget-deferred frames when their publisher connection
   is removed in the same poll.
-- `Conn` relay/inject payload limits follow `chunk_reg.max_msg_length` instead
-  of a hard-coded default.
+- `Conn` relay/inject payload limits follow `chunk_reg.max_msg_length`, capped
+  at `RTMP_WIRE_MAX_MSG_LENGTH` (24-bit RTMP message length).
 
 ### Removed
 - Accidental `scripts/docker_cargo_test.py` helper (local Windows Docker
