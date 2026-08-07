@@ -513,6 +513,13 @@ impl Conn {
         if payload.len() > max_len {
             return Err(ErrorCode::Internal);
         }
+        let stream_name = self.relay_route_key();
+        if self.app.is_empty() || stream_name.is_empty() {
+            return Err(ErrorCode::Internal);
+        }
+        if !self.claim_publish_route(&stream_name) {
+            return Err(ErrorCode::Internal);
+        }
         let normalized = normalize_modex_payload(payload, self.negotiated_caps.caps_ex_mask);
         self.queue_relay_frame(frame_type, timestamp, payload, normalized.as_ref())?;
         // Count audio/video injects as publisher activity for squat timeout.

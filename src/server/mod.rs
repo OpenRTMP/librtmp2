@@ -3620,6 +3620,38 @@ mod tests {
     }
 
     #[test]
+    fn conn_inject_relay_frame_rejects_foreign_route() {
+        use std::collections::HashMap;
+        use std::sync::{Arc, Mutex};
+
+        let routes = Arc::new(Mutex::new(HashMap::new()));
+        routes
+            .lock()
+            .unwrap()
+            .insert(("live".to_string(), "cam".to_string()), 99);
+        let registry = PublishRouteRegistry::new(Arc::clone(&routes));
+
+        let mut conn = Conn::new();
+        conn.conn_id = 7;
+        conn.app = "live".to_string();
+        conn.current_stream = Some(Box::new(crate::session::stream::Stream {
+            stream_id: 1,
+            name: "cam".to_string(),
+            is_publishing: false,
+            is_playing: true,
+            paused: false,
+            receive_audio: true,
+            receive_video: true,
+        }));
+        conn.publish_routes = Some(registry);
+        assert!(
+            conn.inject_relay_frame(FrameType::Video, 0, &[0x17, 0x01, 0xAA])
+                .is_err(),
+            "connection-level inject must not bypass publish-route ownership"
+        );
+    }
+
+    #[test]
     fn inject_rejects_route_owned_by_socket_publisher() {
         let mut server = test_server();
         let route = ("live".to_string(), "stream".to_string());
