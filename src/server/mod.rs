@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 #[cfg(feature = "tls")]
 use std::time::{Duration, Instant};
 
-use crate::chunk::state::DEFAULT_CHUNK_SIZE;
+use crate::chunk::state::{DEFAULT_CHUNK_SIZE, DEFAULT_MAX_MSG_LENGTH};
 use crate::ertmp::multitrack_media::{foreach_track, is_multitrack_container};
 use crate::media::{CacheFrameKind, classify_cache_frame, normalize_modex_payload};
 use crate::net;
@@ -20,9 +20,32 @@ use crate::transport::{PendingTlsAccept, TlsAcceptOutcome};
 use crate::transport::{TlsCtx, Transport};
 use crate::types::*;
 
-/// `RelayFrame::publisher_conn_id` value used by
-/// [`Server::inject_relay_frame`] for socket-less external media.
+/// High bit set on `RelayFrame::publisher_conn_id` marks socket-less injects.
+/// Socket connection ids stay below this range.
+const EXTERNAL_PUBLISHER_ID_BIT: u64 = 0x8000_0000_0000_0000;
+
+/// Canonical sentinel for socket-less / external media (`u64::MAX`).
+///
+/// [`Server::inject_relay_frame`] assigns a **stable per-route** id in the
+/// high-bit range (see [`is_external_publisher_id`]) so stream-cache limits
+/// apply per external stream rather than across all injects.
 pub const EXTERNAL_RELAY_PUBLISHER_ID: u64 = u64::MAX;
+
+/// True when `id` belongs to the socket-less inject publisher-id range.
+#[inline]
+pub fn is_external_publisher_id(id: u64) -> bool {
+    id & EXTERNAL_PUBLISHER_ID_BIT != 0
+}
+
+fn external_publisher_id_for_route(app: &str, stream_name: &str) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    app.hash(&mut hasher);
+    0xffu8.hash(&mut hasher);
+    stream_name.hash(&mut hasher);
+    EXTERNAL_PUBLISHER_ID_BIT | (hasher.finish() & !EXTERNAL_PUBLISHER_ID_BIT)
+}
 
 /// Maximum distinct (app, stream_name) cache entries retained server-wide.
 const MAX_STREAM_CACHE_ENTRIES: usize = 1024;
@@ -381,9 +404,11 @@ impl Server {
     /// for `(app, stream_name)` without creating a socket connection.
     ///
     /// Uses the same `cache_relay_frame` + player delivery path as a local
-    /// publisher. Frames are tagged with [`EXTERNAL_RELAY_PUBLISHER_ID`].
-    /// Resource limits mirror per-connection pending-relay caps
-    /// (`MAX_PENDING_RELAY_FRAMES` and `resource_limits.max_pending_relay_bytes`).
+    /// publisher. Frames are tagged with a stable per-route external publisher
+    /// id ([`is_external_publisher_id`]). Resource limits mirror per-connection
+    /// pending-relay caps (`MAX_PENDING_RELAY_FRAMES` and
+    /// `resource_limits.max_pending_relay_bytes`), counting payload plus route
+    /// string storage. Payloads larger than `DEFAULT_MAX_MSG_LENGTH` are rejected.
     pub fn inject_relay_frame(
         &mut self,
         app: &str,
@@ -392,6 +417,9 @@ impl Server {
         timestamp: u32,
         payload: &[u8],
     ) -> Result<()> {
+        if payload.len() > DEFAULT_MAX_MSG_LENGTH as usize {
+            return Err(ErrorCode::Internal);
+        }
         let normalized = normalize_modex_payload(payload, CAPS_EX_MASK_MODEX);
         let cache_payload = if normalized.as_ref().len() == payload.len()
             && std::ptr::eq(normalized.as_ref().as_ptr(), payload.as_ptr())
@@ -402,7 +430,9 @@ impl Server {
         };
         let retained_bytes = payload
             .len()
-            .saturating_add(cache_payload.as_ref().map(|p| p.len()).unwrap_or(0));
+            .saturating_add(cache_payload.as_ref().map(|p| p.len()).unwrap_or(0))
+            .saturating_add(app.len())
+            .saturating_add(stream_name.len());
         let pending_bytes: usize = self
             .pending_injected_relay
             .iter()
@@ -421,7 +451,7 @@ impl Server {
             cache_payload,
             app: app.to_string(),
             stream_name: stream_name.to_string(),
-            publisher_conn_id: EXTERNAL_RELAY_PUBLISHER_ID,
+            publisher_conn_id: external_publisher_id_for_route(app, stream_name),
         });
         Ok(())
     }
@@ -909,24 +939,15 @@ impl Server {
         // identical (app, name) is unaffected.
         let abandoned_this_batch = self.drain_pending_cache_evictions();
 
-        // Collect all frames queued by publishers, then relay them to players
-        // on the same (app, stream_name) pair.
-        let mut relay_frames: Vec<_> = self
+        // Collect publisher frames, then merge socket-less injects **in front**
+        // so deferred injects are not starved behind sustained local fan-out.
+        let mut local_frames: Vec<_> = self
             .connections
             .iter_mut()
             .flat_map(|c| c.pending_relay.drain(..))
             .collect();
-
-        // Export publisher frames only (before inject merge) so remote→local
-        // injects are not echoed back out through the export buffer.
-        if let Some(export) = self.relay_export.as_mut() {
-            for frame in &relay_frames {
-                export.push_clone(frame);
-            }
-        }
-
-        // Socket-less injects share the same init-cache + fan-out path.
-        relay_frames.extend(self.pending_injected_relay.drain(..));
+        let mut relay_frames = std::mem::take(&mut self.pending_injected_relay);
+        relay_frames.append(&mut local_frames);
 
         // Replay cached codec headers and last keyframe to newly-joined players
         // using the pre-batch cache state, so init frames always precede live
@@ -1052,6 +1073,15 @@ impl Server {
             relay_sends += player_count;
             relay_processed += 1;
         }
+        // Export only frames that completed this poll (not requeued). Injected
+        // frames stay off the export path to avoid remote→local echo loops.
+        if let Some(export) = self.relay_export.as_mut() {
+            for frame in &relay_frames[..relay_processed] {
+                if !is_external_publisher_id(frame.publisher_conn_id) {
+                    export.push_clone(frame);
+                }
+            }
+        }
         for frame in relay_frames.drain(relay_processed..) {
             self.requeue_relay_frame(frame);
         }
@@ -1144,7 +1174,7 @@ impl Server {
     }
 
     fn requeue_relay_frame(&mut self, frame: RelayFrame) {
-        if frame.publisher_conn_id == EXTERNAL_RELAY_PUBLISHER_ID {
+        if is_external_publisher_id(frame.publisher_conn_id) {
             self.pending_injected_relay.push(frame);
             return;
         }
@@ -2847,8 +2877,9 @@ mod tests {
     #[test]
     fn relay_export_respects_byte_budget() {
         let mut server = test_server();
-        // Two 3-byte frames fit; a third 3-byte frame forces dropping oldest.
-        server.enable_relay_export(16, 6);
+        // Each frame retains 3 payload + 4 ("live") + 6 ("stream") = 13 bytes.
+        // Budget 26 fits two frames; a third forces dropping the oldest.
+        server.enable_relay_export(16, 26);
 
         let mut publisher = Conn::new();
         publisher.conn_id = 1;
@@ -2976,7 +3007,8 @@ mod tests {
     #[test]
     fn inject_relay_frame_respects_pending_limits() {
         let mut server = test_server();
-        server.resource_limits.max_pending_relay_bytes = 4;
+        // Route strings ("live" + "stream") count toward the byte budget.
+        server.resource_limits.max_pending_relay_bytes = 14;
         assert!(
             server
                 .inject_relay_frame("live", "stream", FrameType::Video, 0, b"abcd")
@@ -2985,6 +3017,71 @@ mod tests {
         assert_eq!(
             server.inject_relay_frame("live", "stream", FrameType::Video, 0, b"x"),
             Err(ErrorCode::Internal)
+        );
+    }
+
+    #[test]
+    fn inject_relay_frame_rejects_oversized_payload() {
+        let mut server = test_server();
+        let oversized = vec![0u8; DEFAULT_MAX_MSG_LENGTH as usize + 1];
+        assert_eq!(
+            server.inject_relay_frame("live", "stream", FrameType::Video, 0, &oversized),
+            Err(ErrorCode::Internal)
+        );
+    }
+
+    #[test]
+    fn relay_export_skips_requeued_frames() {
+        use crate::session::stream::Stream;
+        use crate::transport::Transport;
+        use std::os::unix::io::IntoRawFd;
+        use std::os::unix::net::UnixStream;
+
+        fn attached(conn_id: u64, publishing: bool) -> (Conn, UnixStream) {
+            let (server_end, peer_end) = UnixStream::pair().unwrap();
+            server_end.set_nonblocking(true).unwrap();
+            peer_end.set_nonblocking(true).unwrap();
+            let mut conn = Conn::new();
+            conn.conn_id = conn_id;
+            conn.app = "live".to_string();
+            conn.relay_enabled = true;
+            conn.transport = Some(Transport::new_plain(server_end.into_raw_fd()));
+            conn.current_stream = Some(Box::new(Stream {
+                stream_id: 1,
+                name: "stream".to_string(),
+                is_publishing: publishing,
+                is_playing: !publishing,
+                paused: false,
+                receive_audio: true,
+                receive_video: true,
+            }));
+            (conn, peer_end)
+        }
+
+        let (mut publisher, _publisher_peer) = attached(1, true);
+        publisher.pending_relay.extend([
+            relay_frame(FrameType::Video, vec![0x11]),
+            relay_frame(FrameType::Video, vec![0x22]),
+        ]);
+        let (player, _player_peer) = attached(2, false);
+
+        let mut server = test_server();
+        server.max_relay_sends_per_poll = 1;
+        server.enable_relay_export(16, 1024);
+        server.connections = vec![publisher, player];
+
+        server.process_connections().unwrap();
+        let first = server.drain_exported_relay_frames();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].payload, vec![0x11]);
+
+        server.process_connections().unwrap();
+        let second = server.drain_exported_relay_frames();
+        assert_eq!(second.len(), 1);
+        assert_eq!(
+            second[0].payload,
+            vec![0x22],
+            "deferred frame must export once on the poll that processes it"
         );
     }
 

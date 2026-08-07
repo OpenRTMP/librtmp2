@@ -120,7 +120,9 @@ Integrators can observe or feed the same local relay path used by publishers
 and players — without sockets or cluster concepts:
 
 ```rust
-use librtmp2::server::{Server, StreamInitSnapshot, EXTERNAL_RELAY_PUBLISHER_ID};
+use librtmp2::server::{
+    is_external_publisher_id, Server, StreamInitSnapshot, EXTERNAL_RELAY_PUBLISHER_ID,
+};
 use librtmp2::{FrameType, RelayFrame, ServerConfig};
 
 // Bounded export of publisher frames (disabled by default = no clones).
@@ -135,6 +137,7 @@ if let Some(snap) = server.stream_init_snapshot("live", "cam1") {
     let _: &StreamInitSnapshot = &snap;
     let _ = snap.avc_header;
     let _ = EXTERNAL_RELAY_PUBLISHER_ID;
+    let _ = is_external_publisher_id(EXTERNAL_RELAY_PUBLISHER_ID);
 }
 ```
 

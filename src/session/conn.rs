@@ -103,8 +103,9 @@ pub struct RelayFrame {
     pub app: String,
     /// Stream / relay-route key used to match publishers to players.
     pub stream_name: String,
-    /// Owning publisher connection id, or
-    /// [`crate::server::EXTERNAL_RELAY_PUBLISHER_ID`] for socket-less injects.
+    /// Owning publisher connection id. Socket-less injects use a high-bit
+    /// external id ([`crate::server::is_external_publisher_id`]); the sentinel
+    /// [`crate::server::EXTERNAL_RELAY_PUBLISHER_ID`] remains `u64::MAX`.
     pub publisher_conn_id: u64,
 }
 
@@ -115,12 +116,16 @@ impl RelayFrame {
     }
 
     pub(crate) fn retained_bytes(&self) -> usize {
-        self.payload.len().saturating_add(
-            self.cache_payload
-                .as_ref()
-                .map(|payload| payload.len())
-                .unwrap_or(0),
-        )
+        self.payload
+            .len()
+            .saturating_add(
+                self.cache_payload
+                    .as_ref()
+                    .map(|payload| payload.len())
+                    .unwrap_or(0),
+            )
+            .saturating_add(self.app.len())
+            .saturating_add(self.stream_name.len())
     }
 }
 pub struct Conn {
@@ -488,6 +493,9 @@ impl Conn {
         timestamp: u32,
         payload: &[u8],
     ) -> Result<()> {
+        if payload.len() > DEFAULT_MAX_MSG_LENGTH as usize {
+            return Err(ErrorCode::Internal);
+        }
         let normalized = normalize_modex_payload(payload, self.negotiated_caps.caps_ex_mask);
         self.queue_relay_frame(frame_type, timestamp, payload, normalized.as_ref())
     }
@@ -499,6 +507,9 @@ impl Conn {
         payload: &[u8],
         cache_payload: &[u8],
     ) -> Result<()> {
+        if payload.len() > DEFAULT_MAX_MSG_LENGTH as usize {
+            return Err(ErrorCode::Internal);
+        }
         let cache_payload = if cache_payload.len() == payload.len()
             && std::ptr::eq(cache_payload.as_ptr(), payload.as_ptr())
         {
@@ -506,12 +517,18 @@ impl Conn {
         } else {
             Some(cache_payload.to_vec())
         };
-        let retained_bytes = payload.len().saturating_add(
-            cache_payload
-                .as_ref()
-                .map(|payload| payload.len())
-                .unwrap_or(0),
-        );
+        let app = self.app.clone();
+        let stream_name = self.relay_route_key();
+        let retained_bytes = payload
+            .len()
+            .saturating_add(
+                cache_payload
+                    .as_ref()
+                    .map(|payload| payload.len())
+                    .unwrap_or(0),
+            )
+            .saturating_add(app.len())
+            .saturating_add(stream_name.len());
         if self.pending_relay.len() >= MAX_PENDING_RELAY_FRAMES
             || self.pending_relay_bytes().saturating_add(retained_bytes)
                 > self.max_pending_relay_bytes
@@ -523,8 +540,8 @@ impl Conn {
             timestamp,
             payload: payload.to_vec(),
             cache_payload,
-            app: self.app.clone(),
-            stream_name: self.relay_route_key(),
+            app,
+            stream_name,
             publisher_conn_id: self.conn_id,
         });
         Ok(())

@@ -13,6 +13,20 @@ begin at `1.0.0`.
 
 ## [Unreleased]
 
+### Fixed
+- Relay export no longer re-exports frames deferred by the per-poll send budget.
+- Socket-less injects are queued ahead of fresh local publisher frames so they
+  are not starved under sustained fan-out.
+- External inject cache ownership uses a stable per-route publisher id in the
+  high-bit range (`is_external_publisher_id`) instead of one shared id for all
+  routes.
+- Pending-relay byte limits count `app` / `stream_name` string storage; inject
+  rejects payloads above `DEFAULT_MAX_MSG_LENGTH`.
+
+### Removed
+- Accidental `scripts/docker_cargo_test.py` helper (local Windows Docker
+  workaround; not part of the library).
+
 ## [0.7.0] — 2026-08-07
 
 ### Added
@@ -23,7 +37,8 @@ begin at `1.0.0`.
     relay frames (disabled by default = zero extra copies; overflow drops
     oldest frames).
   - `Server::inject_relay_frame` — inject media into the local relay /
-    init-cache / player fan-out path without a socket (`EXTERNAL_RELAY_PUBLISHER_ID`).
+    init-cache / player fan-out path without a socket (per-route external
+    publisher ids; `EXTERNAL_RELAY_PUBLISHER_ID` sentinel).
   - `Conn::inject_relay_frame` — queue frames on an existing publisher
     connection (skips `on_media_cb`; integrator-trusted).
   - `Server::stream_init_snapshot` + `StreamInitSnapshot` — copy cached
