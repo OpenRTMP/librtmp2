@@ -16,6 +16,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ github.event.inputs.tag || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   ensure-tag:
     name: ensure release tag exists
@@ -53,9 +57,9 @@ jobs:
   verify:
     name: verify before release
     needs: ensure-tag
-    # ensure-tag is skipped (not failed) on a `push: tags:` run - let this
-    # job proceed in that case, only stop if tag creation actually failed.
-    if: always() && needs.ensure-tag.result != 'failure' && needs.ensure-tag.result != 'cancelled'
+    # On `push: tags:` ensure-tag is skipped; on workflow_dispatch it must
+    # succeed so verify never checks out a tag that was never created.
+    if: always() && (needs.ensure-tag.result == 'success' || needs.ensure-tag.result == 'skipped')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
