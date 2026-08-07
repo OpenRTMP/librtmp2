@@ -429,10 +429,10 @@ impl Server {
     /// id ([`is_external_publisher_id`]). Resource limits mirror per-connection
     /// pending-relay caps (`MAX_PENDING_RELAY_FRAMES` and
     /// `resource_limits.max_pending_relay_bytes`), counting payload plus route
-    /// string storage. Payloads larger than the RTMP 24-bit wire length
-    /// ([`RTMP_WIRE_MAX_MSG_LENGTH`]) and route
+    /// string storage. Payloads larger than [`DEFAULT_MAX_MSG_LENGTH`] (capped
+    /// by [`RTMP_WIRE_MAX_MSG_LENGTH`]) and route
     /// components longer than `MAX_INJECT_ROUTE_COMPONENT_BYTES` are rejected.
-    /// Conflicts with a socket publisher already owning `(app, stream_name)`
+    /// Empty `app` / `stream_name` are rejected. Conflicts with a socket publisher
     /// (or another external id) are rejected via `active_publish_routes`.
     /// The claim persists until [`Self::release_injected_route`] — including
     /// across empty polls between non-cacheable frames. Callers that cycle
@@ -447,7 +447,14 @@ impl Server {
         timestamp: u32,
         payload: &[u8],
     ) -> Result<()> {
-        if payload.len() > RTMP_WIRE_MAX_MSG_LENGTH as usize {
+        // Cap at the chunk-layer default (not the absolute wire max) so injected
+        // frames stay within what typical Conn readers accept on fan-out.
+        let max_payload =
+            (DEFAULT_MAX_MSG_LENGTH as usize).min(RTMP_WIRE_MAX_MSG_LENGTH as usize);
+        if payload.len() > max_payload {
+            return Err(ErrorCode::Internal);
+        }
+        if app.is_empty() || stream_name.is_empty() {
             return Err(ErrorCode::Internal);
         }
         if app.len() > MAX_INJECT_ROUTE_COMPONENT_BYTES
@@ -1494,6 +1501,22 @@ impl Server {
             .saturating_add(route_key_bytes)
             .saturating_sub(existing_field_len);
         if projected_total > max_cache_bytes {
+            // Refuse before wiping peer caches when even clearing every other
+            // external route still cannot fit this reservation.
+            let freeable: usize = self
+                .stream_cache
+                .iter()
+                .filter(|(k, _)| *k != key)
+                .filter(|(k, _)| {
+                    self.publisher_cache_keys.iter().any(|(pub_id, keys)| {
+                        is_external_publisher_id(*pub_id) && keys.contains(*k)
+                    })
+                })
+                .map(|(k, cache)| Self::stream_cache_entry_bytes(k, cache))
+                .sum();
+            if projected_total.saturating_sub(freeable) > max_cache_bytes {
+                return false;
+            }
             while projected_total > max_cache_bytes
                 && self.evict_for_stream_cache_pressure(publisher_conn_id, key)
             {
@@ -3421,9 +3444,22 @@ mod tests {
     #[test]
     fn inject_relay_frame_rejects_oversized_payload() {
         let mut server = test_server();
-        let oversized = vec![0u8; RTMP_WIRE_MAX_MSG_LENGTH as usize + 1];
+        let oversized = vec![0u8; DEFAULT_MAX_MSG_LENGTH as usize + 1];
         assert_eq!(
             server.inject_relay_frame("live", "stream", FrameType::Video, 0, &oversized),
+            Err(ErrorCode::Internal)
+        );
+    }
+
+    #[test]
+    fn inject_relay_frame_rejects_empty_route_components() {
+        let mut server = test_server();
+        assert_eq!(
+            server.inject_relay_frame("", "stream", FrameType::Video, 0, b"x"),
+            Err(ErrorCode::Internal)
+        );
+        assert_eq!(
+            server.inject_relay_frame("live", "", FrameType::Video, 0, b"x"),
             Err(ErrorCode::Internal)
         );
     }

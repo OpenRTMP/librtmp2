@@ -22,7 +22,7 @@ librtmp2 (0.7.0-1) UNRELEASED; urgency=medium
     collide with external publisher ids; remove accidental
     scripts/docker_cargo_test.py helper.
 
- -- OpenRTMP <info@openrtmp.org>  Fri, 07 Aug 2026 00:00:00 +0000
+ -- OpenRTMP <info@openrtmp.org>  Sat, 08 Aug 2026 00:00:00 +0000
 
 librtmp2 (0.6.0-1) UNRELEASED; urgency=medium
 

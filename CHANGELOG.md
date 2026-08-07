@@ -13,7 +13,7 @@ begin at `1.0.0`.
 
 ## [Unreleased]
 
-## [0.7.0] — 2026-08-07
+## [0.7.0] — 2026-08-08
 
 ### Added
 - Public integrator APIs for external media export and socket-less inject:

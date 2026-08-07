@@ -313,7 +313,11 @@ impl Conn {
         let Some(stream) = self.current_stream.as_ref() else {
             return self.session_setup_started.elapsed() >= RTMP_SESSION_SETUP_TIMEOUT;
         };
-        if stream.is_publishing {
+        // Publish role *or* an inject-held route claim must obey the media
+        // squat timer. Otherwise an idle/inject Conn (or a player that somehow
+        // held a claim) blocks socket publishers until TCP disconnect.
+        let holding_inject_claim = self.claimed_publish_route.is_some();
+        if stream.is_publishing || holding_inject_claim {
             // A peer that claims a publish route but never sends media can
             // otherwise squat the route indefinitely by keeping TCP alive.
             // Trusted injects count toward liveness without polluting socket
@@ -503,7 +507,9 @@ impl Conn {
     ///
     /// Uses the same ModEx-normalize + `queue_relay_frame` path as inbound
     /// publisher media, but skips `on_media_cb` / `on_frame_cb` (integrator-
-    /// trusted). Does not require `is_publishing` or `relay_enabled`.
+    /// trusted). Does not require `is_publishing` or `relay_enabled`, but
+    /// refuses while the connection is actively playing — a play session must
+    /// not claim (and squat) a publish route behind the player exemption.
     pub fn inject_relay_frame(
         &mut self,
         frame_type: FrameType,
@@ -516,6 +522,14 @@ impl Conn {
         }
         let stream_name = self.relay_route_key();
         if self.app.is_empty() || stream_name.is_empty() {
+            return Err(ErrorCode::Internal);
+        }
+        if self
+            .current_stream
+            .as_ref()
+            .map(|s| s.is_playing)
+            .unwrap_or(false)
+        {
             return Err(ErrorCode::Internal);
         }
         let already_owned_route =
@@ -2735,9 +2749,24 @@ mod tests {
             .unwrap();
         assert!(idle_inject.injected_media_bytes > 0);
         idle_inject.evict_active_publish_route();
-        assert_eq!(
-            idle_inject.injected_media_bytes, 0,
+        assert!(
+            idle_inject.injected_media_bytes == 0,
             "idle inject must not carry into a later publish epoch"
+        );
+
+        // Active players must not claim a publish route via Conn inject.
+        let mut playing = Conn::new();
+        playing.app = "live".to_string();
+        playing.current_stream = Some(Box::new(Stream {
+            name: "cam".to_string(),
+            is_playing: true,
+            ..Stream::new(1)
+        }));
+        assert!(
+            playing
+                .inject_relay_frame(FrameType::Video, 0, &[0x17, 0x01, 0xAA])
+                .is_err(),
+            "playing connections must not squat publish routes via inject"
         );
 
         let mut squatting = Conn::new();
