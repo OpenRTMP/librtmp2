@@ -36,9 +36,12 @@ begin at `1.0.0`.
   inject and local publishers cannot share one route's init cache.
 - `Conn::inject_relay_frame` counts audio/video toward publisher liveness
   (`injected_media_bytes`) without changing socket receive telemetry.
-- `release_injected_route` frees external publish claims; claims are not
-  auto-reaped between polls so continuous non-cacheable inject feeds stay
-  exclusive until explicit release.
+- `release_injected_route` / `release_all_injected_routes` free external
+  publish claims; claims are not auto-reaped between polls so continuous
+  non-cacheable inject feeds stay exclusive until explicit release.
+  New unique claims beyond `MAX_EXTERNAL_PUBLISH_ROUTES` (1024) are rejected
+  so cycling routes without release cannot grow `active_publish_routes`
+  without bound.
 - Cache-budget projection subtracts only the replaced field after peer
   eviction; reservations whose own irreducible size exceeds
   `max_stream_cache_bytes` reject without wiping peer routes.
@@ -66,7 +69,10 @@ begin at `1.0.0`.
     oldest frames).
   - `Server::inject_relay_frame` — inject media into the local relay /
     init-cache / player fan-out path without a socket (per-route external
-    publisher ids; `EXTERNAL_RELAY_PUBLISHER_ID` sentinel).
+    publisher ids; `EXTERNAL_RELAY_PUBLISHER_ID` sentinel; soft-capped by
+    `MAX_EXTERNAL_PUBLISH_ROUTES`).
+  - `Server::release_injected_route` /
+    `Server::release_all_injected_routes` — free socket-less publish claims.
   - `Conn::inject_relay_frame` — queue frames on an existing publisher
     connection (skips `on_media_cb`; integrator-trusted).
   - `Server::stream_init_snapshot` + `StreamInitSnapshot` — copy cached

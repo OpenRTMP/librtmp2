@@ -72,6 +72,14 @@ const MAX_CACHED_KEYFRAME_BYTES: usize = 2 * 1024 * 1024;
 /// and `publisher_cache_keys` when an integrator feeds untrusted names.
 const MAX_INJECT_ROUTE_COMPONENT_BYTES: usize = 1024;
 
+/// Soft cap on concurrent socket-less inject claims in `active_publish_routes`.
+///
+/// Claims persist until [`Server::release_injected_route`] (or
+/// [`Server::release_all_injected_routes`]). New unique routes beyond this
+/// limit are rejected so buggy integrators that cycle routes without release
+/// cannot grow the map without bound — without stealing mid-feed claims.
+pub const MAX_EXTERNAL_PUBLISH_ROUTES: usize = 1024;
+
 /// Maximum number of incomplete TLS handshakes retained when `max_connections`
 /// is unlimited. When `max_connections` is set, active connections and pending
 /// handshakes share that configured cap instead.
@@ -426,7 +434,10 @@ impl Server {
     /// Conflicts with a socket publisher already owning `(app, stream_name)`
     /// (or another external id) are rejected via `active_publish_routes`.
     /// The claim persists until [`Self::release_injected_route`] — including
-    /// across empty polls between non-cacheable frames.
+    /// across empty polls between non-cacheable frames. Callers that cycle
+    /// many unique routes **must** release finished feeds; new claims beyond
+    /// [`MAX_EXTERNAL_PUBLISH_ROUTES`] are rejected (soft cap, no mid-feed
+    /// eviction).
     pub fn inject_relay_frame(
         &mut self,
         app: &str,
@@ -477,7 +488,17 @@ impl Server {
                 Some(&owner) if owner != publisher_conn_id => {
                     return Err(ErrorCode::Internal);
                 }
-                _ => {
+                Some(_) => {
+                    // Already claimed by this external feed — reuse.
+                }
+                None => {
+                    let external_claims = routes
+                        .values()
+                        .filter(|id| is_external_publisher_id(**id))
+                        .count();
+                    if external_claims >= MAX_EXTERNAL_PUBLISH_ROUTES {
+                        return Err(ErrorCode::Internal);
+                    }
                     routes.insert(key, publisher_conn_id);
                 }
             }
@@ -499,8 +520,9 @@ impl Server {
     /// External inject claims stay in `active_publish_routes` until this is
     /// called — including across empty polls between non-cacheable frames —
     /// so socket publishers cannot steal the route mid-feed. Call when an
-    /// external feed ends. Also drops any init-cache entry owned solely by
-    /// that external id and pending inject frames for the route.
+    /// external feed ends (required for continually changing routes; see
+    /// [`MAX_EXTERNAL_PUBLISH_ROUTES`]). Also drops any init-cache entry owned
+    /// solely by that external id and pending inject frames for the route.
     pub fn release_injected_route(&mut self, app: &str, stream_name: &str) {
         let key = (app.to_string(), stream_name.to_string());
         let external_id = external_publisher_id_for_route(app, stream_name);
@@ -518,6 +540,26 @@ impl Server {
             if routes.get(&key) == Some(&external_id) {
                 routes.remove(&key);
             }
+        }
+    }
+
+    /// Release every socket-less inject claim currently held by this server.
+    ///
+    /// Convenience for shutdown / remesh; prefer
+    /// [`Self::release_injected_route`] per finished feed in normal operation.
+    pub fn release_all_injected_routes(&mut self) {
+        let external_keys: Vec<(String, String)> = {
+            let Ok(routes) = self.active_publish_routes.lock() else {
+                return;
+            };
+            routes
+                .iter()
+                .filter(|(_, id)| is_external_publisher_id(**id))
+                .map(|(k, _)| k.clone())
+                .collect()
+        };
+        for (app, stream_name) in external_keys {
+            self.release_injected_route(&app, &stream_name);
         }
     }
 
@@ -3719,6 +3761,50 @@ mod tests {
             "only release_injected_route frees the claim"
         );
         assert!(registry.claim(99, "live", "ephemeral"));
+    }
+
+    #[test]
+    fn inject_soft_caps_external_publish_routes() {
+        let mut server = test_server();
+        for i in 0..super::MAX_EXTERNAL_PUBLISH_ROUTES {
+            let name = format!("cam{i}");
+            server
+                .inject_relay_frame("live", &name, FrameType::Video, 0, &[0x27, 0x01, 0x01])
+                .unwrap();
+            // Drain pending so the soft claim cap is what blocks, not the
+            // pending-relay frame budget.
+            server.process_connections().unwrap();
+        }
+        // Re-inject on an already-claimed route must still succeed at the cap.
+        server
+            .inject_relay_frame("live", "cam0", FrameType::Video, 1, &[0x27, 0x01, 0x02])
+            .unwrap();
+        assert!(
+            server
+                .inject_relay_frame("live", "overflow", FrameType::Video, 0, &[0x27, 0x01, 0x01])
+                .is_err(),
+            "new unique inject claim must fail at MAX_EXTERNAL_PUBLISH_ROUTES"
+        );
+        server.release_injected_route("live", "cam0");
+        // Drop the successful re-inject pending frame so the freed claim slot
+        // is the only gate for the overflow route.
+        server.pending_injected_relay.clear();
+        server
+            .inject_relay_frame("live", "overflow", FrameType::Video, 0, &[0x27, 0x01, 0x01])
+            .unwrap();
+        server.release_all_injected_routes();
+        assert_eq!(
+            server
+                .active_publish_routes
+                .lock()
+                .unwrap()
+                .values()
+                .filter(|id| super::is_external_publisher_id(**id))
+                .count(),
+            0,
+            "release_all_injected_routes must clear every external claim"
+        );
+        assert!(server.pending_injected_relay.is_empty());
     }
 
     #[test]

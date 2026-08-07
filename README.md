@@ -131,8 +131,11 @@ let frames: Vec<RelayFrame> = server.drain_exported_relay_frames();
 
 // Socket-less inject into cache + player fan-out for (app, stream).
 // Claims the route until `release_injected_route` (call when the feed ends).
+// Required for continually changing routes — otherwise new claims stop at
+// `MAX_EXTERNAL_PUBLISH_ROUTES` (soft cap; no mid-feed eviction).
 server.inject_relay_frame("live", "cam1", FrameType::Video, ts, &payload)?;
 server.release_injected_route("live", "cam1");
+// Or on shutdown / remesh: server.release_all_injected_routes();
 
 // Late-joiner / remote-subscriber init snapshot from StreamCache.
 if let Some(snap) = server.stream_init_snapshot("live", "cam1") {
