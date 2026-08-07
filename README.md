@@ -130,7 +130,9 @@ server.enable_relay_export(/*max_frames*/ 256, /*max_bytes*/ 4 * 1024 * 1024);
 let frames: Vec<RelayFrame> = server.drain_exported_relay_frames();
 
 // Socket-less inject into cache + player fan-out for (app, stream).
+// Claims the route until `release_injected_route` (call when the feed ends).
 server.inject_relay_frame("live", "cam1", FrameType::Video, ts, &payload)?;
+server.release_injected_route("live", "cam1");
 
 // Late-joiner / remote-subscriber init snapshot from StreamCache.
 if let Some(snap) = server.stream_init_snapshot("live", "cam1") {

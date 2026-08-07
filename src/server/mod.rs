@@ -425,6 +425,8 @@ impl Server {
     /// components longer than `MAX_INJECT_ROUTE_COMPONENT_BYTES` are rejected.
     /// Conflicts with a socket publisher already owning `(app, stream_name)`
     /// (or another external id) are rejected via `active_publish_routes`.
+    /// The claim persists until [`Self::release_injected_route`] — including
+    /// across empty polls between non-cacheable frames.
     pub fn inject_relay_frame(
         &mut self,
         app: &str,
@@ -494,9 +496,11 @@ impl Server {
 
     /// Release a socket-less inject claim on `(app, stream_name)`.
     ///
-    /// Call when an external feed ends so socket publishers can reclaim the
-    /// route. Also drops any init-cache entry owned solely by that external id
-    /// and pending inject frames for the route.
+    /// External inject claims stay in `active_publish_routes` until this is
+    /// called — including across empty polls between non-cacheable frames —
+    /// so socket publishers cannot steal the route mid-feed. Call when an
+    /// external feed ends. Also drops any init-cache entry owned solely by
+    /// that external id and pending inject frames for the route.
     pub fn release_injected_route(&mut self, app: &str, stream_name: &str) {
         let key = (app.to_string(), stream_name.to_string());
         let external_id = external_publisher_id_for_route(app, stream_name);
@@ -514,30 +518,6 @@ impl Server {
             if routes.get(&key) == Some(&external_id) {
                 routes.remove(&key);
             }
-        }
-    }
-
-    /// Drop external publish-route claims that have neither pending inject
-    /// frames nor stream-cache ownership (non-cacheable-only feeds).
-    fn reap_idle_external_publish_routes(&mut self) {
-        let pending: std::collections::HashSet<(String, String)> = self
-            .pending_injected_relay
-            .iter()
-            .map(|f| (f.app.clone(), f.stream_name.clone()))
-            .collect();
-        let cached_external: std::collections::HashSet<(String, String)> = self
-            .publisher_cache_keys
-            .iter()
-            .filter(|(id, _)| is_external_publisher_id(**id))
-            .flat_map(|(_, keys)| keys.iter().cloned())
-            .collect();
-        if let Ok(mut routes) = self.active_publish_routes.lock() {
-            routes.retain(|key, owner| {
-                if !is_external_publisher_id(*owner) {
-                    return true;
-                }
-                pending.contains(key) || cached_external.contains(key)
-            });
         }
     }
 
@@ -1230,7 +1210,6 @@ impl Server {
             }
             self.connections.remove(i);
         }
-        self.reap_idle_external_publish_routes();
         Ok(())
     }
 
@@ -1336,22 +1315,9 @@ impl Server {
         }
         // External inject has no connection teardown; drop empty owner rows so
         // `publisher_cache_keys` cannot grow without bound across routes.
+        // Publish-route claims stay until `release_injected_route` so a
+        // continuous feed is not stolen between non-cacheable frames.
         self.publisher_cache_keys.retain(|_, keys| !keys.is_empty());
-        // Free the publish-route claim when an external owner lost its last
-        // cache entry for this key and no inject frames are still queued.
-        let still_pending = self
-            .pending_injected_relay
-            .iter()
-            .any(|f| f.app == key.0 && f.stream_name == key.1);
-        if !still_pending {
-            if let Ok(mut routes) = self.active_publish_routes.lock() {
-                if let Some(&owner) = routes.get(key) {
-                    if is_external_publisher_id(owner) {
-                        routes.remove(key);
-                    }
-                }
-            }
-        }
     }
 
     /// Drop another cache entry owned by `publisher_conn_id`, if any.
@@ -1445,6 +1411,22 @@ impl Server {
         publisher_conn_id: u64,
     ) -> bool {
         let is_new_key = !self.stream_cache.contains_key(key);
+        let route_key_bytes = if is_new_key {
+            key.0.len().saturating_add(key.1.len())
+        } else {
+            0
+        };
+        let max_cache_bytes = self.resource_limits.max_stream_cache_bytes;
+        // This reservation's own contribution cannot shrink by evicting peers.
+        // Reject before wiping other routes when even an empty cache could not
+        // hold `incoming` (replacing `existing_field_len` on the same key).
+        let irreducible = incoming_len
+            .saturating_add(route_key_bytes)
+            .saturating_sub(existing_field_len);
+        if irreducible > max_cache_bytes {
+            return false;
+        }
+
         if is_new_key
             && self.publisher_cache_key_count(publisher_conn_id)
                 >= MAX_STREAM_CACHE_KEYS_PER_PUBLISHER
@@ -1459,17 +1441,11 @@ impl Server {
             }
         }
 
-        let route_key_bytes = if is_new_key {
-            key.0.len().saturating_add(key.1.len())
-        } else {
-            0
-        };
         let mut projected_total = self
             .stream_cache_bytes()
             .saturating_add(incoming_len)
             .saturating_add(route_key_bytes)
             .saturating_sub(existing_field_len);
-        let max_cache_bytes = self.resource_limits.max_stream_cache_bytes;
         if projected_total > max_cache_bytes {
             while projected_total > max_cache_bytes
                 && self.evict_for_stream_cache_pressure(publisher_conn_id, key)
@@ -1911,6 +1887,39 @@ mod tests {
             server.connections[0].pending_relay.is_empty(),
             "the deferred frame must make progress on the next poll"
         );
+    }
+
+    #[test]
+    fn interleave_relay_sources_respects_lead_flag() {
+        let injected = vec![relay_frame_for_publisher(
+            EXTERNAL_RELAY_PUBLISHER_ID,
+            "stream",
+            FrameType::Video,
+            vec![0xA1],
+        )];
+        let local = vec![relay_frame_for_publisher(
+            1,
+            "stream",
+            FrameType::Video,
+            vec![0xB1],
+        )];
+        let inj_first =
+            interleave_relay_sources(injected.clone(), local.clone(), true);
+        assert_eq!(inj_first[0].payload, vec![0xA1]);
+        assert_eq!(inj_first[1].payload, vec![0xB1]);
+        let loc_first = interleave_relay_sources(injected, local, false);
+        assert_eq!(loc_first[0].payload, vec![0xB1]);
+        assert_eq!(loc_first[1].payload, vec![0xA1]);
+    }
+
+    #[test]
+    fn process_connections_rotates_interleave_lead() {
+        let mut server = test_server();
+        assert!(server.relay_interleave_inject_first);
+        server.process_connections().unwrap();
+        assert!(!server.relay_interleave_inject_first);
+        server.process_connections().unwrap();
+        assert!(server.relay_interleave_inject_first);
     }
 
     fn test_server() -> Server {
@@ -3429,6 +3438,60 @@ mod tests {
     }
 
     #[test]
+    fn relay_export_flushes_requeued_frames_when_publisher_removed() {
+        use crate::session::stream::Stream;
+        use crate::transport::Transport;
+        use std::os::unix::io::IntoRawFd;
+        use std::os::unix::net::UnixStream;
+
+        let (server_end, _peer_end) = UnixStream::pair().unwrap();
+        server_end.set_nonblocking(true).unwrap();
+
+        let mut publisher = Conn::new();
+        publisher.conn_id = 1;
+        publisher.app = "live".to_string();
+        // No transport: removed later this poll after budget requeue.
+        publisher.pending_relay.extend([
+            relay_frame(FrameType::Video, vec![0x11]),
+            relay_frame(FrameType::Video, vec![0x22]),
+        ]);
+
+        let mut player = Conn::new();
+        player.conn_id = 2;
+        player.app = "live".to_string();
+        player.relay_enabled = true;
+        player.transport = Some(Transport::new_plain(server_end.into_raw_fd()));
+        player.current_stream = Some(Box::new(Stream {
+            stream_id: 1,
+            name: "stream".to_string(),
+            is_publishing: false,
+            is_playing: true,
+            paused: false,
+            receive_audio: true,
+            receive_video: true,
+        }));
+
+        let mut server = test_server();
+        server.max_relay_sends_per_poll = 1;
+        server.enable_relay_export(16, 1024);
+        server.connections = vec![publisher, player];
+        server.process_connections().unwrap();
+
+        let exported = server.drain_exported_relay_frames();
+        assert_eq!(
+            exported.len(),
+            2,
+            "budget-deferred frames must export on same-poll publisher teardown"
+        );
+        assert_eq!(exported[0].payload, vec![0x11]);
+        assert_eq!(exported[1].payload, vec![0x22]);
+        assert!(
+            server.connections.iter().all(|c| c.conn_id != 1),
+            "socket-less publisher must be removed"
+        );
+    }
+
+    #[test]
     fn injected_frames_respect_receive_audio_video() {
         use crate::session::stream::Stream;
         use crate::transport::Transport;
@@ -3627,19 +3690,68 @@ mod tests {
     }
 
     #[test]
-    fn idle_external_claims_are_reaped_after_process() {
+    fn external_inject_claim_persists_until_release() {
         let mut server = test_server();
         server
             .inject_relay_frame("live", "ephemeral", FrameType::Video, 0, &[0x27, 0x01, 0x01])
             .unwrap();
         server.process_connections().unwrap();
         assert!(
+            server
+                .active_publish_routes
+                .lock()
+                .unwrap()
+                .contains_key(&("live".to_string(), "ephemeral".to_string())),
+            "non-cacheable inject must keep the route claim between polls"
+        );
+        let registry = PublishRouteRegistry::new(Arc::clone(&server.active_publish_routes));
+        assert!(
+            !registry.claim(99, "live", "ephemeral"),
+            "socket publisher must not steal claim between inject frames"
+        );
+        server.release_injected_route("live", "ephemeral");
+        assert!(
             !server
                 .active_publish_routes
                 .lock()
                 .unwrap()
                 .contains_key(&("live".to_string(), "ephemeral".to_string())),
-            "non-cacheable inject must not leave a permanent route claim"
+            "only release_injected_route frees the claim"
+        );
+        assert!(registry.claim(99, "live", "ephemeral"));
+    }
+
+    #[test]
+    fn impossible_cache_reservation_does_not_evict_peers() {
+        let mut server = test_server();
+        server
+            .inject_relay_frame("live", "peer", FrameType::Video, 0, &[0x17, 0x00, 0x01])
+            .unwrap();
+        server.process_connections().unwrap();
+        assert!(server
+            .stream_cache
+            .contains_key(&("live".to_string(), "peer".to_string())));
+
+        // Cap below the irreducible size of the incoming field alone so peer
+        // eviction cannot make this reservation fit.
+        server.resource_limits.max_stream_cache_bytes = 4;
+        let mut huge = vec![0x17, 0x00];
+        huge.extend(std::iter::repeat(0xCDu8).take(64));
+        server
+            .inject_relay_frame("live", "too-big", FrameType::Video, 0, &huge)
+            .unwrap();
+        server.process_connections().unwrap();
+        assert!(
+            server
+                .stream_cache
+                .contains_key(&("live".to_string(), "peer".to_string())),
+            "impossible reservation must not wipe peer cache routes"
+        );
+        assert!(
+            !server
+                .stream_cache
+                .contains_key(&("live".to_string(), "too-big".to_string())),
+            "impossible reservation must not create a cache entry"
         );
     }
 

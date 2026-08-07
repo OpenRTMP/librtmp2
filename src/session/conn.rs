@@ -382,6 +382,9 @@ impl Conn {
             .map(|s| s.is_publishing)
             .unwrap_or(false);
         if !was_publishing {
+            // Idle/prior-epoch inject must not survive createStream / play /
+            // FCUnpublish into a later empty publish's media deadline.
+            self.injected_media_bytes = 0;
             return;
         }
         let claimed_route = self.claimed_publish_route.clone();
@@ -2686,6 +2689,21 @@ mod tests {
         assert!(
             injected_only.session_setup_timed_out(),
             "new publish epoch without media must still time out"
+        );
+
+        // Idle inject (no publish role) must also clear on createStream/unpublish
+        // paths that call evict while !was_publishing.
+        let mut idle_inject = Conn::new();
+        idle_inject.state = ConnState::StreamCreated;
+        idle_inject.current_stream = Some(Box::new(Stream::new(1)));
+        idle_inject
+            .inject_relay_frame(FrameType::Video, 0, &[0x17, 0x01, 0xAA])
+            .unwrap();
+        assert!(idle_inject.injected_media_bytes > 0);
+        idle_inject.evict_active_publish_route();
+        assert_eq!(
+            idle_inject.injected_media_bytes, 0,
+            "idle inject must not carry into a later publish epoch"
         );
 
         let mut squatting = Conn::new();

@@ -36,10 +36,14 @@ begin at `1.0.0`.
   inject and local publishers cannot share one route's init cache.
 - `Conn::inject_relay_frame` counts audio/video toward publisher liveness
   (`injected_media_bytes`) without changing socket receive telemetry.
-- `release_injected_route` plus idle reaping drops external publish claims that
-  never touch the init cache; cache-budget projection subtracts only the
-  replaced field after peer eviction.
-- Injected liveness is reset on new/renamed publish and publish-route eviction.
+- `release_injected_route` frees external publish claims; claims are not
+  auto-reaped between polls so continuous non-cacheable inject feeds stay
+  exclusive until explicit release.
+- Cache-budget projection subtracts only the replaced field after peer
+  eviction; reservations whose own irreducible size exceeds
+  `max_stream_cache_bytes` reject without wiping peer routes.
+- Injected liveness is reset on new/renamed publish and on every
+  publish-route eviction path (including idle `!was_publishing` teardown).
 - Fair inject↔local interleave alternates which source leads each poll so a
   budget of 1 cannot permanently starve one side.
 - Relay export flushes budget-deferred frames when their publisher connection
