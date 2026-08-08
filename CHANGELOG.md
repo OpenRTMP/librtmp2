@@ -38,6 +38,9 @@ begin at `1.0.0`.
   cannot fit.
 - Stream-cache per-publisher key-limit eviction likewise runs only after the
   byte-budget freeable precheck.
+- Abandoned-route pruning of `pending_relay` applies only under deferred relay
+  with `relay_enabled` cleared, so normal publishers keep same-batch media
+  through FCUnpublish/deleteStream for fan-out and export.
 
 ## [0.7.0] — 2026-08-08
 

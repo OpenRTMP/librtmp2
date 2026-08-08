@@ -1147,12 +1147,18 @@ impl Server {
         // order within each source is preserved.
         self.reap_stale_inject_routes();
         // When defer_media_relay clears relay_enabled (FCUnpublish/deleteStream)
-        // after media was already queued, drop abandoned-route frames. Do not
-        // wipe the whole queue when injects arrived before publish: publish
-        // resets `injected_media_bytes` for the media deadline while those
-        // frames are still pending.
+        // after media was already queued, drop abandoned-route frames so they
+        // cannot resurrect after a later reauth. Normal (non-deferred)
+        // publishers must still fan out / export frames already accepted in
+        // this batch — abandonment only skips init-cache writes for them.
+        // Do not wipe the whole queue when injects arrived before publish:
+        // publish resets `injected_media_bytes` for the media deadline while
+        // those frames are still pending.
         for conn in &mut self.connections {
-            if !abandoned_this_batch.is_empty() {
+            if conn.defer_media_relay
+                && !conn.relay_enabled
+                && !abandoned_this_batch.is_empty()
+            {
                 let conn_id = conn.conn_id;
                 conn.pending_relay.retain(|f| {
                     !abandoned_this_batch.contains(&(f.app.clone(), f.stream_name.clone(), conn_id))
