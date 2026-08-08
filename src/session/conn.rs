@@ -3364,7 +3364,8 @@ mod tests {
             receive_video: true,
         }));
         assert!(
-            conn.inject_relay_frame(FrameType::Video, 0, &[0x17, 0x01, 0xAA]).is_err(),
+            conn.inject_relay_frame(FrameType::Video, 0, &[0x17, 0x01, 0xAA])
+                .is_err(),
             "playing-only connections must not inject publisher media"
         );
     }

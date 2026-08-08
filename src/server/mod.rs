@@ -482,8 +482,7 @@ impl Server {
     ) -> Result<()> {
         // Cap at the chunk-layer default (not the absolute wire max) so injected
         // frames stay within what typical Conn readers accept on fan-out.
-        let max_payload =
-            (DEFAULT_MAX_MSG_LENGTH as usize).min(RTMP_WIRE_MAX_MSG_LENGTH as usize);
+        let max_payload = (DEFAULT_MAX_MSG_LENGTH as usize).min(RTMP_WIRE_MAX_MSG_LENGTH as usize);
         if payload.len() > max_payload {
             return Err(ErrorCode::Internal);
         }
@@ -3692,7 +3691,10 @@ mod tests {
         assert!(!unsafe { MEDIA_CB_HIT }, "inject must skip on_media_cb");
     }
 
+    #[test]
     fn conn_inject_relay_frame_rejects_playing_only_connection() {
+        use crate::session::stream::Stream;
+
         let mut conn = Conn::new();
         conn.app = "live".to_string();
         conn.current_stream = Some(Box::new(Stream {
