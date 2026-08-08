@@ -146,9 +146,10 @@ pub struct Conn {
     pub bytes_at_last_ack: u64,
     /// Audio/video payload bytes received (excludes handshake/control overhead).
     pub media_bytes_received: u64,
-    /// Audio/video bytes accepted via [`Conn::inject_relay_frame`] (socket
-    /// telemetry stays in `media_bytes_received`; this counts trusted injects
-    /// toward publisher liveness so route squatters still time out).
+    /// Bytes accepted via [`Conn::inject_relay_frame`] (AV + script/metadata;
+    /// socket telemetry stays in `media_bytes_received`). Counts trusted
+    /// injects toward publisher liveness and deferred-relay drain so route
+    /// squatters still time out and metadata is not stuck while relay is deferred.
     pub injected_media_bytes: u64,
     /// Audio/video payload bytes sent to this peer.
     pub media_bytes_sent: u64,
@@ -558,12 +559,14 @@ impl Conn {
             }
             return Err(e);
         }
-        // Count audio/video injects as publisher activity for squat timeout.
-        if matches!(frame_type, FrameType::Audio | FrameType::Video) {
-            self.injected_media_bytes = self
-                .injected_media_bytes
-                .saturating_add(payload.len() as u64);
-        }
+        // Count all successful injects (AV + script/metadata) as publisher
+        // activity for squat timeout and deferred-relay drain/export. Script
+        // and metadata never touch socket receive telemetry, but they must
+        // still wake `Server::process_connections` when `defer_media_relay`
+        // holds `relay_enabled` off.
+        self.injected_media_bytes = self
+            .injected_media_bytes
+            .saturating_add((payload.len() as u64).max(1));
         Ok(())
     }
 
@@ -2729,6 +2732,27 @@ mod tests {
             !injected_only.session_setup_timed_out(),
             "trusted inject must count toward publisher liveness"
         );
+
+        let mut script_only = Conn::new();
+        script_only.state = ConnState::Publishing;
+        script_only.app = "live".to_string();
+        script_only.defer_media_relay = true;
+        script_only.relay_enabled = false;
+        script_only.current_stream = Some(Box::new(Stream {
+            is_publishing: true,
+            name: "meta".to_string(),
+            ..Stream::new(1)
+        }));
+        let script = b"@setDataFrame";
+        script_only
+            .inject_relay_frame(FrameType::Script, 0, script)
+            .unwrap();
+        assert_eq!(
+            script_only.injected_media_bytes,
+            script.len() as u64,
+            "script inject must count toward deferred-relay drain liveness"
+        );
+        assert_eq!(script_only.pending_relay.len(), 1);
 
         // Injected bytes from a prior epoch must not exempt a later empty publish.
         injected_only.evict_active_publish_route();

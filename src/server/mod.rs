@@ -2,7 +2,7 @@
 //!
 //! Mirrors `src/server/server.h` and `src/server/server.c`.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::TcpListener;
 use std::os::unix::io::{AsRawFd, IntoRawFd};
 use std::sync::{Arc, Mutex};
@@ -500,7 +500,6 @@ impl Server {
         {
             return Err(ErrorCode::Internal);
         }
-        let publisher_conn_id = self.external_publisher_id_for_route(app, stream_name);
         let normalized = normalize_modex_payload(payload, CAPS_EX_MASK_MODEX);
         let cache_payload = if normalized.as_ref().len() == payload.len()
             && std::ptr::eq(normalized.as_ref().as_ptr(), payload.as_ptr())
@@ -519,23 +518,26 @@ impl Server {
             .iter()
             .map(RelayFrame::retained_bytes)
             .sum();
+        // Validate pending-queue budget before allocating a route id so a full
+        // backlog cannot leak entries into `external_route_ids`.
         if self.pending_injected_relay.len() >= MAX_PENDING_RELAY_FRAMES
             || pending_bytes.saturating_add(retained_bytes)
                 > self.resource_limits.max_pending_relay_bytes
         {
             return Err(ErrorCode::Internal);
         }
-        {
+        let route_key = (app.to_string(), stream_name.to_string());
+        let publisher_conn_id = {
             let Ok(mut routes) = self.active_publish_routes.lock() else {
                 return Err(ErrorCode::Internal);
             };
-            let key = (app.to_string(), stream_name.to_string());
-            match routes.get(&key) {
-                Some(&owner) if owner != publisher_conn_id => {
-                    return Err(ErrorCode::Internal);
-                }
-                Some(_) => {
-                    // Already claimed by this external feed — reuse.
+            match routes.get(&route_key).copied() {
+                Some(owner) => {
+                    // Already claimed — reuse only when this external feed owns it.
+                    match self.external_route_ids.get(&route_key).copied() {
+                        Some(id) if id == owner => id,
+                        _ => return Err(ErrorCode::Internal),
+                    }
                 }
                 None => {
                     let external_claims = routes
@@ -545,10 +547,14 @@ impl Server {
                     if external_claims >= MAX_EXTERNAL_PUBLISH_ROUTES {
                         return Err(ErrorCode::Internal);
                     }
-                    routes.insert(key, publisher_conn_id);
+                    // Allocate the stable external id only after the claim is
+                    // admitted — failed injects must not leak `external_route_ids`.
+                    let id = self.external_publisher_id_for_route(app, stream_name);
+                    routes.insert(route_key.clone(), id);
+                    id
                 }
             }
-        }
+        };
         self.pending_injected_relay.push(RelayFrame {
             frame_type,
             timestamp,
@@ -559,7 +565,7 @@ impl Server {
             publisher_conn_id,
         });
         self.inject_route_last_seen
-            .insert((app.to_string(), stream_name.to_string()), std::time::Instant::now());
+            .insert(route_key, std::time::Instant::now());
         Ok(())
     }
 
@@ -569,7 +575,19 @@ impl Server {
         let expired: Vec<(String, String)> = self
             .inject_route_last_seen
             .iter()
-            .filter_map(|(key, seen)| (now.duration_since(*seen) > stale).then(|| key.clone()))
+            .filter_map(|(key, seen)| {
+                if now.duration_since(*seen) <= stale {
+                    return None;
+                }
+                // Frames still waiting in the inject backlog must not be
+                // discarded by the stale reaper — last-seen can age while the
+                // poll loop is backlogged.
+                let has_pending = self
+                    .pending_injected_relay
+                    .iter()
+                    .any(|f| f.app == key.0 && f.stream_name == key.1);
+                (!has_pending).then(|| key.clone())
+            })
             .collect();
         for key in expired {
             self.release_injected_route(&key.0, &key.1);
@@ -1561,15 +1579,18 @@ impl Server {
             .saturating_add(route_key_bytes)
             .saturating_sub(existing_field_len);
         if projected_total > max_cache_bytes {
-            // Refuse before wiping peer caches when even clearing every other
-            // external route still cannot fit this reservation.
+            // Refuse before wiping peer caches when even clearing every route
+            // eviction can actually free (same-publisher peers + other
+            // external routes) still cannot fit this reservation.
             let freeable: usize = self
                 .stream_cache
                 .iter()
                 .filter(|(k, _)| *k != key)
                 .filter(|(k, _)| {
                     self.publisher_cache_keys.iter().any(|(pub_id, keys)| {
-                        is_external_publisher_id(*pub_id) && keys.contains(*k)
+                        keys.contains(*k)
+                            && (*pub_id == publisher_conn_id
+                                || is_external_publisher_id(*pub_id))
                     })
                 })
                 .map(|(k, cache)| Self::stream_cache_entry_bytes(k, cache))
@@ -3782,6 +3803,88 @@ mod tests {
                 .inject_relay_frame("live", "stream", FrameType::Video, 0, &[0x17, 0x01])
                 .is_err(),
             "inject must not share a route claimed by a socket publisher"
+        );
+        assert!(
+            server.external_route_ids.is_empty(),
+            "failed inject must not allocate an external route id"
+        );
+        assert!(
+            server.inject_route_last_seen.is_empty(),
+            "failed inject must not record last-seen for a never-queued route"
+        );
+    }
+
+    #[test]
+    fn failed_inject_does_not_leak_external_route_id_when_pending_full() {
+        let mut server = test_server();
+        server.resource_limits.max_pending_relay_bytes = 8;
+        assert!(
+            server
+                .inject_relay_frame(
+                    "live",
+                    "overflow",
+                    FrameType::Video,
+                    0,
+                    &[0x17, 0x01, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07],
+                )
+                .is_err(),
+            "over-budget inject must be rejected"
+        );
+        assert!(
+            server.external_route_ids.is_empty(),
+            "pending-queue rejection must not leak external_route_ids"
+        );
+    }
+
+    #[test]
+    fn stale_reaper_skips_routes_with_pending_inject_frames() {
+        let mut server = test_server();
+        server
+            .inject_relay_frame("live", "slow", FrameType::Video, 0, &[0x27, 0x01, 0x01])
+            .unwrap();
+        let key = ("live".to_string(), "slow".to_string());
+        // Age last-seen past the stale threshold while the frame is still queued.
+        server.inject_route_last_seen.insert(
+            key.clone(),
+            std::time::Instant::now()
+                - std::time::Duration::from_secs(super::INJECT_ROUTE_STALE_SECS + 1),
+        );
+        server.reap_stale_inject_routes();
+        assert_eq!(
+            server.pending_injected_relay.len(),
+            1,
+            "reaper must not drop pending inject frames for a backlogged route"
+        );
+        assert!(
+            server.external_route_ids.contains_key(&key),
+            "route claim must survive while inject frames remain pending"
+        );
+    }
+
+    #[test]
+    fn cache_byte_precheck_counts_same_publisher_peers_as_freeable() {
+        let mut server = test_server();
+        let pub_id = 42u64;
+        let old_key = ("live".to_string(), "old".to_string());
+        let new_key = ("live".to_string(), "new".to_string());
+        let mut old_cache = super::empty_stream_cache();
+        old_cache.avc_header = Some(vec![0x17, 0x00, 0x01, 0x02]);
+        let old_bytes = Server::stream_cache_entry_bytes(&old_key, &old_cache);
+        server.stream_cache.insert(old_key.clone(), old_cache);
+        server
+            .publisher_cache_keys
+            .insert(pub_id, vec![old_key.clone()]);
+        // Cap just above the new reservation but below old+new, so fitting
+        // requires same-publisher eviction that the precheck must count.
+        server.resource_limits.max_stream_cache_bytes = old_bytes;
+        let incoming = vec![0x17, 0x00, 0xAA];
+        assert!(
+            server.reserve_stream_cache_storage(&new_key, incoming.len(), 0, pub_id),
+            "precheck must treat same-publisher peer cache as freeable"
+        );
+        assert!(
+            !server.stream_cache.contains_key(&old_key),
+            "same-publisher peer must be evicted to admit the new reservation"
         );
     }
 

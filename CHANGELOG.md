@@ -13,6 +13,17 @@ begin at `1.0.0`.
 
 ## [Unreleased]
 
+### Fixed
+- Socket-less inject allocates external route IDs only after pending-queue and
+  publish-route validation succeed, so failed injects cannot leak
+  `external_route_ids` entries the stale reaper never sees.
+- `Conn::inject_relay_frame` counts script/metadata injects toward
+  `injected_media_bytes` so deferred-relay connections drain those frames.
+- Stream-cache byte precheck treats same-publisher peer cache keys as freeable,
+  matching `evict_for_stream_cache_pressure`.
+- Stale inject-route reaper skips routes that still have frames in
+  `pending_injected_relay`.
+
 ## [0.7.0] — 2026-08-08
 
 ### Added
