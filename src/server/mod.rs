@@ -3692,10 +3692,11 @@ mod tests {
         assert!(!unsafe { MEDIA_CB_HIT }, "inject must skip on_media_cb");
     }
 
+    #[test]
     fn conn_inject_relay_frame_rejects_playing_only_connection() {
         let mut conn = Conn::new();
         conn.app = "live".to_string();
-        conn.current_stream = Some(Box::new(Stream {
+        conn.current_stream = Some(Box::new(crate::session::stream::Stream {
             stream_id: 1,
             name: "cam".to_string(),
             is_publishing: false,
