@@ -536,6 +536,9 @@ impl Conn {
         if self.app.is_empty() || stream_name.is_empty() {
             return Err(ErrorCode::Internal);
         }
+        if self.app.len() > 1024 || stream_name.len() > 1024 {
+            return Err(ErrorCode::Internal);
+        }
         let already_owned_route =
             self.claimed_publish_route.as_deref() == Some(stream_name.as_str());
         if !self.claim_publish_route(&stream_name) {

@@ -1098,7 +1098,7 @@ impl Server {
         let local_frames: Vec<_> = self
             .connections
             .iter_mut()
-            .filter(|c| !c.defer_media_relay || c.relay_enabled)
+            .filter(|c| !c.defer_media_relay || c.relay_enabled || c.injected_media_bytes > 0)
             .flat_map(|c| c.pending_relay.drain(..))
             .collect();
         let injected_frames = std::mem::take(&mut self.pending_injected_relay);
