@@ -41,6 +41,9 @@ begin at `1.0.0`.
 - Abandoned-route pruning of `pending_relay` applies only under deferred relay
   with `relay_enabled` cleared, so normal publishers keep same-batch media
   through FCUnpublish/deleteStream for fan-out and export.
+- Local relay round-robin concatenates same-route publisher queues in encounter
+  order before fairness across routes, so an A→B handoff cannot emit B before
+  A's already-accepted final frames.
 
 ## [0.7.0] — 2026-08-08
 

@@ -2016,16 +2016,39 @@ fn interleave_relay_sources(
 }
 
 /// Round-robin merge of per-publisher local queues, preserving relative order
-/// within each queue. `start` selects which non-empty queue leads the first
-/// round; callers should rotate it across polls under a tiny send budget.
+/// within each queue. Queues that share the same `(app, stream_name)` route are
+/// concatenated in encounter order first so a same-batch A→B handoff cannot
+/// emit B's media before A's already-accepted final frames. Round-robin then
+/// applies across independent routes. `start` selects which route queue leads
+/// the first round; callers should rotate it across polls under a tiny send
+/// budget.
 fn round_robin_relay_queues(queues: Vec<Vec<RelayFrame>>, start: usize) -> Vec<RelayFrame> {
     if queues.is_empty() {
         return Vec::new();
     }
-    let n = queues.len();
+    let mut route_order: Vec<(String, String)> = Vec::new();
+    let mut by_route: HashMap<(String, String), Vec<RelayFrame>> = HashMap::new();
+    for q in queues {
+        let Some(first) = q.first() else {
+            continue;
+        };
+        let key = (first.app.clone(), first.stream_name.clone());
+        if !by_route.contains_key(&key) {
+            route_order.push(key.clone());
+        }
+        by_route.entry(key).or_default().extend(q);
+    }
+    let route_queues: Vec<Vec<RelayFrame>> = route_order
+        .into_iter()
+        .filter_map(|k| by_route.remove(&k))
+        .collect();
+    if route_queues.is_empty() {
+        return Vec::new();
+    }
+    let n = route_queues.len();
     let start = start % n;
-    let total: usize = queues.iter().map(Vec::len).sum();
-    let mut iters: Vec<_> = queues.into_iter().map(|q| q.into_iter()).collect();
+    let total: usize = route_queues.iter().map(Vec::len).sum();
+    let mut iters: Vec<_> = route_queues.into_iter().map(|q| q.into_iter()).collect();
     let mut out = Vec::with_capacity(total);
     loop {
         let mut progressed = false;
@@ -2193,6 +2216,27 @@ mod tests {
                 .map(|f| f.payload[0])
                 .collect::<Vec<_>>(),
             vec![0xB1, 0xA1, 0xB2, 0xA2]
+        );
+    }
+
+    #[test]
+    fn round_robin_relay_queues_preserves_same_route_handoff_order() {
+        let old_pub = vec![
+            relay_frame_for_publisher(1, "live", FrameType::Video, vec![0xA1]),
+            relay_frame_for_publisher(1, "live", FrameType::Video, vec![0xA2]),
+        ];
+        let new_pub = vec![relay_frame_for_publisher(
+            2,
+            "live",
+            FrameType::Video,
+            vec![0xB1],
+        )];
+        // Rotating start must not put B ahead of A's already-accepted finals
+        // on the same route.
+        let merged = round_robin_relay_queues(vec![old_pub, new_pub], 1);
+        assert_eq!(
+            merged.iter().map(|f| f.payload[0]).collect::<Vec<_>>(),
+            vec![0xA1, 0xA2, 0xB1]
         );
     }
 
