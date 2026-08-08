@@ -544,7 +544,7 @@ impl Conn {
         if !self.claim_publish_route(&stream_name) {
             return Err(ErrorCode::Internal);
         }
-        let normalized = normalize_modex_payload(payload, self.negotiated_caps.caps_ex_mask);
+        let normalized = normalize_modex_payload(payload, crate::types::CAPS_EX_MASK_MODEX);
         if let Err(e) = self.queue_relay_frame(frame_type, timestamp, payload, normalized.as_ref())
         {
             // Don't let a rejected frame (e.g. over the pending-byte budget)

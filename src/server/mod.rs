@@ -99,6 +99,9 @@ const MAX_INJECT_ROUTE_COMPONENT_BYTES: usize = 1024;
 /// cannot grow the map without bound — without stealing mid-feed claims.
 pub const MAX_EXTERNAL_PUBLISH_ROUTES: usize = 1024;
 
+/// Reap external inject route claims with no frames for this long.
+const INJECT_ROUTE_STALE_SECS: u64 = 120;
+
 /// Maximum number of incomplete TLS handshakes retained when `max_connections`
 /// is unlimited. When `max_connections` is set, active connections and pending
 /// handshakes share that configured cap instead.
@@ -329,6 +332,8 @@ pub struct Server {
     /// Stable external publisher id per `(app, stream_name)` inject route.
     external_route_ids: HashMap<(String, String), u64>,
     external_route_seq: u64,
+    /// Last inject activity per external route (for stale-claim reaping).
+    inject_route_last_seen: HashMap<(String, String), std::time::Instant>,
 }
 
 impl Server {
@@ -381,6 +386,7 @@ impl Server {
             relay_interleave_inject_first: true,
             external_route_ids: HashMap::new(),
             external_route_seq: 1,
+            inject_route_last_seen: HashMap::new(),
         })
     }
 
@@ -552,7 +558,22 @@ impl Server {
             stream_name: stream_name.to_string(),
             publisher_conn_id,
         });
+        self.inject_route_last_seen
+            .insert((app.to_string(), stream_name.to_string()), std::time::Instant::now());
         Ok(())
+    }
+
+    fn reap_stale_inject_routes(&mut self) {
+        let stale = std::time::Duration::from_secs(INJECT_ROUTE_STALE_SECS);
+        let now = std::time::Instant::now();
+        let expired: Vec<(String, String)> = self
+            .inject_route_last_seen
+            .iter()
+            .filter_map(|(key, seen)| (now.duration_since(*seen) > stale).then(|| key.clone()))
+            .collect();
+        for key in expired {
+            self.release_injected_route(&key.0, &key.1);
+        }
     }
 
     /// Release a socket-less inject claim on `(app, stream_name)`.
@@ -565,6 +586,7 @@ impl Server {
     /// solely by that external id and pending inject frames for the route.
     pub fn release_injected_route(&mut self, app: &str, stream_name: &str) {
         let key = (app.to_string(), stream_name.to_string());
+        self.inject_route_last_seen.remove(&key);
         let external_id = self.external_route_ids.remove(&key);
         self.pending_injected_relay
             .retain(|f| !(f.app == key.0 && f.stream_name == key.1));
@@ -1095,6 +1117,7 @@ impl Server {
         // Interleave socket-less injects with local publisher frames so neither
         // source starves the other under a tight relay-send budget. Relative
         // order within each source is preserved.
+        self.reap_stale_inject_routes();
         let local_frames: Vec<_> = self
             .connections
             .iter_mut()
