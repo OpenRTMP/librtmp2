@@ -1147,27 +1147,36 @@ impl Server {
         // order within each source is preserved.
         self.reap_stale_inject_routes();
         // When defer_media_relay clears relay_enabled (FCUnpublish/deleteStream)
-        // after media was already queued, those frames must not sit in
-        // pending_relay and drain later under a reauth/inject wake-up.
+        // after media was already queued, drop abandoned-route frames. Do not
+        // wipe the whole queue when injects arrived before publish: publish
+        // resets `injected_media_bytes` for the media deadline while those
+        // frames are still pending.
         for conn in &mut self.connections {
-            if conn.defer_media_relay && !conn.relay_enabled && conn.injected_media_bytes == 0 {
-                conn.pending_relay.clear();
+            if !abandoned_this_batch.is_empty() {
+                let conn_id = conn.conn_id;
+                conn.pending_relay.retain(|f| {
+                    !abandoned_this_batch.contains(&(f.app.clone(), f.stream_name.clone(), conn_id))
+                });
+            }
+            if conn.defer_media_relay
+                && !conn.relay_enabled
+                && conn.injected_media_bytes == 0
+                && conn.pending_relay.is_empty()
+            {
                 continue;
             }
-            if abandoned_this_batch.is_empty() {
-                continue;
-            }
-            let conn_id = conn.conn_id;
-            conn.pending_relay.retain(|f| {
-                !abandoned_this_batch.contains(&(f.app.clone(), f.stream_name.clone(), conn_id))
-            });
         }
         // Round-robin across local publishers (not flat_map by connection
         // order) so the first publisher cannot monopolize the send budget.
         let local_queues: Vec<Vec<_>> = self
             .connections
             .iter_mut()
-            .filter(|c| !c.defer_media_relay || c.relay_enabled || c.injected_media_bytes > 0)
+            .filter(|c| {
+                !c.defer_media_relay
+                    || c.relay_enabled
+                    || c.injected_media_bytes > 0
+                    || !c.pending_relay.is_empty()
+            })
             .map(|c| c.pending_relay.drain(..).collect::<Vec<_>>())
             .filter(|q| !q.is_empty())
             .collect();

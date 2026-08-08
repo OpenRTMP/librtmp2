@@ -26,6 +26,8 @@ begin at `1.0.0`.
 - Deferred-relay connections drop abandoned `pending_relay` frames when
   `relay_enabled` is cleared so later inject/reauth cannot resurrect them.
 - `claim_publish_route` enqueues cache eviction when an inject switches routes.
+- Deferred-relay no longer discards inject frames queued before `publish`
+  resets `injected_media_bytes` for the media deadline.
 - Local publisher `pending_relay` queues are round-robin merged (with a rotating
   lead) so the first connection cannot starve later publishers under a tight
   relay-send budget.
