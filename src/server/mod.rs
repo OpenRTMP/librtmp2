@@ -11,7 +11,9 @@ use std::time::{Duration, Instant};
 
 use crate::chunk::state::{DEFAULT_CHUNK_SIZE, DEFAULT_MAX_MSG_LENGTH, RTMP_WIRE_MAX_MSG_LENGTH};
 use crate::ertmp::multitrack_media::{foreach_track, is_multitrack_container};
-use crate::media::{CacheFrameKind, classify_cache_frame, normalize_modex_payload};
+use crate::media::{
+    CacheFrameKind, classify_cache_frame, is_on_metadata_payload, normalize_modex_payload,
+};
 use crate::net;
 use crate::session::conn::{Conn, MAX_PENDING_RELAY_FRAMES, RelayFrame};
 use crate::session::publish_route::PublishRouteRegistry;
@@ -1708,6 +1710,11 @@ impl Server {
 
     fn cache_relay_frame(&mut self, frame: &RelayFrame) {
         if frame.frame_type == FrameType::Script || frame.frame_type == FrameType::Metadata {
+            // Injected Script events (e.g. onCuePoint) must still fan out live,
+            // but only onMetaData belongs in the late-joiner metadata cache.
+            if frame.frame_type == FrameType::Script && !is_on_metadata_payload(&frame.payload) {
+                return;
+            }
             if frame.payload.len() > MAX_CACHED_INIT_FRAME_BYTES {
                 return;
             }
@@ -1815,16 +1822,22 @@ impl Server {
                         FrameType::Video,
                         frame.cache_payload(),
                     );
+                    let combined = cache.avc_header.as_ref().map(|v| v.len()).unwrap_or(0);
+                    let tracks: usize = cache.video_track_headers.values().map(|v| v.len()).sum();
                     if seq_tracks.len() > 1 {
-                        cache.avc_header.as_ref().map(|v| v.len()).unwrap_or(0)
+                        // Clears all track headers; replaces combined header.
+                        combined.saturating_add(tracks)
                     } else if let Some(track_id) = seq_tracks.first() {
-                        cache
-                            .video_track_headers
-                            .get(track_id)
-                            .map(|v| v.len())
-                            .unwrap_or(0)
+                        // Clears combined header; replaces one track slot.
+                        combined.saturating_add(
+                            cache
+                                .video_track_headers
+                                .get(track_id)
+                                .map(|v| v.len())
+                                .unwrap_or(0),
+                        )
                     } else {
-                        cache.avc_header.as_ref().map(|v| v.len()).unwrap_or(0)
+                        combined.saturating_add(tracks)
                     }
                 } else if is_keyframe {
                     cache
@@ -1837,16 +1850,20 @@ impl Server {
                         FrameType::Audio,
                         frame.cache_payload(),
                     );
+                    let combined = cache.aac_header.as_ref().map(|v| v.len()).unwrap_or(0);
+                    let tracks: usize = cache.audio_track_headers.values().map(|v| v.len()).sum();
                     if seq_tracks.len() > 1 {
-                        cache.aac_header.as_ref().map(|v| v.len()).unwrap_or(0)
+                        combined.saturating_add(tracks)
                     } else if let Some(track_id) = seq_tracks.first() {
-                        cache
-                            .audio_track_headers
-                            .get(track_id)
-                            .map(|v| v.len())
-                            .unwrap_or(0)
+                        combined.saturating_add(
+                            cache
+                                .audio_track_headers
+                                .get(track_id)
+                                .map(|v| v.len())
+                                .unwrap_or(0),
+                        )
                     } else {
-                        cache.aac_header.as_ref().map(|v| v.len()).unwrap_or(0)
+                        combined.saturating_add(tracks)
                     }
                 }
             })
@@ -2032,15 +2049,16 @@ fn round_robin_relay_queues(queues: Vec<Vec<RelayFrame>>, start: usize) -> Vec<R
     }
     let mut route_order: Vec<(String, String)> = Vec::new();
     let mut by_route: HashMap<(String, String), Vec<RelayFrame>> = HashMap::new();
+    // Group by each frame's route — a single publisher queue can mix routes
+    // after an in-batch rename; first-frame grouping would mis-order handoffs.
     for q in queues {
-        let Some(first) = q.first() else {
-            continue;
-        };
-        let key = (first.app.clone(), first.stream_name.clone());
-        if !by_route.contains_key(&key) {
-            route_order.push(key.clone());
+        for frame in q {
+            let key = (frame.app.clone(), frame.stream_name.clone());
+            if !by_route.contains_key(&key) {
+                route_order.push(key.clone());
+            }
+            by_route.entry(key).or_default().push(frame);
         }
-        by_route.entry(key).or_default().extend(q);
     }
     let route_queues: Vec<Vec<RelayFrame>> = route_order
         .into_iter()

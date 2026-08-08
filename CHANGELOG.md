@@ -49,6 +49,9 @@ begin at `1.0.0`.
   are reaped before publish commands in `process_connections`.
 - Inject queue-failure rollback restores `relay_key` together with the previous
   publish claim so socket media cannot queue under the rejected route.
+- Relay round-robin groups mixed publisher queues by each frame's route; only
+  `onMetaData` Script payloads enter the init cache; cache reservation credits
+  headers cleared by combined↔per-track representation switches.
 
 ## [0.7.0] — 2026-08-08
 
