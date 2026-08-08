@@ -22,7 +22,10 @@ begin at `1.0.0`.
 - Stream-cache byte precheck treats same-publisher peer cache keys as freeable,
   matching `evict_for_stream_cache_pressure`.
 - Stale inject-route reaper skips routes that still have frames in
-  `pending_injected_relay`.
+  `pending_injected_relay`, indexing pending routes once per poll.
+- Deferred-relay connections drop abandoned `pending_relay` frames when
+  `relay_enabled` is cleared so later inject/reauth cannot resurrect them.
+- `claim_publish_route` enqueues cache eviction when an inject switches routes.
 
 ## [0.7.0] — 2026-08-08
 

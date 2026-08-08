@@ -572,6 +572,13 @@ impl Server {
     fn reap_stale_inject_routes(&mut self) {
         let stale = std::time::Duration::from_secs(INJECT_ROUTE_STALE_SECS);
         let now = std::time::Instant::now();
+        // Index once — a linear scan per route would be O(routes × frames)
+        // on every tight-budget poll while the backlog remains.
+        let pending_routes: HashSet<(String, String)> = self
+            .pending_injected_relay
+            .iter()
+            .map(|f| (f.app.clone(), f.stream_name.clone()))
+            .collect();
         let expired: Vec<(String, String)> = self
             .inject_route_last_seen
             .iter()
@@ -582,11 +589,10 @@ impl Server {
                 // Frames still waiting in the inject backlog must not be
                 // discarded by the stale reaper — last-seen can age while the
                 // poll loop is backlogged.
-                let has_pending = self
-                    .pending_injected_relay
-                    .iter()
-                    .any(|f| f.app == key.0 && f.stream_name == key.1);
-                (!has_pending).then(|| key.clone())
+                if pending_routes.contains(key) {
+                    return None;
+                }
+                Some(key.clone())
             })
             .collect();
         for key in expired {
@@ -1136,6 +1142,22 @@ impl Server {
         // source starves the other under a tight relay-send budget. Relative
         // order within each source is preserved.
         self.reap_stale_inject_routes();
+        // When defer_media_relay clears relay_enabled (FCUnpublish/deleteStream)
+        // after media was already queued, those frames must not sit in
+        // pending_relay and drain later under a reauth/inject wake-up.
+        for conn in &mut self.connections {
+            if conn.defer_media_relay && !conn.relay_enabled && conn.injected_media_bytes == 0 {
+                conn.pending_relay.clear();
+                continue;
+            }
+            if abandoned_this_batch.is_empty() {
+                continue;
+            }
+            let conn_id = conn.conn_id;
+            conn.pending_relay.retain(|f| {
+                !abandoned_this_batch.contains(&(f.app.clone(), f.stream_name.clone(), conn_id))
+            });
+        }
         let local_frames: Vec<_> = self
             .connections
             .iter_mut()

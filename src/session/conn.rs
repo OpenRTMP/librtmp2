@@ -445,6 +445,13 @@ impl Conn {
             Some(prev) if prev == stream => self.claimed_publish_route = Some(prev),
             Some(prev) => {
                 routes.release(self.conn_id, &self.app, &prev);
+                // Mirror the publish-rename path: free the old route's init
+                // cache so a later publisher on `prev` cannot inherit stale
+                // codec headers from this connection.
+                if !prev.is_empty() {
+                    self.pending_cache_evictions
+                        .push((self.app.clone(), prev));
+                }
                 self.claimed_publish_route = Some(stream.to_string());
             }
             None => self.claimed_publish_route = Some(stream.to_string()),
