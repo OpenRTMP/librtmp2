@@ -44,6 +44,9 @@ begin at `1.0.0`.
 - Local relay round-robin concatenates same-route publisher queues in encounter
   order before fairness across routes, so an A→B handoff cannot emit B before
   A's already-accepted final frames.
+- Failed inject route-switch restores `relay_key` to the still-held claim;
+  releasing idle inject claims also queues cache eviction; stale inject routes
+  are reaped before publish commands in `process_connections`.
 
 ## [0.7.0] — 2026-08-08
 

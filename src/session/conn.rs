@@ -402,7 +402,16 @@ impl Conn {
             // connection-level inject can claim a route without ever
             // transitioning to Publishing, so release that claim here too or
             // the route stays unavailable to socket publishers until close.
+            // Also evict any cache this idle inject wrote — a later publisher
+            // on the same route must not inherit stale codec headers.
+            let claimed_route = self.claimed_publish_route.clone();
             self.release_claimed_publish_route();
+            if let Some(route_key) = claimed_route
+                && !route_key.is_empty()
+            {
+                self.pending_cache_evictions
+                    .push((self.app.clone(), route_key));
+            }
             self.injected_media_bytes = 0;
             return;
         }
@@ -552,6 +561,12 @@ impl Conn {
         let already_owned_route =
             self.claimed_publish_route.as_deref() == Some(stream_name.as_str());
         if !self.claim_publish_route(&stream_name) {
+            // `relay_route_key()` prefers `relay_key`. If an integrator pointed
+            // it at a contended route, restore it to the still-held claim so
+            // later socket media cannot snapshot an unclaimed key.
+            if let Some(ref claimed) = self.claimed_publish_route {
+                self.relay_key = claimed.clone();
+            }
             return Err(ErrorCode::Internal);
         }
         let normalized =

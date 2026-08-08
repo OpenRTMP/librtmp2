@@ -1053,6 +1053,10 @@ impl Server {
 
         // Drive recv/processing for every connection.
         self.drain_pending_cache_evictions();
+        // Reap expired external inject claims *before* receiving publish
+        // commands — otherwise a socket publisher on a stale inject route
+        // gets BadName in this poll and never retries after the reaper runs.
+        self.reap_stale_inject_routes();
         // Cloned so a closed connection's publish route can be released
         // immediately (below) without conflicting with the mutable borrow
         // of `self.connections` this loop holds via `iter_mut()`.
@@ -1145,7 +1149,7 @@ impl Server {
         // Interleave socket-less injects with local publisher frames so neither
         // source starves the other under a tight relay-send budget. Relative
         // order within each source is preserved.
-        self.reap_stale_inject_routes();
+        // (Stale inject claims were already reaped at the start of this poll.)
         // When defer_media_relay clears relay_enabled (FCUnpublish/deleteStream)
         // after media was already queued, drop abandoned-route frames so they
         // cannot resurrect after a later reauth. Normal (non-deferred)
