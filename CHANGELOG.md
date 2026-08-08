@@ -47,6 +47,8 @@ begin at `1.0.0`.
 - Failed inject route-switch restores `relay_key` to the still-held claim;
   releasing idle inject claims also queues cache eviction; stale inject routes
   are reaped before publish commands in `process_connections`.
+- Inject queue-failure rollback restores `relay_key` together with the previous
+  publish claim so socket media cannot queue under the rejected route.
 
 ## [0.7.0] — 2026-08-08
 

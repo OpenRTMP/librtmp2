@@ -587,7 +587,10 @@ impl Conn {
                     if let Some(routes) = self.publish_routes.as_ref() {
                         let _ = routes.claim(self.conn_id, &self.app, &prev);
                     }
-                    self.claimed_publish_route = Some(prev);
+                    self.claimed_publish_route = Some(prev.clone());
+                    // Keep relay_route_key() aligned with the restored claim so
+                    // socket media cannot queue under the rejected key B.
+                    self.relay_key = prev;
                 }
             }
             return Err(e);
