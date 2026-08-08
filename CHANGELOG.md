@@ -52,6 +52,8 @@ begin at `1.0.0`.
 - Relay round-robin groups mixed publisher queues by each frame's route; only
   `onMetaData` Script payloads enter the init cache; cache reservation credits
   headers cleared by combined↔per-track representation switches.
+- Closed publishers' deferred relay frames stay in a server orphan queue for
+  player fan-out; local↔inject merge keeps same-route handoff order.
 
 ## [0.7.0] — 2026-08-08
 

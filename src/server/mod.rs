@@ -328,6 +328,9 @@ pub struct Server {
     /// Socket-less frames waiting to enter the same cache + fan-out path as
     /// publisher `pending_relay` drains.
     pending_injected_relay: Vec<RelayFrame>,
+    /// Local publisher frames whose connection closed before fan-out finished.
+    /// Kept server-side so players still receive already-accepted media.
+    orphaned_relay: Vec<RelayFrame>,
     /// Alternates which source leads fair inject↔local interleave each poll,
     /// so a budget of 1 cannot permanently starve local (or inject) frames.
     relay_interleave_inject_first: bool,
@@ -388,6 +391,7 @@ impl Server {
             active_publish_routes: Arc::new(Mutex::new(HashMap::new())),
             relay_export: None,
             pending_injected_relay: Vec::new(),
+            orphaned_relay: Vec::new(),
             relay_interleave_inject_first: true,
             relay_local_rr_offset: 0,
             external_route_ids: HashMap::new(),
@@ -1199,12 +1203,20 @@ impl Server {
             self.relay_local_rr_offset = self.relay_local_rr_offset.wrapping_add(1);
             start
         };
-        let local_frames = round_robin_relay_queues(local_queues, local_rr_start);
+        let mut local_frames = round_robin_relay_queues(local_queues, local_rr_start);
+        if !self.orphaned_relay.is_empty() {
+            let orphan = std::mem::take(&mut self.orphaned_relay);
+            // Orphans are already-accepted local media — prepend so they are
+            // not starved behind a fresh publisher's same-poll frames.
+            let mut merged = orphan;
+            merged.append(&mut local_frames);
+            local_frames = merged;
+        }
         let injected_frames = std::mem::take(&mut self.pending_injected_relay);
         let inject_first = self.relay_interleave_inject_first;
         self.relay_interleave_inject_first = !inject_first;
         let mut relay_frames =
-            interleave_relay_sources(injected_frames, local_frames, inject_first);
+            merge_local_and_injected_by_route(local_frames, injected_frames, inject_first);
 
         // Replay cached codec headers and last keyframe to newly-joined players
         // using the pre-batch cache state, so init frames always precede live
@@ -1366,11 +1378,14 @@ impl Server {
             // Budget-deferred local frames live on the connection again; export
             // them before teardown so integrators do not permanently miss
             // frames that were already drained once this poll.
-            if let Some(export) = self.relay_export.as_mut() {
-                for frame in self.connections[i].pending_relay.drain(..) {
-                    if !is_external_publisher_id(frame.publisher_conn_id) {
+            let pending: Vec<_> = self.connections[i].pending_relay.drain(..).collect();
+            for frame in pending {
+                if !is_external_publisher_id(frame.publisher_conn_id) {
+                    if let Some(export) = self.relay_export.as_mut() {
                         export.push_clone(&frame);
                     }
+                    // Retain for local player fan-out — export alone is not enough.
+                    self.orphaned_relay.push(frame);
                 }
             }
             let conn = &self.connections[i];
@@ -1451,7 +1466,10 @@ impl Server {
             .find(|conn| conn.conn_id == frame.publisher_conn_id)
         {
             conn.pending_relay.push(frame);
+            return;
         }
+        // Publisher already gone this poll — keep for player fan-out next tick.
+        self.orphaned_relay.push(frame);
     }
 
     /// Bytes retained by a single stream_cache entry, including HashMap key
@@ -1989,51 +2007,50 @@ impl Server {
     }
 }
 
-/// Round-robin merge of inject and local relay frames, preserving relative
-/// order within each source. `inject_first` selects which source leads each
-/// pair; callers should alternate it across polls so a tiny send budget cannot
-/// starve one source forever.
-fn interleave_relay_sources(
-    injected: Vec<RelayFrame>,
+/// Merge local and injected relay frames. Same-route frames keep handoff order
+/// (local deferred media before a new inject on that route). Independent routes
+/// are then round-robin merged; `inject_first` selects which route's head leads
+/// when both sources contribute distinct routes in this poll.
+fn merge_local_and_injected_by_route(
     local: Vec<RelayFrame>,
+    injected: Vec<RelayFrame>,
     inject_first: bool,
 ) -> Vec<RelayFrame> {
-    let mut out = Vec::with_capacity(injected.len() + local.len());
-    let mut inj = injected.into_iter();
-    let mut loc = local.into_iter();
-    loop {
-        let (first, second) = if inject_first {
-            (inj.next(), loc.next())
-        } else {
-            (loc.next(), inj.next())
-        };
-        match (first, second) {
-            (Some(a), Some(b)) => {
-                out.push(a);
-                out.push(b);
-            }
-            (Some(a), None) => {
-                out.push(a);
-                if inject_first {
-                    out.extend(inj);
-                } else {
-                    out.extend(loc);
-                }
-                break;
-            }
-            (None, Some(b)) => {
-                out.push(b);
-                if inject_first {
-                    out.extend(loc);
-                } else {
-                    out.extend(inj);
-                }
-                break;
-            }
-            (None, None) => break,
+    let mut route_order: Vec<(String, String)> = Vec::new();
+    let mut by_route: HashMap<(String, String), Vec<RelayFrame>> = HashMap::new();
+    let mut push = |frame: RelayFrame| {
+        let key = (frame.app.clone(), frame.stream_name.clone());
+        if !by_route.contains_key(&key) {
+            route_order.push(key.clone());
         }
+        by_route.entry(key).or_default().push(frame);
+    };
+    // Local first so an abandoned publisher's deferred frames precede a new
+    // external claim on the same route in this merge.
+    for frame in local {
+        push(frame);
     }
-    out
+    for frame in injected {
+        push(frame);
+    }
+    let route_queues: Vec<Vec<RelayFrame>> = route_order
+        .into_iter()
+        .filter_map(|k| by_route.remove(&k))
+        .collect();
+    let start = if inject_first && !route_queues.is_empty() {
+        // Prefer a route whose head came from inject when possible.
+        route_queues
+            .iter()
+            .position(|q| {
+                q.first()
+                    .map(|f| is_external_publisher_id(f.publisher_conn_id))
+                    .unwrap_or(false)
+            })
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    round_robin_relay_queues(route_queues, start)
 }
 
 /// Round-robin merge of per-publisher local queues, preserving relative order
@@ -2192,7 +2209,7 @@ mod tests {
     }
 
     #[test]
-    fn interleave_relay_sources_respects_lead_flag() {
+    fn merge_local_and_injected_keeps_same_route_local_first() {
         let injected = vec![relay_frame_for_publisher(
             EXTERNAL_RELAY_PUBLISHER_ID,
             "stream",
@@ -2205,12 +2222,30 @@ mod tests {
             FrameType::Video,
             vec![0xB1],
         )];
-        let inj_first = interleave_relay_sources(injected.clone(), local.clone(), true);
-        assert_eq!(inj_first[0].payload, vec![0xA1]);
-        assert_eq!(inj_first[1].payload, vec![0xB1]);
-        let loc_first = interleave_relay_sources(injected, local, false);
-        assert_eq!(loc_first[0].payload, vec![0xB1]);
-        assert_eq!(loc_first[1].payload, vec![0xA1]);
+        // Even with inject_first, same-route handoff keeps deferred local media
+        // ahead of the new external claim.
+        let merged = merge_local_and_injected_by_route(local, injected, true);
+        assert_eq!(merged[0].payload, vec![0xB1]);
+        assert_eq!(merged[1].payload, vec![0xA1]);
+    }
+
+    #[test]
+    fn merge_local_and_injected_can_lead_with_inject_on_other_route() {
+        let injected = vec![relay_frame_for_publisher(
+            EXTERNAL_RELAY_PUBLISHER_ID,
+            "inj",
+            FrameType::Video,
+            vec![0xA1],
+        )];
+        let local = vec![relay_frame_for_publisher(
+            1,
+            "loc",
+            FrameType::Video,
+            vec![0xB1],
+        )];
+        let merged = merge_local_and_injected_by_route(local, injected, true);
+        assert_eq!(merged[0].payload, vec![0xA1]);
+        assert_eq!(merged[1].payload, vec![0xB1]);
     }
 
     #[test]
