@@ -329,6 +329,9 @@ pub struct Server {
     /// Alternates which source leads fair inject↔local interleave each poll,
     /// so a budget of 1 cannot permanently starve local (or inject) frames.
     relay_interleave_inject_first: bool,
+    /// Rotates which non-empty local publisher queue leads round-robin merge
+    /// so a tight send budget cannot starve later connections forever.
+    relay_local_rr_offset: usize,
     /// Stable external publisher id per `(app, stream_name)` inject route.
     external_route_ids: HashMap<(String, String), u64>,
     external_route_seq: u64,
@@ -384,6 +387,7 @@ impl Server {
             relay_export: None,
             pending_injected_relay: Vec::new(),
             relay_interleave_inject_first: true,
+            relay_local_rr_offset: 0,
             external_route_ids: HashMap::new(),
             external_route_seq: 1,
             inject_route_last_seen: HashMap::new(),
@@ -1158,12 +1162,23 @@ impl Server {
                 !abandoned_this_batch.contains(&(f.app.clone(), f.stream_name.clone(), conn_id))
             });
         }
-        let local_frames: Vec<_> = self
+        // Round-robin across local publishers (not flat_map by connection
+        // order) so the first publisher cannot monopolize the send budget.
+        let local_queues: Vec<Vec<_>> = self
             .connections
             .iter_mut()
             .filter(|c| !c.defer_media_relay || c.relay_enabled || c.injected_media_bytes > 0)
-            .flat_map(|c| c.pending_relay.drain(..))
+            .map(|c| c.pending_relay.drain(..).collect::<Vec<_>>())
+            .filter(|q| !q.is_empty())
             .collect();
+        let local_rr_start = if local_queues.is_empty() {
+            0
+        } else {
+            let start = self.relay_local_rr_offset % local_queues.len();
+            self.relay_local_rr_offset = self.relay_local_rr_offset.wrapping_add(1);
+            start
+        };
+        let local_frames = round_robin_relay_queues(local_queues, local_rr_start);
         let injected_frames = std::mem::take(&mut self.pending_injected_relay);
         let inject_first = self.relay_interleave_inject_first;
         self.relay_interleave_inject_first = !inject_first;
@@ -1589,60 +1604,76 @@ impl Server {
             return false;
         }
 
-        if self.stream_cache.len() >= MAX_STREAM_CACHE_ENTRIES && is_new_key {
-            if !self.evict_for_stream_cache_pressure(publisher_conn_id, key) {
-                return false;
-            }
-        }
-
         let mut projected_total = self
             .stream_cache_bytes()
             .saturating_add(incoming_len)
             .saturating_add(route_key_bytes)
             .saturating_sub(existing_field_len);
+        // Refuse before wiping peer caches when even clearing every route
+        // eviction can actually free (same-publisher peers + other
+        // external routes) still cannot fit this reservation. Run this before
+        // entry-cap eviction so a too-small victim is not deleted permanently
+        // when the new entry still cannot fit.
         if projected_total > max_cache_bytes {
-            // Refuse before wiping peer caches when even clearing every route
-            // eviction can actually free (same-publisher peers + other
-            // external routes) still cannot fit this reservation.
-            let freeable: usize = self
-                .stream_cache
-                .iter()
-                .filter(|(k, _)| *k != key)
-                .filter(|(k, _)| {
-                    self.publisher_cache_keys.iter().any(|(pub_id, keys)| {
-                        keys.contains(*k)
-                            && (*pub_id == publisher_conn_id
-                                || is_external_publisher_id(*pub_id))
-                    })
-                })
-                .map(|(k, cache)| Self::stream_cache_entry_bytes(k, cache))
-                .sum();
+            let freeable = self.stream_cache_freeable_bytes(key, publisher_conn_id);
             if projected_total.saturating_sub(freeable) > max_cache_bytes {
-                return false;
-            }
-            while projected_total > max_cache_bytes
-                && self.evict_for_stream_cache_pressure(publisher_conn_id, key)
-            {
-                // After evicting *other* routes, recompute from the live total.
-                // Subtract only the field being replaced — not the whole entry
-                // for `key`, whose other headers/keyframe remain in the map.
-                let add_key_bytes = if is_new_key && !self.stream_cache.contains_key(key) {
-                    key.0.len().saturating_add(key.1.len())
-                } else {
-                    0
-                };
-                projected_total = self
-                    .stream_cache_bytes()
-                    .saturating_add(incoming_len)
-                    .saturating_add(add_key_bytes)
-                    .saturating_sub(existing_field_len);
-            }
-            if projected_total > max_cache_bytes {
                 return false;
             }
         }
 
+        if self.stream_cache.len() >= MAX_STREAM_CACHE_ENTRIES && is_new_key {
+            if !self.evict_for_stream_cache_pressure(publisher_conn_id, key) {
+                return false;
+            }
+            let add_key_bytes = if !self.stream_cache.contains_key(key) {
+                key.0.len().saturating_add(key.1.len())
+            } else {
+                0
+            };
+            projected_total = self
+                .stream_cache_bytes()
+                .saturating_add(incoming_len)
+                .saturating_add(add_key_bytes)
+                .saturating_sub(existing_field_len);
+        }
+
+        while projected_total > max_cache_bytes
+            && self.evict_for_stream_cache_pressure(publisher_conn_id, key)
+        {
+            // After evicting *other* routes, recompute from the live total.
+            // Subtract only the field being replaced — not the whole entry
+            // for `key`, whose other headers/keyframe remain in the map.
+            let add_key_bytes = if is_new_key && !self.stream_cache.contains_key(key) {
+                key.0.len().saturating_add(key.1.len())
+            } else {
+                0
+            };
+            projected_total = self
+                .stream_cache_bytes()
+                .saturating_add(incoming_len)
+                .saturating_add(add_key_bytes)
+                .saturating_sub(existing_field_len);
+        }
         projected_total <= max_cache_bytes
+    }
+
+    /// Bytes freeable by evicting same-publisher peers or other external routes.
+    fn stream_cache_freeable_bytes(
+        &self,
+        key: &(String, String),
+        publisher_conn_id: u64,
+    ) -> usize {
+        self.stream_cache
+            .iter()
+            .filter(|(k, _)| *k != key)
+            .filter(|(k, _)| {
+                self.publisher_cache_keys.iter().any(|(pub_id, keys)| {
+                    keys.contains(*k)
+                        && (*pub_id == publisher_conn_id || is_external_publisher_id(*pub_id))
+                })
+            })
+            .map(|(k, cache)| Self::stream_cache_entry_bytes(k, cache))
+            .sum()
     }
 
     fn cache_relay_frame(&mut self, frame: &RelayFrame) {
@@ -1958,6 +1989,33 @@ fn interleave_relay_sources(
     out
 }
 
+/// Round-robin merge of per-publisher local queues, preserving relative order
+/// within each queue. `start` selects which non-empty queue leads the first
+/// round; callers should rotate it across polls under a tiny send budget.
+fn round_robin_relay_queues(queues: Vec<Vec<RelayFrame>>, start: usize) -> Vec<RelayFrame> {
+    if queues.is_empty() {
+        return Vec::new();
+    }
+    let n = queues.len();
+    let start = start % n;
+    let total: usize = queues.iter().map(Vec::len).sum();
+    let mut iters: Vec<_> = queues.into_iter().map(|q| q.into_iter()).collect();
+    let mut out = Vec::with_capacity(total);
+    loop {
+        let mut progressed = false;
+        for i in 0..n {
+            if let Some(frame) = iters[(start + i) % n].next() {
+                out.push(frame);
+                progressed = true;
+            }
+        }
+        if !progressed {
+            break;
+        }
+    }
+    out
+}
+
 fn empty_stream_cache() -> StreamCache {
     StreamCache {
         avc_header: None,
@@ -2082,6 +2140,34 @@ mod tests {
         let loc_first = interleave_relay_sources(injected, local, false);
         assert_eq!(loc_first[0].payload, vec![0xB1]);
         assert_eq!(loc_first[1].payload, vec![0xA1]);
+    }
+
+    #[test]
+    fn round_robin_relay_queues_rotates_lead_and_interleaves() {
+        let q0 = vec![
+            relay_frame_for_publisher(1, "a", FrameType::Video, vec![0xA1]),
+            relay_frame_for_publisher(1, "a", FrameType::Video, vec![0xA2]),
+        ];
+        let q1 = vec![
+            relay_frame_for_publisher(2, "b", FrameType::Video, vec![0xB1]),
+            relay_frame_for_publisher(2, "b", FrameType::Video, vec![0xB2]),
+        ];
+        let from_0 = round_robin_relay_queues(vec![q0.clone(), q1.clone()], 0);
+        assert_eq!(
+            from_0
+                .iter()
+                .map(|f| f.payload[0])
+                .collect::<Vec<_>>(),
+            vec![0xA1, 0xB1, 0xA2, 0xB2]
+        );
+        let from_1 = round_robin_relay_queues(vec![q0, q1], 1);
+        assert_eq!(
+            from_1
+                .iter()
+                .map(|f| f.payload[0])
+                .collect::<Vec<_>>(),
+            vec![0xB1, 0xA1, 0xB2, 0xA2]
+        );
     }
 
     #[test]
@@ -3908,6 +3994,51 @@ mod tests {
             !server.stream_cache.contains_key(&old_key),
             "same-publisher peer must be evicted to admit the new reservation"
         );
+    }
+
+    #[test]
+    fn entry_cap_eviction_preserves_victims_when_bytes_cannot_fit() {
+        let mut server = test_server();
+        // Fill almost to the entry cap with socket-owned snapshots (not
+        // freeable for a new external publisher), plus one tiny external
+        // victim that entry-cap eviction would otherwise delete first.
+        for i in 0..(super::MAX_STREAM_CACHE_ENTRIES - 1) {
+            let name = format!("sock{i}");
+            let key = ("live".to_string(), name);
+            let mut cache = super::empty_stream_cache();
+            cache.avc_header = Some(vec![0x17, 0x00, i as u8]);
+            server.stream_cache.insert(key.clone(), cache);
+            server.publisher_cache_keys.insert(i as u64 + 1, vec![key]);
+        }
+        let victim_key = ("live".to_string(), "ext0".to_string());
+        let victim_pub = super::EXTERNAL_PUBLISHER_ID_BIT | 1;
+        let mut victim = super::empty_stream_cache();
+        victim.avc_header = Some(vec![0x17, 0x00, 0x01]);
+        server
+            .stream_cache
+            .insert(victim_key.clone(), victim);
+        server
+            .publisher_cache_keys
+            .insert(victim_pub, vec![victim_key.clone()]);
+        assert_eq!(server.stream_cache.len(), super::MAX_STREAM_CACHE_ENTRIES);
+
+        let total = server.stream_cache_bytes();
+        // Cap equals current total: a modest new entry fits alone (irreducible)
+        // but not alongside retained socket peers after freeing only the tiny
+        // external victim.
+        server.resource_limits.max_stream_cache_bytes = total;
+        let new_key = ("live".to_string(), "new".to_string());
+        let new_pub = super::EXTERNAL_PUBLISHER_ID_BIT | 2;
+        let incoming_len = 32;
+        assert!(
+            !server.reserve_stream_cache_storage(&new_key, incoming_len, 0, new_pub),
+            "reservation must fail when freeable bytes cannot make room"
+        );
+        assert!(
+            server.stream_cache.contains_key(&victim_key),
+            "entry-cap path must not delete the freeable victim when bytes still cannot fit"
+        );
+        assert_eq!(server.stream_cache.len(), super::MAX_STREAM_CACHE_ENTRIES);
     }
 
     #[test]

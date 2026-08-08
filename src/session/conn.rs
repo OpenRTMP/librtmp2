@@ -547,6 +547,8 @@ impl Conn {
         if self.app.len() > 1024 || stream_name.len() > 1024 {
             return Err(ErrorCode::Internal);
         }
+        let previous_claim = self.claimed_publish_route.clone();
+        let eviction_len_before = self.pending_cache_evictions.len();
         let already_owned_route =
             self.claimed_publish_route.as_deref() == Some(stream_name.as_str());
         if !self.claim_publish_route(&stream_name) {
@@ -559,10 +561,19 @@ impl Conn {
             // Don't let a rejected frame (e.g. over the pending-byte budget)
             // leave a route claimed that this connection never actually
             // delivered anything on — that would block a real publisher.
-            // Only roll back a claim we just took; a claim already held from
-            // an earlier successful inject stays intact.
+            // Only roll back a claim/switch we just took; a claim already held
+            // from an earlier successful inject on the same route stays intact.
+            // On a failed route switch, restore the previous claim and undo the
+            // cache-eviction marker so the active feed is not abandoned.
             if !already_owned_route {
                 self.release_claimed_publish_route();
+                self.pending_cache_evictions.truncate(eviction_len_before);
+                if let Some(prev) = previous_claim {
+                    if let Some(routes) = self.publish_routes.as_ref() {
+                        let _ = routes.claim(self.conn_id, &self.app, &prev);
+                    }
+                    self.claimed_publish_route = Some(prev);
+                }
             }
             return Err(e);
         }
@@ -3521,6 +3532,54 @@ mod tests {
             Some(&7),
             "an already-owned route must survive a subsequent rejected frame"
         );
+    }
+
+    #[test]
+    fn inject_relay_frame_restores_prior_claim_when_route_switch_queueing_fails() {
+        use std::collections::HashMap;
+        use std::sync::{Arc, Mutex};
+
+        let routes = Arc::new(Mutex::new(HashMap::new()));
+        let registry = PublishRouteRegistry::new(Arc::clone(&routes));
+        let key_a = ("live".to_string(), "A".to_string());
+        let key_b = ("live".to_string(), "B".to_string());
+
+        let mut conn = Conn::new();
+        conn.conn_id = 7;
+        conn.app = "live".to_string();
+        conn.current_stream = Some(Box::new(Stream {
+            name: "A".to_string(),
+            ..Stream::new(1)
+        }));
+        conn.publish_routes = Some(registry);
+
+        conn.inject_relay_frame(FrameType::Video, 0, &[0x17, 0x01, 0xAA])
+            .unwrap();
+        assert_eq!(routes.lock().unwrap().get(&key_a), Some(&7));
+        assert!(conn.pending_cache_evictions.is_empty());
+
+        // Switch the public relay key, then reject the inject by exhausting
+        // the pending budget. Claim/eviction for B must roll back to A.
+        conn.relay_key = "B".to_string();
+        conn.max_pending_relay_bytes = 0;
+        assert!(
+            conn.inject_relay_frame(FrameType::Video, 0, &[0x17, 0x01, 0xBB])
+                .is_err()
+        );
+        assert_eq!(
+            routes.lock().unwrap().get(&key_a),
+            Some(&7),
+            "failed route-switch inject must restore the previous claim"
+        );
+        assert!(
+            routes.lock().unwrap().get(&key_b).is_none(),
+            "rejected switch must not leave the new route claimed"
+        );
+        assert!(
+            conn.pending_cache_evictions.is_empty(),
+            "failed switch must not queue eviction of the restored route"
+        );
+        assert_eq!(conn.claimed_publish_route.as_deref(), Some("A"));
     }
 
     #[test]

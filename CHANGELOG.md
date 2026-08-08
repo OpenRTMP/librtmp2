@@ -26,6 +26,14 @@ begin at `1.0.0`.
 - Deferred-relay connections drop abandoned `pending_relay` frames when
   `relay_enabled` is cleared so later inject/reauth cannot resurrect them.
 - `claim_publish_route` enqueues cache eviction when an inject switches routes.
+- Local publisher `pending_relay` queues are round-robin merged (with a rotating
+  lead) so the first connection cannot starve later publishers under a tight
+  relay-send budget.
+- Failed `Conn::inject_relay_frame` after a route switch restores the previous
+  publish claim and undoes the pending cache eviction for the abandoned route.
+- Stream-cache entry-cap eviction runs only after the byte-budget freeable
+  precheck, so a too-small victim is not deleted when the new entry still
+  cannot fit.
 
 ## [0.7.0] — 2026-08-08
 
