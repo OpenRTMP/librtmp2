@@ -536,12 +536,16 @@ impl Conn {
         if self.app.is_empty() || stream_name.is_empty() {
             return Err(ErrorCode::Internal);
         }
+        if self.app.len() > 1024 || stream_name.len() > 1024 {
+            return Err(ErrorCode::Internal);
+        }
         let already_owned_route =
             self.claimed_publish_route.as_deref() == Some(stream_name.as_str());
         if !self.claim_publish_route(&stream_name) {
             return Err(ErrorCode::Internal);
         }
-        let normalized = normalize_modex_payload(payload, self.negotiated_caps.caps_ex_mask);
+        let normalized =
+            normalize_modex_payload(payload, self.negotiated_caps.caps_ex_mask);
         if let Err(e) = self.queue_relay_frame(frame_type, timestamp, payload, normalized.as_ref())
         {
             // Don't let a rejected frame (e.g. over the pending-byte budget)

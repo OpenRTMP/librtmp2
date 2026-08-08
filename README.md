@@ -147,7 +147,20 @@ if let Some(snap) = server.stream_init_snapshot("live", "cam1") {
 ```
 
 On an existing local publisher `Conn`, `Conn::inject_relay_frame` queues into
-that connection's `pending_relay` (skips media auth callbacks).
+`pending_relay` the same way as socket-received media.
+
+### HA / cluster mirroring notes
+
+- `enable_relay_export` + `drain_exported_relay_frames` mirror **live** relay
+  frames only. Init state (AVC/AAC sequence headers, metadata, last keyframe) is
+  **not** included in the export buffer.
+- Integrators mirroring to remote nodes must also call `stream_init_snapshot`
+  (or equivalent init-cache handoff) so late joiners can decode the stream.
+- External inject routes (`Server::inject_relay_frame`) must call
+  `release_injected_route` when a feed ends. Stale claims are reaped automatically
+  after ~120s without frames, but explicit release is still recommended.
+
+`Conn::inject_relay_frame` skips media auth callbacks.
 
 ---
 
