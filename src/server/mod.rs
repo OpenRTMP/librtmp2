@@ -37,14 +37,33 @@ pub fn is_external_publisher_id(id: u64) -> bool {
     id & EXTERNAL_PUBLISHER_ID_BIT != 0
 }
 
-fn external_publisher_id_for_route(app: &str, stream_name: &str) -> u64 {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut hasher = DefaultHasher::new();
-    app.hash(&mut hasher);
-    0xffu8.hash(&mut hasher);
-    stream_name.hash(&mut hasher);
-    EXTERNAL_PUBLISHER_ID_BIT | (hasher.finish() & !EXTERNAL_PUBLISHER_ID_BIT)
+fn external_publisher_id_for_route(_app: &str, _stream_name: &str) -> u64 {
+    // Legacy helper retained for tests that pre-seed cache rows without inject.
+    EXTERNAL_PUBLISHER_ID_BIT | 1
+}
+
+/// Stable per-route external publisher ids without hash collisions.
+fn allocate_external_publisher_id(
+    routes: &mut HashMap<(String, String), u64>,
+    seq: &mut u64,
+    app: &str,
+    stream_name: &str,
+) -> u64 {
+    let key = (app.to_string(), stream_name.to_string());
+    if let Some(&id) = routes.get(&key) {
+        return id;
+    }
+    let mut next = *seq;
+    if next == 0 {
+        next = 1;
+    }
+    let id = EXTERNAL_PUBLISHER_ID_BIT | (next & !EXTERNAL_PUBLISHER_ID_BIT);
+    *seq = next.wrapping_add(1);
+    if *seq == 0 {
+        *seq = 1;
+    }
+    routes.insert(key, id);
+    id
 }
 
 /// Maximum distinct (app, stream_name) cache entries retained server-wide.
@@ -307,6 +326,9 @@ pub struct Server {
     /// Alternates which source leads fair inject↔local interleave each poll,
     /// so a budget of 1 cannot permanently starve local (or inject) frames.
     relay_interleave_inject_first: bool,
+    /// Stable external publisher id per `(app, stream_name)` inject route.
+    external_route_ids: HashMap<(String, String), u64>,
+    external_route_seq: u64,
 }
 
 impl Server {
@@ -357,6 +379,8 @@ impl Server {
             relay_export: None,
             pending_injected_relay: Vec::new(),
             relay_interleave_inject_first: true,
+            external_route_ids: HashMap::new(),
+            external_route_seq: 1,
         })
     }
 
@@ -421,6 +445,15 @@ impl Server {
         }
     }
 
+    fn external_publisher_id_for_route(&mut self, app: &str, stream_name: &str) -> u64 {
+        allocate_external_publisher_id(
+            &mut self.external_route_ids,
+            &mut self.external_route_seq,
+            app,
+            stream_name,
+        )
+    }
+
     /// Inject media into the local relay / init-cache / player fan-out path
     /// for `(app, stream_name)` without creating a socket connection.
     ///
@@ -462,7 +495,7 @@ impl Server {
         {
             return Err(ErrorCode::Internal);
         }
-        let publisher_conn_id = external_publisher_id_for_route(app, stream_name);
+        let publisher_conn_id = self.external_publisher_id_for_route(app, stream_name);
         let normalized = normalize_modex_payload(payload, CAPS_EX_MASK_MODEX);
         let cache_payload = if normalized.as_ref().len() == payload.len()
             && std::ptr::eq(normalized.as_ref().as_ptr(), payload.as_ptr())
@@ -533,9 +566,12 @@ impl Server {
     /// solely by that external id and pending inject frames for the route.
     pub fn release_injected_route(&mut self, app: &str, stream_name: &str) {
         let key = (app.to_string(), stream_name.to_string());
-        let external_id = external_publisher_id_for_route(app, stream_name);
+        let external_id = self.external_route_ids.remove(&key);
         self.pending_injected_relay
             .retain(|f| !(f.app == key.0 && f.stream_name == key.1));
+        let Some(external_id) = external_id else {
+            return;
+        };
         if let Some(keys) = self.publisher_cache_keys.remove(&external_id) {
             for k in keys {
                 let still_owned = self.publisher_cache_keys.values().any(|v| v.contains(&k));
@@ -569,6 +605,7 @@ impl Server {
         for (app, stream_name) in external_keys {
             self.release_injected_route(&app, &stream_name);
         }
+        self.external_route_ids.clear();
     }
 
     /// Copy the current init-cache snapshot for `(app, stream_name)`, if any
@@ -1062,6 +1099,7 @@ impl Server {
         let local_frames: Vec<_> = self
             .connections
             .iter_mut()
+            .filter(|c| !c.defer_media_relay || c.relay_enabled)
             .flat_map(|c| c.pending_relay.drain(..))
             .collect();
         let injected_frames = std::mem::take(&mut self.pending_injected_relay);
@@ -3639,7 +3677,7 @@ mod tests {
         conn.current_stream = Some(Box::new(crate::session::stream::Stream {
             stream_id: 1,
             name: "cam".to_string(),
-            is_publishing: false,
+            is_publishing: true,
             is_playing: false,
             paused: false,
             receive_audio: true,
@@ -3652,6 +3690,25 @@ mod tests {
         assert_eq!(conn.pending_relay[0].timestamp, 10);
         assert_eq!(conn.pending_relay[0].payload, vec![0x17, 0x01, 0xAA]);
         assert!(!unsafe { MEDIA_CB_HIT }, "inject must skip on_media_cb");
+    }
+
+    fn conn_inject_relay_frame_rejects_playing_only_connection() {
+        let mut conn = Conn::new();
+        conn.app = "live".to_string();
+        conn.current_stream = Some(Box::new(Stream {
+            stream_id: 1,
+            name: "cam".to_string(),
+            is_publishing: false,
+            is_playing: true,
+            paused: false,
+            receive_audio: true,
+            receive_video: true,
+        }));
+        assert!(
+            conn.inject_relay_frame(FrameType::Video, 0, &[0x17, 0x01, 0xAA])
+                .is_err(),
+            "playing-only connections must not inject publisher media"
+        );
     }
 
     #[test]
@@ -3672,7 +3729,7 @@ mod tests {
         conn.current_stream = Some(Box::new(crate::session::stream::Stream {
             stream_id: 1,
             name: "cam".to_string(),
-            is_publishing: false,
+            is_publishing: true,
             is_playing: true,
             paused: false,
             receive_audio: true,
@@ -3709,7 +3766,10 @@ mod tests {
         server
             .inject_relay_frame("live", "stream", FrameType::Video, 0, &[0x17, 0x00, 0x01])
             .unwrap();
-        let external_id = super::external_publisher_id_for_route("live", "stream");
+        let external_id = *server
+            .external_route_ids
+            .get(&("live".to_string(), "stream".to_string()))
+            .unwrap();
         let owner = *server
             .active_publish_routes
             .lock()
@@ -3732,7 +3792,7 @@ mod tests {
         for i in 0..super::MAX_STREAM_CACHE_ENTRIES {
             let name = format!("s{i}");
             let key = ("live".to_string(), name.clone());
-            let pub_id = super::external_publisher_id_for_route("live", &name);
+            let pub_id = super::EXTERNAL_PUBLISHER_ID_BIT | (i as u64 + 1);
             server
                 .stream_cache
                 .insert(key.clone(), super::empty_stream_cache());
@@ -3762,7 +3822,10 @@ mod tests {
             .inject_relay_frame("live", "cam", FrameType::Video, 0, &[0x17, 0x00, 0x01])
             .unwrap();
         server.process_connections().unwrap();
-        let external_id = super::external_publisher_id_for_route("live", "cam");
+        let external_id = *server
+            .external_route_ids
+            .get(&("live".to_string(), "cam".to_string()))
+            .unwrap();
         assert!(server.publisher_cache_keys.contains_key(&external_id));
         // Oversized AVC sequence header clears the cached field then drops the entry.
         let mut big = vec![0x17, 0x00];

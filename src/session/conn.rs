@@ -327,6 +327,14 @@ impl Conn {
             }
             return false;
         }
+        // Inject-only squatters (no publish role) must not hold a route
+        // longer than a real publisher would without sending media.
+        if self.claimed_publish_route.is_some()
+            && self.media_bytes_received == 0
+            && self.injected_media_bytes == 0
+        {
+            return self.session_setup_started.elapsed() >= PUBLISH_MEDIA_REQUIRED_TIMEOUT;
+        }
         if self.session_setup_started.elapsed() < RTMP_SESSION_SETUP_TIMEOUT {
             return false;
         }
@@ -507,9 +515,8 @@ impl Conn {
     ///
     /// Uses the same ModEx-normalize + `queue_relay_frame` path as inbound
     /// publisher media, but skips `on_media_cb` / `on_frame_cb` (integrator-
-    /// trusted). Does not require `is_publishing` or `relay_enabled`, but
-    /// refuses while the connection is actively playing — a play session must
-    /// not claim (and squat) a publish route behind the player exemption.
+    /// trusted). Does not require `relay_enabled`. Rejects playing-only
+    /// connections so inject cannot squat publish routes from a player session.
     pub fn inject_relay_frame(
         &mut self,
         frame_type: FrameType,
@@ -520,16 +527,13 @@ impl Conn {
         if payload.len() > max_len {
             return Err(ErrorCode::Internal);
         }
+        if let Some(stream) = self.current_stream.as_ref() {
+            if stream.is_playing && !stream.is_publishing {
+                return Err(ErrorCode::Internal);
+            }
+        }
         let stream_name = self.relay_route_key();
         if self.app.is_empty() || stream_name.is_empty() {
-            return Err(ErrorCode::Internal);
-        }
-        if self
-            .current_stream
-            .as_ref()
-            .map(|s| s.is_playing)
-            .unwrap_or(false)
-        {
             return Err(ErrorCode::Internal);
         }
         let already_owned_route =
@@ -3344,6 +3348,25 @@ mod tests {
         conn.evict_active_publish_route();
         assert!(conn.detected_video_codec.is_none());
         assert!(conn.detected_audio_codec.is_none());
+    }
+
+    #[test]
+    fn inject_relay_frame_rejects_playing_only_connection() {
+        let mut conn = Conn::new();
+        conn.app = "live".to_string();
+        conn.current_stream = Some(Box::new(Stream {
+            stream_id: 1,
+            name: "cam".to_string(),
+            is_publishing: false,
+            is_playing: true,
+            paused: false,
+            receive_audio: true,
+            receive_video: true,
+        }));
+        assert!(
+            conn.inject_relay_frame(FrameType::Video, 0, &[0x17, 0x01, 0xAA]).is_err(),
+            "playing-only connections must not inject publisher media"
+        );
     }
 
     #[test]
