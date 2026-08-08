@@ -36,6 +36,8 @@ begin at `1.0.0`.
 - Stream-cache entry-cap eviction runs only after the byte-budget freeable
   precheck, so a too-small victim is not deleted when the new entry still
   cannot fit.
+- Stream-cache per-publisher key-limit eviction likewise runs only after the
+  byte-budget freeable precheck.
 
 ## [0.7.0] — 2026-08-08
 

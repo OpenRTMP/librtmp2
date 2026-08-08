@@ -1605,14 +1605,6 @@ impl Server {
             return false;
         }
 
-        if is_new_key
-            && self.publisher_cache_key_count(publisher_conn_id)
-                >= MAX_STREAM_CACHE_KEYS_PER_PUBLISHER
-            && !self.evict_for_stream_cache_pressure(publisher_conn_id, key)
-        {
-            return false;
-        }
-
         let mut projected_total = self
             .stream_cache_bytes()
             .saturating_add(incoming_len)
@@ -1621,13 +1613,32 @@ impl Server {
         // Refuse before wiping peer caches when even clearing every route
         // eviction can actually free (same-publisher peers + other
         // external routes) still cannot fit this reservation. Run this before
-        // entry-cap eviction so a too-small victim is not deleted permanently
+        // per-publisher / entry-cap eviction so a valid victim is not deleted
         // when the new entry still cannot fit.
         if projected_total > max_cache_bytes {
             let freeable = self.stream_cache_freeable_bytes(key, publisher_conn_id);
             if projected_total.saturating_sub(freeable) > max_cache_bytes {
                 return false;
             }
+        }
+
+        if is_new_key
+            && self.publisher_cache_key_count(publisher_conn_id)
+                >= MAX_STREAM_CACHE_KEYS_PER_PUBLISHER
+        {
+            if !self.evict_for_stream_cache_pressure(publisher_conn_id, key) {
+                return false;
+            }
+            let add_key_bytes = if !self.stream_cache.contains_key(key) {
+                key.0.len().saturating_add(key.1.len())
+            } else {
+                0
+            };
+            projected_total = self
+                .stream_cache_bytes()
+                .saturating_add(incoming_len)
+                .saturating_add(add_key_bytes)
+                .saturating_sub(existing_field_len);
         }
 
         if self.stream_cache.len() >= MAX_STREAM_CACHE_ENTRIES && is_new_key {
