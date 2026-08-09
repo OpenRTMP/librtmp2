@@ -312,6 +312,15 @@ impl Conn {
         // "exempt" forever if this checked `self.state`. Check the current
         // stream's active flags instead -- they're cleared on unpublish.
         let Some(stream) = self.current_stream.as_ref() else {
+            // Inject-held claims can exist without `current_stream` (socket-less
+            // inject path). Sustain while media has flowed; otherwise apply the
+            // publish-media squat timer instead of the longer setup timeout.
+            if self.claimed_publish_route.is_some() {
+                if self.injected_media_bytes > 0 || self.media_bytes_received > 0 {
+                    return false;
+                }
+                return self.session_setup_started.elapsed() >= PUBLISH_MEDIA_REQUIRED_TIMEOUT;
+            }
             return self.session_setup_started.elapsed() >= RTMP_SESSION_SETUP_TIMEOUT;
         };
         // Publish role *or* an inject-held route claim must obey the media

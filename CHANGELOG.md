@@ -14,6 +14,15 @@ begin at `1.0.0`.
 ## [Unreleased]
 
 ### Fixed
+- Disconnect teardown no longer exports budget-deferred `pending_relay` frames
+  before orphaning them; export happens once on the next-poll fan-out path.
+- Orphaned local relay frames skip `cache_relay_frame` when their publisher is
+  no longer in `connections`, so teardown cannot recreate dead cache ownership.
+- `orphaned_relay` is capped via `push_orphaned_relay` (`MAX_PENDING_RELAY_FRAMES`
+  and `max_pending_relay_bytes`), dropping oldest frames until a new one fits.
+- `session_setup_timed_out` with no `current_stream` sustains inject claims that
+  already received media and applies `PUBLISH_MEDIA_REQUIRED_TIMEOUT` when they
+  have not, instead of always using `RTMP_SESSION_SETUP_TIMEOUT`.
 - Socket-less inject allocates external route IDs only after pending-queue and
   publish-route validation succeed, so failed injects cannot leak
   `external_route_ids` entries the stale reaper never sees.

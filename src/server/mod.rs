@@ -1338,7 +1338,17 @@ impl Server {
                 frame.publisher_conn_id,
             );
             if !abandoned_this_batch.contains(&abandon_key) {
-                self.cache_relay_frame(frame);
+                // Orphaned local frames must not recreate stream-cache ownership
+                // for a publisher already removed from `connections`. External
+                // inject ids have no socket row and still cache.
+                let local_publisher_gone = !is_external_publisher_id(frame.publisher_conn_id)
+                    && !self
+                        .connections
+                        .iter()
+                        .any(|c| c.conn_id == frame.publisher_conn_id);
+                if !local_publisher_gone {
+                    self.cache_relay_frame(frame);
+                }
             }
             for (i, conn) in self.connections.iter_mut().enumerate() {
                 if !Self::conn_will_receive_relay_frame(conn, frame) {
@@ -1396,17 +1406,13 @@ impl Server {
         closed.sort_unstable();
         closed.dedup();
         for i in closed.into_iter().rev() {
-            // Budget-deferred local frames live on the connection again; export
-            // them before teardown so integrators do not permanently miss
-            // frames that were already drained once this poll.
+            // Budget-deferred local frames stay on the connection until teardown;
+            // push to orphaned_relay only (no export here). The completed-frame
+            // export path above exports once when they fan out next poll.
             let pending: Vec<_> = self.connections[i].pending_relay.drain(..).collect();
             for frame in pending {
                 if !is_external_publisher_id(frame.publisher_conn_id) {
-                    if let Some(export) = self.relay_export.as_mut() {
-                        export.push_clone(&frame);
-                    }
-                    // Retain for local player fan-out — export alone is not enough.
-                    self.orphaned_relay.push(frame);
+                    self.push_orphaned_relay(frame);
                 }
             }
             let conn = &self.connections[i];
@@ -1490,6 +1496,34 @@ impl Server {
             return;
         }
         // Publisher already gone this poll — keep for player fan-out next tick.
+        self.push_orphaned_relay(frame);
+    }
+
+    /// Cap `orphaned_relay` by frame count and byte budget; drop-oldest until
+    /// `frame` fits. If `frame` alone exceeds capacity, drop it.
+    fn push_orphaned_relay(&mut self, frame: RelayFrame) {
+        let frame_bytes = frame.retained_bytes();
+        let max_bytes = self.resource_limits.max_pending_relay_bytes;
+        if frame_bytes > max_bytes || MAX_PENDING_RELAY_FRAMES == 0 {
+            return;
+        }
+        let mut pending_bytes: usize = self
+            .orphaned_relay
+            .iter()
+            .map(RelayFrame::retained_bytes)
+            .sum();
+        while !self.orphaned_relay.is_empty()
+            && (self.orphaned_relay.len() >= MAX_PENDING_RELAY_FRAMES
+                || pending_bytes.saturating_add(frame_bytes) > max_bytes)
+        {
+            let dropped = self.orphaned_relay.remove(0);
+            pending_bytes = pending_bytes.saturating_sub(dropped.retained_bytes());
+        }
+        if self.orphaned_relay.len() >= MAX_PENDING_RELAY_FRAMES
+            || pending_bytes.saturating_add(frame_bytes) > max_bytes
+        {
+            return;
+        }
         self.orphaned_relay.push(frame);
     }
 
