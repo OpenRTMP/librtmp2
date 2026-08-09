@@ -232,7 +232,8 @@ pub fn chunk_read(
         } else {
             0
         };
-        if reg.reassembly_bytes_in_use().saturating_sub(replaced) + to_read > reg.max_reassembly_bytes
+        if reg.reassembly_bytes_in_use().saturating_sub(replaced) + to_read
+            > reg.max_reassembly_bytes
         {
             return Err(ErrorCode::Chunk);
         }

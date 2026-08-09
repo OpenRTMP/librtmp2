@@ -13,6 +13,126 @@ begin at `1.0.0`.
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-08-09
+
+### Added
+- Public integrator APIs for external media export and socket-less inject:
+  - `RelayFrame` is part of the crate root / `session` public API (documented fields).
+  - `Server::enable_relay_export` / `disable_relay_export` /
+    `drain_exported_relay_frames` — bounded drainable export of publisher
+    relay frames (disabled by default = zero extra copies; overflow drops
+    oldest frames).
+  - `Server::inject_relay_frame` — inject media into the local relay /
+    init-cache / player fan-out path without a socket (per-route external
+    publisher ids; `EXTERNAL_RELAY_PUBLISHER_ID` sentinel; soft-capped by
+    `MAX_EXTERNAL_PUBLISH_ROUTES`).
+  - `Server::release_injected_route` /
+    `Server::release_all_injected_routes` — free socket-less publish claims.
+  - `Conn::inject_relay_frame` — queue frames on an existing publisher
+    connection (skips `on_media_cb`; integrator-trusted).
+  - `Server::stream_init_snapshot` + `StreamInitSnapshot` — copy cached
+    metadata / codec headers / last keyframe for late joiners or remote
+    subscribers.
+
+### Changed
+- Crate version `0.6.0` → `0.7.0`.
+
+### Fixed
+- Disconnect teardown no longer exports budget-deferred `pending_relay` frames
+  before orphaning them; export happens once on the next-poll fan-out path.
+- Orphaned local relay frames skip `cache_relay_frame` when their publisher is
+  no longer in `connections`, so teardown cannot recreate dead cache ownership.
+- `orphaned_relay` is capped via `push_orphaned_relay` (`MAX_PENDING_RELAY_FRAMES`
+  and `max_pending_relay_bytes`), dropping oldest frames until a new one fits;
+  dropped local frames are still exported once so HA does not permanently miss them.
+- `session_setup_timed_out` with no `current_stream` sustains inject claims that
+  already received media and applies `PUBLISH_MEDIA_REQUIRED_TIMEOUT` when they
+  have not, instead of always using `RTMP_SESSION_SETUP_TIMEOUT`.
+- Socket-less inject allocates external route IDs only after pending-queue and
+  publish-route validation succeed, so failed injects cannot leak
+  `external_route_ids` entries the stale reaper never sees.
+- `Conn::inject_relay_frame` counts script/metadata injects toward
+  `injected_media_bytes` so deferred-relay connections drain those frames.
+- Stream-cache byte precheck treats same-publisher peer cache keys as freeable,
+  matching `evict_for_stream_cache_pressure`.
+- Stale inject-route reaper skips routes that still have frames in
+  `pending_injected_relay`, indexing pending routes once per poll.
+- Deferred-relay connections drop abandoned `pending_relay` frames when
+  `relay_enabled` is cleared so later inject/reauth cannot resurrect them.
+- `claim_publish_route` enqueues cache eviction when an inject switches routes.
+- Deferred-relay no longer discards inject frames queued before `publish`
+  resets `injected_media_bytes` for the media deadline.
+- Local publisher `pending_relay` queues are round-robin merged (with a rotating
+  lead) so the first connection cannot starve later publishers under a tight
+  relay-send budget.
+- Failed `Conn::inject_relay_frame` after a route switch restores the previous
+  publish claim and undoes the pending cache eviction for the abandoned route.
+- Stream-cache entry-cap eviction runs only after the byte-budget freeable
+  precheck, so a too-small victim is not deleted when the new entry still
+  cannot fit.
+- Stream-cache per-publisher key-limit eviction likewise runs only after the
+  byte-budget freeable precheck.
+- Abandoned-route pruning of `pending_relay` applies only under deferred relay
+  with `relay_enabled` cleared, so normal publishers keep same-batch media
+  through FCUnpublish/deleteStream for fan-out and export.
+- Local relay round-robin concatenates same-route publisher queues in encounter
+  order before fairness across routes, so an A→B handoff cannot emit B before
+  A's already-accepted final frames.
+- Failed inject route-switch restores `relay_key` to the still-held claim;
+  releasing idle inject claims also queues cache eviction; stale inject routes
+  are reaped before publish commands in `process_connections`.
+- Inject queue-failure rollback restores `relay_key` together with the previous
+  publish claim so socket media cannot queue under the rejected route.
+- Relay round-robin groups mixed publisher queues by each frame's route; only
+  `onMetaData` Script payloads enter the init cache; cache reservation credits
+  headers cleared by combined↔per-track representation switches.
+- Closed publishers' deferred relay frames stay in a server orphan queue for
+  player fan-out; local↔inject merge keeps same-route handoff order.
+- Relay export no longer re-exports frames deferred by the per-poll send budget.
+- Relay merge keeps same-route local deferred frames ahead of injects, then
+  round-robins independent routes so neither multi-route source starves.
+- Oversized export frames clear the export buffer before being skipped, so
+  drainers do not keep only stale pre-overflow data.
+- Stream-cache ownership is recorded only after a successful storage
+  reservation, so failed external injects do not grow `publisher_cache_keys`.
+- `set_conn_id_base` / `allocate_conn_id` reject IDs with the high bit set so
+  socket conn ids cannot collide with `is_external_publisher_id`.
+- Stream-cache byte accounting includes `(app, stream_name)` key string
+  storage; inject rejects oversized route component strings.
+- External inject cache ownership uses a stable per-route publisher id in the
+  high-bit range (`is_external_publisher_id`) instead of one shared id for all
+  routes.
+- Pending-relay byte limits count `app` / `stream_name` string storage; inject
+  rejects payloads above the RTMP 24-bit wire maximum (`RTMP_WIRE_MAX_MSG_LENGTH`).
+- Stream-cache pressure can evict other external routes (per-route IDs blocked
+  same-owner eviction); empty `publisher_cache_keys` rows are pruned.
+- Socket-less inject claims `(app, stream_name)` in `active_publish_routes` so
+  inject and local publishers cannot share one route's init cache.
+- `Conn::inject_relay_frame` counts audio/video toward publisher liveness
+  (`injected_media_bytes`) without changing socket receive telemetry.
+- `release_injected_route` / `release_all_injected_routes` free external
+  publish claims; claims are not auto-reaped between polls so continuous
+  non-cacheable inject feeds stay exclusive until explicit release.
+  New unique claims beyond `MAX_EXTERNAL_PUBLISH_ROUTES` (1024) are rejected
+  so cycling routes without release cannot grow `active_publish_routes`
+  without bound.
+- Cache-budget projection subtracts only the replaced field after peer
+  eviction; reservations whose own irreducible size (including other fields
+  retained on the same route) exceeds `max_stream_cache_bytes` reject without
+  wiping peer routes.
+- Injected liveness is reset on new/renamed publish and on every
+  publish-route eviction path (including idle `!was_publishing` teardown).
+- Fair inject↔local interleave alternates which source leads each poll so a
+  budget of 1 cannot permanently starve one side.
+- Relay export flushes budget-deferred frames when their publisher connection
+  is removed in the same poll.
+- `Conn` relay/inject payload limits follow `chunk_reg.max_msg_length`, capped
+  at `RTMP_WIRE_MAX_MSG_LENGTH` (24-bit RTMP message length).
+
+### Removed
+- Accidental `scripts/docker_cargo_test.py` helper (local Windows Docker
+  workaround; not part of the library).
+
 ## [0.6.0] — 2026-08-06
 
 ### Security
@@ -503,7 +623,8 @@ and others.
 - Protocol mapping documents for legacy, E-RTMP v1, and E-RTMP v2
 - `CONTRIBUTING.md` guidelines
 
-[Unreleased]: https://github.com/OpenRTMP/librtmp2/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/OpenRTMP/librtmp2/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/OpenRTMP/librtmp2/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/OpenRTMP/librtmp2/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/OpenRTMP/librtmp2/compare/v0.4.2...v0.5.0
 [0.4.2]: https://github.com/OpenRTMP/librtmp2/compare/v0.4.1...v0.4.2

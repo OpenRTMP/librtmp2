@@ -161,10 +161,10 @@ fn set_conn_id_base_rejects_zero() {
 }
 
 #[test]
-#[should_panic(expected = "conn_id base must leave room")]
-fn set_conn_id_base_rejects_exhausted_counter() {
+#[should_panic(expected = "external publisher id range")]
+fn set_conn_id_base_rejects_high_bit() {
     let mut server = Server::new(plain_config()).unwrap();
-    server.set_conn_id_base(u64::MAX);
+    server.set_conn_id_base(1u64 << 63);
 }
 
 #[test]

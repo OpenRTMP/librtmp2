@@ -4,7 +4,9 @@ use std::time::{Duration, Instant};
 
 use crate::buffer::Buffer;
 use crate::chunk::reader::{ChunkMessage, chunk_read_owned};
-use crate::chunk::state::{ChunkRegistry, DEFAULT_CHUNK_SIZE, DEFAULT_MAX_MSG_LENGTH};
+use crate::chunk::state::{
+    ChunkRegistry, DEFAULT_CHUNK_SIZE, DEFAULT_MAX_MSG_LENGTH, RTMP_WIRE_MAX_MSG_LENGTH,
+};
 use crate::chunk::writer::chunk_write;
 use crate::ertmp::connect_amf::{negotiate_caps, write_negotiated_caps};
 use crate::ertmp::multitrack_media::{first_track_fourcc, foreach_track, is_multitrack_container};
@@ -82,15 +84,30 @@ pub(crate) const RTMP_SESSION_SETUP_TIMEOUT: Duration = Duration::from_secs(10);
 /// `message::message::MAX_AGGREGATE_SUBTAGS`).
 const MAX_AGGREGATE_SUBTAGS: usize = 4096;
 
+/// One media/script frame queued for local relay, stream-cache update, and
+/// optional export to integrators.
+///
+/// Constructed by publishers (via the session media path), by
+/// [`Conn::inject_relay_frame`], or by [`crate::server::Server::inject_relay_frame`].
+/// Integrators that drain export buffers receive clones of these frames.
+#[derive(Clone)]
 pub struct RelayFrame {
+    /// Audio, video, script (`onMetaData`), or metadata classification.
     pub frame_type: FrameType,
+    /// RTMP message timestamp (milliseconds).
     pub timestamp: u32,
+    /// Wire payload as received or injected (relayed to players unchanged).
     pub payload: Vec<u8>,
     /// ModEx-normalized bytes used only for codec parsing and cache classification.
     /// `None` means the normalized bytes are identical to `payload`.
     pub cache_payload: Option<Vec<u8>>,
+    /// Application name used as the first half of the relay route key.
     pub app: String,
+    /// Stream / relay-route key used to match publishers to players.
     pub stream_name: String,
+    /// Owning publisher connection id. Socket-less injects use a high-bit
+    /// external id ([`crate::server::is_external_publisher_id`]); the sentinel
+    /// [`crate::server::EXTERNAL_RELAY_PUBLISHER_ID`] remains `u64::MAX`.
     pub publisher_conn_id: u64,
 }
 
@@ -100,13 +117,17 @@ impl RelayFrame {
         self.cache_payload.as_deref().unwrap_or(&self.payload)
     }
 
-    fn retained_bytes(&self) -> usize {
-        self.payload.len().saturating_add(
-            self.cache_payload
-                .as_ref()
-                .map(|payload| payload.len())
-                .unwrap_or(0),
-        )
+    pub(crate) fn retained_bytes(&self) -> usize {
+        self.payload
+            .len()
+            .saturating_add(
+                self.cache_payload
+                    .as_ref()
+                    .map(|payload| payload.len())
+                    .unwrap_or(0),
+            )
+            .saturating_add(self.app.len())
+            .saturating_add(self.stream_name.len())
     }
 }
 pub struct Conn {
@@ -125,6 +146,11 @@ pub struct Conn {
     pub bytes_at_last_ack: u64,
     /// Audio/video payload bytes received (excludes handshake/control overhead).
     pub media_bytes_received: u64,
+    /// Bytes accepted via [`Conn::inject_relay_frame`] (AV + script/metadata;
+    /// socket telemetry stays in `media_bytes_received`). Counts trusted
+    /// injects toward publisher liveness and deferred-relay drain so route
+    /// squatters still time out and metadata is not stuck while relay is deferred.
+    pub injected_media_bytes: u64,
     /// Audio/video payload bytes sent to this peer.
     pub media_bytes_sent: u64,
     pub client_fd: i32,
@@ -224,6 +250,7 @@ impl Conn {
             bytes_received: 0,
             bytes_at_last_ack: 0,
             media_bytes_received: 0,
+            injected_media_bytes: 0,
             media_bytes_sent: 0,
             client_fd: -1,
             conn_id: 0,
@@ -285,15 +312,38 @@ impl Conn {
         // "exempt" forever if this checked `self.state`. Check the current
         // stream's active flags instead -- they're cleared on unpublish.
         let Some(stream) = self.current_stream.as_ref() else {
+            // Inject-held claims can exist without `current_stream` (socket-less
+            // inject path). Sustain while media has flowed; otherwise apply the
+            // publish-media squat timer instead of the longer setup timeout.
+            if self.claimed_publish_route.is_some() {
+                if self.injected_media_bytes > 0 || self.media_bytes_received > 0 {
+                    return false;
+                }
+                return self.session_setup_started.elapsed() >= PUBLISH_MEDIA_REQUIRED_TIMEOUT;
+            }
             return self.session_setup_started.elapsed() >= RTMP_SESSION_SETUP_TIMEOUT;
         };
-        if stream.is_publishing {
+        // Publish role *or* an inject-held route claim must obey the media
+        // squat timer. Otherwise an idle/inject Conn (or a player that somehow
+        // held a claim) blocks socket publishers until TCP disconnect.
+        let holding_inject_claim = self.claimed_publish_route.is_some();
+        if stream.is_publishing || holding_inject_claim {
             // A peer that claims a publish route but never sends media can
             // otherwise squat the route indefinitely by keeping TCP alive.
-            if self.media_bytes_received == 0 {
+            // Trusted injects count toward liveness without polluting socket
+            // receive telemetry (`media_bytes_received`).
+            if self.media_bytes_received == 0 && self.injected_media_bytes == 0 {
                 return self.session_setup_started.elapsed() >= PUBLISH_MEDIA_REQUIRED_TIMEOUT;
             }
             return false;
+        }
+        // Inject-only squatters (no publish role) must not hold a route
+        // longer than a real publisher would without sending media.
+        if self.claimed_publish_route.is_some()
+            && self.media_bytes_received == 0
+            && self.injected_media_bytes == 0
+        {
+            return self.session_setup_started.elapsed() >= PUBLISH_MEDIA_REQUIRED_TIMEOUT;
         }
         if self.session_setup_started.elapsed() < RTMP_SESSION_SETUP_TIMEOUT {
             return false;
@@ -356,6 +406,22 @@ impl Conn {
             .map(|s| s.is_publishing)
             .unwrap_or(false);
         if !was_publishing {
+            // Idle/prior-epoch inject must not survive createStream / play /
+            // FCUnpublish into a later empty publish's media deadline. A
+            // connection-level inject can claim a route without ever
+            // transitioning to Publishing, so release that claim here too or
+            // the route stays unavailable to socket publishers until close.
+            // Also evict any cache this idle inject wrote — a later publisher
+            // on the same route must not inherit stale codec headers.
+            let claimed_route = self.claimed_publish_route.clone();
+            self.release_claimed_publish_route();
+            if let Some(route_key) = claimed_route
+                && !route_key.is_empty()
+            {
+                self.pending_cache_evictions
+                    .push((self.app.clone(), route_key));
+            }
+            self.injected_media_bytes = 0;
             return;
         }
         let claimed_route = self.claimed_publish_route.clone();
@@ -374,6 +440,7 @@ impl Conn {
             }
         }
         self.clear_detected_stream_metadata();
+        self.injected_media_bytes = 0;
     }
 
     fn release_claimed_publish_route(&mut self) {
@@ -396,6 +463,13 @@ impl Conn {
             Some(prev) if prev == stream => self.claimed_publish_route = Some(prev),
             Some(prev) => {
                 routes.release(self.conn_id, &self.app, &prev);
+                // Mirror the publish-rename path: free the old route's init
+                // cache so a later publisher on `prev` cannot inherit stale
+                // codec headers from this connection.
+                if !prev.is_empty() {
+                    self.pending_cache_evictions
+                        .push((self.app.clone(), prev));
+                }
                 self.claimed_publish_route = Some(stream.to_string());
             }
             None => self.claimed_publish_route = Some(stream.to_string()),
@@ -462,6 +536,85 @@ impl Conn {
         Ok(())
     }
 
+    /// Inject media into this connection's pending relay queue as if it were
+    /// published locally.
+    ///
+    /// Uses the same ModEx-normalize + `queue_relay_frame` path as inbound
+    /// publisher media, but skips `on_media_cb` / `on_frame_cb` (integrator-
+    /// trusted). Does not require `relay_enabled`. Rejects playing-only
+    /// connections so inject cannot squat publish routes from a player session.
+    pub fn inject_relay_frame(
+        &mut self,
+        frame_type: FrameType,
+        timestamp: u32,
+        payload: &[u8],
+    ) -> Result<()> {
+        let max_len = self.chunk_reg.max_msg_length.min(RTMP_WIRE_MAX_MSG_LENGTH) as usize;
+        if payload.len() > max_len {
+            return Err(ErrorCode::Internal);
+        }
+        if let Some(stream) = self.current_stream.as_ref() {
+            if stream.is_playing && !stream.is_publishing {
+                return Err(ErrorCode::Internal);
+            }
+        }
+        let stream_name = self.relay_route_key();
+        if self.app.is_empty() || stream_name.is_empty() {
+            return Err(ErrorCode::Internal);
+        }
+        if self.app.len() > 1024 || stream_name.len() > 1024 {
+            return Err(ErrorCode::Internal);
+        }
+        let previous_claim = self.claimed_publish_route.clone();
+        let eviction_len_before = self.pending_cache_evictions.len();
+        let already_owned_route =
+            self.claimed_publish_route.as_deref() == Some(stream_name.as_str());
+        if !self.claim_publish_route(&stream_name) {
+            // `relay_route_key()` prefers `relay_key`. If an integrator pointed
+            // it at a contended route, restore it to the still-held claim so
+            // later socket media cannot snapshot an unclaimed key.
+            if let Some(ref claimed) = self.claimed_publish_route {
+                self.relay_key = claimed.clone();
+            }
+            return Err(ErrorCode::Internal);
+        }
+        let normalized =
+            normalize_modex_payload(payload, self.negotiated_caps.caps_ex_mask);
+        if let Err(e) = self.queue_relay_frame(frame_type, timestamp, payload, normalized.as_ref())
+        {
+            // Don't let a rejected frame (e.g. over the pending-byte budget)
+            // leave a route claimed that this connection never actually
+            // delivered anything on — that would block a real publisher.
+            // Only roll back a claim/switch we just took; a claim already held
+            // from an earlier successful inject on the same route stays intact.
+            // On a failed route switch, restore the previous claim and undo the
+            // cache-eviction marker so the active feed is not abandoned.
+            if !already_owned_route {
+                self.release_claimed_publish_route();
+                self.pending_cache_evictions.truncate(eviction_len_before);
+                if let Some(prev) = previous_claim {
+                    if let Some(routes) = self.publish_routes.as_ref() {
+                        let _ = routes.claim(self.conn_id, &self.app, &prev);
+                    }
+                    self.claimed_publish_route = Some(prev.clone());
+                    // Keep relay_route_key() aligned with the restored claim so
+                    // socket media cannot queue under the rejected key B.
+                    self.relay_key = prev;
+                }
+            }
+            return Err(e);
+        }
+        // Count all successful injects (AV + script/metadata) as publisher
+        // activity for squat timeout and deferred-relay drain/export. Script
+        // and metadata never touch socket receive telemetry, but they must
+        // still wake `Server::process_connections` when `defer_media_relay`
+        // holds `relay_enabled` off.
+        self.injected_media_bytes = self
+            .injected_media_bytes
+            .saturating_add((payload.len() as u64).max(1));
+        Ok(())
+    }
+
     fn queue_relay_frame(
         &mut self,
         frame_type: FrameType,
@@ -469,6 +622,10 @@ impl Conn {
         payload: &[u8],
         cache_payload: &[u8],
     ) -> Result<()> {
+        let max_len = self.chunk_reg.max_msg_length.min(RTMP_WIRE_MAX_MSG_LENGTH) as usize;
+        if payload.len() > max_len {
+            return Err(ErrorCode::Internal);
+        }
         let cache_payload = if cache_payload.len() == payload.len()
             && std::ptr::eq(cache_payload.as_ptr(), payload.as_ptr())
         {
@@ -476,12 +633,18 @@ impl Conn {
         } else {
             Some(cache_payload.to_vec())
         };
-        let retained_bytes = payload.len().saturating_add(
-            cache_payload
-                .as_ref()
-                .map(|payload| payload.len())
-                .unwrap_or(0),
-        );
+        let app = self.app.clone();
+        let stream_name = self.relay_route_key();
+        let retained_bytes = payload
+            .len()
+            .saturating_add(
+                cache_payload
+                    .as_ref()
+                    .map(|payload| payload.len())
+                    .unwrap_or(0),
+            )
+            .saturating_add(app.len())
+            .saturating_add(stream_name.len());
         if self.pending_relay.len() >= MAX_PENDING_RELAY_FRAMES
             || self.pending_relay_bytes().saturating_add(retained_bytes)
                 > self.max_pending_relay_bytes
@@ -493,8 +656,8 @@ impl Conn {
             timestamp,
             payload: payload.to_vec(),
             cache_payload,
-            app: self.app.clone(),
-            stream_name: self.relay_route_key(),
+            app,
+            stream_name,
             publisher_conn_id: self.conn_id,
         });
         Ok(())
@@ -1436,6 +1599,9 @@ impl Conn {
                 // already owned by this connection must not refresh the timer.
                 if !was_publishing || renaming_route {
                     self.session_setup_started = Instant::now();
+                    // Injected activity from a prior publish/idle epoch must
+                    // not exempt a new empty publish from the media deadline.
+                    self.injected_media_bytes = 0;
                 }
                 if renaming_route {
                     self.pending_cache_evictions
@@ -2593,6 +2759,93 @@ mod tests {
             "publishers that have sent media must not be reaped by the setup timer"
         );
 
+        let mut injected_only = Conn::new();
+        injected_only.state = ConnState::Publishing;
+        injected_only.app = "live".to_string();
+        injected_only.current_stream = Some(Box::new(Stream {
+            is_publishing: true,
+            name: "cam".to_string(),
+            ..Stream::new(1)
+        }));
+        injected_only
+            .inject_relay_frame(FrameType::Video, 0, &[0x17, 0x01, 0xAA])
+            .unwrap();
+        injected_only.set_session_setup_started_for_test(Instant::now() - Duration::from_secs(11));
+        assert_eq!(injected_only.media_bytes_received, 0);
+        assert!(injected_only.injected_media_bytes > 0);
+        assert!(
+            !injected_only.session_setup_timed_out(),
+            "trusted inject must count toward publisher liveness"
+        );
+
+        let mut script_only = Conn::new();
+        script_only.state = ConnState::Publishing;
+        script_only.app = "live".to_string();
+        script_only.defer_media_relay = true;
+        script_only.relay_enabled = false;
+        script_only.current_stream = Some(Box::new(Stream {
+            is_publishing: true,
+            name: "meta".to_string(),
+            ..Stream::new(1)
+        }));
+        let script = b"@setDataFrame";
+        script_only
+            .inject_relay_frame(FrameType::Script, 0, script)
+            .unwrap();
+        assert_eq!(
+            script_only.injected_media_bytes,
+            script.len() as u64,
+            "script inject must count toward deferred-relay drain liveness"
+        );
+        assert_eq!(script_only.pending_relay.len(), 1);
+
+        // Injected bytes from a prior epoch must not exempt a later empty publish.
+        injected_only.evict_active_publish_route();
+        injected_only.current_stream = Some(Box::new(Stream {
+            is_publishing: true,
+            ..Stream::new(2)
+        }));
+        injected_only.set_session_setup_started_for_test(Instant::now() - Duration::from_secs(3));
+        assert_eq!(injected_only.injected_media_bytes, 0);
+        assert!(
+            injected_only.session_setup_timed_out(),
+            "new publish epoch without media must still time out"
+        );
+
+        // Idle inject (no publish role) must also clear on createStream/unpublish
+        // paths that call evict while !was_publishing.
+        let mut idle_inject = Conn::new();
+        idle_inject.state = ConnState::StreamCreated;
+        idle_inject.app = "live".to_string();
+        idle_inject.current_stream = Some(Box::new(Stream {
+            name: "cam".to_string(),
+            ..Stream::new(1)
+        }));
+        idle_inject
+            .inject_relay_frame(FrameType::Video, 0, &[0x17, 0x01, 0xAA])
+            .unwrap();
+        assert!(idle_inject.injected_media_bytes > 0);
+        idle_inject.evict_active_publish_route();
+        assert!(
+            idle_inject.injected_media_bytes == 0,
+            "idle inject must not carry into a later publish epoch"
+        );
+
+        // Active players must not claim a publish route via Conn inject.
+        let mut playing = Conn::new();
+        playing.app = "live".to_string();
+        playing.current_stream = Some(Box::new(Stream {
+            name: "cam".to_string(),
+            is_playing: true,
+            ..Stream::new(1)
+        }));
+        assert!(
+            playing
+                .inject_relay_frame(FrameType::Video, 0, &[0x17, 0x01, 0xAA])
+                .is_err(),
+            "playing connections must not squat publish routes via inject"
+        );
+
         let mut squatting = Conn::new();
         squatting.state = ConnState::Publishing;
         squatting.current_stream = Some(Box::new(Stream {
@@ -3168,6 +3421,192 @@ mod tests {
         conn.evict_active_publish_route();
         assert!(conn.detected_video_codec.is_none());
         assert!(conn.detected_audio_codec.is_none());
+    }
+
+    #[test]
+    fn inject_relay_frame_rejects_playing_only_connection() {
+        let mut conn = Conn::new();
+        conn.app = "live".to_string();
+        conn.current_stream = Some(Box::new(Stream {
+            stream_id: 1,
+            name: "cam".to_string(),
+            is_publishing: false,
+            is_playing: true,
+            paused: false,
+            receive_audio: true,
+            receive_video: true,
+        }));
+        assert!(
+            conn.inject_relay_frame(FrameType::Video, 0, &[0x17, 0x01, 0xAA])
+                .is_err(),
+            "playing-only connections must not inject publisher media"
+        );
+    }
+
+    #[test]
+    fn evict_active_publish_route_releases_idle_inject_claim() {
+        use std::collections::HashMap;
+        use std::sync::{Arc, Mutex};
+
+        let routes = Arc::new(Mutex::new(HashMap::new()));
+        let registry = PublishRouteRegistry::new(Arc::clone(&routes));
+        let key = ("live".to_string(), "cam".to_string());
+
+        let mut conn = Conn::new();
+        conn.conn_id = 7;
+        conn.app = "live".to_string();
+        conn.current_stream = Some(Box::new(Stream {
+            name: "cam".to_string(),
+            ..Stream::new(1)
+        }));
+        conn.publish_routes = Some(registry);
+
+        conn.inject_relay_frame(FrameType::Video, 0, &[0x17, 0x01, 0xAA])
+            .unwrap();
+        assert_eq!(routes.lock().unwrap().get(&key), Some(&7));
+
+        // No publish/play command ever ran (current_stream.is_publishing is
+        // still false), but a later createStream/play/teardown still calls
+        // evict_active_publish_route(); the claim from the idle inject must
+        // not survive it, or the route stays unavailable to a real publisher
+        // until this connection closes.
+        conn.evict_active_publish_route();
+        assert!(
+            routes.lock().unwrap().get(&key).is_none(),
+            "route claimed by an idle inject must be released on stream replacement"
+        );
+    }
+
+    #[test]
+    fn inject_relay_frame_releases_fresh_claim_when_queueing_fails() {
+        use std::collections::HashMap;
+        use std::sync::{Arc, Mutex};
+
+        let routes = Arc::new(Mutex::new(HashMap::new()));
+        let registry = PublishRouteRegistry::new(Arc::clone(&routes));
+        let key = ("live".to_string(), "cam".to_string());
+
+        let mut conn = Conn::new();
+        conn.conn_id = 7;
+        conn.app = "live".to_string();
+        conn.current_stream = Some(Box::new(Stream {
+            name: "cam".to_string(),
+            ..Stream::new(1)
+        }));
+        conn.publish_routes = Some(registry);
+        conn.max_pending_relay_bytes = 0;
+
+        assert!(
+            conn.inject_relay_frame(FrameType::Video, 0, &[0x17, 0x01, 0xAA])
+                .is_err(),
+            "queueing must fail once the pending-relay byte budget is exhausted"
+        );
+        assert!(
+            routes.lock().unwrap().get(&key).is_none(),
+            "a claim taken only to service a rejected frame must not be left behind"
+        );
+
+        // A different connection must now be able to claim the route.
+        let mut other = Conn::new();
+        other.conn_id = 9;
+        other.app = "live".to_string();
+        other.current_stream = Some(Box::new(Stream {
+            name: "cam".to_string(),
+            ..Stream::new(1)
+        }));
+        other.publish_routes = Some(PublishRouteRegistry::new(Arc::clone(&routes)));
+        assert!(
+            other
+                .inject_relay_frame(FrameType::Video, 0, &[0x17, 0x01, 0xAA])
+                .is_ok(),
+            "a rolled-back claim must not block a subsequent legitimate claim"
+        );
+    }
+
+    #[test]
+    fn inject_relay_frame_keeps_prior_claim_when_a_later_frame_is_rejected() {
+        use std::collections::HashMap;
+        use std::sync::{Arc, Mutex};
+
+        let routes = Arc::new(Mutex::new(HashMap::new()));
+        let registry = PublishRouteRegistry::new(Arc::clone(&routes));
+        let key = ("live".to_string(), "cam".to_string());
+
+        let mut conn = Conn::new();
+        conn.conn_id = 7;
+        conn.app = "live".to_string();
+        conn.current_stream = Some(Box::new(Stream {
+            name: "cam".to_string(),
+            ..Stream::new(1)
+        }));
+        conn.publish_routes = Some(registry);
+
+        conn.inject_relay_frame(FrameType::Video, 0, &[0x17, 0x01, 0xAA])
+            .unwrap();
+        assert_eq!(routes.lock().unwrap().get(&key), Some(&7));
+
+        // Starve the budget so the next frame is rejected.
+        conn.max_pending_relay_bytes = 0;
+        assert!(
+            conn.inject_relay_frame(FrameType::Video, 0, &[0x17, 0x01, 0xAA])
+                .is_err()
+        );
+
+        // The connection already legitimately owned this route from the
+        // first successful inject; a later rejected frame must not evict it.
+        assert_eq!(
+            routes.lock().unwrap().get(&key),
+            Some(&7),
+            "an already-owned route must survive a subsequent rejected frame"
+        );
+    }
+
+    #[test]
+    fn inject_relay_frame_restores_prior_claim_when_route_switch_queueing_fails() {
+        use std::collections::HashMap;
+        use std::sync::{Arc, Mutex};
+
+        let routes = Arc::new(Mutex::new(HashMap::new()));
+        let registry = PublishRouteRegistry::new(Arc::clone(&routes));
+        let key_a = ("live".to_string(), "A".to_string());
+        let key_b = ("live".to_string(), "B".to_string());
+
+        let mut conn = Conn::new();
+        conn.conn_id = 7;
+        conn.app = "live".to_string();
+        conn.current_stream = Some(Box::new(Stream {
+            name: "A".to_string(),
+            ..Stream::new(1)
+        }));
+        conn.publish_routes = Some(registry);
+
+        conn.inject_relay_frame(FrameType::Video, 0, &[0x17, 0x01, 0xAA])
+            .unwrap();
+        assert_eq!(routes.lock().unwrap().get(&key_a), Some(&7));
+        assert!(conn.pending_cache_evictions.is_empty());
+
+        // Switch the public relay key, then reject the inject by exhausting
+        // the pending budget. Claim/eviction for B must roll back to A.
+        conn.relay_key = "B".to_string();
+        conn.max_pending_relay_bytes = 0;
+        assert!(
+            conn.inject_relay_frame(FrameType::Video, 0, &[0x17, 0x01, 0xBB])
+                .is_err()
+        );
+        assert_eq!(
+            routes.lock().unwrap().get(&key_a),
+            Some(&7),
+            "failed route-switch inject must restore the previous claim"
+        );
+        assert!(
+            routes.lock().unwrap().get(&key_b).is_none(),
+            "rejected switch must not leave the new route claimed"
+        );
+        assert!(
+            conn.pending_cache_evictions.is_empty(),
+            "failed switch must not queue eviction of the restored route"
+        );
+        assert_eq!(conn.claimed_publish_route.as_deref(), Some("A"));
     }
 
     #[test]

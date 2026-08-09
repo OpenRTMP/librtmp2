@@ -114,6 +114,54 @@ Without TLS:
 librtmp2 = { path = "../librtmp2", default-features = false }
 ```
 
+### External media export / inject (Rust)
+
+Integrators can observe or feed the same local relay path used by publishers
+and players — without sockets or cluster concepts:
+
+```rust
+use librtmp2::server::{
+    is_external_publisher_id, Server, StreamInitSnapshot, EXTERNAL_RELAY_PUBLISHER_ID,
+};
+use librtmp2::{FrameType, RelayFrame, ServerConfig};
+
+// Bounded export of publisher frames (disabled by default = no clones).
+server.enable_relay_export(/*max_frames*/ 256, /*max_bytes*/ 4 * 1024 * 1024);
+let frames: Vec<RelayFrame> = server.drain_exported_relay_frames();
+
+// Socket-less inject into cache + player fan-out for (app, stream).
+// Claims the route until `release_injected_route` (call when the feed ends).
+// Required for continually changing routes — otherwise new claims stop at
+// `MAX_EXTERNAL_PUBLISH_ROUTES` (soft cap; no mid-feed eviction).
+server.inject_relay_frame("live", "cam1", FrameType::Video, ts, &payload)?;
+server.release_injected_route("live", "cam1");
+// Or on shutdown / remesh: server.release_all_injected_routes();
+
+// Late-joiner / remote-subscriber init snapshot from StreamCache.
+if let Some(snap) = server.stream_init_snapshot("live", "cam1") {
+    let _: &StreamInitSnapshot = &snap;
+    let _ = snap.avc_header;
+    let _ = EXTERNAL_RELAY_PUBLISHER_ID;
+    let _ = is_external_publisher_id(EXTERNAL_RELAY_PUBLISHER_ID);
+}
+```
+
+On an existing local publisher `Conn`, `Conn::inject_relay_frame` queues into
+`pending_relay` the same way as socket-received media.
+
+### HA / cluster mirroring notes
+
+- `enable_relay_export` + `drain_exported_relay_frames` mirror **live** relay
+  frames only. Init state (AVC/AAC sequence headers, metadata, last keyframe) is
+  **not** included in the export buffer.
+- Integrators mirroring to remote nodes must also call `stream_init_snapshot`
+  (or equivalent init-cache handoff) so late joiners can decode the stream.
+- External inject routes (`Server::inject_relay_frame`) must call
+  `release_injected_route` when a feed ends. Stale claims are reaped automatically
+  after ~120s without frames, but explicit release is still recommended.
+
+`Conn::inject_relay_frame` skips media auth callbacks.
+
 ---
 
 ## Using via the `extern "C"` FFI
