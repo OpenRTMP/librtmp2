@@ -538,30 +538,51 @@ impl Server {
         }
         let route_key = (app.to_string(), stream_name.to_string());
         let publisher_conn_id = {
-            let Ok(mut routes) = self.active_publish_routes.lock() else {
-                return Err(ErrorCode::Internal);
-            };
-            match routes.get(&route_key).copied() {
-                Some(owner) => {
-                    // Already claimed — reuse only when this external feed owns it.
-                    match self.external_route_ids.get(&route_key).copied() {
-                        Some(id) if id == owner => id,
-                        _ => return Err(ErrorCode::Internal),
+            enum ClaimPlan {
+                Existing(u64),
+                New,
+            }
+            let claim_plan = {
+                let Ok(routes) = self.active_publish_routes.lock() else {
+                    return Err(ErrorCode::Internal);
+                };
+                match routes.get(&route_key).copied() {
+                    Some(owner) => {
+                        // Already claimed — reuse only when this external feed owns it.
+                        match self.external_route_ids.get(&route_key).copied() {
+                            Some(id) if id == owner => ClaimPlan::Existing(id),
+                            _ => return Err(ErrorCode::Internal),
+                        }
+                    }
+                    None => {
+                        let external_claims = routes
+                            .values()
+                            .filter(|id| is_external_publisher_id(**id))
+                            .count();
+                        if external_claims >= MAX_EXTERNAL_PUBLISH_ROUTES {
+                            return Err(ErrorCode::Internal);
+                        }
+                        ClaimPlan::New
                     }
                 }
-                None => {
-                    let external_claims = routes
-                        .values()
-                        .filter(|id| is_external_publisher_id(**id))
-                        .count();
-                    if external_claims >= MAX_EXTERNAL_PUBLISH_ROUTES {
-                        return Err(ErrorCode::Internal);
-                    }
+            };
+            match claim_plan {
+                ClaimPlan::Existing(id) => id,
+                ClaimPlan::New => {
                     // Allocate the stable external id only after the claim is
                     // admitted — failed injects must not leak `external_route_ids`.
                     let id = self.external_publisher_id_for_route(app, stream_name);
-                    routes.insert(route_key.clone(), id);
-                    id
+                    let Ok(mut routes) = self.active_publish_routes.lock() else {
+                        return Err(ErrorCode::Internal);
+                    };
+                    match routes.get(&route_key).copied() {
+                        Some(owner) if owner == id => id,
+                        Some(_) => return Err(ErrorCode::Internal),
+                        None => {
+                            routes.insert(route_key.clone(), id);
+                            id
+                        }
+                    }
                 }
             }
         };
