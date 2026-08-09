@@ -61,6 +61,11 @@
 #define DEFAULT_MAX_MSG_LENGTH ((4 * 1024) * 1024)
 
 /**
+ * Hard ceiling of the RTMP chunk message-length field (`hton24` / `msg_length`).
+ */
+#define RTMP_WIRE_MAX_MSG_LENGTH 16777215
+
+/**
  * Default cap on concurrently active chunk-stream ids per connection.
  */
 #define DEFAULT_MAX_ACTIVE_CSIDS 256
@@ -143,6 +148,25 @@
 #define RTMP_MSG_AMF0_COMMAND 20
 
 #define RTMP_MSG_AGGREGATE 22
+
+/**
+ * Canonical sentinel for socket-less / external media (`u64::MAX`).
+ *
+ * [`Server::inject_relay_frame`] assigns a **stable per-route** id in the
+ * high-bit range (see [`is_external_publisher_id`]) so stream-cache limits
+ * apply per external stream rather than across all injects.
+ */
+#define EXTERNAL_RELAY_PUBLISHER_ID UINT64_MAX
+
+/**
+ * Soft cap on concurrent socket-less inject claims in `active_publish_routes`.
+ *
+ * Claims persist until [`Server::release_injected_route`] (or
+ * [`Server::release_all_injected_routes`]). New unique routes beyond this
+ * limit are rejected so buggy integrators that cycle routes without release
+ * cannot grow the map without bound — without stealing mid-feed claims.
+ */
+#define MAX_EXTERNAL_PUBLISH_ROUTES 1024
 
 /**
  * Default max simultaneous connections accepted per remote address when
