@@ -13,6 +13,30 @@ begin at `1.0.0`.
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-08-09
+
+### Added
+- Public integrator APIs for external media export and socket-less inject:
+  - `RelayFrame` is part of the crate root / `session` public API (documented fields).
+  - `Server::enable_relay_export` / `disable_relay_export` /
+    `drain_exported_relay_frames` — bounded drainable export of publisher
+    relay frames (disabled by default = zero extra copies; overflow drops
+    oldest frames).
+  - `Server::inject_relay_frame` — inject media into the local relay /
+    init-cache / player fan-out path without a socket (per-route external
+    publisher ids; `EXTERNAL_RELAY_PUBLISHER_ID` sentinel; soft-capped by
+    `MAX_EXTERNAL_PUBLISH_ROUTES`).
+  - `Server::release_injected_route` /
+    `Server::release_all_injected_routes` — free socket-less publish claims.
+  - `Conn::inject_relay_frame` — queue frames on an existing publisher
+    connection (skips `on_media_cb`; integrator-trusted).
+  - `Server::stream_init_snapshot` + `StreamInitSnapshot` — copy cached
+    metadata / codec headers / last keyframe for late joiners or remote
+    subscribers.
+
+### Changed
+- Crate version `0.6.0` → `0.7.0`.
+
 ### Fixed
 - Disconnect teardown no longer exports budget-deferred `pending_relay` frames
   before orphaning them; export happens once on the next-poll fan-out path.
@@ -64,35 +88,9 @@ begin at `1.0.0`.
   headers cleared by combined↔per-track representation switches.
 - Closed publishers' deferred relay frames stay in a server orphan queue for
   player fan-out; local↔inject merge keeps same-route handoff order.
-
-## [0.7.0] — 2026-08-08
-
-### Added
-- Public integrator APIs for external media export and socket-less inject:
-  - `RelayFrame` is part of the crate root / `session` public API (documented fields).
-  - `Server::enable_relay_export` / `disable_relay_export` /
-    `drain_exported_relay_frames` — bounded drainable export of publisher
-    relay frames (disabled by default = zero extra copies; overflow drops
-    oldest frames).
-  - `Server::inject_relay_frame` — inject media into the local relay /
-    init-cache / player fan-out path without a socket (per-route external
-    publisher ids; `EXTERNAL_RELAY_PUBLISHER_ID` sentinel; soft-capped by
-    `MAX_EXTERNAL_PUBLISH_ROUTES`).
-  - `Server::release_injected_route` /
-    `Server::release_all_injected_routes` — free socket-less publish claims.
-  - `Conn::inject_relay_frame` — queue frames on an existing publisher
-    connection (skips `on_media_cb`; integrator-trusted).
-  - `Server::stream_init_snapshot` + `StreamInitSnapshot` — copy cached
-    metadata / codec headers / last keyframe for late joiners or remote
-    subscribers.
-
-### Changed
-- Crate version `0.6.0` → `0.7.0`.
-
-### Fixed
 - Relay export no longer re-exports frames deferred by the per-poll send budget.
-- Injected and local publisher frames are fair-interleaved when merging the
-  relay queue so neither source starves under a tight send budget.
+- Relay merge keeps same-route local deferred frames ahead of injects, then
+  round-robins independent routes so neither multi-route source starves.
 - Oversized export frames clear the export buffer before being skipped, so
   drainers do not keep only stale pre-overflow data.
 - Stream-cache ownership is recorded only after a successful storage

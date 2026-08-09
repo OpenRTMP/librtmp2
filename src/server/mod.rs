@@ -3618,7 +3618,7 @@ mod tests {
     }
 
     #[test]
-    fn relay_fairly_interleaves_inject_and_local_frames() {
+    fn same_route_local_deferred_precedes_inject_under_budget() {
         use crate::session::stream::Stream;
         use crate::transport::Transport;
         use std::os::unix::io::IntoRawFd;
@@ -3653,8 +3653,9 @@ mod tests {
         let (player, _player_peer) = attached(2, false);
 
         let mut server = test_server();
-        // One eligible player => each frame costs 1 send. Budget 2 processes
-        // the first inject+local pair under fair interleave (I1, L1, I2, L2).
+        // One eligible player => each frame costs 1 send. Same-route merge
+        // keeps local deferred frames ahead of injects (L1, L2, I1, I2);
+        // budget 2 therefore completes both locals and leaves both injects.
         server.max_relay_sends_per_poll = 2;
         server.enable_relay_export(16, 1024);
         server.connections = vec![publisher, player];
@@ -3670,17 +3671,16 @@ mod tests {
         let exported = server.drain_exported_relay_frames();
         assert_eq!(
             exported.len(),
-            1,
-            "fair interleave must process one local frame in the first pair"
+            2,
+            "same-route handoff must drain local deferred frames before injects"
         );
         assert_eq!(exported[0].payload, vec![0xB1]);
+        assert_eq!(exported[1].payload, vec![0xB2]);
 
-        // Remaining inject (A2) and local (B2) must both still be pending —
-        // inject-first would have consumed both injects and left both locals.
-        assert_eq!(server.pending_injected_relay.len(), 1);
-        assert_eq!(server.pending_injected_relay[0].payload, vec![0xA2]);
-        assert_eq!(server.connections[0].pending_relay.len(), 1);
-        assert_eq!(server.connections[0].pending_relay[0].payload, vec![0xB2]);
+        assert_eq!(server.pending_injected_relay.len(), 2);
+        assert_eq!(server.pending_injected_relay[0].payload, vec![0xA1]);
+        assert_eq!(server.pending_injected_relay[1].payload, vec![0xA2]);
+        assert!(server.connections[0].pending_relay.is_empty());
     }
 
     #[test]
