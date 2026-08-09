@@ -1500,11 +1500,14 @@ impl Server {
     }
 
     /// Cap `orphaned_relay` by frame count and byte budget; drop-oldest until
-    /// `frame` fits. If `frame` alone exceeds capacity, drop it.
+    /// `frame` fits. If `frame` alone exceeds capacity, drop it. Dropped local
+    /// frames are still exported once so HA consumers do not permanently miss
+    /// media that was accepted before the backlog bound kicked in.
     fn push_orphaned_relay(&mut self, frame: RelayFrame) {
         let frame_bytes = frame.retained_bytes();
         let max_bytes = self.resource_limits.max_pending_relay_bytes;
         if frame_bytes > max_bytes || MAX_PENDING_RELAY_FRAMES == 0 {
+            self.export_orphaned_relay_frame(&frame);
             return;
         }
         let mut pending_bytes: usize = self
@@ -1518,13 +1521,24 @@ impl Server {
         {
             let dropped = self.orphaned_relay.remove(0);
             pending_bytes = pending_bytes.saturating_sub(dropped.retained_bytes());
+            self.export_orphaned_relay_frame(&dropped);
         }
         if self.orphaned_relay.len() >= MAX_PENDING_RELAY_FRAMES
             || pending_bytes.saturating_add(frame_bytes) > max_bytes
         {
+            self.export_orphaned_relay_frame(&frame);
             return;
         }
         self.orphaned_relay.push(frame);
+    }
+
+    fn export_orphaned_relay_frame(&mut self, frame: &RelayFrame) {
+        if is_external_publisher_id(frame.publisher_conn_id) {
+            return;
+        }
+        if let Some(export) = self.relay_export.as_mut() {
+            export.push_clone(frame);
+        }
     }
 
     /// Bytes retained by a single stream_cache entry, including HashMap key
@@ -3891,7 +3905,7 @@ mod tests {
     }
 
     #[test]
-    fn relay_export_flushes_requeued_frames_when_publisher_removed() {
+    fn relay_export_orphaned_frames_on_next_poll_after_publisher_removed() {
         use crate::session::stream::Stream;
         use crate::transport::Transport;
         use std::os::unix::io::IntoRawFd;
@@ -3933,15 +3947,25 @@ mod tests {
         let exported = server.drain_exported_relay_frames();
         assert_eq!(
             exported.len(),
-            2,
-            "budget-deferred frames must export on same-poll publisher teardown"
+            1,
+            "first frame exports on the completed-frame path this poll"
         );
         assert_eq!(exported[0].payload, vec![0x11]);
-        assert_eq!(exported[1].payload, vec![0x22]);
         assert!(
             server.connections.iter().all(|c| c.conn_id != 1),
             "socket-less publisher must be removed"
         );
+
+        // Budget-deferred remainder was orphaned without export; next poll
+        // fans it out and exports once (no teardown double-export).
+        server.process_connections().unwrap();
+        let exported = server.drain_exported_relay_frames();
+        assert_eq!(
+            exported.len(),
+            1,
+            "orphaned deferred frame must export on the next poll fan-out"
+        );
+        assert_eq!(exported[0].payload, vec![0x22]);
     }
 
     #[test]

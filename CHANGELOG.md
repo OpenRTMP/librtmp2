@@ -19,7 +19,8 @@ begin at `1.0.0`.
 - Orphaned local relay frames skip `cache_relay_frame` when their publisher is
   no longer in `connections`, so teardown cannot recreate dead cache ownership.
 - `orphaned_relay` is capped via `push_orphaned_relay` (`MAX_PENDING_RELAY_FRAMES`
-  and `max_pending_relay_bytes`), dropping oldest frames until a new one fits.
+  and `max_pending_relay_bytes`), dropping oldest frames until a new one fits;
+  dropped local frames are still exported once so HA does not permanently miss them.
 - `session_setup_timed_out` with no `current_stream` sustains inject claims that
   already received media and applies `PUBLISH_MEDIA_REQUIRED_TIMEOUT` when they
   have not, instead of always using `RTMP_SESSION_SETUP_TIMEOUT`.
