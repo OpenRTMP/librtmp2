@@ -350,9 +350,13 @@ impl Conn {
         }
         if stream.is_playing {
             // Paused players opt out of relay delivery, so they never hit the
-            // slow-reader disconnect path that would otherwise reap idle play
-            // connections. Treat them like post-play idle after the grace window.
-            return stream.paused;
+            // slow-reader disconnect path. Unpaused viewers who have received
+            // outbound relay are protected; squatters who issued play against a
+            // dead route with zero relay must not hold slots forever.
+            if !stream.paused && self.media_bytes_sent > 0 {
+                return false;
+            }
+            return true;
         }
         true
     }
@@ -2893,8 +2897,22 @@ mod tests {
         }));
         active_player.set_session_setup_started_for_test(Instant::now() - Duration::from_secs(11));
         assert!(
-            !active_player.session_setup_timed_out(),
-            "unpaused players must not be reaped by the setup timer"
+            active_player.session_setup_timed_out(),
+            "unpaused players with no outbound relay must be reaped after the setup grace window"
+        );
+
+        let mut receiving_player = Conn::new();
+        receiving_player.state = ConnState::Playing;
+        receiving_player.current_stream = Some(Box::new(Stream {
+            is_playing: true,
+            paused: false,
+            ..Stream::new(1)
+        }));
+        receiving_player.media_bytes_sent = 1;
+        receiving_player.set_session_setup_started_for_test(Instant::now() - Duration::from_secs(11));
+        assert!(
+            !receiving_player.session_setup_timed_out(),
+            "unpaused players receiving relay must not be reaped by the setup timer"
         );
     }
 
