@@ -3016,6 +3016,10 @@ mod tests {
         // could hold its slot forever.
         let mut conn = Conn::new();
         conn.app = "live".to_string();
+        // Model a viewer that has actually received relay; squatters with
+        // zero outbound relay are reaped separately (see
+        // `session_setup_timed_out`).
+        conn.media_bytes_sent = 1;
         conn.current_stream = Some(Box::new(Stream {
             is_playing: true,
             ..Stream::new(1)
