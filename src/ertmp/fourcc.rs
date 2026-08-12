@@ -59,11 +59,6 @@ static AUDIO_FOURCCS: &[AudioFourCcEntry] = &[
         codec: AudioCodec::Mp3,
         name: "MP3",
     },
-    AudioFourCcEntry {
-        fourcc: *b"ec-3",
-        codec: AudioCodec::G711A,
-        name: "Dolby Digital Plus",
-    },
 ];
 
 /// Convert a FourCC string to a video codec.
