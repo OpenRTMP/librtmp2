@@ -19,6 +19,13 @@ pub fn chunk_write(
         return chunk_write(out, msg, payload, payload_len, 128);
     }
 
+    if payload_len != msg.msg_length as usize {
+        return Err(ErrorCode::Internal);
+    }
+    if payload_len > payload.len() {
+        return Err(ErrorCode::Internal);
+    }
+
     let csid = msg.csid;
     let fmt = msg.fmt;
     let ts = msg.timestamp;
@@ -222,5 +229,24 @@ mod tests {
         chunk_read(&mut wire, &mut reg, None, &mut out_msg, &mut ptr, &mut len).unwrap();
 
         assert_eq!(out_msg.timestamp, 0x0100_0000);
+    }
+
+    #[test]
+    fn rejects_payload_length_mismatch() {
+        let payload = b"hello";
+        let msg = ChunkMessage {
+            csid: 3,
+            fmt: 0,
+            timestamp: 0,
+            msg_length: 99,
+            msg_type_id: 0x14,
+            msg_stream_id: 1,
+            is_complete: false,
+        };
+        let mut wire = Buffer::new();
+        assert_eq!(
+            chunk_write(&mut wire, &msg, payload, payload.len(), 128),
+            Err(ErrorCode::Internal)
+        );
     }
 }
