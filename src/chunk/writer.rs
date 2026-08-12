@@ -232,7 +232,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_payload_length_mismatch() {
+    fn rejects_payload_length_mismatch_for_fmt0() {
         let payload = b"hello";
         let msg = ChunkMessage {
             csid: 3,
@@ -248,5 +248,21 @@ mod tests {
             chunk_write(&mut wire, &msg, payload, payload.len(), 128),
             Err(ErrorCode::Internal)
         );
+    }
+
+    #[test]
+    fn fmt3_ignores_stale_msg_length_field() {
+        let payload = b"continuation";
+        let msg = ChunkMessage {
+            csid: 3,
+            fmt: 3,
+            timestamp: 0,
+            msg_length: 0,
+            msg_type_id: 0x14,
+            msg_stream_id: 1,
+            is_complete: false,
+        };
+        let mut wire = Buffer::new();
+        chunk_write(&mut wire, &msg, payload, payload.len(), 128).unwrap();
     }
 }
