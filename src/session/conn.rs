@@ -153,6 +153,10 @@ pub struct Conn {
     pub injected_media_bytes: u64,
     /// Audio/video payload bytes sent to this peer.
     pub media_bytes_sent: u64,
+    /// Snapshot of `media_bytes_sent` consumed by the last pause-grace reset.
+    /// A later pause may refresh setup grace only after additional relay bytes
+    /// have been sent, so historical activity cannot keep a slot alive forever.
+    pause_grace_media_bytes_sent: u64,
     pub client_fd: i32,
     /// Stable per-connection id (monotonic, never reused while the server runs).
     pub conn_id: u64,
@@ -252,6 +256,7 @@ impl Conn {
             media_bytes_received: 0,
             injected_media_bytes: 0,
             media_bytes_sent: 0,
+            pause_grace_media_bytes_sent: 0,
             client_fd: -1,
             conn_id: 0,
             remote_addr: String::new(),
@@ -471,8 +476,7 @@ impl Conn {
                 // cache so a later publisher on `prev` cannot inherit stale
                 // codec headers from this connection.
                 if !prev.is_empty() {
-                    self.pending_cache_evictions
-                        .push((self.app.clone(), prev));
+                    self.pending_cache_evictions.push((self.app.clone(), prev));
                 }
                 self.claimed_publish_route = Some(stream.to_string());
             }
@@ -582,8 +586,7 @@ impl Conn {
             }
             return Err(ErrorCode::Internal);
         }
-        let normalized =
-            normalize_modex_payload(payload, self.negotiated_caps.caps_ex_mask);
+        let normalized = normalize_modex_payload(payload, self.negotiated_caps.caps_ex_mask);
         if let Err(e) = self.queue_relay_frame(frame_type, timestamp, payload, normalized.as_ref())
         {
             // Don't let a rejected frame (e.g. over the pending-byte budget)
@@ -1699,6 +1702,10 @@ impl Conn {
                         stream.name = name_str;
                     }
                     if !already_playing_same {
+                        // Relay bytes from a previous play route are historical
+                        // for pause-grace purposes. A new route must deliver
+                        // fresh bytes before it can earn another grace reset.
+                        self.pause_grace_media_bytes_sent = self.media_bytes_sent;
                         self.request_init_replay();
                     }
                     let _ = state_machine::conn_transition(&mut self.state, ConnState::Playing);
@@ -1767,13 +1774,13 @@ impl Conn {
                         if pause_flag && stream.is_playing && !stream.paused {
                             // Give paused players the same setup-timeout grace
                             // window as FCUnpublish/deleteStream so a brief pause
-                            // during playback is not reaped immediately. Only
-                            // viewers that have actually received outbound relay
-                            // qualify -- otherwise pause/unpause cycling resets
-                            // the timer indefinitely and squats connection slots
-                            // without ever consuming media.
-                            if self.media_bytes_sent > 0 {
+                            // during playback is not reaped immediately. Require
+                            // relay activity since the previous grace reset; the
+                            // lifetime `media_bytes_sent` counter alone would let
+                            // historical bytes power unlimited pause cycling.
+                            if self.media_bytes_sent > self.pause_grace_media_bytes_sent {
                                 self.session_setup_started = Instant::now();
+                                self.pause_grace_media_bytes_sent = self.media_bytes_sent;
                             }
                         }
                         stream.paused = pause_flag;
@@ -2915,7 +2922,8 @@ mod tests {
             ..Stream::new(1)
         }));
         receiving_player.media_bytes_sent = 1;
-        receiving_player.set_session_setup_started_for_test(Instant::now() - Duration::from_secs(11));
+        receiving_player
+            .set_session_setup_started_for_test(Instant::now() - Duration::from_secs(11));
         assert!(
             !receiving_player.session_setup_timed_out(),
             "unpaused players receiving relay must not be reaped by the setup timer"
@@ -2961,6 +2969,62 @@ mod tests {
         assert!(
             !receiving.session_setup_timed_out(),
             "pausing a viewer that is receiving relay must still refresh the setup timer"
+        );
+
+        let mut unpause = Buffer::with_capacity(64);
+        command::build_pause(&mut unpause, false).unwrap();
+        receiving.handle_command(unpause.as_slice()).unwrap();
+        receiving.set_session_setup_started_for_test(Instant::now() - Duration::from_secs(11));
+
+        let mut stale_pause = Buffer::with_capacity(64);
+        command::build_pause(&mut stale_pause, true).unwrap();
+        receiving.handle_command(stale_pause.as_slice()).unwrap();
+        assert!(
+            receiving.session_setup_timed_out(),
+            "historical relay bytes must not refresh pause grace more than once"
+        );
+
+        let mut unpause = Buffer::with_capacity(64);
+        command::build_pause(&mut unpause, false).unwrap();
+        receiving.handle_command(unpause.as_slice()).unwrap();
+        receiving.media_bytes_sent = 2;
+        receiving.set_session_setup_started_for_test(Instant::now() - Duration::from_secs(11));
+
+        let mut fresh_pause = Buffer::with_capacity(64);
+        command::build_pause(&mut fresh_pause, true).unwrap();
+        receiving.handle_command(fresh_pause.as_slice()).unwrap();
+        assert!(
+            !receiving.session_setup_timed_out(),
+            "fresh relay activity must allow another pause grace window"
+        );
+    }
+
+    #[test]
+    fn play_route_change_does_not_reuse_historical_relay_for_pause_grace() {
+        use std::time::{Duration, Instant};
+
+        let mut conn = Conn::new();
+        conn.app = "live".to_string();
+        conn.state = ConnState::Playing;
+        conn.media_bytes_sent = 1;
+        conn.current_stream = Some(Box::new(Stream {
+            is_playing: true,
+            paused: false,
+            name: "live-route".to_string(),
+            ..Stream::new(1)
+        }));
+
+        let mut play = Buffer::with_capacity(128);
+        command::build_play(&mut play, "dead-route").unwrap();
+        conn.handle_command(play.as_slice()).unwrap();
+        conn.set_session_setup_started_for_test(Instant::now() - Duration::from_secs(11));
+
+        let mut pause = Buffer::with_capacity(64);
+        command::build_pause(&mut pause, true).unwrap();
+        conn.handle_command(pause.as_slice()).unwrap();
+        assert!(
+            conn.session_setup_timed_out(),
+            "relay bytes from a previous play route must not qualify a dead route for pause grace"
         );
     }
 
