@@ -82,6 +82,16 @@ mod tests {
     }
 
     #[test]
+    fn parse_ec3_enhanced_header() {
+        let enhanced_ec3 = [0x90, b'e', b'c', b'-', b'3', 0x00];
+        let mut hdr = AudioHeader::default();
+        exaudio_parse(&enhanced_ec3, &mut hdr).unwrap();
+        assert_eq!(hdr.is_ex_header, 1);
+        assert_eq!(hdr.audio_codec, AudioCodec::Aac);
+        assert_eq!(&hdr.fourcc[..4], b"ec-3");
+    }
+
+    #[test]
     fn parse_error_leaves_header_cleared() {
         let legacy_aac = [0xAF, 0x01];
         let mut hdr = AudioHeader::default();
