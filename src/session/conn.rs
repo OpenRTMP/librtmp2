@@ -1767,8 +1767,14 @@ impl Conn {
                         if pause_flag && stream.is_playing && !stream.paused {
                             // Give paused players the same setup-timeout grace
                             // window as FCUnpublish/deleteStream so a brief pause
-                            // during playback is not reaped immediately.
-                            self.session_setup_started = Instant::now();
+                            // during playback is not reaped immediately. Only
+                            // viewers that have actually received outbound relay
+                            // qualify -- otherwise pause/unpause cycling resets
+                            // the timer indefinitely and squats connection slots
+                            // without ever consuming media.
+                            if self.media_bytes_sent > 0 {
+                                self.session_setup_started = Instant::now();
+                            }
                         }
                         stream.paused = pause_flag;
                     }
@@ -2913,6 +2919,48 @@ mod tests {
         assert!(
             !receiving_player.session_setup_timed_out(),
             "unpaused players receiving relay must not be reaped by the setup timer"
+        );
+    }
+
+    #[test]
+    fn pause_unpause_cycling_cannot_reset_setup_timer_without_relay() {
+        use std::time::{Duration, Instant};
+
+        let mut conn = Conn::new();
+        conn.app = "live".to_string();
+        conn.state = ConnState::Playing;
+        conn.current_stream = Some(Box::new(Stream {
+            is_playing: true,
+            paused: false,
+            ..Stream::new(1)
+        }));
+        conn.set_session_setup_started_for_test(Instant::now() - Duration::from_secs(11));
+
+        let mut pause = Buffer::with_capacity(64);
+        command::build_pause(&mut pause, true).unwrap();
+        conn.handle_command(pause.as_slice()).unwrap();
+        assert!(
+            conn.session_setup_timed_out(),
+            "pausing a viewer that never received relay must not refresh the setup timer"
+        );
+
+        let mut receiving = Conn::new();
+        receiving.app = "live".to_string();
+        receiving.state = ConnState::Playing;
+        receiving.media_bytes_sent = 1;
+        receiving.current_stream = Some(Box::new(Stream {
+            is_playing: true,
+            paused: false,
+            ..Stream::new(1)
+        }));
+        receiving.set_session_setup_started_for_test(Instant::now() - Duration::from_secs(11));
+
+        let mut pause = Buffer::with_capacity(64);
+        command::build_pause(&mut pause, true).unwrap();
+        receiving.handle_command(pause.as_slice()).unwrap();
+        assert!(
+            !receiving.session_setup_timed_out(),
+            "pausing a viewer that is receiving relay must still refresh the setup timer"
         );
     }
 
