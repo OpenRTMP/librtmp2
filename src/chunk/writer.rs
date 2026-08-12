@@ -19,7 +19,7 @@ pub fn chunk_write(
         return chunk_write(out, msg, payload, payload_len, 128);
     }
 
-    if payload_len != msg.msg_length as usize {
+    if msg.fmt <= 1 && payload_len != msg.msg_length as usize {
         return Err(ErrorCode::Internal);
     }
     if payload_len > payload.len() {

@@ -30,9 +30,6 @@ pub fn parse(data: &[u8], tag: &mut VideoTag) -> Result<()> {
         5 => VideoCodec::Vp6a,
         6 => VideoCodec::Screen2,
         7 => VideoCodec::H264,
-        12 => VideoCodec::H265,
-        13 => VideoCodec::Av1,
-        14 => VideoCodec::Vp9,
         _ => return Err(ErrorCode::Unsupported),
     };
 
@@ -84,16 +81,11 @@ mod tests {
     }
 
     #[test]
-    fn parse_h265_av1_vp9_legacy_nibbles() {
-        for (nibble, expected) in [
-            (12u8, VideoCodec::H265),
-            (13, VideoCodec::Av1),
-            (14, VideoCodec::Vp9),
-        ] {
+    fn parse_rejects_internal_enum_nibbles_not_legacy_flv() {
+        for nibble in [12u8, 13, 14] {
             let payload = [0x10 | nibble, 0x00];
             let mut tag = VideoTag::default();
-            parse(&payload, &mut tag).unwrap();
-            assert_eq!(tag.codec, expected);
+            assert_eq!(parse(&payload, &mut tag), Err(ErrorCode::Unsupported));
         }
     }
 
