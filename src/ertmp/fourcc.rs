@@ -59,6 +59,13 @@ static AUDIO_FOURCCS: &[AudioFourCcEntry] = &[
         codec: AudioCodec::Mp3,
         name: "MP3",
     },
+    // E-AC-3 has no dedicated AudioCodec variant yet; map to Aac so enhanced
+    // headers are recognized without mislabeling as G711A.
+    AudioFourCcEntry {
+        fourcc: *b"ec-3",
+        codec: AudioCodec::Aac,
+        name: "Dolby Digital Plus",
+    },
 ];
 
 /// Convert a FourCC string to a video codec.
@@ -154,6 +161,7 @@ mod tests {
     fn audio_fourcc_roundtrip() {
         assert_eq!(fourcc_to_audio_codec(b"mp4a").unwrap(), AudioCodec::Aac);
         assert_eq!(fourcc_to_audio_codec(b"Opus").unwrap(), AudioCodec::Opus);
+        assert_eq!(fourcc_to_audio_codec(b"ec-3").unwrap(), AudioCodec::Aac);
         assert_eq!(audio_codec_to_fourcc(AudioCodec::Aac), "mp4a");
     }
 
