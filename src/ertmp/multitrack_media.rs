@@ -106,6 +106,15 @@ pub fn foreach_track(
             payload.len() - pos
         };
 
+        // ManyTracks / ManyTracksManyCodecs allow up to 4096 sub-tracks in a
+        // single ~16 KiB message. Zero-length sub-tracks pack the maximum
+        // track count into the smallest wire footprint and force per-track
+        // authorization and on_frame callbacks with no payload work to
+        // amortize the cost — reject them as malformed.
+        if multitrack_type != AvMultitrackType::OneTrack as u8 && track_size == 0 {
+            return false;
+        }
+
         if pos + track_size > payload.len() {
             return false;
         }
@@ -224,6 +233,15 @@ mod tests {
         assert!(multitrack_has_keyframe(&payload));
     }
 
+    fn build_many_tracks_min_payload_message(track_count: usize) -> Vec<u8> {
+        let mut payload = vec![0x86, 0x10, b'a', b'v', b'c', b'1'];
+        for id in 0..track_count {
+            payload.push(id as u8);
+            payload.extend_from_slice(&[0x00, 0x00, 0x01, 0xAA]);
+        }
+        payload
+    }
+
     fn build_many_tracks_zero_payload_message(track_count: usize) -> Vec<u8> {
         let mut payload = vec![0x86, 0x10, b'a', b'v', b'c', b'1'];
         for id in 0..track_count {
@@ -235,16 +253,24 @@ mod tests {
 
     #[test]
     fn rejects_multitrack_messages_with_too_many_subtracks() {
-        let at_limit = build_many_tracks_zero_payload_message(MAX_MULTITRACK_SUBTRACKS);
+        let at_limit = build_many_tracks_min_payload_message(MAX_MULTITRACK_SUBTRACKS);
         let mut calls = 0;
         assert!(foreach_track(FrameType::Video, &at_limit, |_| calls += 1));
         assert_eq!(calls, MAX_MULTITRACK_SUBTRACKS);
 
-        let over_limit = build_many_tracks_zero_payload_message(MAX_MULTITRACK_SUBTRACKS + 1);
+        let over_limit = build_many_tracks_min_payload_message(MAX_MULTITRACK_SUBTRACKS + 1);
         let mut over_calls = 0;
         assert!(!foreach_track(FrameType::Video, &over_limit, |_| {
             over_calls += 1
         }));
         assert_eq!(over_calls, 0);
+    }
+
+    #[test]
+    fn rejects_multitrack_messages_with_zero_size_subtracks() {
+        let zero_payload = build_many_tracks_zero_payload_message(2);
+        let mut calls = 0;
+        assert!(!foreach_track(FrameType::Video, &zero_payload, |_| calls += 1));
+        assert_eq!(calls, 0);
     }
 }
