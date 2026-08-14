@@ -23,7 +23,7 @@ A modern, open-source **Rust library** for Legacy RTMP and Enhanced RTMP v1/v2.
 
 **What it is not:**
 - Not a complete Adobe RTMP 1.0 implementation (no VOD commands, shared objects, encrypted handshake, etc.)
-- Not a full E-RTMP v2 session stack (`capsEx` negotiation, reconnect, multitrack, ModEx are library code only today)
+- Not a full E-RTMP v2 session stack (`capsEx` negotiation, multitrack, and ModEx are wired into the session; reconnect is library code only today)
 - Not an HTTP server, media policy layer, or FFmpeg wrapper
 
 See [Implementation status](#implementation-status) for the code-accurate breakdown.
@@ -54,14 +54,19 @@ The live path is implemented in `session/conn.rs` and `server/mod.rs`. Parser mo
 TCP_ACCEPTED
   → HANDSHAKE
   → CONNECTED
-  → APP_CONNECTED          ← connect today skips CAPS_NEGOTIATED
+  → [CAPS_NEGOTIATED]      ← entered when connect advertises E-RTMP v2 caps
+  → APP_CONNECTED
   → STREAM_CREATED
   → PUBLISHING | PLAYING
   → CLOSING
   → CLOSED
 ```
 
-`CAPS_NEGOTIATED` exists in `ConnState` for a future E-RTMP v2 capability exchange but is not entered by the current session code.
+`CAPS_NEGOTIATED` is entered when the client's `connect` command advertises
+`fourCcList` / `capsEx` / `videoFourCcInfoMap` / `reconnect`; `negotiate_caps()`
+computes the response and the negotiated caps are echoed back in the `connect`
+`_result` (`session/conn.rs`). Clients that don't advertise v2 caps skip
+straight to `APP_CONNECTED` as before.
 
 ---
 
@@ -210,15 +215,17 @@ librtmp2/
 ├── src/
 │   ├── lib.rs              Rust API + extern "C" FFI layer
 │   ├── alloc.rs            Custom allocator hook
-│   ├── amf.rs              AMF0 + AMF3 encoding/decoding
+│   ├── amf/                AMF0 + AMF3 encoding/decoding
 │   ├── buffer.rs           Growable byte buffers
 │   ├── bytes.rs            Big-endian byte helpers
-│   ├── chunk.rs            Chunk reader/writer/state (per-csid)
+│   ├── chunk/              Chunk reader/writer/state (per-csid)
 │   ├── client/             Outbound client: connect → publish/play
 │   ├── ertmp/              E-RTMP v1/v2 parsers (see Implementation status)
 │   ├── flv/                FLV tag parsers (library; not used in live relay path)
 │   ├── handshake.rs        C0/C1/C2 ↔ S0/S1/S2
+│   ├── media/              Init-frame cache classification + ModEx helpers shared by session/server
 │   ├── message/            Message reassembly, control, commands
+│   ├── net.rs              Host:port parsing shared by server bind / client connect
 │   ├── server/             Listening socket, accept loop, relay
 │   ├── session/            Connection state, publish/play handling
 │   ├── transport.rs        TLS/plaintext transport
@@ -245,42 +252,43 @@ Status reflects what is **wired into the live session path** (`conn.rs`, `server
 | Encrypted / Adobe-digest handshake | Not implemented |
 | Chunking, control messages, ping | Done |
 | Commands `connect`, `createStream`, `publish`, `play` | Done |
-| Commands `pause`, `seek`, `receiveAudio`, `receiveVideo`, `closeStream` | Not implemented |
+| Commands `pause`, `seek`, `receiveAudio`, `receiveVideo`, `closeStream` | Done — `pause`/`receiveAudio`/`receiveVideo` gate per-frame relay; `closeStream` mirrors `deleteStream` cleanup |
 | `FCPublish` / `releaseStream` | Ignored (no-op) |
-| `FCUnpublish` / `deleteStream` | Partial (publish route cleanup only) |
+| `FCUnpublish` / `deleteStream` | Done — clears publish route, play state (`is_playing`/`paused`), and sends `StreamEOF` |
 | Audio / video ingest and relay | Done |
 | Aggregate messages | Done (unpack → relay) |
-| Publisher `onMetaData` parsing (stats) | Done — not relayed to players |
+| Publisher `onMetaData` parsing (stats) | Done — relayed live to players and cached for late joiners |
 | AMF3 shared objects | Not implemented |
-| User Control `StreamBegin` / `StreamEOF` / `SetBufferLength` | Encode/decode helpers only — not sent or handled in session |
+| User Control `StreamBegin` / `StreamEOF` / `SetBufferLength` | Done — `StreamBegin`/`SetBufferLength` sent on `play`, `StreamEOF` sent on `deleteStream`/`closeStream`, inbound `SetBufferLength` read and stored |
 | One stream per connection (`current_stream`) | By design today |
-| Init-frame cache for late joiners | Legacy H.264 (`0x17`) + AAC only |
+| Init-frame cache for late joiners | Legacy H.264 (`0x17`) + AAC, plus enhanced (ex-header) and multitrack sequence starts per track |
 
 ### E-RTMP v1
 
 | Area | Status |
 |------|--------|
 | Enhanced A/V passthrough (HEVC/AV1/Opus from FFmpeg/OBS) | Done (opaque byte relay) |
-| `exvideo_parse` / `exaudio_parse` in session hot path | Not wired — codec detection uses lightweight heuristics |
-| `fourCcList` in `connect` | Skipped on read; not sent on connect |
+| `exvideo_parse` / `exaudio_parse` in session hot path | Done — called for codec detection and init-cache classification |
+| `fourCcList` in `connect` | Done — parsed on read; echoed back in the `_result` when v2 caps negotiation triggers |
 | HDR / `colorInfo` (`metadata.rs`) | Parser only |
-| Enhanced sequence-start cache for players | Not implemented (see init-frame cache above) |
+| Enhanced sequence-start cache for players | Done (see init-frame cache above) |
 | `exvideo_write` / `exaudio_write` helpers | Not present — send raw enhanced payloads via `send_frame` |
 
 ### E-RTMP v2
 
 | Area | Status |
 |------|--------|
-| `capsEx`, `videoFourCcInfoMap`, `reconnect`, `multitrack`, `modex` parse/write | Library code + unit tests |
-| v2 capability negotiation in session | Not implemented |
-| Reconnect / multitrack / ModEx in session | Not implemented |
+| `capsEx`, `videoFourCcInfoMap`, `reconnect`, `multitrack`, `modex` parse/write | Library code + unit tests, also wired into the session (see below) |
+| v2 capability negotiation in session | Done — `negotiate_caps()` runs on `connect` when the client advertises v2 caps; state transitions to `CAPS_NEGOTIATED` and the response echoes negotiated caps |
+| Multitrack / ModEx in session | Done — ModEx normalized on every ingested frame; multitrack containers demuxed per track for codec authorization and per-track init-cache headers |
+| Reconnect in session | Not implemented — capability flag is echoed back but no reconnect-redirect protocol logic exists |
 
 ### Client, TLS, tests
 
 | Area | Status |
 |------|--------|
 | Minimal publish client | Done |
-| Minimal play client (A/V receive callback) | Done — no metadata/aggregate on play |
+| Minimal play client (A/V receive callback) | Done — also delivers metadata (AMF0/AMF3 data) and handles Aggregate messages |
 | RTMPS | Done |
 | Loopback + FFmpeg interop tests | Present (`tests/`, `tests/interop/`) |
 
