@@ -372,9 +372,17 @@ fn connect_and_wait(
 ) -> NegotiatedCaps {
     let (setup_tx, setup_rx) = std::sync::mpsc::channel();
     let url = format!("rtmp://127.0.0.1:{port}/{app_stream}");
+    // Generous: on a contended CI runner (shared with every other test
+    // binary's threads under `cargo test`'s default full parallelism) even
+    // a purely-local loopback connect + createStream round trip can take
+    // several seconds of wall-clock time despite doing very little real
+    // work, so this needs real margin over the "should be instant" case the
+    // other, older tests in this file were written against.
+    let client_timeout = Duration::from_secs(20);
     let client_thread = thread::spawn(move || {
         let result = (|| -> std::result::Result<(), librtmp2::types::ErrorCode> {
             let mut client = Client::new();
+            client.set_connect_timeout(client_timeout);
             if with_reconnect_cb {
                 client.on_reconnect_request_cb = Some(noop_reconnect_request);
             }
@@ -386,28 +394,17 @@ fn connect_and_wait(
         thread::sleep(Duration::from_millis(200));
     });
 
-    // Generous relative to the other tests in this file, since this test's
-    // server loop contends with every other test binary's threads for CPU
-    // under `cargo test`'s default full parallelism, and must stay
-    // comfortably under the client's own internal connect-timeout budget
-    // (`TCP_CONNECT_TIMEOUT_SECS`, 10s) or the client fails with a timeout
-    // instead of this loop's deadline.
-    let deadline = Instant::now() + Duration::from_secs(8);
+    // Keep servicing the server side until the client thread itself reports
+    // it finished `connect()` (the authoritative signal -- not an inferred
+    // server-side connection state, which can lag behind or race what the
+    // client is actually waiting on) or clearly hung past its own timeout.
+    let deadline = Instant::now() + client_timeout + Duration::from_secs(5);
     loop {
         if let Ok(setup_ok) = setup_rx.try_recv() {
             assert!(setup_ok, "client setup failed");
+            break;
         }
-        // `Client::connect()` only returns once *both* `connect` and
-        // `createStream` have round-tripped (see `do_amf_connect`), and the
-        // server only reaches `StreamCreated` after handling `createStream`
-        // -- stopping at `AppConnected` (reached right after `connect`,
-        // before `createStream` is even received) would starve the still
-        // in-flight `createStream` exchange of further polling.
-        let connected = server
-            .connections
-            .first()
-            .is_some_and(|c| c.state >= ConnState::StreamCreated);
-        if connected || Instant::now() >= deadline {
+        if Instant::now() >= deadline {
             break;
         }
         server.poll(20).unwrap();
