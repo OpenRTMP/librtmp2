@@ -20,6 +20,7 @@ use crate::message::control::{
     UCTRL_STREAM_EOF,
 };
 use crate::message::message as msg_dispatch;
+use crate::message::shared_object::{self, SharedObjectMessage};
 use crate::session::publish_route::PublishRouteRegistry;
 use crate::session::state_machine;
 use crate::session::stream::Stream;
@@ -197,6 +198,12 @@ pub struct Conn {
     pub on_connect_cb: Option<fn()>,
     pub on_publish_cb: Option<fn(conn_id: u64, app: &str, stream_name: &str) -> bool>,
     pub on_play_cb: Option<fn(conn_id: u64, app: &str, stream_name: &str) -> bool>,
+    /// Fired for every parsed AMF3 Shared Object message (RTMP message type
+    /// `0x10`) received on this connection. The library only delivers the
+    /// parsed envelope -- multi-client attribute sync/persistence is left to
+    /// the host application, consistent with this crate's "deliver the
+    /// event, not the policy" design.
+    pub on_shared_object_cb: Option<fn(conn_id: u64, so: &SharedObjectMessage)>,
     /// When set by the built-in server, enforces single-publisher-per-route.
     pub(crate) publish_routes: Option<PublishRouteRegistry>,
     /// Exact stream-name key currently held in `publish_routes` for this conn.
@@ -285,6 +292,7 @@ impl Conn {
             on_connect_cb: None,
             on_publish_cb: None,
             on_play_cb: None,
+            on_shared_object_cb: None,
             publish_routes: None,
             claimed_publish_route: None,
             pending_cache_evictions: Vec::new(),
@@ -1097,9 +1105,44 @@ impl Conn {
         }
     }
 
-    fn handle_amf3_shared_object(&mut self, _payload: &[u8]) -> Result<()> {
-        // AMF3 shared objects are accepted and ignored until a relay use-case exists.
+    fn handle_amf3_shared_object(&mut self, payload: &[u8]) -> Result<()> {
+        // Malformed shared-object messages are dropped, not fatal to the
+        // connection -- mirrors how other opportunistic-parse paths (e.g.
+        // onMetaData) degrade on bad input rather than closing the session.
+        let Ok(so) = shared_object::parse(payload) else {
+            return Ok(());
+        };
+        if let Some(cb) = self.on_shared_object_cb {
+            cb(self.conn_id, &so);
+        }
         Ok(())
+    }
+
+    /// Send an AMF3 Shared Object message (RTMP message type `0x10`) on this
+    /// connection.
+    pub fn send_shared_object(&mut self, so: &SharedObjectMessage) -> Result<()> {
+        let mut amf_buf = Buffer::with_capacity(256);
+        shared_object::write(so, &mut amf_buf)?;
+        // AMF3 command/data/shared-object messages carry a leading 0x00
+        // marker byte ahead of the AMF3 payload (mirrors how this module's
+        // AMF3 command/data paths are unwrapped on read).
+        let mut wire = Vec::with_capacity(amf_buf.available() + 1);
+        wire.push(0x00);
+        wire.extend_from_slice(amf_buf.as_slice());
+
+        let mut cmsg = ChunkMessage::default();
+        cmsg.msg_length = wire.len() as u32;
+        cmsg.msg_stream_id = 0;
+        cmsg.fmt = 0;
+        cmsg.csid = 3;
+        cmsg.msg_type_id = msg_dispatch::RTMP_MSG_AMF3_SHARED_OBJECT;
+        chunk_write(
+            &mut self.send_buffer,
+            &cmsg,
+            &wire,
+            wire.len(),
+            self.active_chunk_size as usize,
+        )
     }
 
     fn handle_data_message(&mut self, payload: &[u8]) -> Result<()> {
@@ -1767,7 +1810,19 @@ impl Conn {
                     let _ = self.send_stream_lifecycle_eof(sid);
                 }
             }
-            "FCPublish" | "releaseStream" => {}
+            "FCPublish" => {}
+            "releaseStream" => {
+                let mut stream_name = [0u8; 256];
+                if command::read_release_stream(&mut buf, &mut stream_name).is_ok() {
+                    if let Ok(name_str) = command::decode_route_amf_string(&stream_name) {
+                        if !name_str.is_empty() {
+                            if let Some(ref routes) = self.publish_routes {
+                                routes.force_release(&self.app, &name_str);
+                            }
+                        }
+                    }
+                }
+            }
             "pause" => {
                 if let Ok(pause_flag) = command::read_pause(&mut buf) {
                     if let Some(ref mut stream) = self.current_stream {
@@ -1922,6 +1977,23 @@ impl Conn {
         let mut amf_buf = Buffer::with_capacity(512);
         command::build_onstatus(&mut amf_buf, level, code, description)?;
         self.send_command(stream_id, amf_buf.as_slice())
+    }
+
+    /// Ask the client to reconnect, per the E-RTMP v2 reconnect mechanism:
+    /// sends `NetConnection.Connect.ReconnectRequest` on the connection
+    /// (stream id 0). `tc_url` redirects the client to a different server;
+    /// `None` tells it to reuse its current connection URL. The client is
+    /// expected to keep streaming through the next media boundary, then
+    /// establish a new connection and disconnect from this one -- this call
+    /// only sends the request, it does not close the connection itself.
+    pub fn send_reconnect_request(
+        &mut self,
+        tc_url: Option<&str>,
+        description: Option<&str>,
+    ) -> Result<()> {
+        let mut amf_buf = Buffer::with_capacity(512);
+        command::build_reconnect_request(&mut amf_buf, tc_url, description)?;
+        self.send_command(0, amf_buf.as_slice())
     }
 
     pub fn flush(&mut self) -> Result<()> {
@@ -3658,6 +3730,48 @@ mod tests {
     }
 
     #[test]
+    fn release_stream_force_releases_a_route_owned_by_another_connection() {
+        use std::collections::HashMap;
+        use std::sync::{Arc, Mutex};
+
+        let routes = Arc::new(Mutex::new(HashMap::new()));
+        let key = ("live".to_string(), "cam1".to_string());
+        PublishRouteRegistry::new(Arc::clone(&routes)).claim(7, "live", "cam1");
+        assert_eq!(routes.lock().unwrap().get(&key), Some(&7));
+
+        let mut conn = Conn::new();
+        conn.conn_id = 9;
+        conn.app = "live".to_string();
+        conn.publish_routes = Some(PublishRouteRegistry::new(Arc::clone(&routes)));
+
+        let mut buf = Buffer::new();
+        command::build_release_stream(&mut buf, "cam1").unwrap();
+        conn.handle_command(buf.as_slice()).unwrap();
+
+        assert!(
+            routes.lock().unwrap().get(&key).is_none(),
+            "releaseStream must force-clear a stale claim so a reconnecting encoder can republish"
+        );
+    }
+
+    #[test]
+    fn release_stream_on_an_unclaimed_route_is_a_no_op() {
+        use std::collections::HashMap;
+        use std::sync::{Arc, Mutex};
+
+        let routes = Arc::new(Mutex::new(HashMap::new()));
+
+        let mut conn = Conn::new();
+        conn.conn_id = 9;
+        conn.app = "live".to_string();
+        conn.publish_routes = Some(PublishRouteRegistry::new(Arc::clone(&routes)));
+
+        let mut buf = Buffer::new();
+        command::build_release_stream(&mut buf, "cam1").unwrap();
+        assert!(conn.handle_command(buf.as_slice()).is_ok());
+    }
+
+    #[test]
     fn inject_relay_frame_keeps_prior_claim_when_a_later_frame_is_rejected() {
         use std::collections::HashMap;
         use std::sync::{Arc, Mutex};
@@ -3899,6 +4013,105 @@ mod tests {
         assert_eq!(conn.pending_relay[0].frame_type, FrameType::Video);
         assert_eq!(conn.pending_relay[0].timestamp, 500);
         assert_eq!(conn.pending_relay[0].payload, video_payload);
+    }
+
+    #[test]
+    fn amf3_shared_object_dispatch_reaches_callback() {
+        use crate::message::shared_object::{SharedObjectEvent, SharedObjectEventType};
+        use std::sync::{LazyLock, Mutex};
+
+        static SEEN: LazyLock<Mutex<Option<(u64, String, usize)>>> =
+            LazyLock::new(|| Mutex::new(None));
+
+        fn record_so(conn_id: u64, so: &SharedObjectMessage) {
+            *SEEN.lock().unwrap() = Some((conn_id, so.name.clone(), so.events.len()));
+        }
+
+        *SEEN.lock().unwrap() = None;
+        let mut conn = Conn::new();
+        conn.conn_id = 42;
+        conn.on_shared_object_cb = Some(record_so);
+
+        let so = SharedObjectMessage {
+            name: "chat".to_string(),
+            version: 1,
+            flags: 0,
+            events: vec![SharedObjectEvent {
+                event_type: SharedObjectEventType::Use,
+                data: Vec::new(),
+            }],
+        };
+        let mut amf_buf = Buffer::with_capacity(64);
+        shared_object::write(&so, &mut amf_buf).unwrap();
+        let mut payload = vec![0x00];
+        payload.extend_from_slice(amf_buf.as_slice());
+
+        let msg = ChunkMessage {
+            csid: 3,
+            fmt: 0,
+            timestamp: 0,
+            msg_length: payload.len() as u32,
+            msg_type_id: msg_dispatch::RTMP_MSG_AMF3_SHARED_OBJECT,
+            msg_stream_id: 0,
+            is_complete: true,
+        };
+        conn.handle_message(&msg, &payload).unwrap();
+
+        assert_eq!(
+            *SEEN.lock().unwrap(),
+            Some((42, "chat".to_string(), 1)),
+            "on_shared_object_cb must fire with the parsed envelope"
+        );
+    }
+
+    #[test]
+    fn malformed_amf3_shared_object_is_dropped_without_error() {
+        let mut conn = Conn::new();
+        let payload = vec![0x00, 0xFF, 0xFF]; // truncated name length, no body
+        let msg = ChunkMessage {
+            csid: 3,
+            fmt: 0,
+            timestamp: 0,
+            msg_length: payload.len() as u32,
+            msg_type_id: msg_dispatch::RTMP_MSG_AMF3_SHARED_OBJECT,
+            msg_stream_id: 0,
+            is_complete: true,
+        };
+        assert!(conn.handle_message(&msg, &payload).is_ok());
+    }
+
+    #[test]
+    fn send_shared_object_round_trips_through_parse() {
+        use crate::message::shared_object::{SharedObjectEvent, SharedObjectEventType};
+
+        let mut conn = Conn::new();
+        let so = SharedObjectMessage {
+            name: "scoreboard".to_string(),
+            version: 2,
+            flags: 0x01,
+            events: vec![SharedObjectEvent {
+                event_type: SharedObjectEventType::Change,
+                data: vec![1, 2, 3],
+            }],
+        };
+        conn.send_shared_object(&so).unwrap();
+
+        let mut reg = ChunkRegistry::new();
+        let mut out_msg = ChunkMessage::default();
+        let (status, payload) = chunk_read_owned(&mut conn.send_buffer, &mut reg, &mut out_msg)
+            .expect("wire bytes from send_shared_object must decode as a valid chunk message");
+        assert_eq!(status, 1);
+        assert!(out_msg.is_complete);
+        assert_eq!(
+            out_msg.msg_type_id,
+            msg_dispatch::RTMP_MSG_AMF3_SHARED_OBJECT
+        );
+        assert_eq!(payload[0], 0x00);
+        let parsed = shared_object::parse(&payload[1..]).unwrap();
+        assert_eq!(parsed.name, "scoreboard");
+        assert_eq!(parsed.version, 2);
+        assert!(parsed.is_persistent());
+        assert_eq!(parsed.events.len(), 1);
     }
 
     fn amf0_string(s: &str) -> Vec<u8> {

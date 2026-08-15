@@ -206,6 +206,14 @@ pub struct Frame {
     pub is_metadata: u8,
     /// E-RTMP multitrack id (0 = default track; 255 = not set / single-track).
     pub track_id: u8,
+    /// Set when `hdr` was populated from an Enhanced RTMP v1 Metadata packet
+    /// (`ERTMP_PACKET_TYPE_METADATA`) carrying `colorInfo`. Appended field:
+    /// see `docs/abi-policy.md`.
+    pub has_hdr: u8,
+    /// HDR color info parsed from the frame's `colorInfo` metadata payload
+    /// when `has_hdr` is set; zeroed otherwise. Appended field: see
+    /// `docs/abi-policy.md`.
+    pub hdr: HdrInfo,
 }
 
 impl Default for Frame {
@@ -226,6 +234,8 @@ impl Default for Frame {
             video_frame_type: 0,
             is_metadata: 0,
             track_id: u8::MAX,
+            has_hdr: 0,
+            hdr: HdrInfo::default(),
         }
     }
 }

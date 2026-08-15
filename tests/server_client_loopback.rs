@@ -3,6 +3,7 @@
 //! createStream + publish exchange over real sockets, and sends one video
 //! frame that the server's `on_frame_cb` should observe.
 
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -73,6 +74,8 @@ fn server_client_publish_over_real_sockets() {
                 video_frame_type: 1,
                 is_metadata: 0,
                 track_id: u8::MAX,
+                has_hdr: 0,
+                hdr: librtmp2::HdrInfo::default(),
             };
             client.send_frame(&frame)?;
             Ok(())
@@ -242,6 +245,8 @@ fn publisher_and_player_relay_across_different_listeners() {
                 video_frame_type: 1,
                 is_metadata: 0,
                 track_id: u8::MAX,
+                has_hdr: 0,
+                hdr: librtmp2::HdrInfo::default(),
             };
             publisher.send_frame(&frame)?;
 
@@ -272,5 +277,91 @@ fn publisher_and_player_relay_across_different_listeners() {
         PLAYER_FRAMES_RECEIVED.load(Ordering::SeqCst) > 0,
         "player on a different listener never received the publisher's frame \
          — relay must be shared across every listener on one Server"
+    );
+}
+
+static RECONNECT_CONN_ID: AtomicU64 = AtomicU64::new(0);
+static RECONNECT_RECEIVED: AtomicUsize = AtomicUsize::new(0);
+static RECONNECT_TC_URL: Mutex<Option<String>> = Mutex::new(None);
+static RECONNECT_DESCRIPTION: Mutex<Option<String>> = Mutex::new(None);
+
+fn record_play_conn_id(conn_id: u64, _app: &str, _stream_name: &str) -> bool {
+    RECONNECT_CONN_ID.store(conn_id, Ordering::SeqCst);
+    true
+}
+
+fn on_reconnect_request(tc_url: Option<&str>, description: Option<&str>) {
+    *RECONNECT_TC_URL.lock().unwrap() = tc_url.map(str::to_string);
+    *RECONNECT_DESCRIPTION.lock().unwrap() = description.map(str::to_string);
+    RECONNECT_RECEIVED.fetch_add(1, Ordering::SeqCst);
+}
+
+/// `Server::request_reconnect` must reach the client as a
+/// `NetConnection.Connect.ReconnectRequest` `onStatus` and fire
+/// `on_reconnect_request_cb` with the `tcUrl` the server sent.
+#[test]
+fn server_request_reconnect_reaches_client_callback() {
+    RECONNECT_CONN_ID.store(0, Ordering::SeqCst);
+    RECONNECT_RECEIVED.store(0, Ordering::SeqCst);
+    *RECONNECT_TC_URL.lock().unwrap() = None;
+    *RECONNECT_DESCRIPTION.lock().unwrap() = None;
+
+    let mut server = Server::new(plain_config()).unwrap();
+    server.listen("127.0.0.1:19665").unwrap();
+    server.on_play_cb = Some(record_play_conn_id);
+
+    let (setup_tx, setup_rx) = std::sync::mpsc::channel();
+    let client_thread = thread::spawn(move || {
+        let result = (|| -> std::result::Result<(), librtmp2::types::ErrorCode> {
+            let mut player = Client::new();
+            player.on_reconnect_request_cb = Some(on_reconnect_request);
+            player.connect("rtmp://127.0.0.1:19665/live/reconnecttest")?;
+            player.play()?;
+
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while RECONNECT_RECEIVED.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
+                player.poll(50)?;
+            }
+            Ok(())
+        })();
+        let _ = setup_tx.send(result.is_ok());
+        result.unwrap();
+    });
+
+    let mut reconnect_sent = false;
+    let deadline = Instant::now() + Duration::from_secs(6);
+    loop {
+        if let Ok(setup_ok) = setup_rx.try_recv() {
+            assert!(setup_ok, "player setup failed");
+            break;
+        }
+        if !reconnect_sent && RECONNECT_CONN_ID.load(Ordering::SeqCst) != 0 {
+            server
+                .request_reconnect(
+                    RECONNECT_CONN_ID.load(Ordering::SeqCst),
+                    Some("rtmp://backup.example.com/live"),
+                    Some("moving you to a healthier node"),
+                )
+                .unwrap();
+            reconnect_sent = true;
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+        server.poll(20).unwrap();
+    }
+
+    client_thread.join().unwrap();
+    assert!(
+        RECONNECT_RECEIVED.load(Ordering::SeqCst) > 0,
+        "client never observed the server's reconnect request"
+    );
+    assert_eq!(
+        RECONNECT_TC_URL.lock().unwrap().as_deref(),
+        Some("rtmp://backup.example.com/live")
+    );
+    assert_eq!(
+        RECONNECT_DESCRIPTION.lock().unwrap().as_deref(),
+        Some("moving you to a healthier node")
     );
 }

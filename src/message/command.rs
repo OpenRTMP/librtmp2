@@ -184,6 +184,99 @@ pub fn build_onstatus(buf: &mut Buffer, level: &str, code: &str, description: &s
     Ok(())
 }
 
+/// `NetConnection.Connect.ReconnectRequest` status code, per the E-RTMP v2
+/// reconnect mechanism: a server-initiated `onStatus` telling the client to
+/// establish a new connection (optionally to `tcUrl`) at the next media
+/// boundary, then disconnect from this one.
+pub const RECONNECT_REQUEST_CODE: &str = "NetConnection.Connect.ReconnectRequest";
+
+/// Build a `NetConnection.Connect.ReconnectRequest` onStatus command.
+/// `tc_url` is omitted when `None`, telling the client to reuse its current
+/// connection URL (per spec).
+pub fn build_reconnect_request(
+    buf: &mut Buffer,
+    tc_url: Option<&str>,
+    description: Option<&str>,
+) -> Result<()> {
+    amf0::write_string(buf, "onStatus")?;
+    amf0::write_number(buf, 0.0)?;
+    amf0::write_null(buf)?;
+    amf0::write_object_begin(buf)?;
+    amf0::write_object_key(buf, "level")?;
+    amf0::write_string(buf, "status")?;
+    amf0::write_object_key(buf, "code")?;
+    amf0::write_string(buf, RECONNECT_REQUEST_CODE)?;
+    amf0::write_object_key(buf, "description")?;
+    amf0::write_string(buf, description.unwrap_or("Reconnect requested"))?;
+    if let Some(url) = tc_url {
+        amf0::write_object_key(buf, "tcUrl")?;
+        amf0::write_string(buf, url)?;
+    }
+    amf0::write_object_end(buf)?;
+    Ok(())
+}
+
+/// A parsed `NetConnection.Connect.ReconnectRequest` onStatus event.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReconnectRequest {
+    /// New URL to reconnect to. `None` means reuse the current connection URL.
+    pub tc_url: Option<String>,
+    pub description: Option<String>,
+}
+
+/// Read an `onStatus` command and return `Some(ReconnectRequest)` when its
+/// code is [`RECONNECT_REQUEST_CODE`], `None` for any other onStatus code
+/// (including other status/error events the caller does not care about).
+/// Returns `Err` only for a malformed command.
+pub fn read_reconnect_request(buf: &mut Buffer) -> Result<Option<ReconnectRequest>> {
+    let mut name = [0u8; 64];
+    let name_len = amf0::read_string(buf, &mut name)?;
+    if &name[..name_len] != b"onStatus" {
+        return Err(ErrorCode::Amf);
+    }
+    read_number_value(buf)?; // transaction id
+    amf0::skip_value(buf)?; // command object (always null)
+
+    amf0::read_object_begin(buf)?;
+    let mut code = [0u8; 128];
+    let mut code_len = 0usize;
+    let mut description = [0u8; 256];
+    let mut description_len = 0usize;
+    let mut tc_url = [0u8; 512];
+    let mut tc_url_len: Option<usize> = None;
+    let mut keys = 0usize;
+    while !amf0::is_object_end(buf) {
+        keys += 1;
+        if keys > amf0::MAX_OBJECT_KEYS {
+            return Err(ErrorCode::Amf);
+        }
+        let mut key = [0u8; 256];
+        let key_len = amf0::read_object_key(buf, &mut key)?;
+        let key_str = std::str::from_utf8(&key[..key_len]).unwrap_or("");
+        match key_str {
+            "code" => code_len = amf0::read_string(buf, &mut code)?,
+            "description" => description_len = amf0::read_string(buf, &mut description)?,
+            "tcUrl" => tc_url_len = Some(amf0::read_string(buf, &mut tc_url)?),
+            _ => amf0::skip_value(buf)?,
+        }
+    }
+    let mut end = [0u8; 3];
+    buf.read(&mut end).map_err(|_| ErrorCode::Amf)?;
+
+    if &code[..code_len] != RECONNECT_REQUEST_CODE.as_bytes() {
+        return Ok(None);
+    }
+
+    Ok(Some(ReconnectRequest {
+        tc_url: tc_url_len.map(|len| String::from_utf8_lossy(&tc_url[..len]).into_owned()),
+        description: if description_len > 0 {
+            Some(String::from_utf8_lossy(&description[..description_len]).into_owned())
+        } else {
+            None
+        },
+    }))
+}
+
 /* ── Decoder ── */
 
 /// Peek at the command name without consuming it.
@@ -335,6 +428,16 @@ pub fn read_publish(
 
 /// Read a play command.
 pub fn read_play(buf: &mut Buffer, stream_name: &mut [u8]) -> Result<()> {
+    let mut name = [0u8; 64];
+    amf0::read_string(buf, &mut name)?;
+    read_number_value(buf)?; // skip txn
+    amf0::skip_value(buf)?;
+    read_string_checked(buf, stream_name)?;
+    Ok(())
+}
+
+/// Read a `releaseStream` command. Returns the target stream name.
+pub fn read_release_stream(buf: &mut Buffer, stream_name: &mut [u8]) -> Result<()> {
     let mut name = [0u8; 64];
     amf0::read_string(buf, &mut name)?;
     read_number_value(buf)?; // skip txn
@@ -857,6 +960,46 @@ mod tests {
             read_onstatus(&mut buf, "NetStream.Publish.Start"),
             Err(ErrorCode::Amf)
         );
+    }
+
+    #[test]
+    fn reconnect_request_round_trips_with_tc_url_and_description() {
+        let mut buf = Buffer::new();
+        build_reconnect_request(&mut buf, Some("rtmp://backup/live"), Some("moving you")).unwrap();
+
+        let req = read_reconnect_request(&mut buf).unwrap().unwrap();
+        assert_eq!(req.tc_url.as_deref(), Some("rtmp://backup/live"));
+        assert_eq!(req.description.as_deref(), Some("moving you"));
+    }
+
+    #[test]
+    fn reconnect_request_without_tc_url_reuses_current_connection() {
+        let mut buf = Buffer::new();
+        build_reconnect_request(&mut buf, None, None).unwrap();
+
+        let req = read_reconnect_request(&mut buf).unwrap().unwrap();
+        assert_eq!(req.tc_url, None);
+        assert!(req.description.is_some());
+    }
+
+    #[test]
+    fn read_reconnect_request_ignores_unrelated_onstatus_codes() {
+        let mut buf = Buffer::new();
+        build_onstatus(&mut buf, "status", "NetStream.Publish.Start", "Publishing").unwrap();
+
+        assert_eq!(read_reconnect_request(&mut buf), Ok(None));
+    }
+
+    #[test]
+    fn read_reconnect_request_rejects_non_onstatus_commands() {
+        let mut buf = Buffer::new();
+        build_onstatus(&mut buf, "status", RECONNECT_REQUEST_CODE, "reconnect").unwrap();
+        // Overwrite the command name's first byte so it no longer reads "onStatus".
+        let mut bytes = buf.as_slice().to_vec();
+        bytes[3] = b'X';
+        let mut tampered = Buffer::from_slice(&bytes);
+
+        assert_eq!(read_reconnect_request(&mut tampered), Err(ErrorCode::Amf));
     }
 
     #[test]

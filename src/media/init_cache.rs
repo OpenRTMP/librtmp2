@@ -1,10 +1,14 @@
 //! Init-frame classification and Frame population for the relay hot path.
 
+use crate::ertmp::metadata::metadata_colorinfo_parse;
 use crate::ertmp::multitrack_media::{
     is_multitrack_container, multitrack_has_keyframe, multitrack_has_sequence_start,
 };
 use crate::ertmp::{exaudio, exvideo, fourcc};
-use crate::types::{AudioCodec, AudioHeader, FourCc, Frame, FrameType, VideoCodec, VideoHeader};
+use crate::types::{
+    AudioCodec, AudioHeader, ERTMP_PACKET_TYPE_METADATA, FourCc, Frame, FrameType, VideoCodec,
+    VideoHeader,
+};
 
 /// How a relayed media frame should be treated by the init-frame cache.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -136,6 +140,13 @@ fn populate_video_frame(frame: &mut Frame, payload: &[u8]) {
     } else {
         legacy_video_codec(payload[0] & 0x0F)
     };
+
+    if hdr.is_ex_header != 0 && hdr.packet_type == ERTMP_PACKET_TYPE_METADATA {
+        frame.is_metadata = 1;
+        if metadata_colorinfo_parse(&payload[hdr.header_size..], &mut frame.hdr).is_ok() {
+            frame.has_hdr = 1;
+        }
+    }
 }
 
 fn populate_audio_frame(frame: &mut Frame, payload: &[u8]) {
@@ -251,6 +262,48 @@ mod tests {
         assert_eq!(&frame.audio_fourcc.cc[..4], b"Opus");
         assert_eq!(frame.audio_codec, AudioCodec::Opus);
     }
+    #[test]
+    fn enhanced_video_metadata_packet_populates_hdr_info() {
+        let payload = [
+            0x94, b'h', b'v', b'c', b'1', // ex-header, frame_type=1, packet_type=4 (Metadata)
+            0x00, 0x01, 0x00, 0x02, 0x00, 0x03, // colorInfo: primaries/transfer/matrix
+        ];
+        let mut frame = Frame {
+            frame_type: FrameType::Video,
+            ..Default::default()
+        };
+        populate_av_frame(&mut frame, &payload);
+        assert_eq!(frame.is_metadata, 1);
+        assert_eq!(frame.has_hdr, 1);
+        assert_eq!(frame.hdr.color_primaries, 1);
+        assert_eq!(frame.hdr.transfer_chars, 2);
+        assert_eq!(frame.hdr.matrix_coeffs, 3);
+    }
+
+    #[test]
+    fn enhanced_video_metadata_packet_with_short_payload_leaves_hdr_unset() {
+        let payload = [0x94, b'h', b'v', b'c', b'1', 0x00, 0x01];
+        let mut frame = Frame {
+            frame_type: FrameType::Video,
+            ..Default::default()
+        };
+        populate_av_frame(&mut frame, &payload);
+        assert_eq!(frame.is_metadata, 1);
+        assert_eq!(frame.has_hdr, 0);
+    }
+
+    #[test]
+    fn enhanced_video_non_metadata_packet_leaves_hdr_unset() {
+        let payload = [0x90, b'a', b'v', b'0', b'1'];
+        let mut frame = Frame {
+            frame_type: FrameType::Video,
+            ..Default::default()
+        };
+        populate_av_frame(&mut frame, &payload);
+        assert_eq!(frame.is_metadata, 0);
+        assert_eq!(frame.has_hdr, 0);
+    }
+
     #[test]
     fn enhanced_hevc_sequence_start_is_cached() {
         let payload = [0x90, b'h', b'v', b'c', b'1', 0x01, 0x02];
