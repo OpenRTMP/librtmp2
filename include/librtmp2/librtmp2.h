@@ -348,9 +348,7 @@ typedef struct lrtmp2_server_config_t {
    */
   const uint8_t *tls_ca_file;
   /**
-   * Client: skip certificate verification. Must be exactly `1` to disable
-   * verification; any other value (including `0` or uninitialized garbage)
-   * keeps verification enabled.
+   * Client: skip certificate verification
    */
   int tls_insecure;
   /**
@@ -468,8 +466,8 @@ void lrtmp2_server_stop(struct lrtmp2_server_t *server);
  * Create a client (FFI-compatible). `config` may be NULL to use defaults
  * (verify `rtmps://` peers against the system trust store). When non-NULL,
  * `config.tls_ca_file` (a CA bundle to trust instead of the system store)
- * and `config.tls_insecure` (skip verification entirely, for testing only)
- * control `rtmps://` verification for this client. Returns NULL if
+ * and `config.tls_insecure` (must be exactly `1` to skip verification, for
+ * testing only) control `rtmps://` verification for this client. Returns NULL if
  * `tls_ca_file` is non-NULL but not valid UTF-8, rather than silently
  * falling back to default verification.
  */
