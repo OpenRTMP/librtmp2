@@ -62,6 +62,36 @@ pub fn exvideo_parse(data: &[u8], hdr: &mut VideoHeader) -> Result<()> {
     Ok(())
 }
 
+/// Write an Enhanced RTMP v1 video tag header. Returns bytes written, or 0 if
+/// `buf` is too small. Mirrors [`exvideo_parse`] in reverse.
+pub fn exvideo_write(hdr: &VideoHeader, buf: &mut [u8]) -> usize {
+    if hdr.is_ex_header == 0 {
+        if buf.is_empty() {
+            return 0;
+        }
+        buf[0] = (hdr.frame_type & 0x0F) << 4;
+        return 1;
+    }
+
+    let needs_ct = hdr.packet_type == 1 && is_composition_time_codec(&hdr.fourcc);
+    let len = if needs_ct { 8 } else { 5 };
+    if buf.len() < len {
+        return 0;
+    }
+
+    buf[0] = 0x80 | ((hdr.frame_type & 0x07) << 4) | (hdr.packet_type & 0x0F);
+    buf[1..5].copy_from_slice(&hdr.fourcc[..4]);
+
+    if needs_ct {
+        let ct = hdr.composition_time as i32;
+        buf[5] = (ct >> 16) as u8;
+        buf[6] = (ct >> 8) as u8;
+        buf[7] = ct as u8;
+    }
+
+    len
+}
+
 /// Get the E-RTMP version string.
 pub fn version_string() -> &'static str {
     "E-RTMP v1 (ExVideoTagHeader/FourCC)"
@@ -97,5 +127,76 @@ mod tests {
         assert!(exvideo_parse(&[0x91, b'a', b'v'], &mut hdr).is_err());
         assert_eq!(hdr.composition_time, 0);
         assert_eq!(hdr.is_ex_header, 1);
+    }
+
+    #[test]
+    fn write_round_trips_legacy_header() {
+        let hdr = VideoHeader {
+            is_ex_header: 0,
+            frame_type: 1,
+            ..Default::default()
+        };
+        let mut buf = [0u8; 8];
+        let n = exvideo_write(&hdr, &mut buf);
+        assert_eq!(n, 1);
+
+        let mut parsed = VideoHeader::default();
+        exvideo_parse(&buf[..n], &mut parsed).unwrap();
+        assert_eq!(parsed.frame_type, 1);
+        assert_eq!(parsed.is_ex_header, 0);
+    }
+
+    #[test]
+    fn write_round_trips_enhanced_header_with_composition_time() {
+        let mut hdr = VideoHeader {
+            is_ex_header: 1,
+            packet_type: 1,
+            frame_type: 1,
+            composition_time: 300,
+            ..Default::default()
+        };
+        hdr.fourcc[..4].copy_from_slice(b"avc1");
+        let mut buf = [0u8; 8];
+        let n = exvideo_write(&hdr, &mut buf);
+        assert_eq!(n, 8);
+
+        let mut parsed = VideoHeader::default();
+        exvideo_parse(&buf[..n], &mut parsed).unwrap();
+        assert_eq!(parsed.composition_time, 300);
+        assert_eq!(&parsed.fourcc[..4], b"avc1");
+        assert_eq!(parsed.header_size, 8);
+    }
+
+    #[test]
+    fn write_round_trips_enhanced_header_without_composition_time() {
+        let mut hdr = VideoHeader {
+            is_ex_header: 1,
+            packet_type: 0,
+            frame_type: 1,
+            ..Default::default()
+        };
+        hdr.fourcc[..4].copy_from_slice(b"av01");
+        let mut buf = [0u8; 8];
+        let n = exvideo_write(&hdr, &mut buf);
+        assert_eq!(n, 5);
+
+        let mut parsed = VideoHeader::default();
+        exvideo_parse(&buf[..n], &mut parsed).unwrap();
+        assert_eq!(parsed.composition_time, 0);
+        assert_eq!(parsed.header_size, 5);
+        assert_eq!(&parsed.fourcc[..4], b"av01");
+    }
+
+    #[test]
+    fn write_rejects_undersized_buffer() {
+        let mut hdr = VideoHeader {
+            is_ex_header: 1,
+            packet_type: 1,
+            frame_type: 1,
+            ..Default::default()
+        };
+        hdr.fourcc[..4].copy_from_slice(b"avc1");
+        let mut buf = [0u8; 4];
+        assert_eq!(exvideo_write(&hdr, &mut buf), 0);
     }
 }

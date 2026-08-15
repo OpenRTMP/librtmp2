@@ -246,6 +246,14 @@ pub struct Client {
     pub app: String,
     pub stream_key: String,
     pub on_frame_cb: Option<fn(&Frame)>,
+    /// Fired when the server sends `NetConnection.Connect.ReconnectRequest`
+    /// (E-RTMP v2 reconnect mechanism). `tc_url` is `Some` when the server
+    /// wants the client to reconnect to a different URL, `None` to reuse the
+    /// current one. The library only delivers the event -- establishing the
+    /// new connection and disconnecting from this one is left to the host
+    /// application, which can keep streaming through the next media boundary
+    /// before doing so.
+    pub on_reconnect_request_cb: Option<fn(tc_url: Option<&str>, description: Option<&str>)>,
     /// Retains the last frame payload delivered through `on_frame_cb` so
     /// `Frame.data` stays valid until the next callback on this connection
     /// (mirrors `Conn::frame_cb_scratch` on the server side).
@@ -280,6 +288,7 @@ impl Client {
             app: String::new(),
             stream_key: String::new(),
             on_frame_cb: None,
+            on_reconnect_request_cb: None,
             frame_cb_scratch: Vec::new(),
             tls_ca_file: None,
             tls_insecure: false,
@@ -688,6 +697,15 @@ impl Client {
                         }
                     } else if msg.msg_type_id == msg_dispatch::RTMP_MSG_AGGREGATE {
                         self.handle_aggregate_message(msg.timestamp, &payload)?;
+                    } else if msg.msg_type_id == msg_dispatch::RTMP_MSG_AMF0_COMMAND {
+                        self.handle_command_message(&payload);
+                    } else if msg.msg_type_id == msg_dispatch::RTMP_MSG_AMF3_COMMAND {
+                        let data: &[u8] = if !payload.is_empty() && payload[0] == 0x00 {
+                            &payload[1..]
+                        } else {
+                            &payload
+                        };
+                        self.handle_command_message(data);
                     }
                 }
                 Ok(_) => break,
@@ -695,6 +713,19 @@ impl Client {
             }
         }
         Ok(())
+    }
+
+    /// Handle an AMF command received outside the blocking connect/publish/play
+    /// handshakes (e.g. a server-initiated `onStatus` mid-session). Unknown or
+    /// malformed commands are ignored -- this path only reacts to events the
+    /// client understands.
+    fn handle_command_message(&mut self, payload: &[u8]) {
+        let mut buf = Buffer::from_slice(payload);
+        if let Ok(Some(req)) = command::read_reconnect_request(&mut buf) {
+            if let Some(cb) = self.on_reconnect_request_cb {
+                cb(req.tc_url.as_deref(), req.description.as_deref());
+            }
+        }
     }
 
     /// Unpack aggregate A/V/script sub-tags for play-side frame callbacks.

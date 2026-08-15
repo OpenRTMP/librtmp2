@@ -14,6 +14,7 @@ use crate::ertmp::multitrack_media::{foreach_track, is_multitrack_container};
 use crate::media::{
     CacheFrameKind, classify_cache_frame, is_on_metadata_payload, normalize_modex_payload,
 };
+use crate::message::shared_object::SharedObjectMessage;
 use crate::net;
 use crate::session::conn::{Conn, MAX_PENDING_RELAY_FRAMES, RelayFrame};
 use crate::session::publish_route::PublishRouteRegistry;
@@ -301,6 +302,9 @@ pub struct Server {
     pub on_play_cb: Option<fn(conn_id: u64, app: &str, stream_name: &str) -> bool>,
     /// When set, must return true before publisher media is queued for relay.
     pub on_media_cb: Option<fn(u64, FrameType, Option<&str>) -> bool>,
+    /// Fired for every parsed AMF3 Shared Object message received on any
+    /// connection.
+    pub on_shared_object_cb: Option<fn(u64, &SharedObjectMessage)>,
     /// TLS context built from `config` at construction time; used by
     /// [`Server::listen`] calls. This field stays public for Rust API
     /// compatibility so integrators that used to replace `server.tls_ctx`
@@ -378,6 +382,7 @@ impl Server {
             on_publish_cb: None,
             on_play_cb: None,
             on_media_cb: None,
+            on_shared_object_cb: None,
             tls_ctx,
             listeners: Vec::new(),
             next_listener_accept: 0,
@@ -712,6 +717,27 @@ impl Server {
         })
     }
 
+    /// Ask a connected client to reconnect (E-RTMP v2 reconnect mechanism):
+    /// sends `NetConnection.Connect.ReconnectRequest` to the connection
+    /// identified by `conn_id`. `tc_url` redirects the client to a different
+    /// server; `None` tells it to reuse its current connection URL. The
+    /// client is expected to keep streaming through the next media boundary
+    /// before reconnecting -- this call only sends the request and does not
+    /// close `conn_id` itself. Returns `Err(ErrorCode::Internal)` if no
+    /// connection with `conn_id` is currently held by this server.
+    pub fn request_reconnect(
+        &mut self,
+        conn_id: u64,
+        tc_url: Option<&str>,
+        description: Option<&str>,
+    ) -> Result<()> {
+        let Some(conn) = self.connections.iter_mut().find(|c| c.conn_id == conn_id) else {
+            return Err(ErrorCode::Internal);
+        };
+        conn.send_reconnect_request(tc_url, description)?;
+        conn.flush()
+    }
+
     /// Resolve a "host:port" (default port 1935) string into a bindable address.
     fn resolve_bind_addr(bind_addr: &str) -> Result<String> {
         let mut host = String::new();
@@ -954,6 +980,7 @@ impl Server {
         conn.on_connect_cb = self.on_connect_cb;
         conn.on_publish_cb = self.on_publish_cb;
         conn.on_play_cb = self.on_play_cb;
+        conn.on_shared_object_cb = self.on_shared_object_cb;
         conn.publish_routes = Some(PublishRouteRegistry::new(Arc::clone(
             &self.active_publish_routes,
         )));

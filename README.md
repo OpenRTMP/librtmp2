@@ -22,8 +22,8 @@ A modern, open-source **Rust library** for Legacy RTMP and Enhanced RTMP v1/v2.
 - Parser/serializer modules for E-RTMP v1/v2 structures (usable from embedders; not all are wired into the session layer yet)
 
 **What it is not:**
-- Not a complete Adobe RTMP 1.0 implementation (no VOD commands, shared objects, encrypted handshake, etc.)
-- Not a full E-RTMP v2 session stack (`capsEx` negotiation, multitrack, and ModEx are wired into the session; reconnect is library code only today)
+- Not a complete Adobe RTMP 1.0 implementation (no VOD commands, encrypted handshake, etc.; AMF3 shared object *envelopes* are parsed/delivered, but multi-client attribute sync/persistence is left to the host)
+- Not a full E-RTMP v2 session stack (`capsEx` negotiation, multitrack, ModEx, and the reconnect-request handshake are wired into the session; the actual reconnect-redirect *transport* logic is left to the host application)
 - Not an HTTP server, media policy layer, or FFmpeg wrapper
 
 See [Implementation status](#implementation-status) for the code-accurate breakdown.
@@ -253,12 +253,12 @@ Status reflects what is **wired into the live session path** (`conn.rs`, `server
 | Chunking, control messages, ping | Done |
 | Commands `connect`, `createStream`, `publish`, `play` | Done |
 | Commands `pause`, `seek`, `receiveAudio`, `receiveVideo`, `closeStream` | Done — `pause`/`receiveAudio`/`receiveVideo` gate per-frame relay; `closeStream` mirrors `deleteStream` cleanup |
-| `FCPublish` / `releaseStream` | Ignored (no-op) |
+| `FCPublish` / `releaseStream` | `FCPublish` ignored (no-op); `releaseStream` force-releases a stale publish-route claim so a reconnecting encoder can immediately republish |
 | `FCUnpublish` / `deleteStream` | Done — clears publish route, play state (`is_playing`/`paused`), and sends `StreamEOF` |
 | Audio / video ingest and relay | Done |
 | Aggregate messages | Done (unpack → relay) |
 | Publisher `onMetaData` parsing (stats) | Done — relayed live to players and cached for late joiners |
-| AMF3 shared objects | Not implemented |
+| AMF3 shared objects | Done — envelope (name/version/flags + event list) parsed and delivered via `on_shared_object_cb`; `Conn::send_shared_object` writes them. Event payloads are opaque bytes — interpreting `Change`/`SendMessage` contents as AMF is left to the host, per this crate's "deliver the event, not the policy" design |
 | User Control `StreamBegin` / `StreamEOF` / `SetBufferLength` | Done — `StreamBegin`/`SetBufferLength` sent on `play`, `StreamEOF` sent on `deleteStream`/`closeStream`, inbound `SetBufferLength` read and stored |
 | One stream per connection (`current_stream`) | By design today |
 | Init-frame cache for late joiners | Legacy H.264 (`0x17`) + AAC, plus enhanced (ex-header) and multitrack sequence starts per track |
@@ -270,9 +270,9 @@ Status reflects what is **wired into the live session path** (`conn.rs`, `server
 | Enhanced A/V passthrough (HEVC/AV1/Opus from FFmpeg/OBS) | Done (opaque byte relay) |
 | `exvideo_parse` / `exaudio_parse` in session hot path | Done — called for codec detection and init-cache classification |
 | `fourCcList` in `connect` | Done — parsed on read; echoed back in the `_result` when v2 caps negotiation triggers |
-| HDR / `colorInfo` (`metadata.rs`) | Parser only |
+| HDR / `colorInfo` (`metadata.rs`) | Done — wired into video frame population: an enhanced Metadata packet type (`ERTMP_PACKET_TYPE_METADATA`) parses `colorInfo` and populates `Frame.hdr` / `Frame.has_hdr` |
 | Enhanced sequence-start cache for players | Done (see init-frame cache above) |
-| `exvideo_write` / `exaudio_write` helpers | Not present — send raw enhanced payloads via `send_frame` |
+| `exvideo_write` / `exaudio_write` helpers | Done — mirror `exvideo_parse` / `exaudio_parse` in reverse (`src/ertmp/exvideo.rs`, `src/ertmp/exaudio.rs`) |
 
 ### E-RTMP v2
 
@@ -281,7 +281,7 @@ Status reflects what is **wired into the live session path** (`conn.rs`, `server
 | `capsEx`, `videoFourCcInfoMap`, `reconnect`, `multitrack`, `modex` parse/write | Library code + unit tests, also wired into the session (see below) |
 | v2 capability negotiation in session | Done — `negotiate_caps()` runs on `connect` when the client advertises v2 caps; state transitions to `CAPS_NEGOTIATED` and the response echoes negotiated caps |
 | Multitrack / ModEx in session | Done — ModEx normalized on every ingested frame; multitrack containers demuxed per track for codec authorization and per-track init-cache headers |
-| Reconnect in session | Not implemented — capability flag is echoed back but no reconnect-redirect protocol logic exists |
+| Reconnect in session | Done — `Conn::send_reconnect_request` / `Server::request_reconnect` send `NetConnection.Connect.ReconnectRequest`; the client detects it mid-session and fires `on_reconnect_request_cb` with the (optional) `tcUrl`. The library only delivers the event — establishing the new connection is left to the host application |
 
 ### Client, TLS, tests
 

@@ -68,6 +68,8 @@ pub fn make_video_frame(timestamp: u32, byte: u8) -> ([u8; SENT_FRAME_LEN], Fram
         video_frame_type: 1,
         is_metadata: 0,
         track_id: u8::MAX,
+        has_hdr: 0,
+        hdr: librtmp2::HdrInfo::default(),
     };
     (data, frame)
 }
@@ -93,6 +95,8 @@ pub fn make_audio_frame(timestamp: u32) -> ([u8; 16], Frame) {
         video_frame_type: 0,
         is_metadata: 0,
         track_id: u8::MAX,
+        has_hdr: 0,
+        hdr: librtmp2::HdrInfo::default(),
     };
     (data, frame)
 }
