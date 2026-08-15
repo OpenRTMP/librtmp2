@@ -380,15 +380,19 @@ fn connect_and_wait(
     // other, older tests in this file were written against.
     let client_timeout = Duration::from_secs(20);
     let client_thread = thread::spawn(move || {
-        let result = (|| -> std::result::Result<(), librtmp2::types::ErrorCode> {
-            let mut client = Client::new();
-            client.set_connect_timeout(client_timeout);
-            if with_reconnect_cb {
-                client.on_reconnect_request_cb = Some(noop_reconnect_request);
-            }
-            client.connect(&url)?;
-            Ok(())
-        })();
+        // `client` must stay alive (and its transport connected) past the
+        // point where the main thread observes success and inspects
+        // `server.connections` -- dropping it right after `connect()`
+        // returns closes the TCP connection immediately, racing the
+        // server's own bookkeeping and intermittently making the
+        // connection vanish from `server.connections` before the caller
+        // ever gets to look at it.
+        let mut client = Client::new();
+        client.set_connect_timeout(client_timeout);
+        if with_reconnect_cb {
+            client.on_reconnect_request_cb = Some(noop_reconnect_request);
+        }
+        let result = client.connect(&url);
         let _ = setup_tx.send(result.is_ok());
         result.unwrap();
         thread::sleep(Duration::from_millis(200));
