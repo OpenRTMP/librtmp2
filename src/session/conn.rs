@@ -12,7 +12,8 @@ use crate::ertmp::connect_amf::{negotiate_caps, write_negotiated_caps};
 use crate::ertmp::multitrack_media::{first_track_fourcc, foreach_track, is_multitrack_container};
 use crate::handshake::{self, Handshake, HandshakeState};
 use crate::media::{
-    is_on_metadata_payload, normalize_modex_payload, populate_av_frame, populate_multitrack_frame,
+    is_on_metadata_payload, normalize_modex_payload, parse_video_metadata_hdr, populate_av_frame,
+    populate_multitrack_frame,
 };
 use crate::message::command;
 use crate::message::control::{
@@ -183,6 +184,11 @@ pub struct Conn {
     pub detected_video_framerate: Option<f64>,
     pub detected_audio_sample_rate: Option<u32>,
     pub detected_audio_channels: Option<u32>,
+    /// HDR `colorInfo` parsed from the publisher's most recent enhanced video
+    /// Metadata packet (`ERTMP_PACKET_TYPE_METADATA`), if any. Rust-only --
+    /// not part of `Frame`'s ABI-stable `#[repr(C)]` layout (see
+    /// `docs/abi-policy.md`).
+    pub detected_hdr_info: Option<HdrInfo>,
     pub relay_enabled: bool,
     /// When true, media relay stays off until the integrator sets `relay_enabled`
     /// after its own post-auth bookkeeping (used by librtmp2-server).
@@ -284,6 +290,7 @@ impl Conn {
             detected_video_framerate: None,
             detected_audio_sample_rate: None,
             detected_audio_channels: None,
+            detected_hdr_info: None,
             relay_enabled: false,
             defer_media_relay: false,
             max_pending_relay_bytes: MAX_PENDING_RELAY_BYTES,
@@ -501,6 +508,7 @@ impl Conn {
         self.detected_video_framerate = None;
         self.detected_audio_sample_rate = None;
         self.detected_audio_channels = None;
+        self.detected_hdr_info = None;
     }
 
     fn publishing_metadata_allowed(&self, msg_stream_id: u32) -> bool {
@@ -774,6 +782,12 @@ impl Conn {
                 self.detected_audio_codec = current_codec.clone();
             }
             _ => {}
+        }
+
+        if frame_type == FrameType::Video && !is_multitrack {
+            if let Some(color_info) = parse_video_metadata_hdr(parse_payload) {
+                self.detected_hdr_info = Some(color_info);
+            }
         }
 
         self.media_bytes_received = self
@@ -3627,6 +3641,34 @@ mod tests {
         conn.evict_active_publish_route();
         assert!(conn.detected_video_codec.is_none());
         assert!(conn.detected_audio_codec.is_none());
+    }
+
+    #[test]
+    fn enhanced_video_metadata_frame_populates_detected_hdr_info() {
+        let mut conn = Conn::new();
+        conn.relay_enabled = true;
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+        conn.current_stream.as_mut().unwrap().is_publishing = true;
+
+        assert!(conn.detected_hdr_info.is_none());
+
+        let payload = vec![
+            0x94, b'h', b'v', b'c', b'1', // ex-header, frame_type=1, packet_type=4 (Metadata)
+            0x00, 0x01, 0x00, 0x02, 0x00, 0x03, // colorInfo: primaries/transfer/matrix
+        ];
+        conn.handle_media_frame(1, FrameType::Video, 0, &payload)
+            .unwrap();
+
+        let hdr = conn.detected_hdr_info.expect("colorInfo must be captured");
+        assert_eq!(hdr.color_primaries, 1);
+        assert_eq!(hdr.transfer_chars, 2);
+        assert_eq!(hdr.matrix_coeffs, 3);
+
+        conn.evict_active_publish_route();
+        assert!(
+            conn.detected_hdr_info.is_none(),
+            "detected_hdr_info must be cleared alongside the other detected-* fields"
+        );
     }
 
     #[test]

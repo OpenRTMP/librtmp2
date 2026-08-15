@@ -74,8 +74,6 @@ fn server_client_publish_over_real_sockets() {
                 video_frame_type: 1,
                 is_metadata: 0,
                 track_id: u8::MAX,
-                has_hdr: 0,
-                hdr: librtmp2::HdrInfo::default(),
             };
             client.send_frame(&frame)?;
             Ok(())
@@ -245,8 +243,6 @@ fn publisher_and_player_relay_across_different_listeners() {
                 video_frame_type: 1,
                 is_metadata: 0,
                 track_id: u8::MAX,
-                has_hdr: 0,
-                hdr: librtmp2::HdrInfo::default(),
             };
             publisher.send_frame(&frame)?;
 

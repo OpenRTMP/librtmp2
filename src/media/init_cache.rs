@@ -143,10 +143,23 @@ fn populate_video_frame(frame: &mut Frame, payload: &[u8]) {
 
     if hdr.is_ex_header != 0 && hdr.packet_type == ERTMP_PACKET_TYPE_METADATA {
         frame.is_metadata = 1;
-        if metadata_colorinfo_parse(&payload[hdr.header_size..], &mut frame.hdr).is_ok() {
-            frame.has_hdr = 1;
-        }
     }
+}
+
+/// Parse `colorInfo` HDR metadata from a raw video payload, if it carries an
+/// enhanced (ex-header) Metadata packet type (`ERTMP_PACKET_TYPE_METADATA`).
+/// Returns `None` for any other packet type or on a parse error -- this is
+/// opportunistic, not part of `Frame` (see `docs/abi-policy.md`: `Frame`'s
+/// `#[repr(C)]` layout is ABI-stable across minor/patch releases).
+pub fn parse_video_metadata_hdr(payload: &[u8]) -> Option<crate::types::HdrInfo> {
+    let mut hdr = VideoHeader::default();
+    exvideo::exvideo_parse(payload, &mut hdr).ok()?;
+    if hdr.is_ex_header == 0 || hdr.packet_type != ERTMP_PACKET_TYPE_METADATA {
+        return None;
+    }
+    let mut color_info = crate::types::HdrInfo::default();
+    metadata_colorinfo_parse(&payload[hdr.header_size..], &mut color_info).ok()?;
+    Some(color_info)
 }
 
 fn populate_audio_frame(frame: &mut Frame, payload: &[u8]) {
@@ -263,7 +276,7 @@ mod tests {
         assert_eq!(frame.audio_codec, AudioCodec::Opus);
     }
     #[test]
-    fn enhanced_video_metadata_packet_populates_hdr_info() {
+    fn enhanced_video_metadata_packet_marks_is_metadata() {
         let payload = [
             0x94, b'h', b'v', b'c', b'1', // ex-header, frame_type=1, packet_type=4 (Metadata)
             0x00, 0x01, 0x00, 0x02, 0x00, 0x03, // colorInfo: primaries/transfer/matrix
@@ -274,26 +287,10 @@ mod tests {
         };
         populate_av_frame(&mut frame, &payload);
         assert_eq!(frame.is_metadata, 1);
-        assert_eq!(frame.has_hdr, 1);
-        assert_eq!(frame.hdr.color_primaries, 1);
-        assert_eq!(frame.hdr.transfer_chars, 2);
-        assert_eq!(frame.hdr.matrix_coeffs, 3);
     }
 
     #[test]
-    fn enhanced_video_metadata_packet_with_short_payload_leaves_hdr_unset() {
-        let payload = [0x94, b'h', b'v', b'c', b'1', 0x00, 0x01];
-        let mut frame = Frame {
-            frame_type: FrameType::Video,
-            ..Default::default()
-        };
-        populate_av_frame(&mut frame, &payload);
-        assert_eq!(frame.is_metadata, 1);
-        assert_eq!(frame.has_hdr, 0);
-    }
-
-    #[test]
-    fn enhanced_video_non_metadata_packet_leaves_hdr_unset() {
+    fn enhanced_video_non_metadata_packet_does_not_mark_is_metadata() {
         let payload = [0x90, b'a', b'v', b'0', b'1'];
         let mut frame = Frame {
             frame_type: FrameType::Video,
@@ -301,7 +298,30 @@ mod tests {
         };
         populate_av_frame(&mut frame, &payload);
         assert_eq!(frame.is_metadata, 0);
-        assert_eq!(frame.has_hdr, 0);
+    }
+
+    #[test]
+    fn parse_video_metadata_hdr_extracts_color_info() {
+        let payload = [
+            0x94, b'h', b'v', b'c', b'1', // ex-header, frame_type=1, packet_type=4 (Metadata)
+            0x00, 0x01, 0x00, 0x02, 0x00, 0x03, // colorInfo: primaries/transfer/matrix
+        ];
+        let hdr = parse_video_metadata_hdr(&payload).unwrap();
+        assert_eq!(hdr.color_primaries, 1);
+        assert_eq!(hdr.transfer_chars, 2);
+        assert_eq!(hdr.matrix_coeffs, 3);
+    }
+
+    #[test]
+    fn parse_video_metadata_hdr_rejects_short_payload() {
+        let payload = [0x94, b'h', b'v', b'c', b'1', 0x00, 0x01];
+        assert!(parse_video_metadata_hdr(&payload).is_none());
+    }
+
+    #[test]
+    fn parse_video_metadata_hdr_returns_none_for_non_metadata_packet() {
+        let payload = [0x90, b'a', b'v', b'0', b'1'];
+        assert!(parse_video_metadata_hdr(&payload).is_none());
     }
 
     #[test]
