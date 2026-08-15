@@ -3561,6 +3561,8 @@ mod tests {
 
     #[test]
     fn on_media_cb_receives_hex_label_for_non_utf8_fourcc() {
+        use std::sync::{LazyLock, Mutex};
+
         static SEEN_CODEC: LazyLock<Mutex<Option<String>>> = LazyLock::new(|| Mutex::new(None));
         fn record_codec(_: u64, _: FrameType, codec: Option<&str>) -> bool {
             *SEEN_CODEC.lock().unwrap() = codec.map(str::to_owned);
