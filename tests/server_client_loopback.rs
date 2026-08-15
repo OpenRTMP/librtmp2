@@ -361,3 +361,88 @@ fn server_request_reconnect_reaches_client_callback() {
         Some("moving you to a healthier node")
     );
 }
+
+fn noop_reconnect_request(_tc_url: Option<&str>, _description: Option<&str>) {}
+
+fn connect_and_wait(
+    server: &mut Server,
+    port: u16,
+    app_stream: &str,
+    with_reconnect_cb: bool,
+) -> NegotiatedCaps {
+    let (setup_tx, setup_rx) = std::sync::mpsc::channel();
+    let url = format!("rtmp://127.0.0.1:{port}/{app_stream}");
+    let client_thread = thread::spawn(move || {
+        let result = (|| -> std::result::Result<(), librtmp2::types::ErrorCode> {
+            let mut client = Client::new();
+            if with_reconnect_cb {
+                client.on_reconnect_request_cb = Some(noop_reconnect_request);
+            }
+            client.connect(&url)?;
+            Ok(())
+        })();
+        let _ = setup_tx.send(result.is_ok());
+        result.unwrap();
+        thread::sleep(Duration::from_millis(200));
+    });
+
+    // Generous relative to the other tests in this file, since this test's
+    // server loop contends with every other test binary's threads for CPU
+    // under `cargo test`'s default full parallelism, and must stay
+    // comfortably under the client's own internal connect-timeout budget
+    // (`TCP_CONNECT_TIMEOUT_SECS`, 10s) or the client fails with a timeout
+    // instead of this loop's deadline.
+    let deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        if let Ok(setup_ok) = setup_rx.try_recv() {
+            assert!(setup_ok, "client setup failed");
+        }
+        // `Client::connect()` only returns once *both* `connect` and
+        // `createStream` have round-tripped (see `do_amf_connect`), and the
+        // server only reaches `StreamCreated` after handling `createStream`
+        // -- stopping at `AppConnected` (reached right after `connect`,
+        // before `createStream` is even received) would starve the still
+        // in-flight `createStream` exchange of further polling.
+        let connected = server
+            .connections
+            .first()
+            .is_some_and(|c| c.state >= ConnState::StreamCreated);
+        if connected || Instant::now() >= deadline {
+            break;
+        }
+        server.poll(20).unwrap();
+    }
+
+    client_thread.join().unwrap();
+    assert_eq!(server.connections.len(), 1);
+    server.connections[0].negotiated_caps.clone()
+}
+
+/// `Client::connect` must advertise E-RTMP v2 reconnect support (`capsEx`
+/// reconnect bit + a `reconnect` value) when the host has registered
+/// `on_reconnect_request_cb` -- otherwise a spec-compliant server would have
+/// no reason to ever send it a `ReconnectRequest`.
+#[test]
+fn client_with_reconnect_callback_advertises_reconnect_capability() {
+    let mut server = Server::new(plain_config()).unwrap();
+    server.listen("127.0.0.1:19666").unwrap();
+    let caps = connect_and_wait(&mut server, 19666, "live/with_cb", true);
+    assert!(caps.has_reconnect);
+    assert!(
+        caps.caps_ex_mask & CAPS_EX_MASK_RECONNECT != 0,
+        "the negotiated caps_ex_mask must include the reconnect bit"
+    );
+}
+
+/// A client that never wired up `on_reconnect_request_cb` must not claim it
+/// can handle a reconnect request.
+#[test]
+fn client_without_reconnect_callback_does_not_advertise_reconnect_capability() {
+    let mut server = Server::new(plain_config()).unwrap();
+    server.listen("127.0.0.1:19667").unwrap();
+    let caps = connect_and_wait(&mut server, 19667, "live/without_cb", false);
+    assert!(
+        !caps.has_reconnect,
+        "a client without on_reconnect_request_cb must not advertise reconnect support"
+    );
+}

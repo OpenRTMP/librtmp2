@@ -210,6 +210,14 @@ pub struct Conn {
     /// the host application, consistent with this crate's "deliver the
     /// event, not the policy" design.
     pub on_shared_object_cb: Option<fn(conn_id: u64, so: &SharedObjectMessage)>,
+    /// Must return true to allow `releaseStream` to force-evict *another*
+    /// connection's publish-route claim for `stream_name` (e.g. reclaiming a
+    /// route after a reconnecting encoder's old TCP session went stale but
+    /// hasn't timed out yet). Unset (the default) makes `releaseStream` a
+    /// no-op: unlike `on_media_cb`/`on_publish_cb`, this has no permissive
+    /// default, since evicting a still-live publisher would otherwise let
+    /// any authenticated peer hijack another connection's stream by name.
+    pub on_release_stream_cb: Option<fn(conn_id: u64, app: &str, stream_name: &str) -> bool>,
     /// When set by the built-in server, enforces single-publisher-per-route.
     pub(crate) publish_routes: Option<PublishRouteRegistry>,
     /// Exact stream-name key currently held in `publish_routes` for this conn.
@@ -300,6 +308,7 @@ impl Conn {
             on_publish_cb: None,
             on_play_cb: None,
             on_shared_object_cb: None,
+            on_release_stream_cb: None,
             publish_routes: None,
             claimed_publish_route: None,
             pending_cache_evictions: Vec::new(),
@@ -1120,6 +1129,13 @@ impl Conn {
     }
 
     fn handle_amf3_shared_object(&mut self, payload: &[u8]) -> Result<()> {
+        // Shared objects are an application-scoped feature: reject them
+        // before `connect` completes, when `self.app` is still empty and no
+        // connect-time authorization has run, so the host callback is never
+        // handed a message it cannot attribute to an application.
+        if self.state < ConnState::AppConnected {
+            return Ok(());
+        }
         // Malformed shared-object messages are dropped, not fatal to the
         // connection -- mirrors how other opportunistic-parse paths (e.g.
         // onMetaData) degrade on bad input rather than closing the session.
@@ -1830,8 +1846,19 @@ impl Conn {
                 if command::read_release_stream(&mut buf, &mut stream_name).is_ok() {
                     if let Ok(name_str) = command::decode_route_amf_string(&stream_name) {
                         if !name_str.is_empty() {
-                            if let Some(ref routes) = self.publish_routes {
-                                routes.force_release(&self.app, &name_str);
+                            // Force-releasing a route can evict a *different*,
+                            // still-live connection's active publish claim, so
+                            // this stays a safe no-op unless the host
+                            // explicitly authorizes it -- unlike
+                            // on_media_cb/on_publish_cb, there is no
+                            // permissive default here.
+                            let authorized = self
+                                .on_release_stream_cb
+                                .is_some_and(|cb| cb(self.conn_id, &self.app, &name_str));
+                            if authorized {
+                                if let Some(ref routes) = self.publish_routes {
+                                    routes.force_release(&self.app, &name_str);
+                                }
                             }
                         }
                     }
@@ -3652,10 +3679,18 @@ mod tests {
 
         assert!(conn.detected_hdr_info.is_none());
 
-        let payload = vec![
-            0x94, b'h', b'v', b'c', b'1', // ex-header, frame_type=1, packet_type=4 (Metadata)
-            0x00, 0x01, 0x00, 0x02, 0x00, 0x03, // colorInfo: primaries/transfer/matrix
-        ];
+        let mut amf = Buffer::new();
+        crate::amf::amf0::write_object_begin(&mut amf).unwrap();
+        crate::amf::amf0::write_object_key(&mut amf, "colorPrimaries").unwrap();
+        crate::amf::amf0::write_number(&mut amf, 1.0).unwrap();
+        crate::amf::amf0::write_object_key(&mut amf, "transferCharacteristics").unwrap();
+        crate::amf::amf0::write_number(&mut amf, 2.0).unwrap();
+        crate::amf::amf0::write_object_key(&mut amf, "matrixCoefficients").unwrap();
+        crate::amf::amf0::write_number(&mut amf, 3.0).unwrap();
+        crate::amf::amf0::write_object_end(&mut amf).unwrap();
+
+        let mut payload = vec![0x94, b'h', b'v', b'c', b'1']; // ex-header, frame_type=1, packet_type=4 (Metadata)
+        payload.extend_from_slice(amf.as_slice());
         conn.handle_media_frame(1, FrameType::Video, 0, &payload)
             .unwrap();
 
@@ -3771,8 +3806,12 @@ mod tests {
         );
     }
 
+    fn allow_release_stream(_conn_id: u64, _app: &str, _stream_name: &str) -> bool {
+        true
+    }
+
     #[test]
-    fn release_stream_force_releases_a_route_owned_by_another_connection() {
+    fn release_stream_force_releases_a_route_owned_by_another_connection_when_authorized() {
         use std::collections::HashMap;
         use std::sync::{Arc, Mutex};
 
@@ -3785,6 +3824,7 @@ mod tests {
         conn.conn_id = 9;
         conn.app = "live".to_string();
         conn.publish_routes = Some(PublishRouteRegistry::new(Arc::clone(&routes)));
+        conn.on_release_stream_cb = Some(allow_release_stream);
 
         let mut buf = Buffer::new();
         command::build_release_stream(&mut buf, "cam1").unwrap();
@@ -3792,8 +3832,62 @@ mod tests {
 
         assert!(
             routes.lock().unwrap().get(&key).is_none(),
-            "releaseStream must force-clear a stale claim so a reconnecting encoder can republish"
+            "releaseStream must force-clear a stale claim once the host authorizes it, so a \
+             reconnecting encoder can republish"
         );
+    }
+
+    #[test]
+    fn release_stream_without_a_callback_does_not_evict_another_connections_live_claim() {
+        use std::collections::HashMap;
+        use std::sync::{Arc, Mutex};
+
+        let routes = Arc::new(Mutex::new(HashMap::new()));
+        let key = ("live".to_string(), "cam1".to_string());
+        PublishRouteRegistry::new(Arc::clone(&routes)).claim(7, "live", "cam1");
+
+        let mut conn = Conn::new();
+        conn.conn_id = 9;
+        conn.app = "live".to_string();
+        conn.publish_routes = Some(PublishRouteRegistry::new(Arc::clone(&routes)));
+        // No on_release_stream_cb set -- must be a safe no-op by default.
+
+        let mut buf = Buffer::new();
+        command::build_release_stream(&mut buf, "cam1").unwrap();
+        conn.handle_command(buf.as_slice()).unwrap();
+
+        assert_eq!(
+            routes.lock().unwrap().get(&key),
+            Some(&7),
+            "releaseStream must not evict another connection's active claim unless the host \
+             explicitly authorizes it -- otherwise any peer could hijack another stream by name"
+        );
+    }
+
+    #[test]
+    fn release_stream_callback_denial_does_not_evict() {
+        use std::collections::HashMap;
+        use std::sync::{Arc, Mutex};
+
+        fn deny_release_stream(_conn_id: u64, _app: &str, _stream_name: &str) -> bool {
+            false
+        }
+
+        let routes = Arc::new(Mutex::new(HashMap::new()));
+        let key = ("live".to_string(), "cam1".to_string());
+        PublishRouteRegistry::new(Arc::clone(&routes)).claim(7, "live", "cam1");
+
+        let mut conn = Conn::new();
+        conn.conn_id = 9;
+        conn.app = "live".to_string();
+        conn.publish_routes = Some(PublishRouteRegistry::new(Arc::clone(&routes)));
+        conn.on_release_stream_cb = Some(deny_release_stream);
+
+        let mut buf = Buffer::new();
+        command::build_release_stream(&mut buf, "cam1").unwrap();
+        conn.handle_command(buf.as_slice()).unwrap();
+
+        assert_eq!(routes.lock().unwrap().get(&key), Some(&7));
     }
 
     #[test]
@@ -4072,6 +4166,7 @@ mod tests {
         *SEEN.lock().unwrap() = None;
         let mut conn = Conn::new();
         conn.conn_id = 42;
+        conn.state = ConnState::AppConnected;
         conn.on_shared_object_cb = Some(record_so);
 
         let so = SharedObjectMessage {
@@ -4109,6 +4204,7 @@ mod tests {
     #[test]
     fn malformed_amf3_shared_object_is_dropped_without_error() {
         let mut conn = Conn::new();
+        conn.state = ConnState::AppConnected;
         let payload = vec![0x00, 0xFF, 0xFF]; // truncated name length, no body
         let msg = ChunkMessage {
             csid: 3,
@@ -4120,6 +4216,55 @@ mod tests {
             is_complete: true,
         };
         assert!(conn.handle_message(&msg, &payload).is_ok());
+    }
+
+    #[test]
+    fn amf3_shared_object_before_connect_does_not_reach_callback() {
+        use crate::message::shared_object::{SharedObjectEvent, SharedObjectEventType};
+        use std::sync::{LazyLock, Mutex};
+
+        static SEEN: LazyLock<Mutex<bool>> = LazyLock::new(|| Mutex::new(false));
+
+        fn record_so(_conn_id: u64, _so: &SharedObjectMessage) {
+            *SEEN.lock().unwrap() = true;
+        }
+
+        *SEEN.lock().unwrap() = false;
+        let mut conn = Conn::new();
+        conn.conn_id = 42;
+        conn.on_shared_object_cb = Some(record_so);
+        // conn.state defaults to a pre-connect state (e.g. TcpAccepted or
+        // Handshake) -- self.app is still empty here.
+
+        let so = SharedObjectMessage {
+            name: "chat".to_string(),
+            version: 1,
+            flags: 0,
+            events: vec![SharedObjectEvent {
+                event_type: SharedObjectEventType::Use,
+                data: Vec::new(),
+            }],
+        };
+        let mut amf_buf = Buffer::with_capacity(64);
+        shared_object::write(&so, &mut amf_buf).unwrap();
+        let mut payload = vec![0x00];
+        payload.extend_from_slice(amf_buf.as_slice());
+
+        let msg = ChunkMessage {
+            csid: 3,
+            fmt: 0,
+            timestamp: 0,
+            msg_length: payload.len() as u32,
+            msg_type_id: msg_dispatch::RTMP_MSG_AMF3_SHARED_OBJECT,
+            msg_stream_id: 0,
+            is_complete: true,
+        };
+        conn.handle_message(&msg, &payload).unwrap();
+
+        assert!(
+            !*SEEN.lock().unwrap(),
+            "shared objects must be rejected before connect completes"
+        );
     }
 
     #[test]

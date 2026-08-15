@@ -102,7 +102,13 @@ pub struct SharedObjectEvent {
 pub struct SharedObjectMessage {
     pub name: String,
     pub version: u32,
-    /// Bit 0 = persistent, per spec.
+    /// Persistence/type flags, passed through unmodified. [`is_persistent`]
+    /// reads bit 0; that specific bit position has not been independently
+    /// verified against a real encoder (see "Known Limitations" in
+    /// `docs/protocol-mapping-ertmp-v1.md`) -- callers that need the exact
+    /// semantics should also inspect the raw value themselves.
+    ///
+    /// [`is_persistent`]: SharedObjectMessage::is_persistent
     pub flags: u32,
     pub events: Vec<SharedObjectEvent>,
 }
@@ -127,7 +133,10 @@ pub fn parse(data: &[u8]) -> Result<SharedObjectMessage> {
     }
     let mut name_bytes = vec![0u8; name_len];
     buf.read(&mut name_bytes).map_err(|_| ErrorCode::Amf)?;
-    let name = String::from_utf8_lossy(&name_bytes).into_owned();
+    // Reject invalid UTF-8 outright rather than lossily substituting U+FFFD:
+    // distinct wire names must not collapse onto the same `name` value, since
+    // hosts use it for their own attribute-sync/persistence policy.
+    let name = String::from_utf8(name_bytes).map_err(|_| ErrorCode::Amf)?;
 
     let version = read_u32(&mut buf)?;
     let flags = read_u32(&mut buf)?;
@@ -160,9 +169,15 @@ pub fn parse(data: &[u8]) -> Result<SharedObjectMessage> {
     })
 }
 
-/// Write a shared-object message body (mirrors [`parse`]).
+/// Write a shared-object message body (mirrors [`parse`]). Rejects a message
+/// `parse` could not have produced (oversized name, too many events, an
+/// oversized event payload) so a round trip through `write` -> `parse` never
+/// silently drops data a receiver would otherwise reject or truncate.
 pub fn write(msg: &SharedObjectMessage, buf: &mut Buffer) -> Result<()> {
     if msg.name.len() > MAX_SO_NAME_BYTES {
+        return Err(ErrorCode::Amf);
+    }
+    if msg.events.len() > MAX_SO_EVENTS {
         return Err(ErrorCode::Amf);
     }
     buf.write(&(msg.name.len() as u16).to_be_bytes())
@@ -289,5 +304,36 @@ mod tests {
         buf.write(b"test").unwrap();
         // Missing version/flags/reserved.
         assert!(parse(buf.peek()).is_err());
+    }
+
+    #[test]
+    fn rejects_invalid_utf8_name_instead_of_substituting() {
+        let mut buf = Buffer::new();
+        let invalid_name = [0xFFu8, 0xFE];
+        buf.write(&(invalid_name.len() as u16).to_be_bytes())
+            .unwrap();
+        buf.write(&invalid_name).unwrap();
+        buf.write(&0u32.to_be_bytes()).unwrap(); // version
+        buf.write(&0u32.to_be_bytes()).unwrap(); // flags
+        buf.write(&0u32.to_be_bytes()).unwrap(); // reserved
+        assert!(parse(buf.peek()).is_err());
+    }
+
+    #[test]
+    fn write_rejects_more_events_than_parse_would_accept() {
+        let events = (0..(MAX_SO_EVENTS + 1))
+            .map(|_| SharedObjectEvent {
+                event_type: SharedObjectEventType::Use,
+                data: Vec::new(),
+            })
+            .collect();
+        let msg = SharedObjectMessage {
+            name: "chat".to_string(),
+            version: 1,
+            flags: 0,
+            events,
+        };
+        let mut buf = Buffer::new();
+        assert!(write(&msg, &mut buf).is_err());
     }
 }

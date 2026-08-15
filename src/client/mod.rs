@@ -437,6 +437,23 @@ impl Client {
     ) -> Result<()> {
         let scheme = if use_tls { "rtmps" } else { "rtmp" };
         let tc_url = format!("{scheme}://{host}:{port}/{app}");
+        // Only advertise reconnect support when the host has actually wired
+        // up on_reconnect_request_cb -- otherwise a spec-compliant server
+        // would have no reason to ever send a ReconnectRequest to this
+        // client, but we also must not claim a capability nothing handles.
+        // Both `has_caps_ex`/`caps_ex_mask` *and* `has_reconnect` must be set:
+        // `negotiate_caps` on the server side only folds
+        // `CAPS_EX_MASK_RECONNECT` into its response mask when the client's
+        // parsed `ConnectInfo::has_reconnect` is also true (see
+        // `ertmp::connect_amf::negotiate_caps`), which requires an actual
+        // `reconnect` AMF value on the wire, not just the capsEx bit.
+        let advertised_caps = self.on_reconnect_request_cb.map(|_| NegotiatedCaps {
+            has_caps_ex: true,
+            caps_ex_mask: CAPS_EX_MASK_RECONNECT,
+            has_reconnect: true,
+            reconnect: Reconnect::default(),
+            ..Default::default()
+        });
         let mut connect_amf = Buffer::with_capacity(512);
         command::build_connect(
             &mut connect_amf,
@@ -447,7 +464,7 @@ impl Client {
             "FMLE/3.0",
             0,
             0,
-            None,
+            advertised_caps.as_ref(),
         )?;
         self.send_command_msg(0, connect_amf.as_slice(), Some(deadline))?;
         let mut result = self.wait_for_command("_result", Some(deadline))?;
