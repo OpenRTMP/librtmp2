@@ -69,8 +69,6 @@ fn deliver_audio_frame(conn: &mut dyn Connection, timestamp: u32, payload: &[u8]
         video_frame_type: 0,
         is_metadata: 0,
         track_id: u8::MAX,
-        has_hdr: 0,
-        hdr: crate::types::HdrInfo::default(),
     };
 
     if !payload.is_empty() {
@@ -115,8 +113,6 @@ fn deliver_video_frame(conn: &mut dyn Connection, timestamp: u32, payload: &[u8]
         video_frame_type: 0,
         is_metadata: 0,
         track_id: u8::MAX,
-        has_hdr: 0,
-        hdr: crate::types::HdrInfo::default(),
     };
 
     if !payload.is_empty() {

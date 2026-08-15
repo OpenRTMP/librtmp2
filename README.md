@@ -270,7 +270,7 @@ Status reflects what is **wired into the live session path** (`conn.rs`, `server
 | Enhanced A/V passthrough (HEVC/AV1/Opus from FFmpeg/OBS) | Done (opaque byte relay) |
 | `exvideo_parse` / `exaudio_parse` in session hot path | Done — called for codec detection and init-cache classification |
 | `fourCcList` in `connect` | Done — parsed on read; echoed back in the `_result` when v2 caps negotiation triggers |
-| HDR / `colorInfo` (`metadata.rs`) | Done — wired into video frame population: an enhanced Metadata packet type (`ERTMP_PACKET_TYPE_METADATA`) parses `colorInfo` and populates `Frame.hdr` / `Frame.has_hdr` |
+| HDR / `colorInfo` (`metadata.rs`) | Done — an enhanced video Metadata packet (`ERTMP_PACKET_TYPE_METADATA`) is parsed and exposed via `Conn::detected_hdr_info` (Rust-only; kept off `Frame` to preserve its ABI-stable `#[repr(C)]` layout, see `docs/abi-policy.md`) |
 | Enhanced sequence-start cache for players | Done (see init-frame cache above) |
 | `exvideo_write` / `exaudio_write` helpers | Done — mirror `exvideo_parse` / `exaudio_parse` in reverse (`src/ertmp/exvideo.rs`, `src/ertmp/exaudio.rs`) |
 
