@@ -272,7 +272,7 @@ Status reflects what is **wired into the live session path** (`conn.rs`, `server
 | `fourCcList` in `connect` | Done — parsed on read; echoed back in the `_result` when v2 caps negotiation triggers |
 | HDR / `colorInfo` (`metadata.rs`) | Done — an enhanced video Metadata packet (`ERTMP_PACKET_TYPE_METADATA`) is parsed and exposed via `Conn::detected_hdr_info` (Rust-only; kept off `Frame` to preserve its ABI-stable `#[repr(C)]` layout, see `docs/abi-policy.md`) |
 | Enhanced sequence-start cache for players | Done (see init-frame cache above) |
-| `exvideo_write` / `exaudio_write` helpers | Done — mirror `exvideo_parse` / `exaudio_parse` in reverse (`src/ertmp/exvideo.rs`, `src/ertmp/exaudio.rs`) |
+| `exvideo_write` / `exaudio_write` helpers | Done — mirror `exvideo_parse` / `exaudio_parse` in reverse (`src/ertmp/exvideo.rs`, `src/ertmp/exaudio.rs`); `exvideo_write` covers enhanced (ex-header) headers only — `VideoHeader` carries no legacy codec ID, so legacy output is rejected (returns 0) rather than emitting an invalid tag byte |
 
 ### E-RTMP v2
 
@@ -281,7 +281,7 @@ Status reflects what is **wired into the live session path** (`conn.rs`, `server
 | `capsEx`, `videoFourCcInfoMap`, `reconnect`, `multitrack`, `modex` parse/write | Library code + unit tests, also wired into the session (see below) |
 | v2 capability negotiation in session | Done — `negotiate_caps()` runs on `connect` when the client advertises v2 caps; state transitions to `CAPS_NEGOTIATED` and the response echoes negotiated caps |
 | Multitrack / ModEx in session | Done — ModEx normalized on every ingested frame; multitrack containers demuxed per track for codec authorization and per-track init-cache headers |
-| Reconnect in session | Done — `Conn::send_reconnect_request` / `Server::request_reconnect` send `NetConnection.Connect.ReconnectRequest`; the client detects it mid-session and fires `on_reconnect_request_cb` with the (optional) `tcUrl`. The library only delivers the event — establishing the new connection is left to the host application |
+| Reconnect in session | Done — `Conn::send_reconnect_request` / `Server::request_reconnect` send `NetConnection.Connect.ReconnectRequest`; the client detects it mid-session and fires `on_reconnect_request_cb` with the (optional) `tcUrl`. The client also advertises the `capsEx` reconnect bit + a `reconnect` value on `connect` whenever `on_reconnect_request_cb` is set, so spec-compliant servers know to expect it. The library only delivers the event — establishing the new connection is left to the host application |
 
 ### Client, TLS, tests
 

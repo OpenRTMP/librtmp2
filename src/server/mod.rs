@@ -305,6 +305,10 @@ pub struct Server {
     /// Fired for every parsed AMF3 Shared Object message received on any
     /// connection.
     pub on_shared_object_cb: Option<fn(u64, &SharedObjectMessage)>,
+    /// Must return true to allow `releaseStream` to force-evict another
+    /// connection's publish-route claim. Unset (the default) makes
+    /// `releaseStream` a safe no-op -- see `Conn::on_release_stream_cb`.
+    pub on_release_stream_cb: Option<fn(conn_id: u64, app: &str, stream_name: &str) -> bool>,
     /// TLS context built from `config` at construction time; used by
     /// [`Server::listen`] calls. This field stays public for Rust API
     /// compatibility so integrators that used to replace `server.tls_ctx`
@@ -383,6 +387,7 @@ impl Server {
             on_play_cb: None,
             on_media_cb: None,
             on_shared_object_cb: None,
+            on_release_stream_cb: None,
             tls_ctx,
             listeners: Vec::new(),
             next_listener_accept: 0,
@@ -981,6 +986,7 @@ impl Server {
         conn.on_publish_cb = self.on_publish_cb;
         conn.on_play_cb = self.on_play_cb;
         conn.on_shared_object_cb = self.on_shared_object_cb;
+        conn.on_release_stream_cb = self.on_release_stream_cb;
         conn.publish_routes = Some(PublishRouteRegistry::new(Arc::clone(
             &self.active_publish_routes,
         )));

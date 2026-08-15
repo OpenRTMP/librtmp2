@@ -1,6 +1,5 @@
 //! Init-frame classification and Frame population for the relay hot path.
 
-use crate::ertmp::metadata::metadata_colorinfo_parse;
 use crate::ertmp::multitrack_media::{
     is_multitrack_container, multitrack_has_keyframe, multitrack_has_sequence_start,
 };
@@ -151,15 +150,103 @@ fn populate_video_frame(frame: &mut Frame, payload: &[u8]) {
 /// Returns `None` for any other packet type or on a parse error -- this is
 /// opportunistic, not part of `Frame` (see `docs/abi-policy.md`: `Frame`'s
 /// `#[repr(C)]` layout is ABI-stable across minor/patch releases).
+///
+/// Per the Enhanced RTMP v1 spec, a Metadata packet's body is an AMF0-encoded
+/// value, not a raw byte tuple: a `colorInfo` object containing a nested
+/// `colorConfig` object with numeric `colorPrimaries` / `transferCharacteristics`
+/// / `matrixCoefficients` fields. Both a top-level `colorConfig` object and one
+/// nested under `colorInfo` are accepted, since the exact wrapping has not been
+/// verified against a real encoder (see "Known Limitations" in
+/// `docs/protocol-mapping-ertmp-v1.md`).
 pub fn parse_video_metadata_hdr(payload: &[u8]) -> Option<crate::types::HdrInfo> {
     let mut hdr = VideoHeader::default();
     exvideo::exvideo_parse(payload, &mut hdr).ok()?;
     if hdr.is_ex_header == 0 || hdr.packet_type != ERTMP_PACKET_TYPE_METADATA {
         return None;
     }
-    let mut color_info = crate::types::HdrInfo::default();
-    metadata_colorinfo_parse(&payload[hdr.header_size..], &mut color_info).ok()?;
-    Some(color_info)
+    parse_color_info_amf(&payload[hdr.header_size..])
+}
+
+/// Scan an AMF0-encoded metadata value for `colorPrimaries` /
+/// `transferCharacteristics` / `matrixCoefficients` numeric fields, either
+/// directly on the top-level object (a bare `colorConfig`-shaped value) or
+/// nested up to two levels down under `colorConfig` / `colorInfo` keys (e.g.
+/// `{ colorInfo: { colorConfig: {...} } }`). Bounds-checked throughout;
+/// never trusts the AMF object-key count.
+fn parse_color_info_amf(data: &[u8]) -> Option<crate::types::HdrInfo> {
+    use crate::amf::amf0::{self, Amf0Type};
+
+    let mut buf = crate::buffer::Buffer::from_slice(data);
+    if amf0::read_type(&mut buf).ok()? != Amf0Type::Object {
+        return None;
+    }
+    scan_object_for_color_info(&mut buf, 2)
+}
+
+/// Reads an AMF0 object body (marker already consumed). Returns `Some` when
+/// this object's own keys directly carry `colorPrimaries` /
+/// `transferCharacteristics` / `matrixCoefficients`; otherwise falls back to
+/// whatever a nested `colorConfig` / `colorInfo` object (bounded by
+/// `depth_remaining`) yields.
+fn scan_object_for_color_info(
+    buf: &mut crate::buffer::Buffer,
+    depth_remaining: u8,
+) -> Option<crate::types::HdrInfo> {
+    use crate::amf::amf0::{self, Amf0Type};
+    use crate::ertmp::metadata::hdr_init;
+
+    let mut hdr = crate::types::HdrInfo::default();
+    hdr_init(&mut hdr);
+    let mut found_direct = false;
+    let mut nested_result = None;
+    let mut keys = 0usize;
+    while !amf0::is_object_end(buf) {
+        keys += 1;
+        if keys > amf0::MAX_OBJECT_KEYS {
+            return None;
+        }
+        let mut key = [0u8; 64];
+        let key_len = amf0::read_object_key(buf, &mut key).ok()?;
+        let key_str = std::str::from_utf8(&key[..key_len]).unwrap_or("");
+        let ty = amf0::read_type(buf).ok()?;
+
+        if ty == Amf0Type::Number
+            && matches!(
+                key_str,
+                "colorPrimaries" | "transferCharacteristics" | "matrixCoefficients"
+            )
+        {
+            let value = amf0::read_number(buf).ok()?;
+            if !value.is_finite() || !(0.0..=u16::MAX as f64).contains(&value) {
+                return None;
+            }
+            found_direct = true;
+            match key_str {
+                "colorPrimaries" => hdr.color_primaries = value as u16,
+                "transferCharacteristics" => hdr.transfer_chars = value as u16,
+                "matrixCoefficients" => hdr.matrix_coeffs = value as u16,
+                _ => unreachable!(),
+            }
+        } else if ty == Amf0Type::Object
+            && depth_remaining > 0
+            && matches!(key_str, "colorConfig" | "colorInfo")
+        {
+            if let Some(inner) = scan_object_for_color_info(buf, depth_remaining - 1) {
+                nested_result = Some(inner);
+            }
+        } else {
+            amf0::skip_value_after_type(buf, ty).ok()?;
+        }
+    }
+    // Consume the trailing 0x00 0x00 0x09 object-end marker.
+    let mut end = [0u8; 3];
+    buf.read(&mut end).ok()?;
+
+    if found_direct {
+        Some(hdr)
+    } else {
+        nested_result
+    }
 }
 
 fn populate_audio_frame(frame: &mut Frame, payload: &[u8]) {
@@ -300,16 +387,47 @@ mod tests {
         assert_eq!(frame.is_metadata, 0);
     }
 
+    fn amf0_color_config(primaries: f64, transfer: f64, matrix: f64) -> Vec<u8> {
+        use crate::amf::amf0;
+        let mut buf = crate::buffer::Buffer::new();
+        amf0::write_object_begin(&mut buf).unwrap();
+        amf0::write_object_key(&mut buf, "colorPrimaries").unwrap();
+        amf0::write_number(&mut buf, primaries).unwrap();
+        amf0::write_object_key(&mut buf, "transferCharacteristics").unwrap();
+        amf0::write_number(&mut buf, transfer).unwrap();
+        amf0::write_object_key(&mut buf, "matrixCoefficients").unwrap();
+        amf0::write_number(&mut buf, matrix).unwrap();
+        amf0::write_object_end(&mut buf).unwrap();
+        buf.as_slice().to_vec()
+    }
+
     #[test]
-    fn parse_video_metadata_hdr_extracts_color_info() {
-        let payload = [
-            0x94, b'h', b'v', b'c', b'1', // ex-header, frame_type=1, packet_type=4 (Metadata)
-            0x00, 0x01, 0x00, 0x02, 0x00, 0x03, // colorInfo: primaries/transfer/matrix
-        ];
+    fn parse_video_metadata_hdr_extracts_nested_color_info_color_config() {
+        use crate::amf::amf0;
+        let mut buf = crate::buffer::Buffer::new();
+        amf0::write_object_begin(&mut buf).unwrap();
+        amf0::write_object_key(&mut buf, "colorInfo").unwrap();
+        buf.write(&amf0_color_config(1.0, 2.0, 3.0)).unwrap();
+        amf0::write_object_end(&mut buf).unwrap();
+
+        let mut payload = vec![0x94, b'h', b'v', b'c', b'1'];
+        payload.extend_from_slice(buf.as_slice());
+
         let hdr = parse_video_metadata_hdr(&payload).unwrap();
         assert_eq!(hdr.color_primaries, 1);
         assert_eq!(hdr.transfer_chars, 2);
         assert_eq!(hdr.matrix_coeffs, 3);
+    }
+
+    #[test]
+    fn parse_video_metadata_hdr_extracts_top_level_color_config() {
+        let mut payload = vec![0x94, b'h', b'v', b'c', b'1'];
+        payload.extend_from_slice(&amf0_color_config(4.0, 5.0, 6.0));
+
+        let hdr = parse_video_metadata_hdr(&payload).unwrap();
+        assert_eq!(hdr.color_primaries, 4);
+        assert_eq!(hdr.transfer_chars, 5);
+        assert_eq!(hdr.matrix_coeffs, 6);
     }
 
     #[test]
@@ -321,6 +439,20 @@ mod tests {
     #[test]
     fn parse_video_metadata_hdr_returns_none_for_non_metadata_packet() {
         let payload = [0x90, b'a', b'v', b'0', b'1'];
+        assert!(parse_video_metadata_hdr(&payload).is_none());
+    }
+
+    #[test]
+    fn parse_video_metadata_hdr_returns_none_when_no_color_config_present() {
+        use crate::amf::amf0;
+        let mut buf = crate::buffer::Buffer::new();
+        amf0::write_object_begin(&mut buf).unwrap();
+        amf0::write_object_key(&mut buf, "someOtherKey").unwrap();
+        amf0::write_number(&mut buf, 42.0).unwrap();
+        amf0::write_object_end(&mut buf).unwrap();
+
+        let mut payload = vec![0x94, b'h', b'v', b'c', b'1'];
+        payload.extend_from_slice(buf.as_slice());
         assert!(parse_video_metadata_hdr(&payload).is_none());
     }
 
