@@ -337,8 +337,8 @@ pub unsafe extern "C" fn lrtmp2_server_stop(server: *mut server::Server) {
 /// Create a client (FFI-compatible). `config` may be NULL to use defaults
 /// (verify `rtmps://` peers against the system trust store). When non-NULL,
 /// `config.tls_ca_file` (a CA bundle to trust instead of the system store)
-/// and `config.tls_insecure` (skip verification entirely, for testing only)
-/// control `rtmps://` verification for this client. Returns NULL if
+/// and `config.tls_insecure` (must be exactly `1` to skip verification, for
+/// testing only) control `rtmps://` verification for this client. Returns NULL if
 /// `tls_ca_file` is non-NULL but not valid UTF-8, rather than silently
 /// falling back to default verification.
 #[unsafe(no_mangle)]
@@ -356,7 +356,10 @@ pub unsafe extern "C" fn lrtmp2_client_create(config: *const ServerConfig) -> *m
                 Err(_) => return std::ptr::null_mut(),
             }
         };
-        c.set_tls_client_config(ca_file, cfg.tls_insecure != 0);
+        // Require an explicit `1` so uninitialized stack garbage cannot silently
+        // enable certificate verification bypass (see issue #89 pattern for
+        // `max_connections`).
+        c.set_tls_client_config(ca_file, cfg.tls_insecure == 1);
     }
     Box::into_raw(Box::new(c))
 }

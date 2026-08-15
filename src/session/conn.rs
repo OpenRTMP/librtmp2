@@ -674,6 +674,11 @@ impl Conn {
         let Some(cb) = self.on_media_cb else {
             return true;
         };
+        // Unknown codec identity must not bypass deny-list policies by appearing
+        // as `None` when the frame is otherwise valid publisher media.
+        if matches!(frame_type, FrameType::Video | FrameType::Audio) && codec.is_none() {
+            return false;
+        }
         cb(self.conn_id, frame_type, codec)
     }
 
@@ -740,8 +745,8 @@ impl Conn {
                 if auth_denied {
                     return;
                 }
-                let track_codec = std::str::from_utf8(&track.fourcc).ok();
-                if !self.media_allowed(frame_type, track_codec) {
+                let track_codec = Some(fourcc_auth_label(&track.fourcc));
+                if !self.media_allowed(frame_type, track_codec.as_deref()) {
                     auth_denied = true;
                 }
             });
@@ -2165,46 +2170,59 @@ fn read_data_event_name(buf: &mut Buffer, is_string: bool, out: &mut [u8; 64]) -
     }
 }
 
+/// Stable codec label for `on_media_cb` authorization. Valid UTF-8 FourCCs are
+/// passed through; non-UTF-8 bytes are hex-encoded so deny-list policies can
+/// still observe the identity instead of receiving `None`.
+fn fourcc_auth_label(fourcc: &[u8; 4]) -> String {
+    match std::str::from_utf8(fourcc) {
+        Ok(label) if !label.is_empty() => label.to_string(),
+        _ => format!(
+            "fourcc:{:02x}{:02x}{:02x}{:02x}",
+            fourcc[0], fourcc[1], fourcc[2], fourcc[3]
+        ),
+    }
+}
+
 fn detect_video_codec(payload: &[u8]) -> Option<String> {
     if let Some(cc) = first_track_fourcc(FrameType::Video, payload) {
-        return std::str::from_utf8(&cc).ok().map(str::to_owned);
+        return Some(fourcc_auth_label(&cc));
     }
     let mut hdr = VideoHeader::default();
     if crate::ertmp::exvideo::exvideo_parse(payload, &mut hdr).is_err() {
         return None;
     }
     if hdr.is_ex_header != 0 {
-        std::str::from_utf8(&hdr.fourcc[..4])
-            .ok()
-            .map(|s| s.to_string())
+        let mut fourcc = [0u8; 4];
+        fourcc.copy_from_slice(&hdr.fourcc[..4]);
+        Some(fourcc_auth_label(&fourcc))
     } else {
         match payload[0] & 0x0F {
             7 => Some("avc1".to_string()),
             12 => Some("hvc1".to_string()),
             13 => Some("av01".to_string()),
-            _ => None,
+            nibble => Some(format!("legacy:{nibble:x}")),
         }
     }
 }
 
 fn detect_audio_codec(payload: &[u8]) -> Option<String> {
     if let Some(cc) = first_track_fourcc(FrameType::Audio, payload) {
-        return std::str::from_utf8(&cc).ok().map(str::to_owned);
+        return Some(fourcc_auth_label(&cc));
     }
     let mut hdr = AudioHeader::default();
     if crate::ertmp::exaudio::exaudio_parse(payload, &mut hdr).is_err() {
         return None;
     }
     if hdr.is_ex_header != 0 {
-        std::str::from_utf8(&hdr.fourcc[..4])
-            .ok()
-            .map(|s| s.to_string())
+        let mut fourcc = [0u8; 4];
+        fourcc.copy_from_slice(&hdr.fourcc[..4]);
+        Some(fourcc_auth_label(&fourcc))
     } else {
         match hdr.audio_codec {
             AudioCodec::Aac => Some("mp4a".to_string()),
             AudioCodec::Mp3 => Some("mp3".to_string()),
             AudioCodec::Opus => Some("Opus".to_string()),
-            _ => None,
+            other => Some(format!("legacy:{other:?}")),
         }
     }
 }
@@ -3536,6 +3554,83 @@ mod tests {
         ];
         assert_eq!(
             conn.handle_media_frame(1, FrameType::Video, 0, &shared_disallowed_codec_frame),
+            Err(ErrorCode::Auth)
+        );
+        assert!(conn.pending_relay.is_empty());
+    }
+
+    #[test]
+    fn on_media_cb_receives_hex_label_for_non_utf8_fourcc() {
+        static SEEN_CODEC: LazyLock<Mutex<Option<String>>> = LazyLock::new(|| Mutex::new(None));
+        fn record_codec(_: u64, _: FrameType, codec: Option<&str>) -> bool {
+            *SEEN_CODEC.lock().unwrap() = codec.map(str::to_owned);
+            true
+        }
+
+        let mut conn = Conn::new();
+        conn.relay_enabled = true;
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+        conn.current_stream.as_mut().unwrap().is_publishing = true;
+        conn.on_media_cb = Some(record_codec);
+
+        let non_utf8_fourcc = vec![
+            0x90, 0x80, 0x80, 0x80, 0x80,
+            0x00, 0x00, 0x00, 0x01, 0xAA,
+        ];
+        conn.handle_media_frame(1, FrameType::Video, 0, &non_utf8_fourcc)
+            .unwrap();
+        assert_eq!(
+            SEEN_CODEC.lock().unwrap().as_deref(),
+            Some("fourcc:80808080")
+        );
+    }
+
+    #[test]
+    fn on_media_cb_deny_list_can_block_hex_fourcc_labels() {
+        fn deny_hex_fourcc(_: u64, frame_type: FrameType, codec: Option<&str>) -> bool {
+            if frame_type == FrameType::Video {
+                return !codec.is_some_and(|c| c.starts_with("fourcc:"));
+            }
+            true
+        }
+
+        let mut conn = Conn::new();
+        conn.relay_enabled = true;
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+        conn.current_stream.as_mut().unwrap().is_publishing = true;
+        conn.on_media_cb = Some(deny_hex_fourcc);
+
+        let non_utf8_fourcc = vec![
+            0x90, 0x80, 0x80, 0x80, 0x80,
+            0x00, 0x00, 0x00, 0x01, 0xAA,
+        ];
+        assert_eq!(
+            conn.handle_media_frame(1, FrameType::Video, 0, &non_utf8_fourcc),
+            Err(ErrorCode::Auth)
+        );
+        assert!(conn.pending_relay.is_empty());
+    }
+
+    #[test]
+    fn on_media_cb_deny_list_observes_unknown_legacy_codec_nibble() {
+        fn deny_legacy_vp6(_: u64, frame_type: FrameType, codec: Option<&str>) -> bool {
+            if frame_type == FrameType::Video {
+                return codec != Some("legacy:4");
+            }
+            true
+        }
+
+        let mut conn = Conn::new();
+        conn.relay_enabled = true;
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+        conn.current_stream.as_mut().unwrap().is_publishing = true;
+        conn.on_media_cb = Some(deny_legacy_vp6);
+
+        // Legacy FLV video with codec nibble 4 (VP6) must surface a stable
+        // identity to `on_media_cb`, not `None`.
+        let legacy_vp6 = vec![0x14, 0x01, 0xAA];
+        assert_eq!(
+            conn.handle_media_frame(1, FrameType::Video, 0, &legacy_vp6),
             Err(ErrorCode::Auth)
         );
         assert!(conn.pending_relay.is_empty());

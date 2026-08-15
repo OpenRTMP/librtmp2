@@ -348,7 +348,9 @@ typedef struct lrtmp2_server_config_t {
    */
   const uint8_t *tls_ca_file;
   /**
-   * Client: skip certificate verification
+   * Client: skip certificate verification. Must be exactly `1` to disable
+   * verification; any other value (including `0` or uninitialized garbage)
+   * keeps verification enabled.
    */
   int tls_insecure;
   /**
