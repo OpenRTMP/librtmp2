@@ -770,7 +770,7 @@ impl Conn {
                 if auth_denied {
                     return;
                 }
-                let track_codec = Some(fourcc_auth_label(&track.fourcc));
+                let track_codec = media_fourcc_auth_label(&track.fourcc);
                 if !self.media_allowed(frame_type, track_codec.as_deref()) {
                     auth_denied = true;
                 }
@@ -2283,6 +2283,22 @@ fn read_data_event_name(buf: &mut Buffer, is_string: bool, out: &mut [u8; 64]) -
     }
 }
 
+/// Wildcard FourCC (`*`) is valid in E-RTMP capability objects but must not
+/// appear on publisher media tags — it carries no concrete codec identity and
+/// would let codec-specific `on_media_cb` deny lists be bypassed.
+fn is_wildcard_media_fourcc(fourcc: &[u8; 4]) -> bool {
+    fourcc[0] == b'*'
+}
+
+/// Codec label for `on_media_cb`, or `None` when the wire FourCC cannot be
+/// authorized (wildcard / unknown-enhanced identity).
+fn media_fourcc_auth_label(fourcc: &[u8; 4]) -> Option<String> {
+    if is_wildcard_media_fourcc(fourcc) {
+        return None;
+    }
+    Some(fourcc_auth_label(fourcc))
+}
+
 /// Stable codec label for `on_media_cb` authorization. Valid UTF-8 FourCCs are
 /// passed through; non-UTF-8 bytes are hex-encoded so deny-list policies can
 /// still observe the identity instead of receiving `None`.
@@ -2298,7 +2314,7 @@ fn fourcc_auth_label(fourcc: &[u8; 4]) -> String {
 
 fn detect_video_codec(payload: &[u8]) -> Option<String> {
     if let Some(cc) = first_track_fourcc(FrameType::Video, payload) {
-        return Some(fourcc_auth_label(&cc));
+        return media_fourcc_auth_label(&cc);
     }
     let mut hdr = VideoHeader::default();
     if crate::ertmp::exvideo::exvideo_parse(payload, &mut hdr).is_err() {
@@ -2307,7 +2323,7 @@ fn detect_video_codec(payload: &[u8]) -> Option<String> {
     if hdr.is_ex_header != 0 {
         let mut fourcc = [0u8; 4];
         fourcc.copy_from_slice(&hdr.fourcc[..4]);
-        Some(fourcc_auth_label(&fourcc))
+        return media_fourcc_auth_label(&fourcc);
     } else {
         match payload[0] & 0x0F {
             7 => Some("avc1".to_string()),
@@ -2320,7 +2336,7 @@ fn detect_video_codec(payload: &[u8]) -> Option<String> {
 
 fn detect_audio_codec(payload: &[u8]) -> Option<String> {
     if let Some(cc) = first_track_fourcc(FrameType::Audio, payload) {
-        return Some(fourcc_auth_label(&cc));
+        return media_fourcc_auth_label(&cc);
     }
     let mut hdr = AudioHeader::default();
     if crate::ertmp::exaudio::exaudio_parse(payload, &mut hdr).is_err() {
@@ -2329,7 +2345,7 @@ fn detect_audio_codec(payload: &[u8]) -> Option<String> {
     if hdr.is_ex_header != 0 {
         let mut fourcc = [0u8; 4];
         fourcc.copy_from_slice(&hdr.fourcc[..4]);
-        Some(fourcc_auth_label(&fourcc))
+        return media_fourcc_auth_label(&fourcc);
     } else {
         match hdr.audio_codec {
             AudioCodec::Aac => Some("mp4a".to_string()),
@@ -3747,6 +3763,36 @@ mod tests {
         assert_eq!(
             conn.handle_media_frame(1, FrameType::Video, 0, &legacy_vp6),
             Err(ErrorCode::Auth)
+        );
+        assert!(conn.pending_relay.is_empty());
+    }
+
+    #[test]
+    fn on_media_cb_deny_list_blocks_wildcard_enhanced_fourcc() {
+        fn deny_hevc_and_av1(_: u64, frame_type: FrameType, codec: Option<&str>) -> bool {
+            if frame_type == FrameType::Video {
+                return !matches!(codec, Some("hvc1") | Some("av01"));
+            }
+            true
+        }
+
+        let mut conn = Conn::new();
+        conn.relay_enabled = true;
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+        conn.current_stream.as_mut().unwrap().is_publishing = true;
+        conn.on_media_cb = Some(deny_hevc_and_av1);
+
+        let hvc1 = vec![0x90, b'h', b'v', b'c', b'1', 0, 0, 0, 1, 0xAA];
+        assert_eq!(
+            conn.handle_media_frame(1, FrameType::Video, 0, &hvc1),
+            Err(ErrorCode::Auth)
+        );
+
+        let wildcard = vec![0x90, b'*', b' ', b' ', b' ', 0, 0, 0, 1, 0xAA];
+        assert_eq!(
+            conn.handle_media_frame(1, FrameType::Video, 0, &wildcard),
+            Err(ErrorCode::Auth),
+            "wildcard media FourCC must not bypass codec-specific deny lists"
         );
         assert!(conn.pending_relay.is_empty());
     }
