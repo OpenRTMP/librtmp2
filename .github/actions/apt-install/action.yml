@@ -1,0 +1,23 @@
+name: Apt install
+description: Install apt packages with mirror fallback and network timeouts
+inputs:
+  packages:
+    description: Space-separated apt package names
+    required: true
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        set -euo pipefail
+        APT_OPTS=(
+          -o Acquire::http::Timeout=30
+          -o Acquire::https::Timeout=30
+          -o Acquire::Retries=3
+        )
+        if [ -f /etc/apt/apt-mirrors.txt ]; then
+          sudo sed -i 's|http://azure.archive.ubuntu.com|https://archive.ubuntu.com|g' /etc/apt/apt-mirrors.txt
+        fi
+        sudo apt-get "${APT_OPTS[@]}" update
+        # shellcheck disable=SC2086
+        sudo apt-get install -y --no-install-recommends ${{ inputs.packages }}
