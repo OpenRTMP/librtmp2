@@ -302,6 +302,10 @@ pub struct Server {
     pub on_play_cb: Option<fn(conn_id: u64, app: &str, stream_name: &str) -> bool>,
     /// When set, must return true before publisher media is queued for relay.
     pub on_media_cb: Option<fn(u64, FrameType, Option<&str>) -> bool>,
+    /// Must return true before a parsed AMF3 Shared Object message is delivered
+    /// to [`Self::on_shared_object_cb`]. When unset while `on_publish_cb` or
+    /// `on_play_cb` is configured, inbound shared objects are dropped.
+    pub on_shared_object_auth_cb: Option<fn(u64, &SharedObjectMessage) -> bool>,
     /// Fired for every parsed AMF3 Shared Object message received on any
     /// connection.
     pub on_shared_object_cb: Option<fn(u64, &SharedObjectMessage)>,
@@ -386,6 +390,7 @@ impl Server {
             on_publish_cb: None,
             on_play_cb: None,
             on_media_cb: None,
+            on_shared_object_auth_cb: None,
             on_shared_object_cb: None,
             on_release_stream_cb: None,
             tls_ctx,
@@ -985,6 +990,7 @@ impl Server {
         conn.on_connect_cb = self.on_connect_cb;
         conn.on_publish_cb = self.on_publish_cb;
         conn.on_play_cb = self.on_play_cb;
+        conn.on_shared_object_auth_cb = self.on_shared_object_auth_cb;
         conn.on_shared_object_cb = self.on_shared_object_cb;
         conn.on_release_stream_cb = self.on_release_stream_cb;
         conn.publish_routes = Some(PublishRouteRegistry::new(Arc::clone(
