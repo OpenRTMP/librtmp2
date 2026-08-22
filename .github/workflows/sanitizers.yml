@@ -18,7 +18,9 @@ jobs:
           persist-credentials: false
 
       - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
+        uses: ./.github/actions/apt-install
+        with:
+          packages: libssl-dev pkg-config
 
       - name: Install nightly Rust
         uses: dtolnay/rust-toolchain@nightly
@@ -44,7 +46,9 @@ jobs:
           persist-credentials: false
 
       - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
+        uses: ./.github/actions/apt-install
+        with:
+          packages: libssl-dev pkg-config
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -65,7 +69,9 @@ jobs:
           persist-credentials: false
 
       - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
+        uses: ./.github/actions/apt-install
+        with:
+          packages: libssl-dev pkg-config
 
       - name: Install nightly Rust
         uses: dtolnay/rust-toolchain@nightly

@@ -110,11 +110,9 @@ jobs:
           ref: ${{ inputs.tag || github.ref_name }}
 
       - name: Install packaging dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            devscripts debhelper dput lintian \
-            build-essential libssl-dev pkg-config
+        uses: ./.github/actions/apt-install
+        with:
+          packages: devscripts debhelper dput lintian build-essential libssl-dev pkg-config
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
