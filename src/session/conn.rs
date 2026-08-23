@@ -13,7 +13,7 @@ use crate::ertmp::multitrack_media::{first_track_fourcc, foreach_track, is_multi
 use crate::handshake::{self, Handshake, HandshakeState};
 use crate::media::{
     is_on_metadata_payload, normalize_modex_payload, parse_video_metadata_hdr, populate_av_frame,
-    populate_multitrack_frame,
+    populate_multitrack_frame, ERTMP_PACKET_TYPE_MODEX,
 };
 use crate::message::command;
 use crate::message::control::{
@@ -753,8 +753,11 @@ impl Conn {
             return Ok(());
         }
 
-        let normalized_payload =
-            normalize_modex_payload(payload, self.negotiated_caps.caps_ex_mask);
+        // Always peel ModEx wrappers for codec authorization and callbacks.
+        // Gating on negotiated `caps_ex_mask` let publishers craft ModEx
+        // frames whose extension bytes spell an allowed FourCC while relaying
+        // a different inner codec to players.
+        let normalized_payload = normalize_modex_payload(payload, CAPS_EX_MASK_MODEX);
         let parse_payload = normalized_payload.as_ref();
 
         let current_codec = match frame_type {
@@ -2335,6 +2338,11 @@ fn detect_video_codec(payload: &[u8]) -> Option<String> {
         return None;
     }
     if hdr.is_ex_header != 0 {
+        // Unpeeled ModEx wrappers expose extension metadata at bytes 1..5,
+        // not the inner codec FourCC — treat as unknown so deny lists apply.
+        if hdr.packet_type == ERTMP_PACKET_TYPE_MODEX {
+            return None;
+        }
         let mut fourcc = [0u8; 4];
         fourcc.copy_from_slice(&hdr.fourcc[..4]);
         return media_fourcc_auth_label(&fourcc);
@@ -2357,6 +2365,9 @@ fn detect_audio_codec(payload: &[u8]) -> Option<String> {
         return None;
     }
     if hdr.is_ex_header != 0 {
+        if hdr.packet_type == ERTMP_PACKET_TYPE_MODEX {
+            return None;
+        }
         let mut fourcc = [0u8; 4];
         fourcc.copy_from_slice(&hdr.fourcc[..4]);
         return media_fourcc_auth_label(&fourcc);
@@ -3777,6 +3788,61 @@ mod tests {
         assert_eq!(
             conn.handle_media_frame(1, FrameType::Video, 0, &legacy_vp6),
             Err(ErrorCode::Auth)
+        );
+        assert!(conn.pending_relay.is_empty());
+    }
+
+    #[test]
+    fn modex_wrapper_cannot_bypass_codec_deny_list_without_caps_ex() {
+        fn allow_avc1_only(_: u64, frame_type: FrameType, codec: Option<&str>) -> bool {
+            frame_type == FrameType::Video && codec == Some("avc1")
+        }
+
+        let mut conn = Conn::new();
+        conn.relay_enabled = true;
+        // Legacy connect: negotiated_caps.caps_ex_mask stays 0.
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+        conn.current_stream.as_mut().unwrap().is_publishing = true;
+        conn.on_media_cb = Some(allow_avc1_only);
+
+        // Naive exvideo_parse reads bytes 1..5 as the FourCC on ModEx packets.
+        // Craft those bytes as "avc1" while the peeled inner packet is vp09.
+        let payload = vec![
+            0x97, b'a', b'v', b'c', b'1', 0x02, 0, 1, 2, 0x01, 0x90, b'v', b'p', b'0', b'9', 0,
+            0, 0, 0xBB,
+        ];
+        assert_eq!(
+            conn.handle_media_frame(1, FrameType::Video, 0, &payload),
+            Err(ErrorCode::Auth),
+            "ModEx wrapper must not let publishers smuggle a disallowed inner codec \
+             past on_media_cb when capsEx was not negotiated"
+        );
+        assert!(conn.pending_relay.is_empty());
+    }
+
+    #[test]
+    fn excessive_modex_chain_cannot_bypass_codec_deny_list() {
+        fn allow_avc1_only(_: u64, frame_type: FrameType, codec: Option<&str>) -> bool {
+            frame_type == FrameType::Video && codec == Some("avc1")
+        }
+
+        let mut conn = Conn::new();
+        conn.relay_enabled = true;
+        conn.negotiated_caps.has_caps_ex = true;
+        conn.negotiated_caps.caps_ex_mask = CAPS_EX_MASK_MODEX;
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+        conn.current_stream.as_mut().unwrap().is_publishing = true;
+        conn.on_media_cb = Some(allow_avc1_only);
+
+        let mut payload = vec![0x97, b'a', b'v', b'c', b'1'];
+        for _ in 0..40 {
+            payload.extend_from_slice(&[0x00, 0x00, 0x07]);
+        }
+        payload.extend_from_slice(&[0x90, b'v', b'p', b'0', b'9', 0, 0, 0, 0xBB]);
+        assert_eq!(
+            conn.handle_media_frame(1, FrameType::Video, 0, &payload),
+            Err(ErrorCode::Auth),
+            "unpeelable ModEx chains must not bypass codec-specific deny lists"
         );
         assert!(conn.pending_relay.is_empty());
     }
