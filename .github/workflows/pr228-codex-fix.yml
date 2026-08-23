@@ -4,17 +4,22 @@ on:
   push:
     branches:
       - cursor/application-security-review-6c9a
+  pull_request:
+    branches:
+      - main
 
 permissions:
   contents: write
 
 jobs:
   fix:
+    if: github.event_name == 'push' || github.event.pull_request.number == 228
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: cursor/application-security-review-6c9a
 
       - name: Apply focused fix
         shell: bash
@@ -199,4 +204,4 @@ jobs:
           git add src/session/conn.rs
           git diff --cached --check
           git commit -m "fix: address Codex ModEx review findings"
-          git push origin "HEAD:${GITHUB_REF_NAME}"
+          git push origin "HEAD:cursor/application-security-review-6c9a"
