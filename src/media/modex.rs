@@ -4,6 +4,9 @@ use std::borrow::Cow;
 
 use crate::types::CAPS_EX_MASK_MODEX;
 
+/// Enhanced RTMP packet type for ModEx wrappers (E-RTMP v2 §16).
+pub const ERTMP_PACKET_TYPE_MODEX: u8 = 7;
+
 /// Cap chained ModEx extension layers peeled per media frame. Without this a
 /// peer can nest millions of single-byte ModEx wrappers in one max-size message
 /// and force O(payload) normalization work on every frame.
@@ -20,7 +23,7 @@ pub fn normalize_modex_payload<'a>(payload: &'a [u8], caps_ex_mask: u32) -> Cow<
     if payload.is_empty()
         || (caps_ex_mask & CAPS_EX_MASK_MODEX) == 0
         || payload[0] & 0x80 == 0
-        || payload[0] & 0x0F != 7
+        || payload[0] & 0x0F != ERTMP_PACKET_TYPE_MODEX
     {
         return Cow::Borrowed(payload);
     }
@@ -57,7 +60,7 @@ pub fn normalize_modex_payload<'a>(payload: &'a [u8], caps_ex_mask: u32) -> Cow<
         pos += 1;
         let next_packet_type = option_and_next_packet & 0x0F;
         reconstructed_header = (reconstructed_header & 0xF0) | next_packet_type;
-        if next_packet_type != 7 {
+        if next_packet_type != ERTMP_PACKET_TYPE_MODEX {
             break;
         }
     }
