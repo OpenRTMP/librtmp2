@@ -85,6 +85,11 @@
  */
 #define MAX_MULTITRACK_SUBTRACKS 4096
 
+/**
+ * Enhanced RTMP packet type for ModEx wrappers (E-RTMP v2 §16).
+ */
+#define ERTMP_PACKET_TYPE_MODEX 7
+
 #define CTRL_SET_CHUNK_SIZE 1
 
 #define CTRL_ABORT_MESSAGE 2
