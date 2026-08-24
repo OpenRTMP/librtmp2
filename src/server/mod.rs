@@ -978,7 +978,7 @@ impl Server {
             return false;
         }
         let remote_ip = Self::peer_ip(&remote_addr);
-        if self.active_connections_for_ip(remote_ip) >= self.max_connections_per_addr() {
+        if self.active_connections_for_ip(&remote_ip) >= self.max_connections_per_addr() {
             return false;
         }
         let Some(conn_id) = self.allocate_conn_id() else {
