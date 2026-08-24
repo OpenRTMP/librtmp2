@@ -888,15 +888,29 @@ impl Server {
         }
     }
 
-    /// Strips the port from a `SocketAddr::to_string()` output (e.g.
-    /// `"1.2.3.4:5678"` -> `"1.2.3.4"`, `"[::1]:5678"` -> `"[::1]"`) so the
-    /// per-address connection cap is keyed on the peer host, not the peer's
-    /// ephemeral source port.
-    fn peer_ip(remote_addr: &str) -> &str {
+    /// Canonical peer host for per-IP caps: strips the port from a
+    /// `SocketAddr::to_string()` value and maps IPv4-mapped IPv6 addresses
+    /// (e.g. `[::ffff:203.0.113.5]:5678`) to their IPv4 form so dual-stack
+    /// listeners cannot be bypassed by choosing a different address family.
+    fn peer_ip(remote_addr: &str) -> String {
+        if let Ok(sock) = remote_addr.parse::<std::net::SocketAddr>() {
+            return Self::canonical_ip(sock.ip());
+        }
         remote_addr
             .rsplit_once(':')
             .map(|(ip, _port)| ip)
             .unwrap_or(remote_addr)
+            .to_string()
+    }
+
+    fn canonical_ip(ip: std::net::IpAddr) -> String {
+        match ip {
+            std::net::IpAddr::V4(v4) => v4.to_string(),
+            std::net::IpAddr::V6(v6) => v6
+                .to_ipv4_mapped()
+                .map(|mapped| mapped.to_string())
+                .unwrap_or_else(|| v6.to_string()),
+        }
     }
 
     fn max_connections_per_addr(&self) -> usize {
@@ -940,7 +954,9 @@ impl Server {
             }
         }
         if self.pending_tls_limit_reached() {
-            self.pending_tls.remove(0);
+            // Drop the new stalled handshake instead of evicting an unrelated
+            // peer's pending entry from the front of the queue.
+            return;
         }
         self.pending_tls.push(conn);
     }
@@ -1077,7 +1093,7 @@ impl Server {
                                         self.add_connection(transport, remote_addr);
                                     }
                                     Ok(TlsAcceptOutcome::WouldBlock(handshake)) => {
-                                        let remote_ip = Self::peer_ip(&remote_addr).to_string();
+                                        let remote_ip = Self::peer_ip(&remote_addr);
                                         self.queue_pending_tls(PendingTlsConnection {
                                             handshake,
                                             remote_addr,
@@ -3525,10 +3541,81 @@ mod tests {
     #[test]
     fn peer_ip_strips_port_from_socket_addr_string() {
         assert_eq!(Server::peer_ip("127.0.0.1:54321"), "127.0.0.1");
-        assert_eq!(Server::peer_ip("[::1]:54321"), "[::1]");
-        assert_eq!(Server::peer_ip("[2001:db8::1]:443"), "[2001:db8::1]");
+        assert_eq!(Server::peer_ip("[::1]:54321"), "::1");
+        assert_eq!(Server::peer_ip("[2001:db8::1]:443"), "2001:db8::1");
+        // IPv4-mapped IPv6 must collapse to the IPv4 form for per-IP caps.
+        assert_eq!(
+            Server::peer_ip("[::ffff:203.0.113.5]:54321"),
+            "203.0.113.5"
+        );
         // No port present: falls back to the input unchanged.
         assert_eq!(Server::peer_ip("127.0.0.1"), "127.0.0.1");
+    }
+
+    #[test]
+    fn peer_ip_canonicalizes_ipv4_mapped_ipv6_for_per_addr_caps() {
+        let mut server = test_server();
+        for i in 0..DEFAULT_MAX_CONNECTIONS_PER_ADDR {
+            let mut conn = Conn::new();
+            conn.remote_addr = format!("203.0.113.5:{i}");
+            server.connections.push(conn);
+        }
+        let mapped = Server::peer_ip("[::ffff:203.0.113.5]:9999");
+        assert_eq!(mapped, "203.0.113.5");
+        assert_eq!(
+            server.active_connections_for_ip(&mapped),
+            DEFAULT_MAX_CONNECTIONS_PER_ADDR,
+            "IPv4-mapped IPv6 must count against the same per-IP cap as IPv4"
+        );
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn pending_tls_global_cap_rejects_new_handshake_instead_of_evicting_oldest() {
+        let (cert_path, key_path) = self_signed_cert_files("pending-tls-no-evict.test");
+        let mut server = test_server();
+        server
+            .listen_tls(
+                "127.0.0.1:0",
+                cert_path.to_str().unwrap(),
+                key_path.to_str().unwrap(),
+            )
+            .unwrap();
+
+        let port = {
+            let mut addr: libc::sockaddr_in = unsafe { std::mem::zeroed() };
+            let mut len = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
+            let rc = unsafe {
+                libc::getsockname(
+                    server.server_fd,
+                    &mut addr as *mut _ as *mut libc::sockaddr,
+                    &mut len,
+                )
+            };
+            assert_eq!(rc, 0);
+            u16::from_be(addr.sin_port)
+        };
+        let addr = format!("127.0.0.1:{port}");
+
+        let mut clients = Vec::new();
+        for _ in 0..MAX_PENDING_TLS_HANDSHAKES {
+            clients.push(std::net::TcpStream::connect(&addr).unwrap());
+            server.accept_new_connections();
+        }
+        assert_eq!(server.pending_tls_count(), MAX_PENDING_TLS_HANDSHAKES);
+        let oldest = server.pending_tls[0].remote_addr.clone();
+
+        clients.push(std::net::TcpStream::connect(&addr).unwrap());
+        server.accept_new_connections();
+
+        assert_eq!(server.pending_tls_count(), MAX_PENDING_TLS_HANDSHAKES);
+        assert_eq!(
+            server.pending_tls[0].remote_addr, oldest,
+            "global pending TLS cap must reject new handshakes instead of evicting unrelated peers"
+        );
+
+        let _ = std::fs::remove_file(cert_path);
+        let _ = std::fs::remove_file(key_path);
     }
 
     #[test]
