@@ -1,0 +1,55 @@
+name: PR 232 one-shot fix
+
+on:
+  push:
+    branches:
+      - cursor/ci-autofix-pr231-remote-ip-borrow
+
+permissions:
+  contents: write
+
+jobs:
+  apply-fix:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: cursor/ci-autofix-pr231-remote-ip-borrow
+          fetch-depth: 0
+
+      - name: Patch global TLS cap regression test
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("src/server/mod.rs")
+          text = path.read_text()
+          old = '''        let (cert_path, key_path) = self_signed_cert_files("pending-tls-no-evict.test");
+                  let mut server = test_server();
+                  server
+          '''
+          new = '''        let (cert_path, key_path) = self_signed_cert_files("pending-tls-no-evict.test");
+                  let mut server = test_server();
+                  // Isolate the global pending-TLS cap from the lower limits used by
+                  // test_server(), otherwise this test can never fill the global queue.
+                  server.config.max_connections = 0;
+                  server.config.max_pending_tls_per_addr =
+                      (MAX_PENDING_TLS_HANDSHAKES + 1) as std::ffi::c_int;
+                  server
+          '''
+          if text.count(old) != 1:
+              raise SystemExit(f"expected exactly one target block, found {text.count(old)}")
+          path.write_text(text.replace(old, new, 1))
+          PY
+
+      - name: Commit fix and remove one-shot workflow
+        shell: bash
+        run: |
+          rm .github/workflows/pr232-self-fix.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/server/mod.rs .github/workflows/pr232-self-fix.yml
+          git commit -m "fix(test): isolate global TLS pending cap"
+          git push origin HEAD:cursor/ci-autofix-pr231-remote-ip-borrow
