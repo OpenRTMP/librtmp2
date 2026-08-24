@@ -3574,6 +3574,11 @@ mod tests {
     fn pending_tls_global_cap_rejects_new_handshake_instead_of_evicting_oldest() {
         let (cert_path, key_path) = self_signed_cert_files("pending-tls-no-evict.test");
         let mut server = test_server();
+        // Isolate the global pending-TLS cap from the lower limits used by
+        // test_server(), otherwise this test can never fill the global queue.
+        server.config.max_connections = 0;
+        server.config.max_pending_tls_per_addr =
+            (MAX_PENDING_TLS_HANDSHAKES + 1) as std::ffi::c_int;
         server
             .listen_tls(
                 "127.0.0.1:0",
