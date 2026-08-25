@@ -679,12 +679,15 @@ impl Client {
             let mut msg = ChunkMessage::default();
             match chunk_read_owned(&mut self.recv_buffer, &mut self.chunk_reg, &mut msg) {
                 Ok((1, payload)) if msg.is_complete => {
-                    *messages_processed += 1;
-                    if msg.msg_type_id == msg_dispatch::RTMP_MSG_SET_CHUNK_SIZE {
-                        if let Ok(cs) = control::read_set_chunk_size(&payload) {
-                            self.chunk_reg.set_all_chunk_size(cs);
-                        }
-                    } else if msg.msg_type_id == msg_dispatch::RTMP_MSG_USER_CONTROL {
+                    if msg.msg_type_id == msg_dispatch::RTMP_MSG_AGGREGATE {
+                        self.handle_aggregate_message(msg.timestamp, &payload, messages_processed)?;
+                    } else {
+                        *messages_processed += 1;
+                        if msg.msg_type_id == msg_dispatch::RTMP_MSG_SET_CHUNK_SIZE {
+                            if let Ok(cs) = control::read_set_chunk_size(&payload) {
+                                self.chunk_reg.set_all_chunk_size(cs);
+                            }
+                        } else if msg.msg_type_id == msg_dispatch::RTMP_MSG_USER_CONTROL {
                         self.handle_user_control(&payload)?;
                     } else if msg.msg_type_id == msg_dispatch::RTMP_MSG_AUDIO
                         || msg.msg_type_id == msg_dispatch::RTMP_MSG_VIDEO
@@ -712,8 +715,6 @@ impl Client {
                         if let Some(cb) = self.on_frame_cb {
                             self.deliver_script_frame_cb(cb, msg.timestamp, data_payload);
                         }
-                    } else if msg.msg_type_id == msg_dispatch::RTMP_MSG_AGGREGATE {
-                        self.handle_aggregate_message(msg.timestamp, &payload)?;
                     } else if msg.msg_type_id == msg_dispatch::RTMP_MSG_AMF0_COMMAND {
                         self.handle_command_message(&payload);
                     } else if msg.msg_type_id == msg_dispatch::RTMP_MSG_AMF3_COMMAND {
@@ -723,6 +724,7 @@ impl Client {
                             &payload
                         };
                         self.handle_command_message(data);
+                    }
                     }
                 }
                 Ok(_) => break,
@@ -746,13 +748,21 @@ impl Client {
     }
 
     /// Unpack aggregate A/V/script sub-tags for play-side frame callbacks.
-    fn handle_aggregate_message(&mut self, base_timestamp: u32, payload: &[u8]) -> Result<()> {
+    fn handle_aggregate_message(
+        &mut self,
+        base_timestamp: u32,
+        payload: &[u8],
+        messages_processed: &mut usize,
+    ) -> Result<()> {
         let mut pos = 0usize;
         let mut have_base = false;
         let mut sub_base_ts: u32 = 0;
         let mut subtags = 0usize;
 
         while pos + 11 <= payload.len() {
+            if *messages_processed >= MAX_MESSAGES_PER_POLL {
+                break;
+            }
             if subtags >= MAX_AGGREGATE_SUBTAGS {
                 return Err(ErrorCode::Protocol);
             }
@@ -781,14 +791,27 @@ impl Client {
             if let Some(cb) = self.on_frame_cb {
                 match tag_type {
                     msg_dispatch::RTMP_MSG_AUDIO => {
+                        *messages_processed += 1;
                         self.deliver_av_frame_cb(cb, FrameType::Audio, out_ts, tag_payload)?;
                     }
                     msg_dispatch::RTMP_MSG_VIDEO => {
+                        *messages_processed += 1;
                         self.deliver_av_frame_cb(cb, FrameType::Video, out_ts, tag_payload)?;
                     }
                     msg_dispatch::RTMP_MSG_AMF0_DATA => {
+                        *messages_processed += 1;
                         self.deliver_script_frame_cb(cb, out_ts, tag_payload);
                     }
+                    _ => {
+                        pos = body + data_size + 4;
+                        continue;
+                    }
+                }
+            } else {
+                match tag_type {
+                    msg_dispatch::RTMP_MSG_AUDIO
+                    | msg_dispatch::RTMP_MSG_VIDEO
+                    | msg_dispatch::RTMP_MSG_AMF0_DATA => {}
                     _ => {
                         pos = body + data_size + 4;
                         continue;
