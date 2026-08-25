@@ -401,6 +401,27 @@ impl Conn {
         self.session_setup_started = started;
     }
 
+    #[cfg(test)]
+    fn handle_message_for_test(
+        &mut self,
+        msg: &ChunkMessage,
+        payload: &[u8],
+    ) -> Result<()> {
+        let mut messages_budget = usize::MAX;
+        self.handle_message(msg, payload, &mut messages_budget)
+    }
+
+    #[cfg(test)]
+    fn handle_aggregate_for_test(
+        &mut self,
+        msg_stream_id: u32,
+        base_timestamp: u32,
+        payload: &[u8],
+    ) -> Result<()> {
+        let mut messages_budget = usize::MAX;
+        self.handle_aggregate(msg_stream_id, base_timestamp, payload, &mut messages_budget)
+    }
+
     /// True if the last `recv`/`process` pass stopped early because the
     /// per-call message budget was exhausted while complete messages were
     /// still buffered. Callers (e.g. the server poll loop) should keep
@@ -862,6 +883,7 @@ impl Conn {
         msg_stream_id: u32,
         base_timestamp: u32,
         payload: &[u8],
+        messages_budget: &mut usize,
     ) -> Result<()> {
         let mut pos = 0;
         let mut have_base = false;
@@ -898,6 +920,21 @@ impl Conn {
             // wrap in an unexpected direction in release.
             let out_ts = base_timestamp.wrapping_add(ts.wrapping_sub(sub_base_ts));
             let tag_payload = &payload[body..body + data_size];
+
+            match tag_type {
+                msg_dispatch::RTMP_MSG_AUDIO
+                | msg_dispatch::RTMP_MSG_VIDEO
+                | msg_dispatch::RTMP_MSG_AMF0_DATA => {
+                    if *messages_budget == 0 {
+                        return Ok(());
+                    }
+                    *messages_budget = messages_budget.saturating_sub(1);
+                }
+                _ => {
+                    pos = body + data_size + 4;
+                    continue;
+                }
+            }
 
             match tag_type {
                 msg_dispatch::RTMP_MSG_AUDIO => {
@@ -1071,8 +1108,7 @@ impl Conn {
                 Ok((1, payload_owned)) => {
                     if msg.is_complete {
                         processed += 1;
-                        *messages_budget = messages_budget.saturating_sub(1);
-                        if let Err(e) = self.handle_message(&msg, &payload_owned) {
+                        if let Err(e) = self.handle_message(&msg, &payload_owned, messages_budget) {
                             return match e {
                                 ErrorCode::Auth => -8,
                                 _ => -3,
@@ -1089,7 +1125,29 @@ impl Conn {
         1
     }
 
-    fn handle_message(&mut self, msg: &ChunkMessage, payload: &[u8]) -> Result<()> {
+    fn handle_message(
+        &mut self,
+        msg: &ChunkMessage,
+        payload: &[u8],
+        messages_budget: &mut usize,
+    ) -> Result<()> {
+        match msg.msg_type_id {
+            msg_dispatch::RTMP_MSG_AGGREGATE => {
+                return self.handle_aggregate(
+                    msg.msg_stream_id,
+                    msg.timestamp,
+                    payload,
+                    messages_budget,
+                );
+            }
+            _ => {
+                if *messages_budget == 0 {
+                    return Ok(());
+                }
+                *messages_budget = messages_budget.saturating_sub(1);
+            }
+        }
+
         match msg.msg_type_id {
             msg_dispatch::RTMP_MSG_SET_CHUNK_SIZE
             | msg_dispatch::RTMP_MSG_ABORT_MESSAGE
@@ -1113,9 +1171,6 @@ impl Conn {
             msg_dispatch::RTMP_MSG_VIDEO => {
                 self.handle_media_frame(msg.msg_stream_id, FrameType::Video, msg.timestamp, payload)
             }
-            msg_dispatch::RTMP_MSG_AGGREGATE => {
-                self.handle_aggregate(msg.msg_stream_id, msg.timestamp, payload)
-            }
             msg_dispatch::RTMP_MSG_AMF0_DATA => {
                 self.handle_publisher_data_message(msg.msg_stream_id, msg.timestamp, payload)
             }
@@ -1138,6 +1193,7 @@ impl Conn {
                 };
                 self.handle_amf3_shared_object(data)
             }
+            msg_dispatch::RTMP_MSG_AGGREGATE => Ok(()),
             _ => Ok(()),
         }
     }
@@ -4312,7 +4368,7 @@ mod tests {
         aggregate.extend(flv_subtag(0x08, 100, &audio_payload));
         aggregate.extend(flv_subtag(0x09, 140, &video_payload));
 
-        conn.handle_aggregate(1, 1000, &aggregate).unwrap();
+        conn.handle_aggregate_for_test(1, 1000, &aggregate).unwrap();
 
         assert_eq!(conn.pending_relay.len(), 2);
         assert_eq!(conn.pending_relay[0].frame_type, FrameType::Audio);
@@ -4323,6 +4379,30 @@ mod tests {
         // so its relayed timestamp is the aggregate's own timestamp (1000) + 40.
         assert_eq!(conn.pending_relay[1].timestamp, 1040);
         assert_eq!(conn.pending_relay[1].payload, video_payload);
+    }
+
+    #[test]
+    fn aggregate_subtag_dispatches_consume_message_budget() {
+        let mut conn = Conn::new();
+        conn.relay_enabled = true;
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+        if let Some(s) = conn.current_stream.as_mut() {
+            s.is_publishing = true;
+        }
+        conn.max_pending_relay_bytes = usize::MAX;
+
+        let audio_payload = vec![0xAF, 0x01];
+        let mut aggregate = Vec::new();
+        for i in 0..10 {
+            aggregate.extend(flv_subtag(0x08, i, &audio_payload));
+        }
+
+        let mut messages_budget = 3;
+        conn.handle_aggregate(1, 0, &aggregate, &mut messages_budget)
+            .unwrap();
+
+        assert_eq!(messages_budget, 0);
+        assert_eq!(conn.pending_relay.len(), 3);
     }
 
     #[test]
@@ -4340,7 +4420,7 @@ mod tests {
         aggregate.extend_from_slice(b"short");
 
         assert_eq!(
-            conn.handle_aggregate(1, 0, &aggregate),
+            conn.handle_aggregate_for_test(1, 0, &aggregate),
             Err(ErrorCode::Protocol)
         );
     }
@@ -4366,7 +4446,7 @@ mod tests {
             is_complete: true,
         };
 
-        conn.handle_message(&msg, &aggregate).unwrap();
+        conn.handle_message_for_test(&msg, &aggregate).unwrap();
 
         assert_eq!(conn.pending_relay.len(), 1);
         assert_eq!(conn.pending_relay[0].frame_type, FrameType::Video);
@@ -4415,7 +4495,7 @@ mod tests {
             msg_stream_id: 0,
             is_complete: true,
         };
-        conn.handle_message(&msg, &payload).unwrap();
+        conn.handle_message_for_test(&msg, &payload).unwrap();
 
         assert_eq!(
             *SEEN.lock().unwrap(),
@@ -4464,7 +4544,7 @@ mod tests {
             msg_stream_id: 0,
             is_complete: true,
         };
-        conn.handle_message(&msg, &payload).unwrap();
+        conn.handle_message_for_test(&msg, &payload).unwrap();
         assert!(
             !*SEEN.lock().unwrap(),
             "shared objects must not bypass publish/play auth hooks"
@@ -4515,7 +4595,7 @@ mod tests {
             msg_stream_id: 0,
             is_complete: true,
         };
-        conn.handle_message(&denied_msg, &denied_payload).unwrap();
+        conn.handle_message_for_test(&denied_msg, &denied_payload).unwrap();
         assert!(!*SEEN.lock().unwrap(), "denied shared object must not fire callback");
 
         let allowed = SharedObjectMessage {
@@ -4540,7 +4620,7 @@ mod tests {
             msg_stream_id: 0,
             is_complete: true,
         };
-        conn.handle_message(&allowed_msg, &allowed_payload).unwrap();
+        conn.handle_message_for_test(&allowed_msg, &allowed_payload).unwrap();
         assert!(
             *SEEN.lock().unwrap(),
             "authorized shared object must reach on_shared_object_cb"
@@ -4561,7 +4641,7 @@ mod tests {
             msg_stream_id: 0,
             is_complete: true,
         };
-        assert!(conn.handle_message(&msg, &payload).is_ok());
+        assert!(conn.handle_message_for_test(&msg, &payload).is_ok());
     }
 
     #[test]
@@ -4605,7 +4685,7 @@ mod tests {
             msg_stream_id: 0,
             is_complete: true,
         };
-        conn.handle_message(&msg, &payload).unwrap();
+        conn.handle_message_for_test(&msg, &payload).unwrap();
 
         assert!(
             !*SEEN.lock().unwrap(),
@@ -4992,7 +5072,7 @@ mod tests {
             msg_stream_id: 1,
             is_complete: true,
         };
-        conn.handle_message(&msg, &payload).unwrap();
+        conn.handle_message_for_test(&msg, &payload).unwrap();
         assert_eq!(conn.detected_video_width, Some(1024));
         assert_eq!(conn.detected_video_height, Some(576));
     }
@@ -5056,7 +5136,7 @@ mod tests {
             msg_stream_id: 1,
             is_complete: true,
         };
-        conn.handle_message(&msg, &payload).unwrap();
+        conn.handle_message_for_test(&msg, &payload).unwrap();
         assert_eq!(conn.detected_video_width, None);
     }
 
@@ -5073,7 +5153,7 @@ mod tests {
             msg_stream_id: 99,
             is_complete: true,
         };
-        conn.handle_message(&msg, &payload).unwrap();
+        conn.handle_message_for_test(&msg, &payload).unwrap();
         assert_eq!(conn.detected_video_width, None);
     }
 
@@ -5094,7 +5174,7 @@ mod tests {
         let metadata =
             build_on_metadata_payload(false, &[("width", 720.0), ("height", 480.0)], &[]);
         let aggregate = flv_subtag(msg_dispatch::RTMP_MSG_AMF0_DATA, 0, &metadata);
-        conn.handle_aggregate(1, 0, &aggregate).unwrap();
+        conn.handle_aggregate_for_test(1, 0, &aggregate).unwrap();
         assert_eq!(conn.detected_video_width, Some(720));
         assert_eq!(conn.detected_video_height, Some(480));
     }
