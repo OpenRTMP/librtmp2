@@ -1,21 +1,31 @@
 # Bug scan progress
 
-Last scanned: session / server / client / transport (2026-07-11)
+Last scanned: core (2026-08-26)
 
 ## Modules
 
 - [x] core — Memory, logging, errors, buffer
-- [x] handshake — C0/C1/C2 ↔ S0/S1/S2
-- [x] chunk — Chunk reader/writer/state
-- [x] message — Message reassembly, control, commands
-- [x] amf — AMF0 + AMF3
-- [x] flv — Audio/video/script tags
-- [x] ertmp — E-RTMP v1/v2 extensions
-- [x] session — State machine, publish/play flows
-- [x] server — Server listener
-- [x] client — Outbound client
+- [ ] handshake — C0/C1/C2 ↔ S0/S1/S2
+- [ ] chunk — Chunk reader/writer/state
+- [ ] message — Message reassembly, control, commands
+- [ ] amf — AMF0 + AMF3
+- [ ] flv — Audio/video/script tags
+- [ ] ertmp — E-RTMP v1/v2 extensions
+- [ ] session — State machine, publish/play flows
+- [ ] server — Server listener
+- [ ] client — Outbound client
 
-All modules in the module layout have now had at least one full pass.
+## Findings (2026-08-26 core pass)
+
+- Reviewed `src/alloc.rs`, `src/bytes.rs`, `src/buffer.rs`, `src/log.rs`,
+  `src/types.rs`, and `src/net.rs` in full. Traced callers for
+  `Buffer::write`/`read`/`reset` caps (`BUFFER_MAX_SIZE` 64 MiB),
+  `lrtmp2_calloc` overflow guard, unowned-buffer growth refusal,
+  `ntoh32`/`ntoh24` indexing (all production callers pre-check slice
+  length; `ntoh24` is test-only today), `split_host_port` IPv4/IPv6
+  bracket forms and downstream `parse_rtmp_url`/`resolve_bind_addr`
+  usage, log-callback deadlock avoidance, and FFI enum validation in
+  `types.rs`/`lib.rs`. No new critical or high-severity issue found.
 
 ## Findings (2026-07-11 session/server/client/transport pass)
 
