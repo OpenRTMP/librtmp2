@@ -303,8 +303,9 @@ pub struct Server {
     /// When set, must return true before publisher media is queued for relay.
     pub on_media_cb: Option<fn(u64, FrameType, Option<&str>) -> bool>,
     /// Must return true before a parsed AMF3 Shared Object message is delivered
-    /// to [`Self::on_shared_object_cb`]. When unset while `on_publish_cb` or
-    /// `on_play_cb` is configured, inbound shared objects are dropped.
+    /// to [`Self::on_shared_object_cb`]. When unset while `on_publish_cb`,
+    /// `on_play_cb`, or `on_media_cb` is configured, inbound shared objects are
+    /// dropped.
     pub on_shared_object_auth_cb: Option<fn(u64, &SharedObjectMessage) -> bool>,
     /// Fired for every parsed AMF3 Shared Object message received on any
     /// connection.

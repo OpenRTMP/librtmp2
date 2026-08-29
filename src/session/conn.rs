@@ -205,9 +205,10 @@ pub struct Conn {
     pub on_publish_cb: Option<fn(conn_id: u64, app: &str, stream_name: &str) -> bool>,
     pub on_play_cb: Option<fn(conn_id: u64, app: &str, stream_name: &str) -> bool>,
     /// Must return true before a parsed AMF3 Shared Object message is delivered
-    /// to [`Self::on_shared_object_cb`]. When unset while `on_publish_cb` or
-    /// `on_play_cb` is configured, inbound shared objects are dropped so a
-    /// peer authorized only for publish/play cannot inject shared-object events.
+    /// to [`Self::on_shared_object_cb`]. When unset while `on_publish_cb`,
+    /// `on_play_cb`, or `on_media_cb` is configured, inbound shared objects are
+    /// dropped so a peer authorized only for publish/play/media filtering cannot
+    /// inject shared-object events.
     pub on_shared_object_auth_cb: Option<fn(conn_id: u64, so: &SharedObjectMessage) -> bool>,
     /// Fired for every parsed AMF3 Shared Object message (RTMP message type
     /// `0x10`) received on this connection. The library only delivers the
@@ -1217,7 +1218,12 @@ impl Conn {
         }
         match self.on_shared_object_auth_cb {
             Some(auth_cb) if !auth_cb(self.conn_id, &so) => return Ok(()),
-            None if self.on_publish_cb.is_some() || self.on_play_cb.is_some() => return Ok(()),
+            None if self.on_publish_cb.is_some()
+                || self.on_play_cb.is_some()
+                || self.on_media_cb.is_some() =>
+            {
+                return Ok(());
+            }
             _ => {}
         }
         if let Some(cb) = self.on_shared_object_cb {
@@ -1704,7 +1710,9 @@ impl Conn {
                         "No stream created",
                     );
                 }
-                if self.on_publish_cb.is_none() && self.on_play_cb.is_some() {
+                if self.on_publish_cb.is_none()
+                    && (self.on_play_cb.is_some() || self.on_media_cb.is_some())
+                {
                     return self.send_onstatus(
                         0,
                         "error",
@@ -1814,7 +1822,9 @@ impl Conn {
                         "No stream created",
                     );
                 }
-                if self.on_play_cb.is_none() && self.on_publish_cb.is_some() {
+                if self.on_play_cb.is_none()
+                    && (self.on_publish_cb.is_some() || self.on_media_cb.is_some())
+                {
                     return self.send_onstatus(
                         0,
                         "error",
@@ -2690,6 +2700,42 @@ mod tests {
         assert!(
             !conn.relay_enabled,
             "relay must stay disabled when play is rejected on a publish-only server"
+        );
+    }
+
+    #[test]
+    fn play_rejects_media_only_connections_when_play_cb_missing() {
+        let mut conn = Conn::new();
+        conn.app = "live".to_string();
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+        conn.on_media_cb = Some(|_, _, _| true);
+
+        let mut play = Buffer::with_capacity(128);
+        command::build_play(&mut play, "viewer").unwrap();
+        conn.handle_command(play.as_slice()).unwrap();
+        assert!(
+            !conn.current_stream.as_ref().unwrap().is_playing,
+            "media-filtered peers must not play when on_play_cb is unset"
+        );
+        assert!(
+            !conn.relay_enabled,
+            "relay must stay disabled when play is rejected on a media-only server"
+        );
+    }
+
+    #[test]
+    fn publish_rejects_media_only_connections_when_publish_cb_missing() {
+        let mut conn = Conn::new();
+        conn.app = "live".to_string();
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+        conn.on_media_cb = Some(|_, _, _| true);
+
+        let mut publish = Buffer::with_capacity(128);
+        command::build_publish(&mut publish, "inject", "live").unwrap();
+        conn.handle_command(publish.as_slice()).unwrap();
+        assert!(
+            !conn.current_stream.as_ref().unwrap().is_publishing,
+            "media-filtered peers must not publish when on_publish_cb is unset"
         );
     }
 
@@ -4548,6 +4594,53 @@ mod tests {
         assert!(
             !*SEEN.lock().unwrap(),
             "shared objects must not bypass publish/play auth hooks"
+        );
+    }
+
+    #[test]
+    fn amf3_shared_object_dropped_when_media_auth_configured_without_so_auth() {
+        use crate::message::shared_object::{SharedObjectEvent, SharedObjectEventType};
+        use std::sync::{LazyLock, Mutex};
+
+        static SEEN: LazyLock<Mutex<bool>> = LazyLock::new(|| Mutex::new(false));
+
+        fn record_so(_conn_id: u64, _so: &SharedObjectMessage) {
+            *SEEN.lock().unwrap() = true;
+        }
+
+        *SEEN.lock().unwrap() = false;
+        let mut conn = Conn::new();
+        conn.conn_id = 42;
+        conn.state = ConnState::AppConnected;
+        conn.on_media_cb = Some(|_, _, _| true);
+        conn.on_shared_object_cb = Some(record_so);
+
+        let so = SharedObjectMessage {
+            name: "chat".to_string(),
+            version: 1,
+            flags: 0,
+            events: vec![SharedObjectEvent {
+                event_type: SharedObjectEventType::Change,
+                data: b"evil".to_vec(),
+            }],
+        };
+        let mut amf_buf = Buffer::with_capacity(64);
+        shared_object::write(&so, &mut amf_buf).unwrap();
+        let mut payload = vec![0x00];
+        payload.extend_from_slice(amf_buf.as_slice());
+        let msg = ChunkMessage {
+            csid: 3,
+            fmt: 0,
+            timestamp: 0,
+            msg_length: payload.len() as u32,
+            msg_type_id: msg_dispatch::RTMP_MSG_AMF3_SHARED_OBJECT,
+            msg_stream_id: 0,
+            is_complete: true,
+        };
+        conn.handle_message_for_test(&msg, &payload).unwrap();
+        assert!(
+            !*SEEN.lock().unwrap(),
+            "shared objects must not bypass media auth hooks"
         );
     }
 
