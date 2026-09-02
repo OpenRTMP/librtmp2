@@ -13,7 +13,7 @@ begin at `1.0.0`.
 
 ## [Unreleased]
 
-## [0.8.0] — 2026-09-02
+## [0.8.0] — 2026-09-03
 
 ### Added
 - `FCPublish` / `releaseStream` command support.
