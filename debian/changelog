@@ -1,3 +1,23 @@
+librtmp2 (0.8.0-1) UNRELEASED; urgency=medium
+
+  * Add FCPublish/releaseStream support, AMF3 shared objects gated on a new
+    on_shared_object_auth_cb, HDR colorInfo for enhanced video, ExVideo/
+    ExAudio write helpers, and E-RTMP v2 reconnect capability.
+  * Security: close publish/play/shared-object auth bypass on connections
+    that configure only on_frame_cb or only on_media_cb; treat wildcard
+    E-RTMP media FourCC as unknown codec identity for on_media_cb auth;
+    block ModEx wrapper bypass of on_media_cb codec deny lists; require
+    tls_insecure == 1 (not any non-zero) to disable RTMPS verification;
+    reject zero-size E-RTMP multitrack sub-tracks (CPU amplification);
+    count aggregate sub-tag dispatches individually against message
+    budgets; canonicalize IPv4-mapped IPv6 peers for per-IP/TLS caps and
+    stop evicting unrelated peers when the global TLS pending queue is full.
+  * Fix pause/unpause cycling resetting the setup timer without relay, reap
+    idle unpaused players with zero outbound relay, and drop stale relay
+    activity carried across pause grace.
+
+ -- OpenRTMP <info@openrtmp.org>  Wed, 02 Sep 2026 00:00:00 +0000
+
 librtmp2 (0.7.0-1) UNRELEASED; urgency=medium
 
   * Add public relay export / socket-less inject APIs (RelayFrame,
