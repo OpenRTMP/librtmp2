@@ -13,6 +13,57 @@ begin at `1.0.0`.
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-09-02
+
+### Added
+- `FCPublish` / `releaseStream` command support.
+- AMF3 shared object delivery, gated behind a new `on_shared_object_auth_cb`
+  so servers must explicitly authorize shared objects at the protocol layer.
+- HDR `colorInfo` for enhanced (E-RTMP) video frames, kept off `Frame`'s
+  ABI-stable layout (see `docs/abi-policy.md`) and exposed via a separate
+  accessor.
+- ExVideo/ExAudio write helpers for emitting E-RTMP v1 media.
+- E-RTMP v2 reconnect capability support.
+
+### Security
+- Publish, play, and shared-object commands are no longer accepted on
+  connections that configure only `on_frame_cb` or only `on_media_cb`
+  without the matching `on_publish_cb`/`on_play_cb`/`on_shared_object_auth_cb` —
+  closing an auth bypass for servers that use those hooks purely for
+  frame/codec observation.
+- Wildcard E-RTMP media FourCC (`*`, meaningful only in capability
+  negotiation) is treated like an unknown codec identity for
+  `on_media_cb` authorization instead of bypassing codec-specific deny lists.
+- `ModEx` wrapper payloads can no longer bypass `on_media_cb` codec deny
+  lists.
+- Non-UTF-8 FourCC and unknown legacy codec nibbles are surfaced to
+  `on_media_cb` via stable labels instead of `None`, and frames with no
+  resolvable codec identity are denied; `tls_insecure` now requires the
+  FFI value `1` (not any non-zero) to disable RTMPS certificate
+  verification.
+- Zero-size E-RTMP multitrack sub-tracks are rejected as malformed,
+  closing a CPU-amplification path where a ~16 KiB `ManyTracks` container
+  could otherwise trigger millions of per-track callback invocations.
+- Aggregate message sub-tags now count individually against per-recv/per-poll
+  message budgets instead of the whole aggregate consuming a single slot,
+  closing an amplification path of up to ~1M handler invocations per batch.
+- IPv4-mapped IPv6 peer addresses are canonicalized before per-IP connection
+  and pending-TLS caps are applied, so dual-stack listeners can't bypass
+  them; a full global TLS pending-handshake queue now rejects new stalled
+  handshakes instead of evicting unrelated queued peers.
+
+### Fixed
+- Pause/unpause cycling no longer refreshes the session setup timer for
+  players that have never received outbound relay, closing a way to hold
+  connection slots indefinitely without consuming media.
+- Unpaused play sessions that never receive outbound relay (no publisher,
+  no cache replay) are reaped after the setup grace window, like paused
+  squatters; players actively receiving relay are unaffected.
+- Stale relay activity is no longer retained across pause grace.
+
+### Changed
+- Crate version `0.7.0` → `0.8.0`.
+
 ## [0.7.0] — 2026-08-09
 
 ### Added
@@ -623,7 +674,8 @@ and others.
 - Protocol mapping documents for legacy, E-RTMP v1, and E-RTMP v2
 - `CONTRIBUTING.md` guidelines
 
-[Unreleased]: https://github.com/OpenRTMP/librtmp2/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/OpenRTMP/librtmp2/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/OpenRTMP/librtmp2/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/OpenRTMP/librtmp2/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/OpenRTMP/librtmp2/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/OpenRTMP/librtmp2/compare/v0.4.2...v0.5.0
