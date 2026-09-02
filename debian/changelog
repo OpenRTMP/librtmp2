@@ -16,7 +16,7 @@ librtmp2 (0.8.0-1) UNRELEASED; urgency=medium
     idle unpaused players with zero outbound relay, and drop stale relay
     activity carried across pause grace.
 
- -- OpenRTMP <info@openrtmp.org>  Wed, 02 Sep 2026 00:00:00 +0000
+ -- OpenRTMP <info@openrtmp.org>  Thu, 03 Sep 2026 00:00:00 +0000
 
 librtmp2 (0.7.0-1) UNRELEASED; urgency=medium
 
