@@ -1580,6 +1580,25 @@ impl Conn {
         Ok(())
     }
 
+    /// True when any configured callback implies publish/play must be explicitly
+    /// authorized via `on_publish_cb` / `on_play_cb` (mirrors the cross-gate
+    /// used for `on_media_cb` / `on_frame_cb`).
+    fn requires_explicit_publish_auth(&self) -> bool {
+        self.on_play_cb.is_some()
+            || self.on_media_cb.is_some()
+            || self.on_frame_cb.is_some()
+            || self.on_shared_object_auth_cb.is_some()
+            || self.on_release_stream_cb.is_some()
+    }
+
+    fn requires_explicit_play_auth(&self) -> bool {
+        self.on_publish_cb.is_some()
+            || self.on_media_cb.is_some()
+            || self.on_frame_cb.is_some()
+            || self.on_shared_object_auth_cb.is_some()
+            || self.on_release_stream_cb.is_some()
+    }
+
     pub fn handle_command(&mut self, payload: &[u8]) -> Result<()> {
         let mut buf = Buffer::from_slice(payload);
         let mut name_buf = [0u8; 64];
@@ -1710,11 +1729,7 @@ impl Conn {
                         "No stream created",
                     );
                 }
-                if self.on_publish_cb.is_none()
-                    && (self.on_play_cb.is_some()
-                        || self.on_media_cb.is_some()
-                        || self.on_frame_cb.is_some())
-                {
+                if self.on_publish_cb.is_none() && self.requires_explicit_publish_auth() {
                     return self.send_onstatus(
                         0,
                         "error",
@@ -1824,11 +1839,7 @@ impl Conn {
                         "No stream created",
                     );
                 }
-                if self.on_play_cb.is_none()
-                    && (self.on_publish_cb.is_some()
-                        || self.on_media_cb.is_some()
-                        || self.on_frame_cb.is_some())
-                {
+                if self.on_play_cb.is_none() && self.requires_explicit_play_auth() {
                     return self.send_onstatus(
                         0,
                         "error",
@@ -2784,6 +2795,130 @@ mod tests {
         assert!(
             !conn.relay_enabled,
             "relay must stay disabled when play is rejected on a frame-only server"
+        );
+    }
+
+    #[test]
+    fn publish_rejects_shared_object_auth_only_connections_when_publish_cb_missing() {
+        use crate::message::shared_object::{SharedObjectEvent, SharedObjectEventType};
+
+        fn allow_so(_conn_id: u64, _so: &SharedObjectMessage) -> bool {
+            true
+        }
+
+        let mut conn = Conn::new();
+        conn.app = "live".to_string();
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+        conn.on_shared_object_auth_cb = Some(allow_so);
+
+        let mut publish = Buffer::with_capacity(128);
+        command::build_publish(&mut publish, "inject", "live").unwrap();
+        conn.handle_command(publish.as_slice()).unwrap();
+        assert!(
+            !conn.current_stream.as_ref().unwrap().is_publishing,
+            "shared-object-auth servers must not accept publish without on_publish_cb"
+        );
+        assert!(
+            !conn.relay_enabled,
+            "relay must stay disabled when publish is rejected on a shared-object-auth server"
+        );
+
+        // Sanity: shared-object auth still applies to AMF3 shared objects.
+        conn.on_shared_object_cb = Some(|_, _| {});
+        let so = SharedObjectMessage {
+            name: "chat".to_string(),
+            version: 1,
+            flags: 0,
+            events: vec![SharedObjectEvent {
+                event_type: SharedObjectEventType::Use,
+                data: Vec::new(),
+            }],
+        };
+        let mut amf_buf = Buffer::with_capacity(64);
+        shared_object::write(&so, &mut amf_buf).unwrap();
+        let mut payload = vec![0x00];
+        payload.extend_from_slice(amf_buf.as_slice());
+        let msg = ChunkMessage {
+            csid: 3,
+            fmt: 0,
+            timestamp: 0,
+            msg_length: payload.len() as u32,
+            msg_type_id: msg_dispatch::RTMP_MSG_AMF3_SHARED_OBJECT,
+            msg_stream_id: 0,
+            is_complete: true,
+        };
+        conn.handle_message_for_test(&msg, &payload).unwrap();
+    }
+
+    #[test]
+    fn play_rejects_shared_object_auth_only_connections_when_play_cb_missing() {
+        fn allow_so(_conn_id: u64, _so: &SharedObjectMessage) -> bool {
+            true
+        }
+
+        let mut conn = Conn::new();
+        conn.app = "live".to_string();
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+        conn.on_shared_object_auth_cb = Some(allow_so);
+
+        let mut play = Buffer::with_capacity(128);
+        command::build_play(&mut play, "viewer").unwrap();
+        conn.handle_command(play.as_slice()).unwrap();
+        assert!(
+            !conn.current_stream.as_ref().unwrap().is_playing,
+            "shared-object-auth servers must not accept play without on_play_cb"
+        );
+        assert!(
+            !conn.relay_enabled,
+            "relay must stay disabled when play is rejected on a shared-object-auth server"
+        );
+    }
+
+    #[test]
+    fn publish_rejects_release_stream_only_connections_when_publish_cb_missing() {
+        fn allow_release(_conn_id: u64, _app: &str, _stream: &str) -> bool {
+            true
+        }
+
+        let mut conn = Conn::new();
+        conn.app = "live".to_string();
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+        conn.on_release_stream_cb = Some(allow_release);
+
+        let mut publish = Buffer::with_capacity(128);
+        command::build_publish(&mut publish, "inject", "live").unwrap();
+        conn.handle_command(publish.as_slice()).unwrap();
+        assert!(
+            !conn.current_stream.as_ref().unwrap().is_publishing,
+            "release-stream servers must not accept publish without on_publish_cb"
+        );
+        assert!(
+            !conn.relay_enabled,
+            "relay must stay disabled when publish is rejected on a release-stream server"
+        );
+    }
+
+    #[test]
+    fn play_rejects_release_stream_only_connections_when_play_cb_missing() {
+        fn allow_release(_conn_id: u64, _app: &str, _stream: &str) -> bool {
+            true
+        }
+
+        let mut conn = Conn::new();
+        conn.app = "live".to_string();
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+        conn.on_release_stream_cb = Some(allow_release);
+
+        let mut play = Buffer::with_capacity(128);
+        command::build_play(&mut play, "viewer").unwrap();
+        conn.handle_command(play.as_slice()).unwrap();
+        assert!(
+            !conn.current_stream.as_ref().unwrap().is_playing,
+            "release-stream servers must not accept play without on_play_cb"
+        );
+        assert!(
+            !conn.relay_enabled,
+            "relay must stay disabled when play is rejected on a release-stream server"
         );
     }
 
