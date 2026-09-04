@@ -1587,6 +1587,8 @@ impl Conn {
         self.on_play_cb.is_some()
             || self.on_media_cb.is_some()
             || self.on_frame_cb.is_some()
+            || self.on_connect_cb.is_some()
+            || self.on_shared_object_cb.is_some()
             || self.on_shared_object_auth_cb.is_some()
             || self.on_release_stream_cb.is_some()
     }
@@ -1595,6 +1597,8 @@ impl Conn {
         self.on_publish_cb.is_some()
             || self.on_media_cb.is_some()
             || self.on_frame_cb.is_some()
+            || self.on_connect_cb.is_some()
+            || self.on_shared_object_cb.is_some()
             || self.on_shared_object_auth_cb.is_some()
             || self.on_release_stream_cb.is_some()
     }
@@ -2437,12 +2441,29 @@ fn detect_video_codec(payload: &[u8]) -> Option<String> {
     }
 }
 
+/// True when bytes 1..5 look like a deliberate enhanced-audio FourCC slot
+/// (printable ASCII) rather than legacy codec payload continuation bytes.
+fn looks_like_enhanced_audio_fourcc_slot(payload: &[u8]) -> bool {
+    payload.len() >= 5
+        && payload[1..5]
+            .iter()
+            .all(|b| b.is_ascii_graphic() || *b == b' ')
+}
+
 fn detect_audio_codec(payload: &[u8]) -> Option<String> {
     if let Some(cc) = first_track_fourcc(FrameType::Audio, payload) {
         return media_fourcc_auth_label(&cc);
     }
     let mut hdr = AudioHeader::default();
     if crate::ertmp::exaudio::exaudio_parse(payload, &mut hdr).is_err() {
+        return None;
+    }
+    // IsExHeader bit set with a printable FourCC-shaped slot but no recognized
+    // enhanced codec is an ambiguous enhanced header, not a legacy SoundFormat.
+    if payload[0] & 0x80 != 0
+        && hdr.is_ex_header == 0
+        && looks_like_enhanced_audio_fourcc_slot(payload)
+    {
         return None;
     }
     if hdr.is_ex_header != 0 {
@@ -2919,6 +2940,86 @@ mod tests {
         assert!(
             !conn.relay_enabled,
             "relay must stay disabled when play is rejected on a release-stream server"
+        );
+    }
+
+    #[test]
+    fn publish_rejects_connect_only_connections_when_publish_cb_missing() {
+        let mut conn = Conn::new();
+        conn.app = "live".to_string();
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+        conn.on_connect_cb = Some(|| {});
+
+        let mut publish = Buffer::with_capacity(128);
+        command::build_publish(&mut publish, "inject", "live").unwrap();
+        conn.handle_command(publish.as_slice()).unwrap();
+        assert!(
+            !conn.current_stream.as_ref().unwrap().is_publishing,
+            "connect-observing servers must not accept publish without on_publish_cb"
+        );
+        assert!(
+            !conn.relay_enabled,
+            "relay must stay disabled when publish is rejected on a connect-only server"
+        );
+    }
+
+    #[test]
+    fn play_rejects_connect_only_connections_when_play_cb_missing() {
+        let mut conn = Conn::new();
+        conn.app = "live".to_string();
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+        conn.on_connect_cb = Some(|| {});
+
+        let mut play = Buffer::with_capacity(128);
+        command::build_play(&mut play, "viewer").unwrap();
+        conn.handle_command(play.as_slice()).unwrap();
+        assert!(
+            !conn.current_stream.as_ref().unwrap().is_playing,
+            "connect-observing servers must not accept play without on_play_cb"
+        );
+        assert!(
+            !conn.relay_enabled,
+            "relay must stay disabled when play is rejected on a connect-only server"
+        );
+    }
+
+    #[test]
+    fn publish_rejects_shared_object_delivery_only_connections_when_publish_cb_missing() {
+        let mut conn = Conn::new();
+        conn.app = "live".to_string();
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+        conn.on_shared_object_cb = Some(|_, _| {});
+
+        let mut publish = Buffer::with_capacity(128);
+        command::build_publish(&mut publish, "inject", "live").unwrap();
+        conn.handle_command(publish.as_slice()).unwrap();
+        assert!(
+            !conn.current_stream.as_ref().unwrap().is_publishing,
+            "shared-object-delivery servers must not accept publish without on_publish_cb"
+        );
+        assert!(
+            !conn.relay_enabled,
+            "relay must stay disabled when publish is rejected on a shared-object-delivery server"
+        );
+    }
+
+    #[test]
+    fn play_rejects_shared_object_delivery_only_connections_when_play_cb_missing() {
+        let mut conn = Conn::new();
+        conn.app = "live".to_string();
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+        conn.on_shared_object_cb = Some(|_, _| {});
+
+        let mut play = Buffer::with_capacity(128);
+        command::build_play(&mut play, "viewer").unwrap();
+        conn.handle_command(play.as_slice()).unwrap();
+        assert!(
+            !conn.current_stream.as_ref().unwrap().is_playing,
+            "shared-object-delivery servers must not accept play without on_play_cb"
+        );
+        assert!(
+            !conn.relay_enabled,
+            "relay must stay disabled when play is rejected on a shared-object-delivery server"
         );
     }
 
@@ -4158,6 +4259,38 @@ mod tests {
             conn.handle_media_frame(1, FrameType::Video, 0, &wildcard),
             Err(ErrorCode::Auth),
             "wildcard media FourCC must not bypass codec-specific deny lists"
+        );
+        assert!(conn.pending_relay.is_empty());
+    }
+
+    #[test]
+    fn on_media_cb_deny_list_blocks_enhanced_audio_masquerading_as_legacy_g711u() {
+        fn deny_opus_allow_g711u(_: u64, frame_type: FrameType, codec: Option<&str>) -> bool {
+            if frame_type == FrameType::Audio {
+                return codec != Some("Opus") && codec != Some("legacy:G711U");
+            }
+            true
+        }
+
+        let mut conn = Conn::new();
+        conn.relay_enabled = true;
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+        conn.current_stream.as_mut().unwrap().is_publishing = true;
+        conn.on_media_cb = Some(deny_opus_allow_g711u);
+
+        let real_opus = vec![0x90, b'O', b'p', b'u', b's', 0, 0, 0, 0xAA];
+        assert_eq!(
+            conn.handle_media_frame(1, FrameType::Audio, 0, &real_opus),
+            Err(ErrorCode::Auth)
+        );
+
+        // IsExHeader bit set with an unrecognized printable FourCC slot must
+        // not fall back to legacy SoundFormat 8 (G711U) for authorization.
+        let masqueraded = vec![0x80, b'x', b'x', b'x', b'x', 0xBB, 0xCC];
+        assert_eq!(
+            conn.handle_media_frame(1, FrameType::Audio, 0, &masqueraded),
+            Err(ErrorCode::Auth),
+            "enhanced audio with invalid FourCC must not masquerade as legacy:G711U"
         );
         assert!(conn.pending_relay.is_empty());
     }
