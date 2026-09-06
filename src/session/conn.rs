@@ -1220,7 +1220,9 @@ impl Conn {
             None if self.on_publish_cb.is_some()
                 || self.on_play_cb.is_some()
                 || self.on_media_cb.is_some()
-                || self.on_frame_cb.is_some() =>
+                || self.on_frame_cb.is_some()
+                || self.on_connect_cb.is_some()
+                || self.on_release_stream_cb.is_some() =>
             {
                 return Ok(());
             }
@@ -4871,6 +4873,100 @@ mod tests {
         assert!(
             !*SEEN.lock().unwrap(),
             "shared objects must not bypass frame-only auth configuration"
+        );
+    }
+
+    #[test]
+    fn amf3_shared_object_dropped_when_only_on_connect_cb_configured() {
+        use crate::message::shared_object::{SharedObjectEvent, SharedObjectEventType};
+        use std::sync::{LazyLock, Mutex};
+
+        static SEEN: LazyLock<Mutex<bool>> = LazyLock::new(|| Mutex::new(false));
+
+        fn record_so(_conn_id: u64, _so: &SharedObjectMessage) {
+            *SEEN.lock().unwrap() = true;
+        }
+
+        *SEEN.lock().unwrap() = false;
+        let mut conn = Conn::new();
+        conn.conn_id = 42;
+        conn.state = ConnState::AppConnected;
+        conn.on_connect_cb = Some(|| {});
+        conn.on_shared_object_cb = Some(record_so);
+
+        let so = SharedObjectMessage {
+            name: "chat".to_string(),
+            version: 1,
+            flags: 0,
+            events: vec![SharedObjectEvent {
+                event_type: SharedObjectEventType::Change,
+                data: b"evil".to_vec(),
+            }],
+        };
+        let mut amf_buf = Buffer::with_capacity(64);
+        shared_object::write(&so, &mut amf_buf).unwrap();
+        let mut payload = vec![0x00];
+        payload.extend_from_slice(amf_buf.as_slice());
+        let msg = ChunkMessage {
+            csid: 3,
+            fmt: 0,
+            timestamp: 0,
+            msg_length: payload.len() as u32,
+            msg_type_id: msg_dispatch::RTMP_MSG_AMF3_SHARED_OBJECT,
+            msg_stream_id: 0,
+            is_complete: true,
+        };
+        conn.handle_message_for_test(&msg, &payload).unwrap();
+        assert!(
+            !*SEEN.lock().unwrap(),
+            "shared objects must not bypass connect-only auth configuration"
+        );
+    }
+
+    #[test]
+    fn amf3_shared_object_dropped_when_only_on_release_stream_cb_configured() {
+        use crate::message::shared_object::{SharedObjectEvent, SharedObjectEventType};
+        use std::sync::{LazyLock, Mutex};
+
+        static SEEN: LazyLock<Mutex<bool>> = LazyLock::new(|| Mutex::new(false));
+
+        fn record_so(_conn_id: u64, _so: &SharedObjectMessage) {
+            *SEEN.lock().unwrap() = true;
+        }
+
+        *SEEN.lock().unwrap() = false;
+        let mut conn = Conn::new();
+        conn.conn_id = 42;
+        conn.state = ConnState::AppConnected;
+        conn.on_release_stream_cb = Some(|_, _, _| true);
+        conn.on_shared_object_cb = Some(record_so);
+
+        let so = SharedObjectMessage {
+            name: "chat".to_string(),
+            version: 1,
+            flags: 0,
+            events: vec![SharedObjectEvent {
+                event_type: SharedObjectEventType::Change,
+                data: b"evil".to_vec(),
+            }],
+        };
+        let mut amf_buf = Buffer::with_capacity(64);
+        shared_object::write(&so, &mut amf_buf).unwrap();
+        let mut payload = vec![0x00];
+        payload.extend_from_slice(amf_buf.as_slice());
+        let msg = ChunkMessage {
+            csid: 3,
+            fmt: 0,
+            timestamp: 0,
+            msg_length: payload.len() as u32,
+            msg_type_id: msg_dispatch::RTMP_MSG_AMF3_SHARED_OBJECT,
+            msg_stream_id: 0,
+            is_complete: true,
+        };
+        conn.handle_message_for_test(&msg, &payload).unwrap();
+        assert!(
+            !*SEEN.lock().unwrap(),
+            "shared objects must not bypass release-stream-only auth configuration"
         );
     }
 
