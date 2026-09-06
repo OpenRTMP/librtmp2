@@ -1221,7 +1221,6 @@ impl Conn {
                 || self.on_play_cb.is_some()
                 || self.on_media_cb.is_some()
                 || self.on_frame_cb.is_some()
-                || self.on_connect_cb.is_some()
                 || self.on_release_stream_cb.is_some() =>
             {
                 return Ok(());
@@ -4877,7 +4876,7 @@ mod tests {
     }
 
     #[test]
-    fn amf3_shared_object_dropped_when_only_on_connect_cb_configured() {
+    fn amf3_shared_object_delivered_when_only_on_connect_cb_configured() {
         use crate::message::shared_object::{SharedObjectEvent, SharedObjectEventType};
         use std::sync::{LazyLock, Mutex};
 
@@ -4918,8 +4917,8 @@ mod tests {
         };
         conn.handle_message_for_test(&msg, &payload).unwrap();
         assert!(
-            !*SEEN.lock().unwrap(),
-            "shared objects must not bypass connect-only auth configuration"
+            *SEEN.lock().unwrap(),
+            "connect callback is an observer and must not require shared-object auth"
         );
     }
 
