@@ -1690,10 +1690,24 @@ impl Conn {
                     // that route is being abandoned and must be evicted now
                     // rather than left as a dangling cache-key tracking
                     // entry until this connection eventually disconnects.
+                    let was_active = self
+                        .current_stream
+                        .as_ref()
+                        .is_some_and(|s| s.is_publishing || s.is_playing);
                     self.evict_active_publish_route();
+                    // Mirror FCUnpublish/deleteStream/closeStream: a fresh
+                    // createStream abandons the current publish/play role but
+                    // must not leave a stale `relay_enabled` from a prior
+                    // integrator approval, or `defer_media_relay` servers can
+                    // be bypassed by createStream -> publish without
+                    // re-authorization.
+                    self.relay_enabled = false;
                     self.next_stream_id += 1;
                     let stream_id = self.next_stream_id;
                     self.current_stream = Some(Box::new(Stream::new(stream_id)));
+                    if was_active {
+                        self.session_setup_started = Instant::now();
+                    }
                     let _ =
                         state_machine::conn_transition(&mut self.state, ConnState::StreamCreated);
                     self.send_create_stream_response(txn, stream_id)?;
@@ -2938,6 +2952,36 @@ mod tests {
         assert!(
             !conn.relay_enabled,
             "defer_media_relay must hold relay off until the integrator enables it"
+        );
+    }
+
+    #[test]
+    fn create_stream_clears_relay_enabled_under_defer_media_relay() {
+        let mut conn = Conn::new();
+        conn.app = "live".to_string();
+        conn.defer_media_relay = true;
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+        if let Some(stream) = conn.current_stream.as_mut() {
+            stream.is_publishing = true;
+        }
+        conn.relay_enabled = true;
+
+        let mut create = Buffer::with_capacity(128);
+        command::build_create_stream(&mut create, 2.0).unwrap();
+        conn.handle_command(create.as_slice()).unwrap();
+
+        assert!(
+            !conn.relay_enabled,
+            "createStream must clear relay_enabled so defer_media_relay requires re-authorization"
+        );
+
+        let mut publish = Buffer::with_capacity(128);
+        command::build_publish(&mut publish, "stream2", "live").unwrap();
+        conn.handle_command(publish.as_slice()).unwrap();
+
+        assert!(
+            !conn.relay_enabled,
+            "publish under defer_media_relay must not re-enable relay without integrator approval"
         );
     }
 
