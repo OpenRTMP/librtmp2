@@ -58,7 +58,7 @@ jobs:
       version: ${{ steps.ver.outputs.version }}
       series: ${{ steps.ver.outputs.series }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           ref: ${{ inputs.tag || github.ref_name }}
@@ -104,7 +104,7 @@ jobs:
       DEBEMAIL: info@openrtmp.org
       DEBFULLNAME: OpenRTMP
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           ref: ${{ inputs.tag || github.ref_name }}
@@ -117,7 +117,7 @@ jobs:
             build-essential libssl-dev pkg-config
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
 
       - name: Resolve cbindgen version
         id: cbindgen_ver
