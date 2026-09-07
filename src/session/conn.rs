@@ -2959,6 +2959,7 @@ mod tests {
     fn create_stream_clears_relay_enabled_under_defer_media_relay() {
         let mut conn = Conn::new();
         conn.app = "live".to_string();
+        conn.state = ConnState::AppConnected;
         conn.defer_media_relay = true;
         conn.current_stream = Some(Box::new(Stream::new(1)));
         if let Some(stream) = conn.current_stream.as_mut() {
