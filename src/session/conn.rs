@@ -1805,7 +1805,16 @@ impl Conn {
                     self.pending_cache_evictions
                         .push((self.app.clone(), prev_route_key));
                 }
-                if !self.defer_media_relay {
+                if self.defer_media_relay {
+                    // Same-connection republish must not fan out under a stale
+                    // integrator-pinned relay_key until process_server_connections
+                    // updates the key and re-enables relay. Leaving relay_enabled
+                    // true lets B's media reach A's players in the same poll.
+                    if was_publishing {
+                        self.relay_enabled = false;
+                        self.pending_relay.clear();
+                    }
+                } else {
                     self.relay_enabled = true;
                 }
                 {
