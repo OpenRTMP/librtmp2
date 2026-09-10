@@ -1806,11 +1806,22 @@ impl Conn {
                         .push((self.app.clone(), prev_route_key));
                 }
                 if self.defer_media_relay {
-                    // Same-connection republish must not fan out under a stale
-                    // integrator-pinned relay_key until process_server_connections
-                    // updates the key and re-enables relay. Leaving relay_enabled
-                    // true lets B's media reach A's players in the same poll.
-                    if was_publishing {
+                    // Reset only when leaving a prior play role or switching
+                    // the RTMP publish name. Duplicate `publish` for the same
+                    // name must keep an already-authorized deferred relay and
+                    // its pending frames (integrator re-auth is unchanged).
+                    // Detect switches via stream.name — with a pinned
+                    // relay_key, next_route_key stays on the old DB id so
+                    // renaming_route alone cannot see A→B.
+                    let was_playing = self
+                        .current_stream
+                        .as_ref()
+                        .is_some_and(|s| s.is_playing);
+                    let publish_name_changed = self
+                        .current_stream
+                        .as_ref()
+                        .is_none_or(|s| s.name != name_str);
+                    if was_playing || (was_publishing && publish_name_changed) {
                         self.relay_enabled = false;
                         self.pending_relay.clear();
                     }
