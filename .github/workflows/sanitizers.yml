@@ -57,6 +57,62 @@ jobs:
           RUSTFLAGS: "-C overflow-checks=on"
         run: cargo test --lib --all-features --verbose
 
+  undefined-behavior-sanitizer:
+    name: UBSan (unit tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
+
+      - name: Install nightly Rust
+        uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296 # nightly
+        with:
+          toolchain: nightly
+          components: rust-src
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Run unit tests under UndefinedBehaviorSanitizer
+        env:
+          RUSTFLAGS: "-Zsanitizer=undefined -Cdebuginfo=1 -Copt-level=0"
+          UBSAN_OPTIONS: "print_stacktrace=1:halt_on_error=1"
+        run: |
+          cargo +nightly test --lib --all-features --verbose \
+            -Zbuild-std --target x86_64-unknown-linux-gnu
+
+  thread-sanitizer:
+    name: TSan (unit tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
+
+      - name: Install nightly Rust
+        uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296 # nightly
+        with:
+          toolchain: nightly
+          components: rust-src
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      # The library keeps per-connection state deliberately unshared (see
+      # CLAUDE.md "Threading"); TSan mainly guards against a future regression
+      # that leaks mutable state across the `parking_lot` usage or FFI layer.
+      - name: Run unit tests under ThreadSanitizer
+        env:
+          RUSTFLAGS: "-Zsanitizer=thread -Cdebuginfo=1 -Copt-level=0"
+        run: |
+          cargo +nightly test --lib --all-features --verbose \
+            -Zbuild-std --target x86_64-unknown-linux-gnu
+
   examples-asan:
     name: ASan (examples)
     runs-on: ubuntu-latest

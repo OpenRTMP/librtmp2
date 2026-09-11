@@ -1,0 +1,79 @@
+name: Cross-Platform
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  macos:
+    name: cargo test (macOS, all features)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Point openssl-sys at Homebrew OpenSSL
+        run: echo "OPENSSL_DIR=$(brew --prefix openssl@3)" >> "$GITHUB_ENV"
+
+      - name: Build (all features)
+        run: cargo build --all-features --verbose
+
+      - name: Test (all features)
+        run: cargo test --all-features --verbose
+
+      - name: Run E2E integration tests (serial)
+        run: |
+          cargo test --all-features --verbose \
+            --test server_client_loopback \
+            --test e2e_publish_play_same_listener \
+            --test e2e_publish_rejection \
+            --test e2e_multiple_frames \
+            --test e2e_audio_frames \
+            -- --test-threads=1
+
+      - name: Build & test without TLS
+        run: |
+          cargo build --no-default-features --verbose
+          cargo test --no-default-features --verbose
+
+  windows:
+    name: cargo test (Windows, plaintext-only)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      # OpenSSL native linking on Windows CI needs vcpkg bootstrapping and is
+      # fragile; the `tls` feature is covered on Linux/macOS instead. This job
+      # exercises the plaintext-only, zero-dependency build path that
+      # `--no-default-features` documents in CLAUDE.md.
+      - name: Build & test (no default features)
+        run: |
+          cargo build --no-default-features --verbose
+          cargo test --no-default-features --verbose
+
+      - name: Run E2E integration tests (serial, no default features)
+        run: |
+          cargo test --no-default-features --verbose `
+            --test server_client_loopback `
+            --test e2e_publish_play_same_listener `
+            --test e2e_publish_rejection `
+            --test e2e_multiple_frames `
+            --test e2e_audio_frames `
+            -- --test-threads=1
