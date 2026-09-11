@@ -1687,10 +1687,32 @@ mod tests {
     #[test]
     fn try_flush_send_buffer_shrinks_after_full_drain() {
         use crate::buffer::BUFFER_RESET_CAPACITY;
-        use std::os::unix::io::IntoRawFd;
+        use std::os::unix::io::{AsRawFd, IntoRawFd};
         use std::os::unix::net::UnixStream;
 
         let (client_end, _peer) = UnixStream::pair().unwrap();
+
+        // The default unix-domain socket buffer is much smaller on macOS
+        // (~8 KiB) than on Linux, so a write past it would only partially
+        // drain in one non-blocking call. Grow both ends past the test
+        // payload explicitly so the "fully drains in one write" assumption
+        // below holds on every platform this runs on.
+        let big_len = BUFFER_RESET_CAPACITY * 4;
+        let wanted_buf_size = (big_len + BUFFER_RESET_CAPACITY) as libc::c_int;
+        for fd in [client_end.as_raw_fd(), _peer.as_raw_fd()] {
+            for opt in [libc::SO_SNDBUF, libc::SO_RCVBUF] {
+                unsafe {
+                    libc::setsockopt(
+                        fd,
+                        libc::SOL_SOCKET,
+                        opt,
+                        &wanted_buf_size as *const libc::c_int as *const libc::c_void,
+                        std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+                    );
+                }
+            }
+        }
+
         client_end.set_nonblocking(true).unwrap();
 
         let mut client = Client::new();
@@ -1700,7 +1722,7 @@ mod tests {
         // reset capacity. This is well within the unix socket's send buffer,
         // so try_flush_send_buffer can fully drain it in one non-blocking
         // write without the peer needing to read concurrently.
-        let big = vec![0u8; BUFFER_RESET_CAPACITY * 4];
+        let big = vec![0u8; big_len];
         client.send_buffer.write(&big).unwrap();
         assert!(client.send_buffer.capacity() > BUFFER_RESET_CAPACITY);
 
