@@ -945,13 +945,11 @@ impl Server {
             .filter(|pending| pending.remote_ip == conn.remote_ip)
             .count();
         if same_addr >= self.max_pending_tls_per_addr() {
-            if let Some(i) = self
-                .pending_tls
-                .iter()
-                .position(|pending| pending.remote_ip == conn.remote_ip)
-            {
-                self.pending_tls.remove(i);
-            }
+            // Drop the new stalled handshake instead of evicting an existing
+            // pending entry from the same IP -- otherwise a co-located attacker
+            // can repeatedly open stalled RTMPS connects and deny TLS completion
+            // for legitimate peers behind the same NAT/egress address.
+            return;
         }
         if self.pending_tls_limit_reached() {
             // Drop the new stalled handshake instead of evicting an unrelated
@@ -3475,6 +3473,61 @@ mod tests {
         assert!(
             server.pending_tls_count() <= MAX_PENDING_TLS_HANDSHAKES,
             "global pending TLS cap must hold"
+        );
+
+        let _ = std::fs::remove_file(cert_path);
+        let _ = std::fs::remove_file(key_path);
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn pending_tls_per_addr_cap_rejects_new_handshake_instead_of_evicting_oldest() {
+        let (cert_path, key_path) = self_signed_cert_files("pending-tls-per-addr-no-evict.test");
+        let mut server = test_server();
+        server
+            .listen_tls(
+                "127.0.0.1:0",
+                cert_path.to_str().unwrap(),
+                key_path.to_str().unwrap(),
+            )
+            .unwrap();
+
+        let port = {
+            let mut addr: libc::sockaddr_in = unsafe { std::mem::zeroed() };
+            let mut len = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
+            let rc = unsafe {
+                libc::getsockname(
+                    server.server_fd,
+                    &mut addr as *mut _ as *mut libc::sockaddr,
+                    &mut len,
+                )
+            };
+            assert_eq!(rc, 0);
+            u16::from_be(addr.sin_port)
+        };
+        let addr = format!("127.0.0.1:{port}");
+
+        let mut clients = Vec::new();
+        for _ in 0..DEFAULT_MAX_PENDING_TLS_PER_ADDR {
+            clients.push(std::net::TcpStream::connect(&addr).unwrap());
+            server.accept_new_connections();
+        }
+        assert_eq!(
+            server.pending_tls_count_for_addr("127.0.0.1"),
+            DEFAULT_MAX_PENDING_TLS_PER_ADDR
+        );
+        let oldest = server.pending_tls[0].remote_addr.clone();
+
+        clients.push(std::net::TcpStream::connect(&addr).unwrap());
+        server.accept_new_connections();
+
+        assert_eq!(
+            server.pending_tls_count_for_addr("127.0.0.1"),
+            DEFAULT_MAX_PENDING_TLS_PER_ADDR
+        );
+        assert_eq!(
+            server.pending_tls[0].remote_addr, oldest,
+            "per-IP pending TLS cap must reject new handshakes instead of evicting same-IP peers"
         );
 
         let _ = std::fs::remove_file(cert_path);
