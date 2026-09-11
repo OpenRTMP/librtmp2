@@ -20,9 +20,8 @@ jobs:
     # is scoped to the parser/codec modules that never touch the network
     # (core buffer/alloc helpers, handshake, chunk, message/AMF, FLV, E-RTMP).
     # `server`, `client`, `transport`, `session`, `net` and the `ffi_tests`
-    # module drive real TCP sockets and stay covered by the ASan/UBSan/TSan
-    # and E2E jobs instead.
-    continue-on-error: true
+    # module drive real TCP sockets and stay covered by the ASan/TSan and
+    # E2E jobs instead.
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

@@ -40,7 +40,16 @@ jobs:
       - name: Determine baseline ref
         id: baseline
         run: |
-          PREV_TAG=$(git tag --list 'v*' --sort=-version:refname | grep -vx "${GITHUB_REF#refs/tags/}" | head -1 2>/dev/null || echo "")
+          HEAD_COMMIT=$(git rev-parse HEAD)
+          PREV_TAG=$(
+            git tag --list 'v*' --sort=-version:refname |
+              while IFS= read -r tag; do
+                [ "$(git rev-list -n1 "$tag")" = "$HEAD_COMMIT" ] || {
+                  printf '%s\n' "$tag"
+                  break
+                }
+              done
+          )
           if [ -z "$PREV_TAG" ]; then
             echo "No previous release tag found. Skipping C ABI comparison."
             echo "skip=true" >> "$GITHUB_OUTPUT"
