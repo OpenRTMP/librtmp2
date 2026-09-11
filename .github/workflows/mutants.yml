@@ -33,9 +33,15 @@ jobs:
       # tests that run code without asserting on it) and time-boxed so the
       # weekly run stays cheap; widen the -f globs to cover more of src/
       # once this baseline is clean.
+      #
+      # No -j > 1: the integration tests this crate's test suite runs bind
+      # fixed ports (e.g. 19661-19668), so concurrent mutant workers would
+      # collide on the same port and get recorded as "caught" by an
+      # unrelated bind failure rather than by the mutated logic actually
+      # being exercised, inflating the mutation score.
       - name: Run cargo-mutants
         run: |
-          timeout 55m cargo mutants --no-shuffle --all-features -j 4 \
+          timeout 55m cargo mutants --no-shuffle --all-features \
             -f 'src/amf/**' \
             -f 'src/chunk/**' \
             -f 'src/message/**' \

@@ -1,4 +1,13 @@
 [graph]
+# Only the platforms CI actually builds/runs on. Left unrestricted, cargo-deny
+# considers every cfg-gated dependency for every target rustc knows about
+# (e.g. libfuzzer-sys pulls in the UEFI-only `r-efi` under some targets),
+# which flags licenses/advisories for code that's never actually compiled.
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+]
 all-features = true
 
 [advisories]
@@ -17,12 +26,17 @@ allow = [
     "ISC",
     "Zlib",
     "Unicode-3.0",
+    "NCSA",
 ]
 confidence-threshold = 0.8
 
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# The fuzz crate depends on the parent crate via an unversioned path dep
+# (`librtmp2 = { path = ".." }`), which is exactly what a workspace path
+# dependency should look like, not a registry crate pinned to "*".
+allow-wildcard-paths = true
 deny = []
 
 [sources]
