@@ -1,0 +1,70 @@
+name: Coverage
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  coverage:
+    name: cargo-llvm-cov
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          components: llvm-tools-preview
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cb407c4fe87966b0b9d1f7350974e80c133dd4bb # cargo-llvm-cov
+
+      - name: Run unit tests under coverage instrumentation
+        run: cargo llvm-cov --no-report --all-features --lib --verbose
+
+      - name: Run E2E integration tests under coverage instrumentation (serial)
+        run: |
+          cargo llvm-cov --no-report --all-features --verbose \
+            --test server_client_loopback \
+            --test e2e_publish_play_same_listener \
+            --test e2e_publish_rejection \
+            --test e2e_multiple_frames \
+            --test e2e_audio_frames \
+            -- --test-threads=1
+
+      - name: Generate lcov report
+        run: cargo llvm-cov report --lcov --output-path lcov.info
+
+      - name: Print coverage summary
+        run: cargo llvm-cov report --summary-only >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Generate HTML report
+        run: cargo llvm-cov report --html
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: librtmp2-coverage
+          path: |
+            lcov.info
+            target/llvm-cov/html/**
+
+      - name: Upload to Codecov
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        uses: codecov/codecov-action@e53489f4d376d79066609109e7a95a29eb3740b1 # v7.0.0
+        with:
+          files: lcov.info
+          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}

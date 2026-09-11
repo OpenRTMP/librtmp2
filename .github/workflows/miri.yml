@@ -1,0 +1,49 @@
+name: Miri
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 4 * * 3"
+
+permissions:
+  contents: read
+
+jobs:
+  miri:
+    name: cargo miri test (pure parsing modules)
+    runs-on: ubuntu-latest
+    # Interpreting under Miri is an order of magnitude slower than a native
+    # test run, so this stays off the push/PR path (weekly schedule +
+    # workflow_dispatch only) to keep normal CI feedback fast.
+    #
+    # Miri also has no shims for real sockets or the OpenSSL FFI, so the run
+    # is scoped to the parser/codec modules that never touch the network
+    # (core buffer/alloc helpers, handshake, chunk, message/AMF, FLV, E-RTMP).
+    # `server`, `client`, `transport`, `session`, `net` and the `ffi_tests`
+    # module drive real TCP sockets and stay covered by the ASan/UBSan/TSan
+    # and E2E jobs instead.
+    continue-on-error: true
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install nightly Rust with Miri
+        uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296 # nightly
+        with:
+          toolchain: nightly
+          components: miri
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: cargo miri setup
+        run: cargo +nightly miri setup
+
+      - name: Run pure-parsing unit tests under Miri
+        env:
+          MIRIFLAGS: "-Zmiri-strict-provenance"
+        run: |
+          cargo +nightly miri test --lib --no-default-features --verbose -- \
+            alloc:: bytes:: buffer:: log:: types:: \
+            handshake:: chunk:: message:: amf:: flv:: ertmp::

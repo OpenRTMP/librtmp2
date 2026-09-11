@@ -1,0 +1,49 @@
+name: MSRV
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  msrv:
+    name: cargo build/test (MSRV)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Read MSRV from Cargo.toml
+        id: msrv
+        run: |
+          version=$(sed -n 's/^rust-version *= *"\(.*\)"/\1/p' Cargo.toml)
+          if [ -z "$version" ]; then
+            echo "Could not read rust-version from Cargo.toml" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
+
+      - name: Install Rust ${{ steps.msrv.outputs.version }}
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Build (default features) at MSRV
+        run: cargo build --all-features --verbose
+
+      - name: Test (default features) at MSRV
+        run: cargo test --all-features --verbose
+
+      - name: Build & test without TLS at MSRV
+        run: |
+          cargo build --no-default-features --verbose
+          cargo test --no-default-features --verbose
