@@ -73,6 +73,7 @@ jobs:
           else
             echo "Comparing C ABI against $PREV_TAG"
             echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "tag=$PREV_TAG" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Configure git identity for stash/checkout
@@ -83,7 +84,7 @@ jobs:
 
       - name: Run scripts/abi-baseline.sh compare
         if: steps.baseline.outputs.skip == 'false'
-        run: bash scripts/abi-baseline.sh compare HEAD
+        run: bash scripts/abi-baseline.sh compare "${{ steps.baseline.outputs.tag }}"
 
       - name: Upload ABI report
         if: always() && steps.baseline.outputs.skip == 'false'

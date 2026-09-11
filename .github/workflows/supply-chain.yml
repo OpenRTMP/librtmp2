@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   cargo-deny:
-    name: cargo-deny (${{ matrix.checks }})
+    name: cargo-deny (${{ matrix.checks }}, ${{ matrix.manifest }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -22,6 +22,14 @@ jobs:
           - bans
           - licenses
           - sources
+        # cargo-deny resolves the dependency graph rooted at whichever
+        # manifest it's pointed at, not the whole workspace: this repo's
+        # root Cargo.toml is a package (not a virtual workspace manifest),
+        # so a root-only run never sees the `fuzz` member's own graph (e.g.
+        # libfuzzer-sys's NCSA-licensed component). Check both manifests.
+        manifest:
+          - Cargo.toml
+          - fuzz/Cargo.toml
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -29,4 +37,5 @@ jobs:
 
       - uses: EmbarkStudios/cargo-deny-action@c3bbe7e4e3f7baeee1a3dd9aec0a3b2aded580fb # v2.1.1
         with:
+          manifest-path: ${{ matrix.manifest }}
           command: check ${{ matrix.checks }}
