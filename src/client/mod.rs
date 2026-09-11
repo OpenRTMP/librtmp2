@@ -1701,17 +1701,51 @@ mod tests {
         let wanted_buf_size = (big_len + BUFFER_RESET_CAPACITY) as libc::c_int;
         for fd in [client_end.as_raw_fd(), _peer.as_raw_fd()] {
             for opt in [libc::SO_SNDBUF, libc::SO_RCVBUF] {
-                unsafe {
+                let rc = unsafe {
                     libc::setsockopt(
                         fd,
                         libc::SOL_SOCKET,
                         opt,
                         &wanted_buf_size as *const libc::c_int as *const libc::c_void,
                         std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-                    );
-                }
+                    )
+                };
+                assert_eq!(
+                    rc,
+                    0,
+                    "setsockopt(fd={fd}, opt={opt}) failed: {}",
+                    std::io::Error::last_os_error()
+                );
             }
         }
+
+        // The kernel may clamp the requested size below what was asked for
+        // (e.g. a sandboxed CI runner with a low net.core.wmem_max /
+        // kern.ipc.maxsockbuf ceiling), so confirm the *effective* buffer
+        // rather than trusting the setsockopt call above blindly - otherwise
+        // this test would fail with the same cryptic assertion it exists to
+        // avoid, just on a different platform.
+        let mut effective_sndbuf: libc::c_int = 0;
+        let mut effective_len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+        let rc = unsafe {
+            libc::getsockopt(
+                client_end.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_SNDBUF,
+                &mut effective_sndbuf as *mut libc::c_int as *mut libc::c_void,
+                &mut effective_len,
+            )
+        };
+        assert_eq!(
+            rc,
+            0,
+            "getsockopt(SO_SNDBUF) failed: {}",
+            std::io::Error::last_os_error()
+        );
+        assert!(
+            effective_sndbuf >= wanted_buf_size,
+            "environment's effective SO_SNDBUF ({effective_sndbuf}) is below what this test needs ({wanted_buf_size}); the full-drain-in-one-write assumption below won't hold here"
+        );
 
         client_end.set_nonblocking(true).unwrap();
 
