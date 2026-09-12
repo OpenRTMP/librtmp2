@@ -37,13 +37,16 @@ jobs:
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
+      - name: Generate lockfile for reproducible builds
+        run: cargo generate-lockfile
+
       - name: Build (default features) at MSRV
-        run: cargo build --all-features --verbose
+        run: cargo build --locked --all-features --verbose
 
       - name: Test (default features) at MSRV
         run: cargo test --all-features --verbose
 
       - name: Build & test without TLS at MSRV
         run: |
-          cargo build --no-default-features --verbose
+          cargo build --locked --no-default-features --verbose
           cargo test --no-default-features --verbose
