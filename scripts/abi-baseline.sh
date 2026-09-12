@@ -68,16 +68,19 @@ case "${1:-}" in
         ABIDIFF_STATUS=${PIPESTATUS[0]}
         set -e
 
-        # abidiff uses a bitmask exit status. Bit 3 (8) means incompatible ABI
-        # changes were found; other non-zero bits indicate an execution/error
-        # condition and must also fail the check rather than being ignored.
+        # abidiff uses a bitmask exit status:
+        #   1/2 = execution or usage error, 4 = compatible ABI change,
+        #   8 = incompatible ABI change. Compatible changes are allowed.
         if (( ABIDIFF_STATUS & 8 )); then
             echo "❌ ABI BREAKING CHANGES DETECTED!"
             exit 1
         fi
-        if (( ABIDIFF_STATUS != 0 )); then
+        if (( ABIDIFF_STATUS & 3 )); then
             echo "❌ abidiff failed with status $ABIDIFF_STATUS"
             exit "$ABIDIFF_STATUS"
+        fi
+        if (( ABIDIFF_STATUS & 4 )); then
+            echo "ℹ️ ABI changed, but no incompatible changes were detected"
         fi
 
         echo "✅ ABI check passed"
