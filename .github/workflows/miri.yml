@@ -17,12 +17,9 @@ jobs:
     # workflow_dispatch only) to keep normal CI feedback fast.
     #
     # Miri also has no shims for real sockets or the OpenSSL FFI, so the run
-    # is scoped to parser/codec modules that never touch the network. The
-    # handshake module is intentionally excluded under strict provenance
-    # because its random payload seed currently derives entropy from a pointer
-    # address, which Miri correctly rejects as a pointer-to-integer cast.
-    # `server`, `client`, `transport`, `session`, `net`, `handshake` and the
-    # `ffi_tests` module stay covered by the normal, sanitizer and E2E jobs.
+    # is scoped to parser/codec modules that never touch the network.
+    # `server`, `client`, `transport`, `session`, `net` and the `ffi_tests`
+    # module stay covered by the normal, sanitizer and E2E jobs.
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -44,6 +41,9 @@ jobs:
         env:
           MIRIFLAGS: "-Zmiri-strict-provenance"
         run: |
-          cargo +nightly miri test --lib --no-default-features --verbose -- \
+          for filter in \
             alloc:: bytes:: buffer:: log:: types:: \
-            chunk:: message:: amf:: flv:: ertmp::
+            handshake:: chunk:: message:: amf:: flv:: ertmp::
+          do
+            cargo +nightly miri test --lib --no-default-features --verbose "$filter"
+          done
