@@ -7,7 +7,7 @@
 #   ./scripts/abi-baseline.sh compare v0.1.0 # Compare current vs tag
 #
 # Requires (install on Ubuntu):
-#   sudo apt-get install -y abigail-tools libabigail-dev abi-compliance-checker
+#   sudo apt-get install -y abigail-tools libabigail-dev
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -58,18 +58,26 @@ case "${1:-}" in
         # Build current
         build_and_dump "current"
 
-        # Compare
-        echo "=== Running ABI compliance check ==="
-        abi-compliance-checker \
-            -l librtmp2 \
-            -old "$ABI_DIR/librtmp2-baseline.xml" \
-            -new "$ABI_DIR/librtmp2-current.xml" \
-            -report-path "$ABI_DIR/abi-report.html" \
-            -xml 2>&1 | tee "$ABI_DIR/abi-check-result.txt"
+        # abidw emits libabigail ABIXML, so compare those dumps with abidiff.
+        echo "=== Running ABI compatibility check ==="
+        set +e
+        abidiff \
+            "$ABI_DIR/librtmp2-baseline.xml" \
+            "$ABI_DIR/librtmp2-current.xml" \
+            2>&1 | tee "$ABI_DIR/abi-check-result.txt"
+        ABIDIFF_STATUS=${PIPESTATUS[0]}
+        set -e
 
-        if grep -q "Binary compatibility: Incompatible" "$ABI_DIR/abi-check-result.txt"; then
+        # abidiff uses a bitmask exit status. Bit 3 (8) means incompatible ABI
+        # changes were found; other non-zero bits indicate an execution/error
+        # condition and must also fail the check rather than being ignored.
+        if (( ABIDIFF_STATUS & 8 )); then
             echo "❌ ABI BREAKING CHANGES DETECTED!"
             exit 1
+        fi
+        if (( ABIDIFF_STATUS != 0 )); then
+            echo "❌ abidiff failed with status $ABIDIFF_STATUS"
+            exit "$ABIDIFF_STATUS"
         fi
 
         echo "✅ ABI check passed"
