@@ -39,7 +39,11 @@ jobs:
 
       - name: Run pure-parsing unit tests under Miri
         env:
-          MIRIFLAGS: "-Zmiri-strict-provenance"
+          # -Zmiri-disable-isolation: handshake's get_time()/fill_random read
+          # the wall clock (SystemTime::now()), which Miri's default
+          # isolation otherwise rejects outright ("clock_gettime with
+          # REALTIME clocks not available when isolation is enabled").
+          MIRIFLAGS: "-Zmiri-strict-provenance -Zmiri-disable-isolation"
         run: |
           for filter in \
             alloc:: bytes:: buffer:: log:: types:: \
