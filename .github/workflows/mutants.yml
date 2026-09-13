@@ -10,9 +10,13 @@ permissions:
 
 jobs:
   mutants:
-    name: cargo-mutants (parser/codec modules)
+    name: cargo-mutants (shard ${{ matrix.shard }}/8)
     runs-on: ubuntu-latest
     timeout-minutes: 65
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -30,18 +34,22 @@ jobs:
         uses: taiki-e/install-action@30e0800c3cc5170618e272b943882781ce25e858 # cargo-mutants
 
       # Scoped to the parser/codec modules (highest payoff for catching
-      # tests that run code without asserting on it) and time-boxed so the
-      # weekly run stays cheap; widen the -f globs to cover more of src/
-      # once this baseline is clean.
+      # tests that run code without asserting on it). The full set currently
+      # contains enough mutants that a single serial runner exceeds the
+      # workflow time budget, so split it across independent runners.
+      # Round-robin sharding keeps the runtimes balanced while preserving
+      # serial execution inside each runner.
       #
       # No -j > 1: the integration tests this crate's test suite runs bind
-      # fixed ports (e.g. 19661-19668), so concurrent mutant workers would
-      # collide on the same port and get recorded as "caught" by an
-      # unrelated bind failure rather than by the mutated logic actually
-      # being exercised, inflating the mutation score.
+      # fixed ports (e.g. 19661-19668), so concurrent mutant workers on the
+      # same runner would collide on the same port and get recorded as
+      # "caught" by an unrelated bind failure rather than by the mutated
+      # logic actually being exercised, inflating the mutation score.
       - name: Run cargo-mutants
         run: |
-          timeout 55m cargo mutants --no-shuffle --all-features \
+          cargo mutants --no-shuffle --all-features \
+            --sharding round-robin \
+            --shard "${{ matrix.shard }}/8" \
             -f 'src/amf/**' \
             -f 'src/chunk/**' \
             -f 'src/message/**' \
@@ -54,5 +62,5 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: librtmp2-mutants-report
+          name: librtmp2-mutants-report-shard-${{ matrix.shard }}
           path: mutants.out/**
