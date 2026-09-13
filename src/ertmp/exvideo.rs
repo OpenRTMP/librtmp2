@@ -32,6 +32,16 @@ pub fn exvideo_parse(data: &[u8], hdr: &mut VideoHeader) -> Result<()> {
     if hdr.is_ex_header == 0 {
         hdr.frame_type = (b0 >> 4) & 0x0F;
         hdr.header_size = 1;
+        // Legacy FLV AVCVIDEOPACKET: AVCPacketType (1) + CompositionTime SI24.
+        if (b0 & 0x0F) == 7 && data.len() >= 5 {
+            let ct = ((data[2] as i32) << 16) | ((data[3] as i32) << 8) | (data[4] as i32);
+            let ct = if ct & 0x00800000 != 0 {
+                ct | 0xFF000000u32 as i32
+            } else {
+                ct
+            };
+            hdr.composition_time = ct as u32;
+        }
         return Ok(());
     }
 

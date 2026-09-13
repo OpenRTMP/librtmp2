@@ -59,12 +59,28 @@ static AUDIO_FOURCCS: &[AudioFourCcEntry] = &[
         codec: AudioCodec::Mp3,
         name: "MP3",
     },
-    // E-AC-3 has no dedicated AudioCodec variant yet; map to Aac so enhanced
-    // headers are recognized without mislabeling as G711A.
+    AudioFourCcEntry {
+        fourcc: *b".mp3",
+        codec: AudioCodec::Mp3,
+        name: "MP3 (E-RTMP)",
+    },
+    // AC-3 / E-AC-3 / FLAC have no dedicated AudioCodec variant (ABI-stable
+    // enum); map to Aac so enhanced headers are recognized without falling
+    // through to legacy G.711.
+    AudioFourCcEntry {
+        fourcc: *b"ac-3",
+        codec: AudioCodec::Aac,
+        name: "Dolby Digital",
+    },
     AudioFourCcEntry {
         fourcc: *b"ec-3",
         codec: AudioCodec::Aac,
         name: "Dolby Digital Plus",
+    },
+    AudioFourCcEntry {
+        fourcc: *b"fLaC",
+        codec: AudioCodec::Aac,
+        name: "FLAC",
     },
 ];
 
