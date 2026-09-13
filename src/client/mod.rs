@@ -532,12 +532,19 @@ impl Client {
         cmsg.msg_length = payload.len() as u32;
         cmsg.msg_stream_id = self.stream_id;
 
-        if frame_type == FrameType::Audio {
-            cmsg.csid = 4;
-            cmsg.msg_type_id = 0x08; // AUDIO
-        } else {
-            cmsg.csid = 6;
-            cmsg.msg_type_id = 0x09; // VIDEO
+        match frame_type {
+            FrameType::Audio => {
+                cmsg.csid = 4;
+                cmsg.msg_type_id = 0x08; // AUDIO
+            }
+            FrameType::Video => {
+                cmsg.csid = 6;
+                cmsg.msg_type_id = 0x09; // VIDEO
+            }
+            FrameType::Script | FrameType::Metadata => {
+                cmsg.csid = 5;
+                cmsg.msg_type_id = 0x12; // AMF0 data
+            }
         }
         cmsg.fmt = 0;
 
@@ -676,6 +683,7 @@ impl Client {
                 break;
             }
 
+            let before = self.recv_buffer.available();
             let mut msg = ChunkMessage::default();
             match chunk_read_owned(&mut self.recv_buffer, &mut self.chunk_reg, &mut msg) {
                 Ok((1, payload)) if msg.is_complete => {
@@ -727,7 +735,15 @@ impl Client {
                     }
                     }
                 }
-                Ok(_) => break,
+                Ok(_) => {
+                    // Ok(0) means both "need more bytes" and "consumed a
+                    // non-final fragment". Only stop when the cursor did not
+                    // advance — leftover continuation chunks may already be
+                    // in recv_buffer.
+                    if self.recv_buffer.available() >= before {
+                        break;
+                    }
+                }
                 Err(_) => return Err(ErrorCode::Chunk),
             }
         }
@@ -760,9 +776,6 @@ impl Client {
         let mut subtags = 0usize;
 
         while pos + 11 <= payload.len() {
-            if *messages_processed >= MAX_MESSAGES_PER_POLL {
-                break;
-            }
             if subtags >= MAX_AGGREGATE_SUBTAGS {
                 return Err(ErrorCode::Protocol);
             }

@@ -313,47 +313,43 @@ pub fn read_connect(buf: &mut Buffer, info: &mut ConnectInfo) -> Result<()> {
         let key_str = std::str::from_utf8(&key[..key_len]).unwrap_or("");
 
         if key_str == "fourCcList" {
+            let type_pos = buf.read_pos();
             if connect_amf::read_four_cc_list_amf(buf, &mut info.four_cc_list).is_ok() {
                 info.has_four_cc_list = true;
             } else {
-                let type_pos = buf.read_pos();
-                let _ = amf0::read_type(buf);
                 buf.set_read_pos(type_pos);
                 amf0::skip_value(buf)?;
             }
             continue;
         }
         if key_str == "capsEx" {
+            let type_pos = buf.read_pos();
             if connect_amf::read_caps_ex_amf(buf, &mut info.caps_ex, &mut info.caps_ex_mask).is_ok()
             {
                 info.has_caps_ex = true;
             } else {
-                let type_pos = buf.read_pos();
-                let _ = amf0::read_type(buf);
                 buf.set_read_pos(type_pos);
                 amf0::skip_value(buf)?;
             }
             continue;
         }
         if key_str == "videoFourCcInfoMap" {
+            let type_pos = buf.read_pos();
             if connect_amf::read_video_fourcc_info_map_amf(buf, &mut info.video_four_cc_info_map)
                 .is_ok()
             {
                 info.has_video_four_cc_info_map = true;
             } else {
-                let type_pos = buf.read_pos();
-                let _ = amf0::read_type(buf);
                 buf.set_read_pos(type_pos);
                 amf0::skip_value(buf)?;
             }
             continue;
         }
         if key_str == "reconnect" {
+            let type_pos = buf.read_pos();
             if connect_amf::read_reconnect_amf(buf, &mut info.reconnect).is_ok() {
                 info.has_reconnect = true;
             } else {
-                let type_pos = buf.read_pos();
-                let _ = amf0::read_type(buf);
                 buf.set_read_pos(type_pos);
                 amf0::skip_value(buf)?;
             }

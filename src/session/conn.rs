@@ -1102,9 +1102,14 @@ impl Conn {
                 self.budget_exhausted = true;
                 break;
             }
+            let before = self.recv_buffer.available();
             let mut msg = ChunkMessage::default();
             match chunk_read_owned(&mut self.recv_buffer, &mut self.chunk_reg, &mut msg) {
-                Ok((0, _)) => break,
+                Ok((0, _)) => {
+                    if self.recv_buffer.available() >= before {
+                        break;
+                    }
+                }
                 Ok((1, payload_owned)) => {
                     if msg.is_complete {
                         processed += 1;
@@ -1117,7 +1122,11 @@ impl Conn {
                         let _ = self.flush();
                     }
                 }
-                Ok(_) => break,
+                Ok(_) => {
+                    if self.recv_buffer.available() >= before {
+                        break;
+                    }
+                }
                 Err(ErrorCode::Chunk) => return -5,
                 Err(_) => return -1,
             }
@@ -2234,12 +2243,19 @@ impl Conn {
         cmsg.msg_length = payload.len() as u32;
         cmsg.msg_stream_id = stream_id;
         cmsg.fmt = 0;
-        if frame_type == FrameType::Audio {
-            cmsg.csid = 4;
-            cmsg.msg_type_id = 0x08;
-        } else {
-            cmsg.csid = 6;
-            cmsg.msg_type_id = 0x09;
+        match frame_type {
+            FrameType::Audio => {
+                cmsg.csid = 4;
+                cmsg.msg_type_id = 0x08;
+            }
+            FrameType::Video => {
+                cmsg.csid = 6;
+                cmsg.msg_type_id = 0x09;
+            }
+            FrameType::Script | FrameType::Metadata => {
+                cmsg.csid = 5;
+                cmsg.msg_type_id = 0x12;
+            }
         }
         chunk_write(
             &mut self.send_buffer,

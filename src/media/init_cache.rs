@@ -53,7 +53,15 @@ fn classify_video(payload: &[u8]) -> CacheFrameKind {
     if codec_id == 7 && payload.len() >= 2 && payload[1] == 0 {
         return CacheFrameKind::VideoSequenceHeader;
     }
+    // Legacy AVC: nibble 1 is "keyframe" for sequence-end (AVCPacketType 2)
+    // as well as coded IDR (type 1). Only NALU packets are cacheable IDRs.
     if frame_type_nibble == 1 {
+        if codec_id == 7 {
+            if payload.len() >= 2 && payload[1] == 1 {
+                return CacheFrameKind::VideoKeyframe;
+            }
+            return CacheFrameKind::LiveOnly;
+        }
         return CacheFrameKind::VideoKeyframe;
     }
     CacheFrameKind::LiveOnly
