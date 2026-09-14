@@ -47,6 +47,10 @@ const MAX_MESSAGES_PER_RECV: usize = 256;
 /// default) plus normal per-poll staging, while staying well below the
 /// original unbounded-growth risk this cap replaces.
 const MAX_RECV_BUFFER_BYTES: usize = 2 * DEFAULT_MAX_MSG_LENGTH as usize;
+/// Cap deferred init-cache eviction markers per connection. Without a bound,
+/// a peer that repeatedly renames its publish route on a `Conn` driven
+/// outside `Server::poll` can grow this vector without bound.
+const MAX_PENDING_CACHE_EVICTIONS: usize = 64;
 
 const SERVER_WINDOW_ACK_SIZE: u32 = 2_500_000;
 const SERVER_PEER_BANDWIDTH: u32 = 2_500_000;
@@ -478,8 +482,7 @@ impl Conn {
             if let Some(route_key) = claimed_route
                 && !route_key.is_empty()
             {
-                self.pending_cache_evictions
-                    .push((self.app.clone(), route_key));
+                self.try_push_pending_cache_eviction(self.app.clone(), route_key);
             }
             self.injected_media_bytes = 0;
             return;
@@ -495,8 +498,7 @@ impl Conn {
         let mut evicted = std::collections::HashSet::new();
         for route_key in [claimed_route, Some(live_route_key)].into_iter().flatten() {
             if !route_key.is_empty() && evicted.insert(route_key.clone()) {
-                self.pending_cache_evictions
-                    .push((self.app.clone(), route_key));
+                self.try_push_pending_cache_eviction(self.app.clone(), route_key);
             }
         }
         self.clear_detected_stream_metadata();
@@ -509,6 +511,20 @@ impl Conn {
                 routes.release(self.conn_id, &self.app, &claimed);
             }
         }
+    }
+
+    fn try_push_pending_cache_eviction(&mut self, app: String, route_key: String) {
+        if self.pending_cache_evictions.len() < MAX_PENDING_CACHE_EVICTIONS {
+            self.pending_cache_evictions.push((app, route_key));
+        }
+    }
+
+    fn push_pending_cache_eviction(&mut self, app: String, route_key: String) -> Result<()> {
+        if self.pending_cache_evictions.len() >= MAX_PENDING_CACHE_EVICTIONS {
+            return Err(ErrorCode::Protocol);
+        }
+        self.pending_cache_evictions.push((app, route_key));
+        Ok(())
     }
 
     fn claim_publish_route(&mut self, stream: &str) -> bool {
@@ -527,7 +543,15 @@ impl Conn {
                 // cache so a later publisher on `prev` cannot inherit stale
                 // codec headers from this connection.
                 if !prev.is_empty() {
-                    self.pending_cache_evictions.push((self.app.clone(), prev));
+                    if self
+                        .push_pending_cache_eviction(self.app.clone(), prev.clone())
+                        .is_err()
+                    {
+                        routes.release(self.conn_id, &self.app, stream);
+                        let _ = routes.claim(self.conn_id, &self.app, &prev);
+                        self.claimed_publish_route = Some(prev);
+                        return false;
+                    }
                 }
                 self.claimed_publish_route = Some(stream.to_string());
             }
@@ -754,6 +778,7 @@ impl Conn {
         frame_type: FrameType,
         timestamp: u32,
         payload: &[u8],
+        messages_budget: Option<&mut usize>,
     ) -> Result<()> {
         if !self.relay_enabled
             || !self
@@ -839,7 +864,22 @@ impl Conn {
             .saturating_add(payload.len() as u64);
 
         let cb = self.on_frame_cb;
+        let mut track_index = 0usize;
+        let mut track_budget_exhausted = false;
         let parsed_multitrack = foreach_track(frame_type, parse_payload, |track| {
+            if track_budget_exhausted {
+                return;
+            }
+            if track_index > 0 {
+                if let Some(budget) = messages_budget {
+                    if *budget == 0 {
+                        track_budget_exhausted = true;
+                        return;
+                    }
+                    *budget = budget.saturating_sub(1);
+                }
+            }
+            track_index += 1;
             if let Some(cb) = cb {
                 self.invoke_multitrack_on_frame_cb(
                     cb,
@@ -938,10 +978,22 @@ impl Conn {
 
             match tag_type {
                 msg_dispatch::RTMP_MSG_AUDIO => {
-                    self.handle_media_frame(msg_stream_id, FrameType::Audio, out_ts, tag_payload)?;
+                    self.handle_media_frame(
+                        msg_stream_id,
+                        FrameType::Audio,
+                        out_ts,
+                        tag_payload,
+                        Some(messages_budget),
+                    )?;
                 }
                 msg_dispatch::RTMP_MSG_VIDEO => {
-                    self.handle_media_frame(msg_stream_id, FrameType::Video, out_ts, tag_payload)?;
+                    self.handle_media_frame(
+                        msg_stream_id,
+                        FrameType::Video,
+                        out_ts,
+                        tag_payload,
+                        Some(messages_budget),
+                    )?;
                 }
                 msg_dispatch::RTMP_MSG_AMF0_DATA => {
                     self.handle_publisher_data_message(msg_stream_id, out_ts, tag_payload)?;
@@ -1175,10 +1227,22 @@ impl Conn {
                 }
             }
             msg_dispatch::RTMP_MSG_AUDIO => {
-                self.handle_media_frame(msg.msg_stream_id, FrameType::Audio, msg.timestamp, payload)
+                self.handle_media_frame(
+                    msg.msg_stream_id,
+                    FrameType::Audio,
+                    msg.timestamp,
+                    payload,
+                    Some(messages_budget),
+                )
             }
             msg_dispatch::RTMP_MSG_VIDEO => {
-                self.handle_media_frame(msg.msg_stream_id, FrameType::Video, msg.timestamp, payload)
+                self.handle_media_frame(
+                    msg.msg_stream_id,
+                    FrameType::Video,
+                    msg.timestamp,
+                    payload,
+                    Some(messages_budget),
+                )
             }
             msg_dispatch::RTMP_MSG_AMF0_DATA => {
                 self.handle_publisher_data_message(msg.msg_stream_id, msg.timestamp, payload)
@@ -1811,8 +1875,22 @@ impl Conn {
                     self.injected_media_bytes = 0;
                 }
                 if renaming_route {
-                    self.pending_cache_evictions
-                        .push((self.app.clone(), prev_route_key));
+                    if self
+                        .push_pending_cache_eviction(self.app.clone(), prev_route_key.clone())
+                        .is_err()
+                    {
+                        if let Some(routes) = self.publish_routes.as_ref() {
+                            routes.release(self.conn_id, &self.app, &next_route_key);
+                            let _ = routes.claim(self.conn_id, &self.app, &prev_route_key);
+                        }
+                        self.claimed_publish_route = Some(prev_route_key);
+                        return self.send_onstatus(
+                            0,
+                            "error",
+                            "NetStream.Publish.BadName",
+                            "Publish not authorized",
+                        );
+                    }
                 }
                 if self.defer_media_relay {
                     // Reset only when leaving a prior play role or switching
@@ -3067,19 +3145,19 @@ mod tests {
 
         let av1_seq = vec![0x90, b'a', b'v', b'0', b'1', 0x01, 0x02, 0x03];
         assert!(
-            conn.handle_media_frame(1, FrameType::Video, 0, &av1_seq)
+            conn.handle_media_frame(1, FrameType::Video, 0, &av1_seq, None)
                 .is_ok()
         );
 
         let aac_seq = vec![0xAF, 0x00, 0x12, 0x10];
         assert!(
-            conn.handle_media_frame(1, FrameType::Audio, 0, &aac_seq)
+            conn.handle_media_frame(1, FrameType::Audio, 0, &aac_seq, None)
                 .is_ok()
         );
 
         let av1_frame = vec![0x91, b'a', b'v', b'0', b'1', 0xDE, 0xAD, 0xBE, 0xEF];
         assert!(
-            conn.handle_media_frame(1, FrameType::Video, 40, &av1_frame)
+            conn.handle_media_frame(1, FrameType::Video, 40, &av1_frame, None)
                 .is_ok()
         );
     }
@@ -3893,7 +3971,7 @@ mod tests {
         }
 
         let payload = vec![0x17, 0x01, 0x00, 0x00, 0x00];
-        conn.handle_media_frame(99, FrameType::Video, 0, &payload)
+        conn.handle_media_frame(99, FrameType::Video, 0, &payload, None)
             .unwrap();
         assert!(conn.pending_relay.is_empty());
     }
@@ -3959,7 +4037,7 @@ mod tests {
             0x86, 0x10, b'a', b'v', b'c', b'1', 0x00, 0x00, 0x00, 0x03, 0xAA, 0xBB, 0xCC, 0x01,
             0x00, 0x00, 0x02, 0xDD, 0xEE,
         ];
-        conn.handle_media_frame(1, FrameType::Video, 0, &payload)
+        conn.handle_media_frame(1, FrameType::Video, 0, &payload, None)
             .unwrap();
 
         assert_eq!(*SEEN_TRACK_IDS.lock().unwrap(), vec![0, 1]);
@@ -3983,7 +4061,7 @@ mod tests {
         conn.current_stream.as_mut().unwrap().is_publishing = true;
         conn.on_media_cb = Some(allow_media);
         let payload = vec![0x86, 0x10, b'a', b'v', b'c', b'1', 0, 0, 0, 1, 0xAA];
-        conn.handle_media_frame(1, FrameType::Video, 0, &payload)
+        conn.handle_media_frame(1, FrameType::Video, 0, &payload, None)
             .unwrap();
         assert_eq!(SEEN_CODEC.lock().unwrap().as_deref(), Some("avc1"));
     }
@@ -4004,13 +4082,13 @@ mod tests {
         conn.on_media_cb = Some(allow_avc1_only);
 
         let avc1_multitrack = vec![0x86, 0x10, b'a', b'v', b'c', b'1', 0, 0, 0, 1, 0xAA];
-        conn.handle_media_frame(1, FrameType::Video, 0, &avc1_multitrack)
+        conn.handle_media_frame(1, FrameType::Video, 0, &avc1_multitrack, None)
             .unwrap();
         assert_eq!(conn.pending_relay.len(), 1);
 
         let vp09 = vec![0x90, b'v', b'p', b'0', b'9'];
         assert_eq!(
-            conn.handle_media_frame(1, FrameType::Video, 1, &vp09),
+            conn.handle_media_frame(1, FrameType::Video, 1, &vp09, None),
             Err(ErrorCode::Auth)
         );
         assert_eq!(conn.pending_relay.len(), 1);
@@ -4042,7 +4120,7 @@ mod tests {
             b'v', b'p', b'0', b'9', 0x01, 0x00, 0x00, 0x01, 0xBB, // track 1: vp09
         ];
         assert_eq!(
-            conn.handle_media_frame(1, FrameType::Video, 0, &mixed_codec_frame),
+            conn.handle_media_frame(1, FrameType::Video, 0, &mixed_codec_frame, None),
             Err(ErrorCode::Auth)
         );
         assert!(conn.pending_relay.is_empty());
@@ -4074,7 +4152,7 @@ mod tests {
             0x01, 0x00, 0x00, 0x01, 0xBB, // track 1
         ];
         assert_eq!(
-            conn.handle_media_frame(1, FrameType::Video, 0, &shared_disallowed_codec_frame),
+            conn.handle_media_frame(1, FrameType::Video, 0, &shared_disallowed_codec_frame, None),
             Err(ErrorCode::Auth)
         );
         assert!(conn.pending_relay.is_empty());
@@ -4100,7 +4178,7 @@ mod tests {
             0x90, 0x80, 0x80, 0x80, 0x80,
             0x00, 0x00, 0x00, 0x01, 0xAA,
         ];
-        conn.handle_media_frame(1, FrameType::Video, 0, &non_utf8_fourcc)
+        conn.handle_media_frame(1, FrameType::Video, 0, &non_utf8_fourcc, None)
             .unwrap();
         assert_eq!(
             SEEN_CODEC.lock().unwrap().as_deref(),
@@ -4128,7 +4206,7 @@ mod tests {
             0x00, 0x00, 0x00, 0x01, 0xAA,
         ];
         assert_eq!(
-            conn.handle_media_frame(1, FrameType::Video, 0, &non_utf8_fourcc),
+            conn.handle_media_frame(1, FrameType::Video, 0, &non_utf8_fourcc, None),
             Err(ErrorCode::Auth)
         );
         assert!(conn.pending_relay.is_empty());
@@ -4153,7 +4231,7 @@ mod tests {
         // identity to `on_media_cb`, not `None`.
         let legacy_vp6 = vec![0x14, 0x01, 0xAA];
         assert_eq!(
-            conn.handle_media_frame(1, FrameType::Video, 0, &legacy_vp6),
+            conn.handle_media_frame(1, FrameType::Video, 0, &legacy_vp6, None),
             Err(ErrorCode::Auth)
         );
         assert!(conn.pending_relay.is_empty());
@@ -4179,7 +4257,7 @@ mod tests {
             0, 0, 0xBB,
         ];
         assert_eq!(
-            conn.handle_media_frame(1, FrameType::Video, 0, &payload),
+            conn.handle_media_frame(1, FrameType::Video, 0, &payload, None),
             Err(ErrorCode::Auth),
             "ModEx wrapper must not let publishers smuggle a disallowed inner codec \
              past on_media_cb when capsEx was not negotiated"
@@ -4207,7 +4285,7 @@ mod tests {
         }
         payload.extend_from_slice(&[0x90, b'v', b'p', b'0', b'9', 0, 0, 0, 0xBB]);
         assert_eq!(
-            conn.handle_media_frame(1, FrameType::Video, 0, &payload),
+            conn.handle_media_frame(1, FrameType::Video, 0, &payload, None),
             Err(ErrorCode::Auth),
             "unpeelable ModEx chains must not bypass codec-specific deny lists"
         );
@@ -4231,13 +4309,13 @@ mod tests {
 
         let hvc1 = vec![0x90, b'h', b'v', b'c', b'1', 0, 0, 0, 1, 0xAA];
         assert_eq!(
-            conn.handle_media_frame(1, FrameType::Video, 0, &hvc1),
+            conn.handle_media_frame(1, FrameType::Video, 0, &hvc1, None),
             Err(ErrorCode::Auth)
         );
 
         let wildcard = vec![0x90, b'*', b' ', b' ', b' ', 0, 0, 0, 1, 0xAA];
         assert_eq!(
-            conn.handle_media_frame(1, FrameType::Video, 0, &wildcard),
+            conn.handle_media_frame(1, FrameType::Video, 0, &wildcard, None),
             Err(ErrorCode::Auth),
             "wildcard media FourCC must not bypass codec-specific deny lists"
         );
@@ -4251,7 +4329,7 @@ mod tests {
         conn.current_stream = Some(Box::new(Stream::new(1)));
         conn.current_stream.as_mut().unwrap().is_publishing = true;
         let payload = vec![0x86, 0x10, b'a', b'v', b'c', b'1', 0, 0, 0, 1, 0xAA];
-        conn.handle_media_frame(1, FrameType::Video, 0, &payload)
+        conn.handle_media_frame(1, FrameType::Video, 0, &payload, None)
             .unwrap();
         assert_eq!(conn.detected_video_codec.as_deref(), Some("avc1"));
 
@@ -4281,7 +4359,7 @@ mod tests {
 
         let mut payload = vec![0x94, b'h', b'v', b'c', b'1']; // ex-header, frame_type=1, packet_type=4 (Metadata)
         payload.extend_from_slice(amf.as_slice());
-        conn.handle_media_frame(1, FrameType::Video, 0, &payload)
+        conn.handle_media_frame(1, FrameType::Video, 0, &payload, None)
             .unwrap();
 
         let hdr = conn.detected_hdr_info.expect("colorInfo must be captured");
@@ -4597,7 +4675,7 @@ mod tests {
             0x86, 0x10, b'a', b'v', b'c', b'1', 0x00, 0x00, 0x00, 0x03, 0xAA, 0xBB, 0xCC, 0x01,
             0x00, 0x00, 0x02, 0xDD, 0xEE,
         ];
-        conn.handle_media_frame(1, FrameType::Video, 0, &payload)
+        conn.handle_media_frame(1, FrameType::Video, 0, &payload, None)
             .unwrap();
 
         assert_eq!(conn.frame_cb_scratch.as_slice(), &[0xDD, 0xEE]);
@@ -4616,7 +4694,7 @@ mod tests {
         let payload = vec![
             0x97, 0x02, 0, 1, 2, 0x01, b'a', b'v', b'c', b'1', 0, 0, 0, 0xAA,
         ];
-        conn.handle_media_frame(1, FrameType::Video, 0, &payload)
+        conn.handle_media_frame(1, FrameType::Video, 0, &payload, None)
             .unwrap();
 
         assert_eq!(conn.pending_relay[0].payload, payload);
@@ -4641,7 +4719,7 @@ mod tests {
         conn.on_frame_cb = Some(|_| {});
 
         let payload = vec![0x17, 0x42];
-        conn.handle_media_frame(1, FrameType::Video, 0, &payload)
+        conn.handle_media_frame(1, FrameType::Video, 0, &payload, None)
             .unwrap();
         assert_eq!(conn.frame_cb_scratch.as_slice(), payload.as_slice());
     }
@@ -4690,6 +4768,60 @@ mod tests {
         // so its relayed timestamp is the aggregate's own timestamp (1000) + 40.
         assert_eq!(conn.pending_relay[1].timestamp, 1040);
         assert_eq!(conn.pending_relay[1].payload, video_payload);
+    }
+
+    #[test]
+    fn multitrack_subtracks_consume_message_budget() {
+        use std::sync::{LazyLock, Mutex};
+
+        static CALLBACKS: LazyLock<Mutex<usize>> = LazyLock::new(|| Mutex::new(0));
+
+        let mut conn = Conn::new();
+        conn.relay_enabled = true;
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+        if let Some(s) = conn.current_stream.as_mut() {
+            s.is_publishing = true;
+        }
+        conn.max_pending_relay_bytes = usize::MAX;
+        *CALLBACKS.lock().unwrap() = 0;
+        conn.on_frame_cb = Some(|_| {
+            *CALLBACKS.lock().unwrap() += 1;
+        });
+
+        let mut payload = vec![0x86, 0x10, b'a', b'v', b'c', b'1'];
+        for id in 0..8u8 {
+            payload.push(id);
+            payload.extend_from_slice(&[0x00, 0x00, 0x01]);
+            payload.push(0xAA);
+        }
+
+        let mut messages_budget = 3;
+        conn.handle_media_frame(1, FrameType::Video, 0, &payload, Some(&mut messages_budget))
+            .unwrap();
+
+        assert_eq!(messages_budget, 0);
+        assert_eq!(*CALLBACKS.lock().unwrap(), 3);
+    }
+
+    #[test]
+    fn publish_rename_rejects_when_pending_cache_evictions_cap_reached() {
+        let mut conn = Conn::new();
+        conn.app = "live".to_string();
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+        if let Some(s) = conn.current_stream.as_mut() {
+            s.is_publishing = true;
+            s.name = "route-a".to_string();
+        }
+        conn.claimed_publish_route = Some("route-a".to_string());
+        conn.pending_cache_evictions = (0..MAX_PENDING_CACHE_EVICTIONS)
+            .map(|i| ("live".to_string(), format!("stale-{i}")))
+            .collect();
+
+        let mut buf = Buffer::with_capacity(256);
+        command::build_publish(&mut buf, "route-b", "live").unwrap();
+        conn.handle_command(buf.as_slice()).unwrap();
+        assert_eq!(conn.pending_cache_evictions.len(), MAX_PENDING_CACHE_EVICTIONS);
+        assert_eq!(conn.claimed_publish_route.as_deref(), Some("route-a"));
     }
 
     #[test]
