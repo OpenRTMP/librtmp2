@@ -20,61 +20,62 @@ jobs:
           persist-credentials: true
 
       - name: Apply source fixes
-        shell: python
+        shell: bash
         run: |
+          python - <<'PY'
           from pathlib import Path
 
           path = Path("src/session/conn.rs")
           text = path.read_text()
 
           old_claim = '''    fn claim_publish_route(&mut self, stream: &str) -> bool {
-        if self.publish_routes.is_none() {
-            self.claimed_publish_route = Some(stream.to_string());
-            return true;
-        }
-        {
-            let routes = self.publish_routes.as_ref().unwrap();
-            if !routes.claim(self.conn_id, &self.app, stream) {
-                return false;
-            }
-        }
-'''
+              if self.publish_routes.is_none() {
+                  self.claimed_publish_route = Some(stream.to_string());
+                  return true;
+              }
+              {
+                  let routes = self.publish_routes.as_ref().unwrap();
+                  if !routes.claim(self.conn_id, &self.app, stream) {
+                      return false;
+                  }
+              }
+          '''
           new_claim = '''    fn claim_publish_route(&mut self, stream: &str) -> bool {
-        let claimed = match self.publish_routes.as_ref() {
-            Some(routes) => routes.claim(self.conn_id, &self.app, stream),
-            None => {
-                self.claimed_publish_route = Some(stream.to_string());
-                return true;
-            }
-        };
-        if !claimed {
-            return false;
-        }
-'''
+              let claimed = match self.publish_routes.as_ref() {
+                  Some(routes) => routes.claim(self.conn_id, &self.app, stream),
+                  None => {
+                      self.claimed_publish_route = Some(stream.to_string());
+                      return true;
+                  }
+              };
+              if !claimed {
+                  return false;
+              }
+          '''
 
           old_budget_signature = '''        payload: &[u8],
-        messages_budget: Option<&mut usize>,
-    ) -> Result<()> {'''
+              messages_budget: Option<&mut usize>,
+          ) -> Result<()> {'''
           new_budget_signature = '''        payload: &[u8],
-        mut messages_budget: Option<&mut usize>,
-    ) -> Result<()> {'''
+              mut messages_budget: Option<&mut usize>,
+          ) -> Result<()> {'''
 
           old_budget = '''                if let Some(budget) = messages_budget.as_mut() {
-                    if *budget == 0 {
-                        track_budget_exhausted = true;
-                        return;
-                    }
-                    *budget = budget.saturating_sub(1);
-                }
-'''
+                      if *budget == 0 {
+                          track_budget_exhausted = true;
+                          return;
+                      }
+                      *budget = budget.saturating_sub(1);
+                  }
+          '''
           new_budget = '''                if let Some(budget) = messages_budget.as_deref_mut() {
-                    if *budget == 0 {
-                        track_budget_exhausted = true;
-                        return;
-                    }
-                    *budget = budget.saturating_sub(1);
-                }
-'''
+                      if *budget == 0 {
+                          track_budget_exhausted = true;
+                          return;
+                      }
+                      *budget = budget.saturating_sub(1);
+                  }
+          '''
 
           replacements = [
               (old_claim, new_claim, "claim_publish_route"),
@@ -88,6 +89,7 @@ jobs:
               text = text.replace(old, new, 1)
 
           path.write_text(text)
+          PY
 
       - name: Format
         run: cargo fmt --all
