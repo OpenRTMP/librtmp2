@@ -774,83 +774,67 @@ impl Conn {
         self.needs_init_frames = true;
     }
 
-    fn handle_media_frame(
-        &mut self,
-        msg_stream_id: u32,
-        frame_type: FrameType,
-        timestamp: u32,
-        payload: &[u8],
-        mut messages_budget: Option<&mut usize>,
-    ) -> Result<()> {
-        if !self.relay_enabled
-            || !self
+    fn is_active_publisher_stream(&self, msg_stream_id: u32) -> bool {
+        self.relay_enabled
+            && self
                 .current_stream
                 .as_ref()
-                .map(|s| s.is_publishing)
-                .unwrap_or(false)
-        {
-            return Ok(());
+                .is_some_and(|stream| stream.is_publishing && stream.stream_id == msg_stream_id)
+    }
+
+    fn authorize_media_frame(
+        &self,
+        frame_type: FrameType,
+        parse_payload: &[u8],
+        current_codec: Option<&str>,
+        is_multitrack: bool,
+    ) -> Result<()> {
+        if !is_multitrack {
+            return if self.media_allowed(frame_type, current_codec) {
+                Ok(())
+            } else {
+                Err(ErrorCode::Auth)
+            };
         }
 
-        let expected_stream_id = self
-            .current_stream
-            .as_ref()
-            .map(|s| s.stream_id)
-            .unwrap_or(0);
-        if msg_stream_id != expected_stream_id {
-            return Ok(());
-        }
-
-        // Always peel ModEx wrappers for codec authorization and callbacks.
-        // Gating on negotiated `caps_ex_mask` let publishers craft ModEx
-        // frames whose extension bytes spell an allowed FourCC while relaying
-        // a different inner codec to players.
-        let normalized_payload = normalize_modex_payload(payload, CAPS_EX_MASK_MODEX);
-        let parse_payload = normalized_payload.as_ref();
-
-        let current_codec = match frame_type {
-            FrameType::Video => detect_video_codec(parse_payload),
-            FrameType::Audio => detect_audio_codec(parse_payload),
-            _ => None,
-        };
-
-        let is_multitrack = is_multitrack_container(frame_type, parse_payload);
-
-        if is_multitrack {
-            // A `ManyTracksManyCodecs` container can carry a different codec
-            // per track; `current_codec` only reflects the first one. Check
-            // every track's codec so a publisher can't smuggle a disallowed
-            // codec past authorization by pairing it with an allowed first
-            // track.
-            let mut auth_denied = false;
-            let tracks_valid = foreach_track(frame_type, parse_payload, |track| {
-                if auth_denied {
-                    return;
-                }
-                let track_codec = media_fourcc_auth_label(&track.fourcc);
-                if !self.media_allowed(frame_type, track_codec.as_deref()) {
-                    auth_denied = true;
-                }
-            });
-            if !tracks_valid {
-                return Err(ErrorCode::Protocol);
-            }
+        // A `ManyTracksManyCodecs` container can carry a different codec per
+        // track; checking only the first codec would allow a later disallowed
+        // codec to bypass authorization.
+        let mut auth_denied = false;
+        let tracks_valid = foreach_track(frame_type, parse_payload, |track| {
             if auth_denied {
-                return Err(ErrorCode::Auth);
+                return;
             }
-        } else if !self.media_allowed(frame_type, current_codec.as_deref()) {
+            let track_codec = media_fourcc_auth_label(&track.fourcc);
+            if !self.media_allowed(frame_type, track_codec.as_deref()) {
+                auth_denied = true;
+            }
+        });
+        if !tracks_valid {
+            return Err(ErrorCode::Protocol);
+        }
+        if auth_denied {
             return Err(ErrorCode::Auth);
         }
+        Ok(())
+    }
 
+    fn update_detected_media_metadata(
+        &mut self,
+        frame_type: FrameType,
+        current_codec: Option<&str>,
+        is_multitrack: bool,
+        parse_payload: &[u8],
+    ) {
         // Only pin the detected codec once the frame has cleared
-        // authorization, so a rejected frame's codec never lingers in
-        // `detected_video_codec`/`detected_audio_codec` for telemetry readers.
+        // authorization, so a rejected frame's codec never lingers for
+        // telemetry readers.
         match frame_type {
             FrameType::Video if self.detected_video_codec.is_none() => {
-                self.detected_video_codec = current_codec.clone();
+                self.detected_video_codec = current_codec.map(str::to_owned);
             }
             FrameType::Audio if self.detected_audio_codec.is_none() => {
-                self.detected_audio_codec = current_codec.clone();
+                self.detected_audio_codec = current_codec.map(str::to_owned);
             }
             _ => {}
         }
@@ -860,11 +844,16 @@ impl Conn {
                 self.detected_hdr_info = Some(color_info);
             }
         }
+    }
 
-        self.media_bytes_received = self
-            .media_bytes_received
-            .saturating_add(payload.len() as u64);
-
+    fn dispatch_media_frame_callbacks(
+        &mut self,
+        frame_type: FrameType,
+        timestamp: u32,
+        parse_payload: &[u8],
+        is_multitrack: bool,
+        mut messages_budget: Option<&mut usize>,
+    ) -> Result<()> {
         let cb = self.on_frame_cb;
         let mut track_index = 0usize;
         let mut track_budget_exhausted = false;
@@ -895,14 +884,69 @@ impl Conn {
                 );
             }
         });
-        if is_multitrack && !parsed_multitrack {
-            return Err(ErrorCode::Protocol);
-        }
-        if !is_multitrack {
-            if let Some(cb) = cb {
-                self.invoke_on_frame_cb(cb, frame_type, timestamp, u8::MAX, parse_payload);
+
+        if is_multitrack {
+            if !parsed_multitrack {
+                return Err(ErrorCode::Protocol);
             }
+            return Ok(());
         }
+
+        if let Some(cb) = cb {
+            self.invoke_on_frame_cb(cb, frame_type, timestamp, u8::MAX, parse_payload);
+        }
+        Ok(())
+    }
+
+    fn handle_media_frame(
+        &mut self,
+        msg_stream_id: u32,
+        frame_type: FrameType,
+        timestamp: u32,
+        payload: &[u8],
+        messages_budget: Option<&mut usize>,
+    ) -> Result<()> {
+        if !self.is_active_publisher_stream(msg_stream_id) {
+            return Ok(());
+        }
+
+        // Always peel ModEx wrappers for codec authorization and callbacks.
+        // Gating on negotiated `caps_ex_mask` let publishers craft ModEx
+        // frames whose extension bytes spell an allowed FourCC while relaying
+        // a different inner codec to players.
+        let normalized_payload = normalize_modex_payload(payload, CAPS_EX_MASK_MODEX);
+        let parse_payload = normalized_payload.as_ref();
+        let current_codec = match frame_type {
+            FrameType::Video => detect_video_codec(parse_payload),
+            FrameType::Audio => detect_audio_codec(parse_payload),
+            _ => None,
+        };
+        let is_multitrack = is_multitrack_container(frame_type, parse_payload);
+
+        self.authorize_media_frame(
+            frame_type,
+            parse_payload,
+            current_codec.as_deref(),
+            is_multitrack,
+        )?;
+        self.update_detected_media_metadata(
+            frame_type,
+            current_codec.as_deref(),
+            is_multitrack,
+            parse_payload,
+        );
+
+        self.media_bytes_received = self
+            .media_bytes_received
+            .saturating_add(payload.len() as u64);
+        self.dispatch_media_frame_callbacks(
+            frame_type,
+            timestamp,
+            parse_payload,
+            is_multitrack,
+            messages_budget,
+        )?;
+
         if self
             .queue_relay_frame(frame_type, timestamp, payload, parse_payload)
             .is_err()
