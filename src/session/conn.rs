@@ -528,30 +528,36 @@ impl Conn {
     }
 
     fn claim_publish_route(&mut self, stream: &str) -> bool {
-        let Some(routes) = self.publish_routes.as_ref() else {
+        if self.publish_routes.is_none() {
             self.claimed_publish_route = Some(stream.to_string());
             return true;
-        };
-        if !routes.claim(self.conn_id, &self.app, stream) {
-            return false;
+        }
+        {
+            let routes = self.publish_routes.as_ref().unwrap();
+            if !routes.claim(self.conn_id, &self.app, stream) {
+                return false;
+            }
         }
         match self.claimed_publish_route.take() {
             Some(prev) if prev == stream => self.claimed_publish_route = Some(prev),
             Some(prev) => {
-                routes.release(self.conn_id, &self.app, &prev);
+                if let Some(routes) = self.publish_routes.as_ref() {
+                    routes.release(self.conn_id, &self.app, &prev);
+                }
                 // Mirror the publish-rename path: free the old route's init
                 // cache so a later publisher on `prev` cannot inherit stale
                 // codec headers from this connection.
-                if !prev.is_empty() {
-                    if self
+                if !prev.is_empty()
+                    && self
                         .push_pending_cache_eviction(self.app.clone(), prev.clone())
                         .is_err()
-                    {
+                {
+                    if let Some(routes) = self.publish_routes.as_ref() {
                         routes.release(self.conn_id, &self.app, stream);
                         let _ = routes.claim(self.conn_id, &self.app, &prev);
-                        self.claimed_publish_route = Some(prev);
-                        return false;
                     }
+                    self.claimed_publish_route = Some(prev);
+                    return false;
                 }
                 self.claimed_publish_route = Some(stream.to_string());
             }
@@ -871,7 +877,7 @@ impl Conn {
                 return;
             }
             if track_index > 0 {
-                if let Some(budget) = messages_budget {
+                if let Some(budget) = messages_budget.as_mut() {
                     if *budget == 0 {
                         track_budget_exhausted = true;
                         return;
