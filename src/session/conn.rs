@@ -12,8 +12,8 @@ use crate::ertmp::connect_amf::{negotiate_caps, write_negotiated_caps};
 use crate::ertmp::multitrack_media::{first_track_fourcc, foreach_track, is_multitrack_container};
 use crate::handshake::{self, Handshake, HandshakeState};
 use crate::media::{
-    is_on_metadata_payload, normalize_modex_payload, parse_video_metadata_hdr, populate_av_frame,
-    populate_multitrack_frame, ERTMP_PACKET_TYPE_MODEX,
+    ERTMP_PACKET_TYPE_MODEX, is_on_metadata_payload, normalize_modex_payload,
+    parse_video_metadata_hdr, populate_av_frame, populate_multitrack_frame,
 };
 use crate::message::command;
 use crate::message::control::{
@@ -406,11 +406,7 @@ impl Conn {
     }
 
     #[cfg(test)]
-    fn handle_message_for_test(
-        &mut self,
-        msg: &ChunkMessage,
-        payload: &[u8],
-    ) -> Result<()> {
+    fn handle_message_for_test(&mut self, msg: &ChunkMessage, payload: &[u8]) -> Result<()> {
         let mut messages_budget = usize::MAX;
         self.handle_message(msg, payload, &mut messages_budget)
     }
@@ -528,15 +524,15 @@ impl Conn {
     }
 
     fn claim_publish_route(&mut self, stream: &str) -> bool {
-        if self.publish_routes.is_none() {
-            self.claimed_publish_route = Some(stream.to_string());
-            return true;
-        }
-        {
-            let routes = self.publish_routes.as_ref().unwrap();
-            if !routes.claim(self.conn_id, &self.app, stream) {
-                return false;
+        let claimed = match self.publish_routes.as_ref() {
+            Some(routes) => routes.claim(self.conn_id, &self.app, stream),
+            None => {
+                self.claimed_publish_route = Some(stream.to_string());
+                return true;
             }
+        };
+        if !claimed {
+            return false;
         }
         match self.claimed_publish_route.take() {
             Some(prev) if prev == stream => self.claimed_publish_route = Some(prev),
@@ -784,7 +780,7 @@ impl Conn {
         frame_type: FrameType,
         timestamp: u32,
         payload: &[u8],
-        messages_budget: Option<&mut usize>,
+        mut messages_budget: Option<&mut usize>,
     ) -> Result<()> {
         if !self.relay_enabled
             || !self
@@ -877,7 +873,7 @@ impl Conn {
                 return;
             }
             if track_index > 0 {
-                if let Some(budget) = messages_budget.as_mut() {
+                if let Some(budget) = messages_budget.as_deref_mut() {
                     if *budget == 0 {
                         track_budget_exhausted = true;
                         return;
@@ -1232,24 +1228,20 @@ impl Conn {
                     self.handle_command(payload)
                 }
             }
-            msg_dispatch::RTMP_MSG_AUDIO => {
-                self.handle_media_frame(
-                    msg.msg_stream_id,
-                    FrameType::Audio,
-                    msg.timestamp,
-                    payload,
-                    Some(messages_budget),
-                )
-            }
-            msg_dispatch::RTMP_MSG_VIDEO => {
-                self.handle_media_frame(
-                    msg.msg_stream_id,
-                    FrameType::Video,
-                    msg.timestamp,
-                    payload,
-                    Some(messages_budget),
-                )
-            }
+            msg_dispatch::RTMP_MSG_AUDIO => self.handle_media_frame(
+                msg.msg_stream_id,
+                FrameType::Audio,
+                msg.timestamp,
+                payload,
+                Some(messages_budget),
+            ),
+            msg_dispatch::RTMP_MSG_VIDEO => self.handle_media_frame(
+                msg.msg_stream_id,
+                FrameType::Video,
+                msg.timestamp,
+                payload,
+                Some(messages_budget),
+            ),
             msg_dispatch::RTMP_MSG_AMF0_DATA => {
                 self.handle_publisher_data_message(msg.msg_stream_id, msg.timestamp, payload)
             }
@@ -1906,10 +1898,7 @@ impl Conn {
                     // Detect switches via stream.name — with a pinned
                     // relay_key, next_route_key stays on the old DB id so
                     // renaming_route alone cannot see A→B.
-                    let was_playing = self
-                        .current_stream
-                        .as_ref()
-                        .is_some_and(|s| s.is_playing);
+                    let was_playing = self.current_stream.as_ref().is_some_and(|s| s.is_playing);
                     let publish_name_changed = self
                         .current_stream
                         .as_ref()
@@ -4180,10 +4169,7 @@ mod tests {
         conn.current_stream.as_mut().unwrap().is_publishing = true;
         conn.on_media_cb = Some(record_codec);
 
-        let non_utf8_fourcc = vec![
-            0x90, 0x80, 0x80, 0x80, 0x80,
-            0x00, 0x00, 0x00, 0x01, 0xAA,
-        ];
+        let non_utf8_fourcc = vec![0x90, 0x80, 0x80, 0x80, 0x80, 0x00, 0x00, 0x00, 0x01, 0xAA];
         conn.handle_media_frame(1, FrameType::Video, 0, &non_utf8_fourcc, None)
             .unwrap();
         assert_eq!(
@@ -4207,10 +4193,7 @@ mod tests {
         conn.current_stream.as_mut().unwrap().is_publishing = true;
         conn.on_media_cb = Some(deny_hex_fourcc);
 
-        let non_utf8_fourcc = vec![
-            0x90, 0x80, 0x80, 0x80, 0x80,
-            0x00, 0x00, 0x00, 0x01, 0xAA,
-        ];
+        let non_utf8_fourcc = vec![0x90, 0x80, 0x80, 0x80, 0x80, 0x00, 0x00, 0x00, 0x01, 0xAA];
         assert_eq!(
             conn.handle_media_frame(1, FrameType::Video, 0, &non_utf8_fourcc, None),
             Err(ErrorCode::Auth)
@@ -4259,8 +4242,8 @@ mod tests {
         // Naive exvideo_parse reads bytes 1..5 as the FourCC on ModEx packets.
         // Craft those bytes as "avc1" while the peeled inner packet is vp09.
         let payload = vec![
-            0x97, b'a', b'v', b'c', b'1', 0x02, 0, 1, 2, 0x01, 0x90, b'v', b'p', b'0', b'9', 0,
-            0, 0, 0xBB,
+            0x97, b'a', b'v', b'c', b'1', 0x02, 0, 1, 2, 0x01, 0x90, b'v', b'p', b'0', b'9', 0, 0,
+            0, 0xBB,
         ];
         assert_eq!(
             conn.handle_media_frame(1, FrameType::Video, 0, &payload, None),
@@ -4801,7 +4784,9 @@ mod tests {
             payload.push(0xAA);
         }
 
-        let mut messages_budget = 3;
+        // `handle_message()` already charges one unit for the outer RTMP message.
+        // This direct helper call therefore starts with the remaining budget.
+        let mut messages_budget = 2;
         conn.handle_media_frame(1, FrameType::Video, 0, &payload, Some(&mut messages_budget))
             .unwrap();
 
@@ -4826,7 +4811,10 @@ mod tests {
         let mut buf = Buffer::with_capacity(256);
         command::build_publish(&mut buf, "route-b", "live").unwrap();
         conn.handle_command(buf.as_slice()).unwrap();
-        assert_eq!(conn.pending_cache_evictions.len(), MAX_PENDING_CACHE_EVICTIONS);
+        assert_eq!(
+            conn.pending_cache_evictions.len(),
+            MAX_PENDING_CACHE_EVICTIONS
+        );
         assert_eq!(conn.claimed_publish_route.as_deref(), Some("route-a"));
     }
 
@@ -5232,8 +5220,12 @@ mod tests {
             msg_stream_id: 0,
             is_complete: true,
         };
-        conn.handle_message_for_test(&denied_msg, &denied_payload).unwrap();
-        assert!(!*SEEN.lock().unwrap(), "denied shared object must not fire callback");
+        conn.handle_message_for_test(&denied_msg, &denied_payload)
+            .unwrap();
+        assert!(
+            !*SEEN.lock().unwrap(),
+            "denied shared object must not fire callback"
+        );
 
         let allowed = SharedObjectMessage {
             name: "chat".to_string(),
@@ -5257,7 +5249,8 @@ mod tests {
             msg_stream_id: 0,
             is_complete: true,
         };
-        conn.handle_message_for_test(&allowed_msg, &allowed_payload).unwrap();
+        conn.handle_message_for_test(&allowed_msg, &allowed_payload)
+            .unwrap();
         assert!(
             *SEEN.lock().unwrap(),
             "authorized shared object must reach on_shared_object_cb"

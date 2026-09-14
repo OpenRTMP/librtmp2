@@ -270,7 +270,9 @@ mod tests {
     fn rejects_multitrack_messages_with_zero_size_subtracks() {
         let zero_payload = build_many_tracks_zero_payload_message(2);
         let mut calls = 0;
-        assert!(!foreach_track(FrameType::Video, &zero_payload, |_| calls += 1));
+        assert!(!foreach_track(FrameType::Video, &zero_payload, |_| {
+            calls += 1
+        }));
         assert_eq!(calls, 0);
     }
 }

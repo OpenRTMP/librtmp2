@@ -699,49 +699,50 @@ impl Client {
                                 self.chunk_reg.set_all_chunk_size(cs);
                             }
                         } else if msg.msg_type_id == msg_dispatch::RTMP_MSG_USER_CONTROL {
-                        self.handle_user_control(&payload)?;
-                    } else if msg.msg_type_id == msg_dispatch::RTMP_MSG_AUDIO
-                        || msg.msg_type_id == msg_dispatch::RTMP_MSG_VIDEO
-                    {
-                        if let Some(cb) = self.on_frame_cb {
-                            let frame_type = if msg.msg_type_id == msg_dispatch::RTMP_MSG_AUDIO {
-                                FrameType::Audio
-                            } else {
-                                FrameType::Video
-                            };
-                            self.deliver_av_frame_cb(
-                                cb,
-                                frame_type,
-                                msg.timestamp,
-                                &payload,
-                                messages_processed,
-                            )?;
-                        }
-                    } else if msg.msg_type_id == msg_dispatch::RTMP_MSG_AMF0_DATA
-                        || msg.msg_type_id == msg_dispatch::RTMP_MSG_AMF3_DATA
-                    {
-                        let data_payload: &[u8] = if msg.msg_type_id
-                            == msg_dispatch::RTMP_MSG_AMF3_DATA
-                            && payload.len() > 1
-                            && payload[0] == 0x00
+                            self.handle_user_control(&payload)?;
+                        } else if msg.msg_type_id == msg_dispatch::RTMP_MSG_AUDIO
+                            || msg.msg_type_id == msg_dispatch::RTMP_MSG_VIDEO
                         {
-                            &payload[1..]
-                        } else {
-                            &payload
-                        };
-                        if let Some(cb) = self.on_frame_cb {
-                            self.deliver_script_frame_cb(cb, msg.timestamp, data_payload);
+                            if let Some(cb) = self.on_frame_cb {
+                                let frame_type = if msg.msg_type_id == msg_dispatch::RTMP_MSG_AUDIO
+                                {
+                                    FrameType::Audio
+                                } else {
+                                    FrameType::Video
+                                };
+                                self.deliver_av_frame_cb(
+                                    cb,
+                                    frame_type,
+                                    msg.timestamp,
+                                    &payload,
+                                    messages_processed,
+                                )?;
+                            }
+                        } else if msg.msg_type_id == msg_dispatch::RTMP_MSG_AMF0_DATA
+                            || msg.msg_type_id == msg_dispatch::RTMP_MSG_AMF3_DATA
+                        {
+                            let data_payload: &[u8] = if msg.msg_type_id
+                                == msg_dispatch::RTMP_MSG_AMF3_DATA
+                                && payload.len() > 1
+                                && payload[0] == 0x00
+                            {
+                                &payload[1..]
+                            } else {
+                                &payload
+                            };
+                            if let Some(cb) = self.on_frame_cb {
+                                self.deliver_script_frame_cb(cb, msg.timestamp, data_payload);
+                            }
+                        } else if msg.msg_type_id == msg_dispatch::RTMP_MSG_AMF0_COMMAND {
+                            self.handle_command_message(&payload);
+                        } else if msg.msg_type_id == msg_dispatch::RTMP_MSG_AMF3_COMMAND {
+                            let data: &[u8] = if !payload.is_empty() && payload[0] == 0x00 {
+                                &payload[1..]
+                            } else {
+                                &payload
+                            };
+                            self.handle_command_message(data);
                         }
-                    } else if msg.msg_type_id == msg_dispatch::RTMP_MSG_AMF0_COMMAND {
-                        self.handle_command_message(&payload);
-                    } else if msg.msg_type_id == msg_dispatch::RTMP_MSG_AMF3_COMMAND {
-                        let data: &[u8] = if !payload.is_empty() && payload[0] == 0x00 {
-                            &payload[1..]
-                        } else {
-                            &payload
-                        };
-                        self.handle_command_message(data);
-                    }
                     }
                 }
                 Ok(_) => {
