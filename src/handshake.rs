@@ -70,7 +70,8 @@ fn splitmix64(state: &mut u64) -> u64 {
 }
 
 /// Counter mixed into the PRNG seed so calls made at the same timestamp still differ.
-static RANDOM_SEED_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static RANDOM_SEED_COUNTER: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
 
 /// Fill `buf` with pseudo-random bytes using a seeded PRNG.
 fn fill_random(buf: &mut [u8]) {

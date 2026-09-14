@@ -1239,7 +1239,10 @@ impl Server {
         // publish resets `injected_media_bytes` for the media deadline while
         // those frames are still pending.
         for conn in &mut self.connections {
-            if conn.defer_media_relay && !conn.relay_enabled && !abandoned_this_batch.is_empty() {
+            if conn.defer_media_relay
+                && !conn.relay_enabled
+                && !abandoned_this_batch.is_empty()
+            {
                 let conn_id = conn.conn_id;
                 conn.pending_relay.retain(|f| {
                     !abandoned_this_batch.contains(&(f.app.clone(), f.stream_name.clone(), conn_id))
@@ -1827,7 +1830,11 @@ impl Server {
     }
 
     /// Bytes freeable by evicting same-publisher peers or other external routes.
-    fn stream_cache_freeable_bytes(&self, key: &(String, String), publisher_conn_id: u64) -> usize {
+    fn stream_cache_freeable_bytes(
+        &self,
+        key: &(String, String),
+        publisher_conn_id: u64,
+    ) -> usize {
         self.stream_cache
             .iter()
             .filter(|(k, _)| *k != key)
@@ -2375,12 +2382,18 @@ mod tests {
         ];
         let from_0 = round_robin_relay_queues(vec![q0.clone(), q1.clone()], 0);
         assert_eq!(
-            from_0.iter().map(|f| f.payload[0]).collect::<Vec<_>>(),
+            from_0
+                .iter()
+                .map(|f| f.payload[0])
+                .collect::<Vec<_>>(),
             vec![0xA1, 0xB1, 0xA2, 0xB2]
         );
         let from_1 = round_robin_relay_queues(vec![q0, q1], 1);
         assert_eq!(
-            from_1.iter().map(|f| f.payload[0]).collect::<Vec<_>>(),
+            from_1
+                .iter()
+                .map(|f| f.payload[0])
+                .collect::<Vec<_>>(),
             vec![0xB1, 0xA1, 0xB2, 0xA2]
         );
     }
@@ -3584,7 +3597,10 @@ mod tests {
         assert_eq!(Server::peer_ip("[::1]:54321"), "::1");
         assert_eq!(Server::peer_ip("[2001:db8::1]:443"), "2001:db8::1");
         // IPv4-mapped IPv6 must collapse to the IPv4 form for per-IP caps.
-        assert_eq!(Server::peer_ip("[::ffff:203.0.113.5]:54321"), "203.0.113.5");
+        assert_eq!(
+            Server::peer_ip("[::ffff:203.0.113.5]:54321"),
+            "203.0.113.5"
+        );
         // No port present: falls back to the input unchanged.
         assert_eq!(Server::peer_ip("127.0.0.1"), "127.0.0.1");
     }
@@ -4388,7 +4404,9 @@ mod tests {
         let victim_pub = super::EXTERNAL_PUBLISHER_ID_BIT | 1;
         let mut victim = super::empty_stream_cache();
         victim.avc_header = Some(vec![0x17, 0x00, 0x01]);
-        server.stream_cache.insert(victim_key.clone(), victim);
+        server
+            .stream_cache
+            .insert(victim_key.clone(), victim);
         server
             .publisher_cache_keys
             .insert(victim_pub, vec![victim_key.clone()]);
