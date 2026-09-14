@@ -2,8 +2,7 @@ name: PR 284 final fix
 
 on:
   push:
-    branches:
-      - cursor/ci-autofix-automation-9931
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -243,6 +242,7 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           rm -f .github/workflows/pr284-sonar-diagnose.yml
           rm -f .github/workflows/pr284-final-fix.yml
+          rm -f .pr284-run
           git add -A
           git commit -m "refactor: reduce media handling complexity"
           git push origin HEAD:cursor/ci-autofix-automation-9931
