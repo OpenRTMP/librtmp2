@@ -690,6 +690,9 @@ impl Client {
                     if msg.msg_type_id == msg_dispatch::RTMP_MSG_AGGREGATE {
                         self.handle_aggregate_message(msg.timestamp, &payload, messages_processed)?;
                     } else {
+                        if *messages_processed >= MAX_MESSAGES_PER_POLL {
+                            break;
+                        }
                         *messages_processed += 1;
                         if msg.msg_type_id == msg_dispatch::RTMP_MSG_SET_CHUNK_SIZE {
                             if let Ok(cs) = control::read_set_chunk_size(&payload) {
@@ -706,7 +709,13 @@ impl Client {
                             } else {
                                 FrameType::Video
                             };
-                            self.deliver_av_frame_cb(cb, frame_type, msg.timestamp, &payload)?;
+                            self.deliver_av_frame_cb(
+                                cb,
+                                frame_type,
+                                msg.timestamp,
+                                &payload,
+                                messages_processed,
+                            )?;
                         }
                     } else if msg.msg_type_id == msg_dispatch::RTMP_MSG_AMF0_DATA
                         || msg.msg_type_id == msg_dispatch::RTMP_MSG_AMF3_DATA
@@ -804,14 +813,35 @@ impl Client {
             if let Some(cb) = self.on_frame_cb {
                 match tag_type {
                     msg_dispatch::RTMP_MSG_AUDIO => {
+                        if *messages_processed >= MAX_MESSAGES_PER_POLL {
+                            break;
+                        }
                         *messages_processed += 1;
-                        self.deliver_av_frame_cb(cb, FrameType::Audio, out_ts, tag_payload)?;
+                        self.deliver_av_frame_cb(
+                            cb,
+                            FrameType::Audio,
+                            out_ts,
+                            tag_payload,
+                            messages_processed,
+                        )?;
                     }
                     msg_dispatch::RTMP_MSG_VIDEO => {
+                        if *messages_processed >= MAX_MESSAGES_PER_POLL {
+                            break;
+                        }
                         *messages_processed += 1;
-                        self.deliver_av_frame_cb(cb, FrameType::Video, out_ts, tag_payload)?;
+                        self.deliver_av_frame_cb(
+                            cb,
+                            FrameType::Video,
+                            out_ts,
+                            tag_payload,
+                            messages_processed,
+                        )?;
                     }
                     msg_dispatch::RTMP_MSG_AMF0_DATA => {
+                        if *messages_processed >= MAX_MESSAGES_PER_POLL {
+                            break;
+                        }
                         *messages_processed += 1;
                         self.deliver_script_frame_cb(cb, out_ts, tag_payload);
                     }
@@ -845,11 +875,20 @@ impl Client {
         frame_type: FrameType,
         timestamp: u32,
         payload: &[u8],
+        messages_processed: &mut usize,
     ) -> Result<()> {
         let normalized = normalize_modex_payload(payload, self.negotiated_caps.caps_ex_mask);
         let parse_payload = normalized.as_ref();
         let is_multitrack = is_multitrack_container(frame_type, parse_payload);
+        let mut track_index = 0usize;
         let parsed_multitrack = foreach_track(frame_type, parse_payload, |track| {
+            if track_index > 0 {
+                if *messages_processed >= MAX_MESSAGES_PER_POLL {
+                    return;
+                }
+                *messages_processed += 1;
+            }
+            track_index += 1;
             self.invoke_multitrack_on_frame_cb(
                 cb,
                 frame_type,
@@ -1838,6 +1877,55 @@ mod tests {
         );
 
         assert_eq!(*FLAGS.lock().unwrap(), vec![0, 1]);
+    }
+
+    #[test]
+    fn aggregate_subtags_stop_at_max_messages_per_poll() {
+        use std::sync::{LazyLock, Mutex};
+
+        static CALLBACKS: LazyLock<Mutex<usize>> = LazyLock::new(|| Mutex::new(0));
+
+        let audio_payload = vec![0xAF, 0x01];
+        let mut aggregate = Vec::new();
+        for i in 0..(MAX_MESSAGES_PER_POLL + 8) {
+            aggregate.push(0x08);
+            let len = audio_payload.len() as u32;
+            aggregate.extend_from_slice(&[(len >> 16) as u8, (len >> 8) as u8, len as u8]);
+            aggregate.extend_from_slice(&[
+                (i >> 16) as u8,
+                (i >> 8) as u8,
+                i as u8,
+                (i >> 24) as u8,
+            ]);
+            aggregate.extend_from_slice(&[0, 0, 0]);
+            aggregate.extend_from_slice(&audio_payload);
+            let prev_tag_size = (11 + audio_payload.len()) as u32;
+            aggregate.extend_from_slice(&prev_tag_size.to_be_bytes());
+        }
+
+        let mut wire = Buffer::new();
+        let mut cmsg = ChunkMessage::default();
+        cmsg.csid = 6;
+        cmsg.fmt = 0;
+        cmsg.msg_length = aggregate.len() as u32;
+        cmsg.msg_type_id = msg_dispatch::RTMP_MSG_AGGREGATE;
+        cmsg.msg_stream_id = 1;
+        chunk_write(&mut wire, &cmsg, &aggregate, aggregate.len(), 128).unwrap();
+
+        let mut client = Client::new();
+        client.recv_buffer.write(wire.peek()).unwrap();
+        *CALLBACKS.lock().unwrap() = 0;
+        client.on_frame_cb = Some(|_| {
+            *CALLBACKS.lock().unwrap() += 1;
+        });
+
+        let mut messages_processed = 0;
+        client
+            .drain_ready_messages(&mut messages_processed)
+            .unwrap();
+
+        assert_eq!(messages_processed, MAX_MESSAGES_PER_POLL);
+        assert_eq!(*CALLBACKS.lock().unwrap(), MAX_MESSAGES_PER_POLL);
     }
 
     #[test]
