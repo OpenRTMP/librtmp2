@@ -64,22 +64,8 @@ jobs:
                   "messages_budget signature",
               ),
               (
-                  '''                if let Some(budget) = messages_budget.as_mut() {
-                          if *budget == 0 {
-                              track_budget_exhausted = true;
-                              return;
-                          }
-                          *budget = budget.saturating_sub(1);
-                      }
-          ''',
-                  '''                if let Some(budget) = messages_budget.as_deref_mut() {
-                          if *budget == 0 {
-                              track_budget_exhausted = true;
-                              return;
-                          }
-                          *budget = budget.saturating_sub(1);
-                      }
-          ''',
+                  "messages_budget.as_mut()",
+                  "messages_budget.as_deref_mut()",
                   "messages_budget dereference",
               ),
           ]
