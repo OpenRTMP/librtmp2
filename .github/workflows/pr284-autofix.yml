@@ -68,6 +68,19 @@ jobs:
                   "messages_budget.as_deref_mut()",
                   "messages_budget dereference",
               ),
+              (
+                  '''        let mut messages_budget = 3;
+                  conn.handle_media_frame(1, FrameType::Video, 0, &payload, Some(&mut messages_budget))
+                      .unwrap();
+          ''',
+                  '''        // `handle_message()` already charges one unit for the outer RTMP message.
+                  // This direct helper call therefore starts with the remaining budget.
+                  let mut messages_budget = 2;
+                  conn.handle_media_frame(1, FrameType::Video, 0, &payload, Some(&mut messages_budget))
+                      .unwrap();
+          ''',
+                  "multitrack budget regression test",
+              ),
           ]
 
           for old, new, label in replacements:
