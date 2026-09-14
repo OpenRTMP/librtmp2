@@ -1,11 +1,11 @@
 # Bug scan progress
 
-Last scanned: core (2026-08-26)
+Last scanned: handshake (2026-09-14)
 
 ## Modules
 
 - [x] core — Memory, logging, errors, buffer
-- [ ] handshake — C0/C1/C2 ↔ S0/S1/S2
+- [x] handshake — C0/C1/C2 ↔ S0/S1/S2
 - [ ] chunk — Chunk reader/writer/state
 - [ ] message — Message reassembly, control, commands
 - [ ] amf — AMF0 + AMF3
@@ -14,6 +14,17 @@ Last scanned: core (2026-08-26)
 - [ ] session — State machine, publish/play flows
 - [ ] server — Server listener
 - [ ] client — Outbound client
+
+## Findings (2026-09-14 handshake pass)
+
+- Reviewed `src/handshake.rs` in full plus integration in `src/session/conn.rs`
+  (`do_handshake`, partial-read buffering, pipelined C0+C1+C2+chunks),
+  `src/client/mod.rs` (`do_handshake`, `reset_session_state` on reconnect),
+  `fuzz/fuzz_targets/handshake_server.rs`, and server poll/flush path.
+  Traced version-byte rejection, fixed-size 1536-byte reads, S1/S2 and C2
+  echo/time2 semantics, complex-C1→simple downgrade, recv-buffer cap during
+  handshake, session-setup timeout for stalled peers, and post-handshake
+  drain of pipelined chunk data. No new critical or high-severity issue found.
 
 ## Findings (2026-08-26 core pass)
 
