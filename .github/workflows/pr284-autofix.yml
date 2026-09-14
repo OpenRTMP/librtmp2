@@ -1,0 +1,110 @@
+name: PR 284 autofix
+
+on:
+  push:
+    branches:
+      - cursor/ci-autofix-automation-9931
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out PR branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: cursor/ci-autofix-automation-9931
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Apply source fixes
+        shell: python
+        run: |
+          from pathlib import Path
+
+          path = Path("src/session/conn.rs")
+          text = path.read_text()
+
+          old_claim = '''    fn claim_publish_route(&mut self, stream: &str) -> bool {
+        if self.publish_routes.is_none() {
+            self.claimed_publish_route = Some(stream.to_string());
+            return true;
+        }
+        {
+            let routes = self.publish_routes.as_ref().unwrap();
+            if !routes.claim(self.conn_id, &self.app, stream) {
+                return false;
+            }
+        }
+'''
+          new_claim = '''    fn claim_publish_route(&mut self, stream: &str) -> bool {
+        let claimed = match self.publish_routes.as_ref() {
+            Some(routes) => routes.claim(self.conn_id, &self.app, stream),
+            None => {
+                self.claimed_publish_route = Some(stream.to_string());
+                return true;
+            }
+        };
+        if !claimed {
+            return false;
+        }
+'''
+
+          old_budget_signature = '''        payload: &[u8],
+        messages_budget: Option<&mut usize>,
+    ) -> Result<()> {'''
+          new_budget_signature = '''        payload: &[u8],
+        mut messages_budget: Option<&mut usize>,
+    ) -> Result<()> {'''
+
+          old_budget = '''                if let Some(budget) = messages_budget.as_mut() {
+                    if *budget == 0 {
+                        track_budget_exhausted = true;
+                        return;
+                    }
+                    *budget = budget.saturating_sub(1);
+                }
+'''
+          new_budget = '''                if let Some(budget) = messages_budget.as_deref_mut() {
+                    if *budget == 0 {
+                        track_budget_exhausted = true;
+                        return;
+                    }
+                    *budget = budget.saturating_sub(1);
+                }
+'''
+
+          replacements = [
+              (old_claim, new_claim, "claim_publish_route"),
+              (old_budget_signature, new_budget_signature, "messages_budget signature"),
+              (old_budget, new_budget, "messages_budget dereference"),
+          ]
+          for old, new, label in replacements:
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"Expected exactly one {label} match, found {count}")
+              text = text.replace(old, new, 1)
+
+          path.write_text(text)
+
+      - name: Format
+        run: cargo fmt --all
+
+      - name: Check
+        run: cargo check --all-features
+
+      - name: Run library tests
+        run: cargo test --all-features --lib
+
+      - name: Merge current main and commit validated fix
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin main
+          git merge --no-edit origin/main
+          rm .github/workflows/pr284-autofix.yml
+          git add -A
+          git commit -m "fix: complete PR #284 borrow and budget repairs"
+          git push origin HEAD:cursor/ci-autofix-automation-9931
