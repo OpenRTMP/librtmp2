@@ -2444,6 +2444,30 @@ mod tests {
         .unwrap()
     }
 
+    /// Loopback clients can return from `connect()` before the listener's
+    /// non-blocking `accept()` sees the socket (notably on macOS). Retry
+    /// until the expected connections are admitted or the deadline expires.
+    fn accept_pending_connections(server: &mut Server, expected: usize) {
+        use std::time::{Duration, Instant};
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while server.connections.len() < expected {
+            server.accept_new_connections();
+            if server.connections.len() >= expected {
+                return;
+            }
+            if Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(
+            server.connections.len(),
+            expected,
+            "expected {expected} accepted connection(s)"
+        );
+    }
+
     fn relay_frame(frame_type: FrameType, payload: Vec<u8>) -> crate::session::conn::RelayFrame {
         relay_frame_for_publisher(1, "stream", frame_type, payload)
     }
@@ -2861,15 +2885,21 @@ mod tests {
         let addr = format!("127.0.0.1:{port}");
 
         let _first = std::net::TcpStream::connect(&addr).unwrap();
-        server.accept_new_connections();
-        assert_eq!(server.connections.len(), 1);
+        accept_pending_connections(&mut server, 1);
         let first_conn_id = server.connections[0].conn_id;
         server.connections[0].state = ConnState::AppConnected;
         server.connections[0]
             .set_session_setup_started_for_test(Instant::now() - Duration::from_secs(11));
 
         let _second = std::net::TcpStream::connect(&addr).unwrap();
-        server.poll(0).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            server.poll(0).unwrap();
+            if server.connections.len() == 1 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
         assert_eq!(
             server.connections.len(),
             1,
