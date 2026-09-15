@@ -1,11 +1,11 @@
 # Bug scan progress
 
-Last scanned: core (2026-08-26)
+Last scanned: handshake (2026-09-15)
 
 ## Modules
 
 - [x] core — Memory, logging, errors, buffer
-- [ ] handshake — C0/C1/C2 ↔ S0/S1/S2
+- [x] handshake — C0/C1/C2 ↔ S0/S1/S2
 - [ ] chunk — Chunk reader/writer/state
 - [ ] message — Message reassembly, control, commands
 - [ ] amf — AMF0 + AMF3
@@ -14,6 +14,22 @@ Last scanned: core (2026-08-26)
 - [ ] session — State machine, publish/play flows
 - [ ] server — Server listener
 - [ ] client — Outbound client
+
+## Findings (2026-09-15 handshake pass)
+
+- Reviewed `src/handshake.rs` in full plus integration in
+  `src/session/conn.rs` (`do_handshake`, `do_handshake_recurse`) and
+  `src/client/mod.rs` (`do_handshake`, `reset_session_state`). Traced
+  partial-read buffering (all fixed-size reads guard `buf.available()` before
+  consuming), state-machine transitions (C0→C1→C2 server path; C0+C1
+  generate→S0+S1→C2→S2 client path), S1/S2 and C2 echo semantics (time1
+  echo + time2 local clock), wrong-version rejection, `hs.out` buffer growth
+  on owned `Buffer`, reconnect stale-state reset (client `reset_session_state`
+  + `client_init` at connect), recv-buffer cap during incomplete handshake,
+  `session_setup_timed_out` reaping squatters, and fuzz harness
+  (`fuzz/fuzz_targets/handshake_server.rs`). Complex/encrypted handshake is
+  intentionally unsupported (documented). No new critical or high-severity
+  issue found.
 
 ## Findings (2026-08-26 core pass)
 
