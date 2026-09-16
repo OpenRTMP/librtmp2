@@ -868,9 +868,18 @@ impl Server {
         self.server_fd = -1;
     }
 
+    fn total_connection_slots_in_use(&self) -> usize {
+        let mut slots = self.connections.len();
+        #[cfg(feature = "tls")]
+        {
+            slots += self.pending_tls.len();
+        }
+        slots
+    }
+
     fn max_connections_reached(&self) -> bool {
         self.config.max_connections > 0
-            && self.connections.len() >= self.config.max_connections as usize
+            && self.total_connection_slots_in_use() >= self.config.max_connections as usize
     }
 
     #[cfg(feature = "tls")]
@@ -880,11 +889,10 @@ impl Server {
 
     #[cfg(feature = "tls")]
     fn pending_tls_limit_reached(&self) -> bool {
-        let pending = self.pending_tls.len();
         if self.config.max_connections > 0 {
-            self.connections.len() + pending >= self.config.max_connections as usize
+            self.max_connections_reached()
         } else {
-            pending >= MAX_PENDING_TLS_HANDSHAKES
+            self.pending_tls.len() >= MAX_PENDING_TLS_HANDSHAKES
         }
     }
 
@@ -2798,6 +2806,82 @@ mod tests {
         let _third = std::net::TcpStream::connect(&addr).unwrap();
         server.accept_new_connections();
         assert_eq!(server.connections.len(), 2);
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn pending_tls_handshakes_share_max_connections_budget_with_active_sessions() {
+        let (cert_path, key_path) = self_signed_cert_files("pending-tls-max-conn-budget.test");
+        let config = ServerConfig {
+            max_connections: 4,
+            chunk_size: 128,
+            tls_enabled: 0,
+            tls_cert_file: std::ptr::null(),
+            tls_key_file: std::ptr::null(),
+            tls_ca_file: std::ptr::null(),
+            tls_insecure: 0,
+            max_pending_tls_per_addr: 0,
+            max_connections_per_addr: 0,
+        };
+        let mut server = Server::new(config).unwrap();
+        server.listen("127.0.0.1:0").unwrap();
+        server
+            .listen_tls(
+                "127.0.0.1:0",
+                cert_path.to_str().unwrap(),
+                key_path.to_str().unwrap(),
+            )
+            .unwrap();
+
+        let plaintext_port = {
+            let fd = server.listener_fds()[0];
+            let mut addr: libc::sockaddr_in = unsafe { std::mem::zeroed() };
+            let mut len = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
+            let rc = unsafe {
+                libc::getsockname(fd, &mut addr as *mut _ as *mut libc::sockaddr, &mut len)
+            };
+            assert_eq!(rc, 0);
+            u16::from_be(addr.sin_port)
+        };
+        let tls_port = {
+            let fd = server.listener_fds()[1];
+            let mut addr: libc::sockaddr_in = unsafe { std::mem::zeroed() };
+            let mut len = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
+            let rc = unsafe {
+                libc::getsockname(fd, &mut addr as *mut _ as *mut libc::sockaddr, &mut len)
+            };
+            assert_eq!(rc, 0);
+            u16::from_be(addr.sin_port)
+        };
+        let plaintext_addr = format!("127.0.0.1:{plaintext_port}");
+        let tls_addr = format!("127.0.0.1:{tls_port}");
+
+        let mut stalled_tls = Vec::new();
+        for _ in 0..3 {
+            stalled_tls.push(std::net::TcpStream::connect(&tls_addr).unwrap());
+            server.accept_new_connections();
+        }
+        assert_eq!(server.pending_tls_count(), 3);
+
+        let mut plaintext = Vec::new();
+        for _ in 0..4 {
+            plaintext.push(std::net::TcpStream::connect(&plaintext_addr).unwrap());
+            server.accept_new_connections();
+        }
+
+        assert_eq!(
+            server.connections.len(),
+            1,
+            "only one active slot should remain once three pending TLS handshakes occupy the cap"
+        );
+        assert_eq!(server.pending_tls_count(), 3);
+        assert!(
+            server.connections.len() + server.pending_tls_count() <= 4,
+            "pending TLS and active connections must share max_connections"
+        );
+
+        let _ = std::fs::remove_file(cert_path);
+        let _ = std::fs::remove_file(key_path);
     }
 
     #[test]
