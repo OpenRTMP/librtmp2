@@ -70,55 +70,61 @@ jobs:
           path = Path("src/server/mod.rs")
           text = path.read_text()
 
-          old = '''        let mut stalled_tls = Vec::new();
-          for _ in 0..3 {
-              stalled_tls.push(std::net::TcpStream::connect(&tls_addr).unwrap());
-              server.accept_new_connections();
-          }
-          assert_eq!(server.pending_tls_count(), 3);
+          insert_before = "        let mut stalled_tls = Vec::new();\n"
+          helper = "\n".join([
+              "        fn accept_until_slots_in_use(server: &mut Server, expected: usize) {",
+              "            use std::time::{Duration, Instant};",
+              "",
+              "            let deadline = Instant::now() + Duration::from_secs(2);",
+              "            while server.total_connection_slots_in_use() < expected && Instant::now() < deadline {",
+              "                server.accept_new_connections();",
+              "                if server.total_connection_slots_in_use() < expected {",
+              "                    std::thread::sleep(Duration::from_millis(1));",
+              "                }",
+              "            }",
+              "            assert_eq!(",
+              "                server.total_connection_slots_in_use(),",
+              "                expected,",
+              "                \"expected {expected} total connection slot(s) in use\"",
+              "            );",
+              "        }",
+              "",
+          ]) + "\n"
 
-          let mut plaintext = Vec::new();
-          for _ in 0..4 {
-              plaintext.push(std::net::TcpStream::connect(&plaintext_addr).unwrap());
-              server.accept_new_connections();
-          }
-          '''
+          old_tls_loop = "\n".join([
+              "        for _ in 0..3 {",
+              "            stalled_tls.push(std::net::TcpStream::connect(&tls_addr).unwrap());",
+              "            server.accept_new_connections();",
+              "        }",
+          ])
+          new_tls_loop = "\n".join([
+              "        for expected in 1..=3 {",
+              "            stalled_tls.push(std::net::TcpStream::connect(&tls_addr).unwrap());",
+              "            accept_until_slots_in_use(&mut server, expected);",
+              "        }",
+          ])
 
-          new = '''        fn accept_until_slots_in_use(server: &mut Server, expected: usize) {
-              use std::time::{Duration, Instant};
+          old_plaintext_loop = "\n".join([
+              "        for _ in 0..4 {",
+              "            plaintext.push(std::net::TcpStream::connect(&plaintext_addr).unwrap());",
+              "            server.accept_new_connections();",
+              "        }",
+          ])
+          new_plaintext_loop = "\n".join([
+              "        for _ in 0..4 {",
+              "            plaintext.push(std::net::TcpStream::connect(&plaintext_addr).unwrap());",
+              "        }",
+              "        accept_until_slots_in_use(&mut server, 4);",
+          ])
 
-              let deadline = Instant::now() + Duration::from_secs(2);
-              while server.total_connection_slots_in_use() < expected && Instant::now() < deadline {
-                  server.accept_new_connections();
-                  if server.total_connection_slots_in_use() < expected {
-                      std::thread::sleep(Duration::from_millis(1));
-                  }
-              }
-              assert_eq!(
-                  server.total_connection_slots_in_use(),
-                  expected,
-                  "expected {expected} total connection slot(s) in use"
-              );
-          }
+          for needle in (insert_before, old_tls_loop, old_plaintext_loop):
+              if needle not in text:
+                  raise SystemExit(f"target block not found: {needle.splitlines()[0]!r}")
 
-          let mut stalled_tls = Vec::new();
-          for expected in 1..=3 {
-              stalled_tls.push(std::net::TcpStream::connect(&tls_addr).unwrap());
-              accept_until_slots_in_use(&mut server, expected);
-          }
-          assert_eq!(server.pending_tls_count(), 3);
-
-          let mut plaintext = Vec::new();
-          for _ in 0..4 {
-              plaintext.push(std::net::TcpStream::connect(&plaintext_addr).unwrap());
-          }
-          accept_until_slots_in_use(&mut server, 4);
-          '''
-
-          if old not in text:
-              raise SystemExit("target block not found; refusing to modify an unexpected revision")
-
-          path.write_text(text.replace(old, new, 1))
+          text = text.replace(insert_before, helper + insert_before, 1)
+          text = text.replace(old_tls_loop, new_tls_loop, 1)
+          text = text.replace(old_plaintext_loop, new_plaintext_loop, 1)
+          path.write_text(text)
 
       - name: Commit fix and restore workflow files
         env:
