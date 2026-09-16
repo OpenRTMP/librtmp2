@@ -2856,18 +2856,35 @@ mod tests {
         let plaintext_addr = format!("127.0.0.1:{plaintext_port}");
         let tls_addr = format!("127.0.0.1:{tls_port}");
 
+        fn accept_until_slots_in_use(server: &mut Server, expected: usize) {
+            use std::time::{Duration, Instant};
+
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while server.total_connection_slots_in_use() < expected && Instant::now() < deadline {
+                server.accept_new_connections();
+                if server.total_connection_slots_in_use() < expected {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+            }
+            assert_eq!(
+                server.total_connection_slots_in_use(),
+                expected,
+                "expected {expected} total connection slot(s) in use"
+            );
+        }
+
         let mut stalled_tls = Vec::new();
-        for _ in 0..3 {
+        for expected in 1..=3 {
             stalled_tls.push(std::net::TcpStream::connect(&tls_addr).unwrap());
-            server.accept_new_connections();
+            accept_until_slots_in_use(&mut server, expected);
         }
         assert_eq!(server.pending_tls_count(), 3);
 
         let mut plaintext = Vec::new();
         for _ in 0..4 {
             plaintext.push(std::net::TcpStream::connect(&plaintext_addr).unwrap());
-            server.accept_new_connections();
         }
+        accept_until_slots_in_use(&mut server, 4);
 
         assert_eq!(
             server.connections.len(),
