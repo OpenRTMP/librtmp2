@@ -1,5 +1,6 @@
 name: PR 292 one-shot fix
 
+# This follow-up commit triggers the workflow after its initial registration.
 on:
   push:
     branches:
