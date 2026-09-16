@@ -1,11 +1,11 @@
 # Bug scan progress
 
-Last scanned: core (2026-08-26)
+Last scanned: handshake (2026-09-16)
 
 ## Modules
 
 - [x] core — Memory, logging, errors, buffer
-- [ ] handshake — C0/C1/C2 ↔ S0/S1/S2
+- [x] handshake — C0/C1/C2 ↔ S0/S1/S2
 - [ ] chunk — Chunk reader/writer/state
 - [ ] message — Message reassembly, control, commands
 - [ ] amf — AMF0 + AMF3
@@ -14,6 +14,24 @@ Last scanned: core (2026-08-26)
 - [ ] session — State machine, publish/play flows
 - [ ] server — Server listener
 - [ ] client — Outbound client
+
+## Findings (2026-09-16 handshake pass)
+
+- Reviewed `src/handshake.rs` in full and traced all production callers:
+  `Conn::do_handshake()` / `do_handshake_recurse()` in `src/session/conn.rs`,
+  `Client::do_handshake()` / `reset_session_state()` in `src/client/mod.rs`,
+  plus `fuzz/fuzz_targets/handshake_server.rs` and `benches/protocol.rs`.
+  Checked partial-read buffering (fixed 1-byte C0/S0 and 1536-byte C1/S1/C2/S2
+  guards via `buf.available()` / `Buffer::read`), version-byte rejection,
+  S1/S2 and C2 echo semantics (time1 echo + time2 wall-clock), state-machine
+  transitions (server C0→C1→C2 and client generate→S0→S1→S2), stale-state
+  reuse on client reconnect (`reset_session_state` + `client_init` before each
+  `connect()`), `hs.out` reset before every queued write, bounds-checked
+  `ntoh32` slices, and session-setup timeout coverage for incomplete
+  handshakes (`RTMP_SESSION_SETUP_TIMEOUT` in `Conn::session_setup_timed_out`).
+  Complex/Adobe-digest handshake is intentionally out of scope (simple
+  fallback only; `c1_requests_complex_handshake` is dead code today). No new
+  critical or high-severity issue found.
 
 ## Findings (2026-08-26 core pass)
 
