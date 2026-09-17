@@ -37,62 +37,44 @@ jobs:
           path = Path('src/session/conn.rs')
           text = path.read_text()
 
-          signature = '''    fn authorize_media_frame(
-              &self,
-              frame_type: FrameType,
-              parse_payload: &[u8],
-              current_codec: Option<&str>,
-              is_multitrack: bool,
-              mut messages_budget: Option<&mut usize>,
-          ) -> Result<()> {
-              if !is_multitrack {
-          '''
-          replacement = '''    fn authorize_media_frame(
-              &self,
-              frame_type: FrameType,
-              parse_payload: &[u8],
-              current_codec: Option<&str>,
-              is_multitrack: bool,
-              mut messages_budget: Option<&mut usize>,
-          ) -> Result<()> {
-              // Without an authorization callback there is no per-track auth work
-              // to budget here. The frame-callback path applies its own sub-track
-              // budget independently below.
-              if self.on_media_cb.is_none() {
-                  return Ok(());
-              }
+          # The authorization budget only belongs to on_media_cb work. If no
+          # authorization callback is configured, leave the budget untouched so
+          # the independent on_frame_cb multitrack dispatch can consume it.
+          auth_start = text.index('    fn authorize_media_frame(')
+          auth_insert = text.index('        if !is_multitrack {', auth_start)
+          guard = '''        // Without an authorization callback there is no per-track auth work
+          // to budget here. The frame-callback path applies its own sub-track
+          // budget independently below.
+          if self.on_media_cb.is_none() {
+              return Ok(());
+          }
 
-              if !is_multitrack {
           '''
-          if signature not in text:
-              raise SystemExit('authorize_media_frame signature block not found')
-          text = text.replace(signature, replacement, 1)
+          text = text[:auth_insert] + guard + text[auth_insert:]
 
+          # Exhausting the authorization budget is deliberately a protocol error;
+          # the regression test must assert that behavior rather than unwrap it.
           test_name = '    fn multitrack_on_media_cb_authorization_consume_message_budget()'
           start = text.index(test_name)
           end = text.index('\n    #[test]', start)
           block = text[start:end]
           old_call = '''        let mut messages_budget = 2;
-              conn.handle_media_frame(1, FrameType::Video, 0, &payload, Some(&mut messages_budget))
-                  .unwrap();
+          conn.handle_media_frame(1, FrameType::Video, 0, &payload, Some(&mut messages_budget))
+              .unwrap();
           '''
           new_call = '''        let mut messages_budget = 2;
-              assert_eq!(
-                  conn.handle_media_frame(
-                      1,
-                      FrameType::Video,
-                      0,
-                      &payload,
-                      Some(&mut messages_budget),
-                  ),
-                  Err(ErrorCode::Protocol)
-              );
+          assert_eq!(
+              conn.handle_media_frame(1, FrameType::Video, 0, &payload, Some(&mut messages_budget)),
+              Err(ErrorCode::Protocol)
+          );
           '''
           if old_call not in block:
               raise SystemExit('on_media_cb budget test call block not found')
           block = block.replace(old_call, new_call, 1)
           text = text[:start] + block + text[end:]
 
+          # The setup timeout is 10 seconds. Nine seconds cannot be asserted as
+          # timed out, so use a value unambiguously beyond the timeout boundary.
           test_name = '    fn play_teardown_cycling_cannot_reset_setup_timer_without_relay()'
           start = text.index(test_name)
           end = text.index('\n    #[test]', start)
@@ -106,6 +88,9 @@ jobs:
           PY
 
       - name: Format
+        run: cargo fmt --all
+
+      - name: Verify formatting
         run: cargo fmt --all -- --check
 
       - name: Run library tests
@@ -114,9 +99,8 @@ jobs:
       - name: Commit verified fix
         shell: bash
         run: |
-          rm .github/workflows/fix-pr295.yml
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add src/session/conn.rs .github/workflows/fix-pr295.yml
-          git commit -m "fix(conn): correct PR 295 budget and teardown tests"
+          git add src/session/conn.rs
+          git commit -m "fix(conn): correct PR 295 budget and teardown regressions"
           git push origin HEAD:security/fix-play-teardown-and-multitrack-auth-budget
