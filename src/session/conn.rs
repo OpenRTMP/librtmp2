@@ -782,12 +782,21 @@ impl Conn {
                 .is_some_and(|stream| stream.is_publishing && stream.stream_id == msg_stream_id)
     }
 
+    /// True when an active->idle transition carried meaningful media flow and
+    /// should grant a fresh setup-timeout window (mirrors pause grace).
+    fn teardown_refreshes_setup_timer(&self) -> bool {
+        self.media_bytes_sent > 0
+            || self.media_bytes_received > 0
+            || self.injected_media_bytes > 0
+    }
+
     fn authorize_media_frame(
         &self,
         frame_type: FrameType,
         parse_payload: &[u8],
         current_codec: Option<&str>,
         is_multitrack: bool,
+        mut messages_budget: Option<&mut usize>,
     ) -> Result<()> {
         if !is_multitrack {
             return if self.media_allowed(frame_type, current_codec) {
@@ -801,15 +810,30 @@ impl Conn {
         // track; checking only the first codec would allow a later disallowed
         // codec to bypass authorization.
         let mut auth_denied = false;
+        let mut auth_budget_exhausted = false;
+        let mut track_index = 0usize;
         let tracks_valid = foreach_track(frame_type, parse_payload, |track| {
-            if auth_denied {
+            if auth_denied || auth_budget_exhausted {
                 return;
             }
+            if track_index > 0 {
+                if let Some(budget) = messages_budget.as_deref_mut() {
+                    if *budget == 0 {
+                        auth_budget_exhausted = true;
+                        return;
+                    }
+                    *budget = budget.saturating_sub(1);
+                }
+            }
+            track_index += 1;
             let track_codec = media_fourcc_auth_label(&track.fourcc);
             if !self.media_allowed(frame_type, track_codec.as_deref()) {
                 auth_denied = true;
             }
         });
+        if auth_budget_exhausted {
+            return Err(ErrorCode::Protocol);
+        }
         if !tracks_valid {
             return Err(ErrorCode::Protocol);
         }
@@ -928,6 +952,7 @@ impl Conn {
             parse_payload,
             current_codec.as_deref(),
             is_multitrack,
+            messages_budget.as_deref_mut(),
         )?;
         self.update_detected_media_metadata(
             frame_type,
@@ -1820,7 +1845,7 @@ impl Conn {
                     self.next_stream_id += 1;
                     let stream_id = self.next_stream_id;
                     self.current_stream = Some(Box::new(Stream::new(stream_id)));
-                    if was_active {
+                    if was_active && self.teardown_refreshes_setup_timer() {
                         self.session_setup_started = Instant::now();
                     }
                     let _ =
@@ -2090,7 +2115,7 @@ impl Conn {
                 // was never active gets no reset here, so it can't use
                 // repeated FCUnpublish/deleteStream calls to keep dodging
                 // the reaper forever.
-                if was_active {
+                if was_active && self.teardown_refreshes_setup_timer() {
                     self.session_setup_started = Instant::now();
                 }
                 // Clear relay_enabled along with the publish role: with
@@ -2204,7 +2229,7 @@ impl Conn {
                     // active->idle transition -- a peer that was never
                     // publishing/playing gets no reset, so it can't use
                     // repeated closeStream calls to dodge the reaper forever.
-                    if was_active {
+                    if was_active && self.teardown_refreshes_setup_timer() {
                         self.session_setup_started = Instant::now();
                     }
                     self.relay_enabled = false;
@@ -3749,6 +3774,46 @@ mod tests {
     }
 
     #[test]
+    fn play_teardown_cycling_cannot_reset_setup_timer_without_relay() {
+        use std::time::{Duration, Instant};
+
+        let mut conn = Conn::new();
+        conn.app = "live".to_string();
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+        conn.set_session_setup_started_for_test(Instant::now() - Duration::from_secs(9));
+
+        let mut play = Buffer::with_capacity(128);
+        command::build_play(&mut play, "room").unwrap();
+        conn.handle_command(play.as_slice()).unwrap();
+        assert!(conn.current_stream.as_ref().unwrap().is_playing);
+
+        let mut teardown = Buffer::with_capacity(128);
+        command::build_deletestream(&mut teardown, 2.0, 1).unwrap();
+        conn.handle_command(teardown.as_slice()).unwrap();
+        assert!(
+            conn.session_setup_timed_out(),
+            "teardown of a viewer that never received relay must not refresh the setup timer"
+        );
+
+        conn.set_session_setup_started_for_test(Instant::now() - Duration::from_secs(9));
+        conn.current_stream.as_mut().unwrap().is_playing = true;
+
+        let mut teardown = Buffer::with_capacity(128);
+        command::build_deletestream(&mut teardown, 2.0, 1).unwrap();
+        conn.handle_command(teardown.as_slice()).unwrap();
+
+        let mut play = Buffer::with_capacity(128);
+        command::build_play(&mut play, "room").unwrap();
+        conn.handle_command(play.as_slice()).unwrap();
+
+        conn.set_session_setup_started_for_test(Instant::now() - Duration::from_secs(11));
+        assert!(
+            conn.session_setup_timed_out(),
+            "play/teardown cycling without relay must not hold slots indefinitely"
+        );
+    }
+
+    #[test]
     fn teardown_commands_do_not_refresh_timer_for_a_never_active_peer() {
         use std::time::{Duration, Instant};
 
@@ -4830,6 +4895,41 @@ mod tests {
 
         // `handle_message()` already charges one unit for the outer RTMP message.
         // This direct helper call therefore starts with the remaining budget.
+        let mut messages_budget = 2;
+        conn.handle_media_frame(1, FrameType::Video, 0, &payload, Some(&mut messages_budget))
+            .unwrap();
+
+        assert_eq!(messages_budget, 0);
+        assert_eq!(*CALLBACKS.lock().unwrap(), 3);
+    }
+
+    #[test]
+    fn multitrack_on_media_cb_authorization_consume_message_budget() {
+        use std::sync::{LazyLock, Mutex};
+
+        static CALLBACKS: LazyLock<Mutex<usize>> = LazyLock::new(|| Mutex::new(0));
+
+        fn allow_all(_: u64, _: FrameType, _: Option<&str>) -> bool {
+            *CALLBACKS.lock().unwrap() += 1;
+            true
+        }
+
+        let mut conn = Conn::new();
+        conn.relay_enabled = true;
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+        if let Some(s) = conn.current_stream.as_mut() {
+            s.is_publishing = true;
+        }
+        conn.on_media_cb = Some(allow_all);
+        *CALLBACKS.lock().unwrap() = 0;
+
+        let mut payload = vec![0x86, 0x10, b'a', b'v', b'c', b'1'];
+        for id in 0..8u8 {
+            payload.push(id);
+            payload.extend_from_slice(&[0x00, 0x00, 0x01]);
+            payload.push(0xAA);
+        }
+
         let mut messages_budget = 2;
         conn.handle_media_frame(1, FrameType::Video, 0, &payload, Some(&mut messages_budget))
             .unwrap();
