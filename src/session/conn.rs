@@ -785,9 +785,7 @@ impl Conn {
     /// True when an active->idle transition carried meaningful media flow and
     /// should grant a fresh setup-timeout window (mirrors pause grace).
     fn teardown_refreshes_setup_timer(&self) -> bool {
-        self.media_bytes_sent > 0
-            || self.media_bytes_received > 0
-            || self.injected_media_bytes > 0
+        self.media_bytes_sent > 0 || self.media_bytes_received > 0 || self.injected_media_bytes > 0
     }
 
     fn authorize_media_frame(
@@ -798,6 +796,13 @@ impl Conn {
         is_multitrack: bool,
         mut messages_budget: Option<&mut usize>,
     ) -> Result<()> {
+        // Without an authorization callback there is no per-track auth work
+        // to budget here. The frame-callback path applies its own sub-track
+        // budget independently below.
+        if self.on_media_cb.is_none() {
+            return Ok(());
+        }
+
         if !is_multitrack {
             return if self.media_allowed(frame_type, current_codec) {
                 Ok(())
@@ -3780,7 +3785,7 @@ mod tests {
         let mut conn = Conn::new();
         conn.app = "live".to_string();
         conn.current_stream = Some(Box::new(Stream::new(1)));
-        conn.set_session_setup_started_for_test(Instant::now() - Duration::from_secs(9));
+        conn.set_session_setup_started_for_test(Instant::now() - Duration::from_secs(11));
 
         let mut play = Buffer::with_capacity(128);
         command::build_play(&mut play, "room").unwrap();
@@ -4931,8 +4936,10 @@ mod tests {
         }
 
         let mut messages_budget = 2;
-        conn.handle_media_frame(1, FrameType::Video, 0, &payload, Some(&mut messages_budget))
-            .unwrap();
+        assert_eq!(
+            conn.handle_media_frame(1, FrameType::Video, 0, &payload, Some(&mut messages_budget)),
+            Err(ErrorCode::Protocol)
+        );
 
         assert_eq!(messages_budget, 0);
         assert_eq!(*CALLBACKS.lock().unwrap(), 3);
