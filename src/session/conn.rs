@@ -928,7 +928,7 @@ impl Conn {
         frame_type: FrameType,
         timestamp: u32,
         payload: &[u8],
-        messages_budget: Option<&mut usize>,
+        mut messages_budget: Option<&mut usize>,
     ) -> Result<()> {
         if !self.is_active_publisher_stream(msg_stream_id) {
             return Ok(());
