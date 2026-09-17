@@ -34,57 +34,60 @@ jobs:
           python3 - <<'PY'
           from pathlib import Path
 
-          path = Path('src/session/conn.rs')
-          text = path.read_text()
+          path = Path("src/session/conn.rs")
+          lines = path.read_text().splitlines()
 
-          # The authorization budget only belongs to on_media_cb work. If no
-          # authorization callback is configured, leave the budget untouched so
-          # the independent on_frame_cb multitrack dispatch can consume it.
-          auth_start = text.index('    fn authorize_media_frame(')
-          auth_insert = text.index('        if !is_multitrack {', auth_start)
-          guard = '''        // Without an authorization callback there is no per-track auth work
-          // to budget here. The frame-callback path applies its own sub-track
-          // budget independently below.
-          if self.on_media_cb.is_none() {
-              return Ok(());
-          }
+          # Only on_media_cb authorization work should consume the auth budget.
+          fn_idx = next(i for i, line in enumerate(lines) if line.strip() == "fn authorize_media_frame(")
+          if_idx = next(i for i in range(fn_idx, len(lines)) if lines[i].strip() == "if !is_multitrack {")
+          guard_lines = [
+              "        // Without an authorization callback there is no per-track auth work",
+              "        // to budget here. The frame-callback path applies its own sub-track",
+              "        // budget independently below.",
+              "        if self.on_media_cb.is_none() {",
+              "            return Ok(());",
+              "        }",
+              "",
+          ]
+          lines[if_idx:if_idx] = guard_lines
 
-          '''
-          text = text[:auth_insert] + guard + text[auth_insert:]
+          # Budget exhaustion is intentionally a protocol error; assert it.
+          test_idx = next(
+              i for i, line in enumerate(lines)
+              if line.strip() == "fn multitrack_on_media_cb_authorization_consume_message_budget() {"
+          )
+          budget_idx = next(
+              i for i in range(test_idx, len(lines))
+              if lines[i].strip() == "let mut messages_budget = 2;"
+          )
+          call_start = budget_idx + 1
+          if not lines[call_start].strip().startswith("conn.handle_media_frame("):
+              raise SystemExit("unexpected on_media_cb test call layout")
+          unwrap_idx = next(
+              i for i in range(call_start, min(call_start + 6, len(lines)))
+              if lines[i].strip() == ".unwrap();"
+          )
+          lines[call_start:unwrap_idx + 1] = [
+              "        assert_eq!(",
+              "            conn.handle_media_frame(1, FrameType::Video, 0, &payload, Some(&mut messages_budget)),",
+              "            Err(ErrorCode::Protocol)",
+              "        );",
+          ]
 
-          # Exhausting the authorization budget is deliberately a protocol error;
-          # the regression test must assert that behavior rather than unwrap it.
-          test_name = '    fn multitrack_on_media_cb_authorization_consume_message_budget()'
-          start = text.index(test_name)
-          end = text.index('\n    #[test]', start)
-          block = text[start:end]
-          old_call = '''        let mut messages_budget = 2;
-          conn.handle_media_frame(1, FrameType::Video, 0, &payload, Some(&mut messages_budget))
-              .unwrap();
-          '''
-          new_call = '''        let mut messages_budget = 2;
-          assert_eq!(
-              conn.handle_media_frame(1, FrameType::Video, 0, &payload, Some(&mut messages_budget)),
-              Err(ErrorCode::Protocol)
-          );
-          '''
-          if old_call not in block:
-              raise SystemExit('on_media_cb budget test call block not found')
-          block = block.replace(old_call, new_call, 1)
-          text = text[:start] + block + text[end:]
+          # The setup timeout is 10s, so the test must start beyond that boundary.
+          test_idx = next(
+              i for i, line in enumerate(lines)
+              if line.strip() == "fn play_teardown_cycling_cannot_reset_setup_timer_without_relay() {"
+          )
+          timeout_idx = next(
+              i for i in range(test_idx, len(lines))
+              if "Duration::from_secs(9)" in lines[i]
+          )
+          lines[timeout_idx] = lines[timeout_idx].replace(
+              "Duration::from_secs(9)", "Duration::from_secs(11)"
+          )
 
-          # The setup timeout is 10 seconds. Nine seconds cannot be asserted as
-          # timed out, so use a value unambiguously beyond the timeout boundary.
-          test_name = '    fn play_teardown_cycling_cannot_reset_setup_timer_without_relay()'
-          start = text.index(test_name)
-          end = text.index('\n    #[test]', start)
-          block = text[start:end]
-          if block.count('Duration::from_secs(9)') != 2:
-              raise SystemExit('expected exactly two 9-second setup timestamps in teardown test')
-          block = block.replace('Duration::from_secs(9)', 'Duration::from_secs(11)')
-          text = text[:start] + block + text[end:]
-
-          path.write_text(text)
+          path.write_text("\n".join(lines) + "\n")
           PY
 
       - name: Format
