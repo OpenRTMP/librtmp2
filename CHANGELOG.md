@@ -13,6 +13,45 @@ begin at `1.0.0`.
 
 ## [Unreleased]
 
+## [0.8.1] — 2026-09-18
+
+### Security
+- Capped multitrack/aggregate media fan-out against the per-poll message
+  budget on both sides: the client no longer lets aggregate/multitrack
+  messages dispatch past `MAX_MESSAGES_PER_POLL`, and the server decrements
+  the budget per multitrack sub-track; `pending_cache_evictions` is now
+  capped and publish renames are rejected once the limit is reached.
+- `max_connections_reached()` now counts pending RTMPS handshakes together
+  with active connections, closing a bypass where an attacker could fill
+  the configured `max_connections` cap with stalled TLS handshakes and then
+  open additional plaintext sessions up to roughly double the intended
+  limit.
+- Play/teardown sessions no longer refresh the setup-timeout window on
+  teardown or `createStream` unless media actually flowed (sent, received,
+  or injected), closing a way to squat a stream slot indefinitely across
+  repeated teardown/`createStream` cycles.
+- Multitrack `on_media_cb` authorization now charges the per-recv message
+  budget for sub-tracks after the first and rejects over-budget containers
+  with `Protocol`, restricted to connections that actually register an
+  `on_media_cb` callback (the frame-callback path enforces its own budget
+  separately).
+- Aggregate message sub-tags — including unknown sub-tag types — now count
+  individually against the per-recv message budget, and zero-length
+  sub-tags are rejected, closing a CPU-amplification gap left by the
+  aggregate budgeting added in `0.8.0`.
+
+### Fixed
+- Script/metadata tags are sent as AMF0 data instead of an AMF0 command,
+  chunk reassembly keeps draining a message when a fragment is already
+  buffered instead of stalling, E-RTMP audio FourCCs are mapped instead of
+  dropped, and AMF decoding rewinds correctly after a failed
+  connect-capabilities read instead of skipping the type byte twice.
+
+### Changed
+- Reduced branching complexity in media-frame handling across
+  `session/conn.rs`, the client, and the server module (internal refactor,
+  no behavior change).
+
 ## [0.8.0] — 2026-09-03
 
 ### Added
@@ -674,7 +713,8 @@ and others.
 - Protocol mapping documents for legacy, E-RTMP v1, and E-RTMP v2
 - `CONTRIBUTING.md` guidelines
 
-[Unreleased]: https://github.com/OpenRTMP/librtmp2/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/OpenRTMP/librtmp2/compare/v0.8.1...HEAD
+[0.8.1]: https://github.com/OpenRTMP/librtmp2/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/OpenRTMP/librtmp2/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/OpenRTMP/librtmp2/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/OpenRTMP/librtmp2/compare/v0.5.0...v0.6.0
