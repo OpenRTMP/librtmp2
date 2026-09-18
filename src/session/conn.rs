@@ -1026,6 +1026,16 @@ impl Conn {
             if body + data_size > payload.len() {
                 return Err(ErrorCode::Protocol);
             }
+            // Mirror multitrack: zero-length sub-tags pack the maximum sub-tag
+            // count into the smallest wire footprint and bypass per-sub-tag
+            // processing budgets when their type is not audio/video/script.
+            if data_size == 0 {
+                return Err(ErrorCode::Protocol);
+            }
+            if *messages_budget == 0 {
+                return Ok(());
+            }
+            *messages_budget = messages_budget.saturating_sub(1);
 
             if !have_base {
                 sub_base_ts = ts;
@@ -1040,12 +1050,7 @@ impl Conn {
             match tag_type {
                 msg_dispatch::RTMP_MSG_AUDIO
                 | msg_dispatch::RTMP_MSG_VIDEO
-                | msg_dispatch::RTMP_MSG_AMF0_DATA => {
-                    if *messages_budget == 0 {
-                        return Ok(());
-                    }
-                    *messages_budget = messages_budget.saturating_sub(1);
-                }
+                | msg_dispatch::RTMP_MSG_AMF0_DATA => {}
                 _ => {
                     pos = body + data_size + 4;
                     continue;
@@ -4991,6 +4996,35 @@ mod tests {
 
         assert_eq!(messages_budget, 0);
         assert_eq!(conn.pending_relay.len(), 3);
+    }
+
+    #[test]
+    fn aggregate_unknown_subtags_consume_message_budget() {
+        let mut conn = Conn::new();
+        let filler = [0x00];
+        let mut aggregate = Vec::new();
+        for i in 0..10 {
+            aggregate.extend(flv_subtag(0x01, i, &filler));
+        }
+
+        let mut messages_budget = 3;
+        conn.handle_aggregate(1, 0, &aggregate, &mut messages_budget)
+            .unwrap();
+
+        assert_eq!(messages_budget, 0);
+        assert!(conn.pending_relay.is_empty());
+    }
+
+    #[test]
+    fn aggregate_rejects_zero_size_subtags() {
+        let mut conn = Conn::new();
+        let aggregate = flv_subtag(0x08, 0, &[]);
+        let mut messages_budget = MAX_MESSAGES_PER_RECV;
+
+        assert_eq!(
+            conn.handle_aggregate(1, 0, &aggregate, &mut messages_budget),
+            Err(ErrorCode::Protocol)
+        );
     }
 
     #[test]

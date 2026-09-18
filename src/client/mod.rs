@@ -804,6 +804,13 @@ impl Client {
             if body + data_size > payload.len() {
                 return Err(ErrorCode::Protocol);
             }
+            if data_size == 0 {
+                return Err(ErrorCode::Protocol);
+            }
+            if *messages_processed >= MAX_MESSAGES_PER_POLL {
+                break;
+            }
+            *messages_processed += 1;
             if !have_base {
                 sub_base_ts = ts;
                 have_base = true;
@@ -814,10 +821,6 @@ impl Client {
             if let Some(cb) = self.on_frame_cb {
                 match tag_type {
                     msg_dispatch::RTMP_MSG_AUDIO => {
-                        if *messages_processed >= MAX_MESSAGES_PER_POLL {
-                            break;
-                        }
-                        *messages_processed += 1;
                         self.deliver_av_frame_cb(
                             cb,
                             FrameType::Audio,
@@ -827,10 +830,6 @@ impl Client {
                         )?;
                     }
                     msg_dispatch::RTMP_MSG_VIDEO => {
-                        if *messages_processed >= MAX_MESSAGES_PER_POLL {
-                            break;
-                        }
-                        *messages_processed += 1;
                         self.deliver_av_frame_cb(
                             cb,
                             FrameType::Video,
@@ -840,10 +839,6 @@ impl Client {
                         )?;
                     }
                     msg_dispatch::RTMP_MSG_AMF0_DATA => {
-                        if *messages_processed >= MAX_MESSAGES_PER_POLL {
-                            break;
-                        }
-                        *messages_processed += 1;
                         self.deliver_script_frame_cb(cb, out_ts, tag_payload);
                     }
                     _ => {
@@ -1927,6 +1922,46 @@ mod tests {
 
         assert_eq!(messages_processed, MAX_MESSAGES_PER_POLL);
         assert_eq!(*CALLBACKS.lock().unwrap(), MAX_MESSAGES_PER_POLL);
+    }
+
+    #[test]
+    fn aggregate_unknown_subtags_consume_message_budget() {
+        let filler = [0x00];
+        let mut aggregate = Vec::new();
+        for i in 0..(MAX_MESSAGES_PER_POLL + 8) {
+            aggregate.push(0x01);
+            aggregate.push(0x00);
+            aggregate.push(0x00);
+            aggregate.push(0x01);
+            aggregate.extend_from_slice(&[
+                (i >> 16) as u8,
+                (i >> 8) as u8,
+                i as u8,
+                (i >> 24) as u8,
+            ]);
+            aggregate.extend_from_slice(&[0, 0, 0]);
+            aggregate.push(filler[0]);
+            let prev_tag_size = 12u32;
+            aggregate.extend_from_slice(&prev_tag_size.to_be_bytes());
+        }
+
+        let mut wire = Buffer::new();
+        let mut cmsg = ChunkMessage::default();
+        cmsg.csid = 6;
+        cmsg.fmt = 0;
+        cmsg.msg_length = aggregate.len() as u32;
+        cmsg.msg_type_id = msg_dispatch::RTMP_MSG_AGGREGATE;
+        cmsg.msg_stream_id = 1;
+        chunk_write(&mut wire, &cmsg, &aggregate, aggregate.len(), 128).unwrap();
+
+        let mut client = Client::new();
+        client.recv_buffer.write(wire.peek()).unwrap();
+        let mut messages_processed = 0;
+        client
+            .drain_ready_messages(&mut messages_processed)
+            .unwrap();
+
+        assert_eq!(messages_processed, MAX_MESSAGES_PER_POLL);
     }
 
     #[test]
