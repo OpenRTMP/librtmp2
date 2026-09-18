@@ -1,3 +1,17 @@
+librtmp2 (0.8.1-1) UNRELEASED; urgency=medium
+
+  * Security: cap multitrack/aggregate media fan-out against the per-poll
+    message budget on client and server; count pending RTMPS handshakes
+    against max_connections; stop play/teardown slot squatting when no
+    media flowed; charge multitrack on_media_cb budget per sub-track; count
+    aggregate sub-tags (including unknown types) individually against the
+    per-recv budget and reject zero-length sub-tags.
+  * Fix script/metadata tags sent as AMF0 command instead of AMF0 data,
+    chunk reassembly stalling on an already-buffered fragment, unmapped
+    E-RTMP audio FourCCs, and AMF rewind after a failed connect-caps read.
+
+ -- OpenRTMP <info@openrtmp.org>  Fri, 18 Sep 2026 00:00:00 +0000
+
 librtmp2 (0.8.0-1) UNRELEASED; urgency=medium
 
   * Add FCPublish/releaseStream support, AMF3 shared objects gated on a new
