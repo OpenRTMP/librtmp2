@@ -2800,11 +2800,14 @@ mod tests {
         for _ in 0..2 {
             streams.push(std::net::TcpStream::connect(&addr).unwrap());
         }
-        server.accept_new_connections();
-        assert_eq!(server.connections.len(), 2);
+        accept_pending_connections(&mut server, 2);
 
         let _third = std::net::TcpStream::connect(&addr).unwrap();
-        server.accept_new_connections();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while std::time::Instant::now() < deadline {
+            server.accept_new_connections();
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
         assert_eq!(server.connections.len(), 2);
     }
 
@@ -2936,11 +2939,14 @@ mod tests {
         for _ in 0..2 {
             streams.push(std::net::TcpStream::connect(&addr).unwrap());
         }
-        server.accept_new_connections();
-        assert_eq!(server.connections.len(), 2);
+        accept_pending_connections(&mut server, 2);
 
         let _third = std::net::TcpStream::connect(&addr).unwrap();
-        server.accept_new_connections();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while std::time::Instant::now() < deadline {
+            server.accept_new_connections();
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
         assert_eq!(
             server.connections.len(),
             2,
@@ -3095,8 +3101,7 @@ mod tests {
         let addr = format!("127.0.0.1:{port}");
 
         let _stream = std::net::TcpStream::connect(&addr).unwrap();
-        server.accept_new_connections();
-        assert_eq!(server.connections.len(), 1);
+        accept_pending_connections(&mut server, 1);
 
         server.connections[0].state = ConnState::Handshake;
         server.connections[0]
@@ -3140,8 +3145,7 @@ mod tests {
         let addr = format!("127.0.0.1:{port}");
 
         let _stream = std::net::TcpStream::connect(&addr).unwrap();
-        server.accept_new_connections();
-        assert_eq!(server.connections.len(), 1);
+        accept_pending_connections(&mut server, 1);
 
         server.connections[0].state = ConnState::AppConnected;
         server.connections[0]
@@ -3185,8 +3189,7 @@ mod tests {
         let addr = format!("127.0.0.1:{port}");
 
         let _stream = std::net::TcpStream::connect(&addr).unwrap();
-        server.accept_new_connections();
-        assert_eq!(server.connections.len(), 1);
+        accept_pending_connections(&mut server, 1);
 
         server.connections[0].state = ConnState::Playing;
         server.connections[0].current_stream = Some(Box::new(crate::session::stream::Stream {
