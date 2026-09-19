@@ -1,11 +1,11 @@
 # Bug scan progress
 
-Last scanned: core (2026-08-26)
+Last scanned: handshake (2026-09-19)
 
 ## Modules
 
 - [x] core — Memory, logging, errors, buffer
-- [ ] handshake — C0/C1/C2 ↔ S0/S1/S2
+- [x] handshake — C0/C1/C2 ↔ S0/S1/S2
 - [ ] chunk — Chunk reader/writer/state
 - [ ] message — Message reassembly, control, commands
 - [ ] amf — AMF0 + AMF3
@@ -14,6 +14,20 @@ Last scanned: core (2026-08-26)
 - [ ] session — State machine, publish/play flows
 - [ ] server — Server listener
 - [ ] client — Outbound client
+
+## Findings (2026-09-19 handshake pass)
+
+- Reviewed `src/handshake.rs` in full and traced server integration in
+  `session/conn.rs` (`do_handshake`, `do_handshake_recurse`, `recv` loop
+  during `ConnState::Handshake`) and client integration in `client/mod.rs`
+  (`reset_session_state`, `do_handshake` with bounded read/send). Checked
+  partial-read behavior via `Buffer::read` (all-or-nothing), C0 version
+  rejection, C1/C2 length guards, S1/S2/C2 echo layout (time1/time2/random),
+  simple-handshake response to complex C1 (`c1_requests_complex_handshake`),
+  PRNG seeding (`fill_random`/`splitmix64`), output buffer caps, stale-state
+  on reconnect (client `reset_session_state` + `client_init`; server fresh
+  `Conn::new()` per accept), and error propagation (`ErrorCode::Handshake`
+  vs `Io` on partial input). No new critical or high-severity issue found.
 
 ## Findings (2026-08-26 core pass)
 
