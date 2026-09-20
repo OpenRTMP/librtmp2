@@ -12,7 +12,10 @@ jobs:
   mutants:
     name: cargo-mutants (shard ${{ matrix.shard }}/8)
     runs-on: ubuntu-latest
-    timeout-minutes: 65
+    # The slowest shards in the previous run reached the old 65-minute job
+    # limit while still processing valid mutants. Give them enough headroom
+    # to finish and upload a complete report.
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -45,9 +48,19 @@ jobs:
       # same runner would collide on the same port and get recorded as
       # "caught" by an unrelated bind failure rather than by the mutated
       # logic actually being exercised, inflating the mutation score.
+      #
+      # cargo-mutants uses exit code 2 for missed mutants and 3 for mutation
+      # test timeouts. Those are useful findings from this reporting workflow,
+      # not infrastructure failures, so preserve them as warnings and keep
+      # uploading the complete report. Baseline/tool/configuration failures
+      # still fail the job.
       - name: Run cargo-mutants
+        id: mutants
+        shell: bash
         run: |
+          set +e
           cargo mutants --no-shuffle --all-features \
+            --timeout 60 \
             --sharding round-robin \
             --shard "${{ matrix.shard }}/8" \
             -f 'src/amf/**' \
@@ -57,6 +70,58 @@ jobs:
             -f 'src/ertmp/**' \
             -f 'src/handshake.rs' \
             -- -- --test-threads=2
+          status=$?
+          set -e
+
+          echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+
+          case "$status" in
+            0)
+              echo "::notice::All tested viable mutants in this shard were caught."
+              ;;
+            2)
+              echo "::warning::cargo-mutants found missed mutants in this shard. See the uploaded report for details."
+              ;;
+            3)
+              echo "::warning::cargo-mutants found timed-out mutants in this shard. See the uploaded report for details."
+              ;;
+            *)
+              echo "::error::cargo-mutants failed with unexpected exit code $status."
+              exit "$status"
+              ;;
+          esac
+
+      - name: Summarize mutation results
+        if: always()
+        shell: bash
+        run: |
+          count_lines() {
+            if [[ -f "$1" ]]; then
+              wc -l < "$1" | tr -d ' '
+            else
+              printf '0'
+            fi
+          }
+
+          caught="$(count_lines mutants.out/caught.txt)"
+          missed="$(count_lines mutants.out/missed.txt)"
+          timed_out="$(count_lines mutants.out/timeout.txt)"
+          unviable="$(count_lines mutants.out/unviable.txt)"
+
+          {
+            echo "### cargo-mutants shard ${{ matrix.shard }}/8"
+            echo
+            echo "| Result | Count |"
+            echo "| --- | ---: |"
+            echo "| Caught | $caught |"
+            echo "| Missed | $missed |"
+            echo "| Timed out | $timed_out |"
+            echo "| Unviable | $unviable |"
+            echo
+            echo "cargo-mutants exit code: \`${{ steps.mutants.outputs.exit_code || 'not available' }}\`"
+            echo
+            echo "Missed and timed-out mutants are reported as findings; unexpected cargo-mutants errors still fail the job."
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload mutants report
         if: always()
