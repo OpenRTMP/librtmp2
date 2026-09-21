@@ -37,45 +37,51 @@ pub const MIN_WINDOW_ACK_SIZE: u32 = 1024;
 /* ── Encoder ── */
 
 /// Write a SetChunkSize control message.
+///
+/// Emits the bare 4-byte chunk size only. The RTMP control message type
+/// (`CTRL_SET_CHUNK_SIZE`) lives in the message header, not the payload, so it
+/// must NOT be prepended here (the matching decoder reads a bare value).
 pub fn write_set_chunk_size(buf: &mut Buffer, chunk_size: u32) -> Result<()> {
-    buf.write(&[CTRL_SET_CHUNK_SIZE])
-        .map_err(|_| ErrorCode::Internal)?;
     buf.write(&chunk_size.to_be_bytes())
         .map_err(|_| ErrorCode::Internal)?;
     Ok(())
 }
 
 /// Write an AbortMessage control message.
+///
+/// Bare 4-byte chunk-stream id; the control type is carried by the message
+/// header, not the payload.
 pub fn write_abort_message(buf: &mut Buffer, csid: u32) -> Result<()> {
-    buf.write(&[CTRL_ABORT_MESSAGE])
-        .map_err(|_| ErrorCode::Internal)?;
     buf.write(&csid.to_be_bytes())
         .map_err(|_| ErrorCode::Internal)?;
     Ok(())
 }
 
 /// Write an Acknowledgement control message.
+///
+/// Bare 4-byte sequence number; the control type is carried by the message
+/// header, not the payload.
 pub fn write_acknowledgement(buf: &mut Buffer, sequence_number: u32) -> Result<()> {
-    buf.write(&[CTRL_ACKNOWLEDGEMENT])
-        .map_err(|_| ErrorCode::Internal)?;
     buf.write(&sequence_number.to_be_bytes())
         .map_err(|_| ErrorCode::Internal)?;
     Ok(())
 }
 
 /// Write a WindowAckSize control message.
+///
+/// Bare 4-byte window size; the control type is carried by the message header,
+/// not the payload.
 pub fn write_window_ack_size(buf: &mut Buffer, window_size: u32) -> Result<()> {
-    buf.write(&[CTRL_WINDOW_ACK_SIZE])
-        .map_err(|_| ErrorCode::Internal)?;
     buf.write(&window_size.to_be_bytes())
         .map_err(|_| ErrorCode::Internal)?;
     Ok(())
 }
 
 /// Write a SetPeerBandwidth control message.
+///
+/// Bare 4-byte window size followed by the 1-byte limit type; the control type
+/// is carried by the message header, not the payload.
 pub fn write_set_peer_bandwidth(buf: &mut Buffer, window_size: u32, limit_type: u8) -> Result<()> {
-    buf.write(&[CTRL_SET_PEER_BANDWIDTH])
-        .map_err(|_| ErrorCode::Internal)?;
     buf.write(&window_size.to_be_bytes())
         .map_err(|_| ErrorCode::Internal)?;
     buf.write(&[limit_type]).map_err(|_| ErrorCode::Internal)?;
@@ -206,8 +212,8 @@ mod tests {
     fn set_chunk_size_round_trips_and_is_big_endian() {
         let mut buf = Buffer::new();
         write_set_chunk_size(&mut buf, 4096).unwrap();
-        assert_eq!(buf.peek(), &[CTRL_SET_CHUNK_SIZE, 0x00, 0x00, 0x10, 0x00]);
-        assert_eq!(read_set_chunk_size(&buf.peek()[1..]).unwrap(), 4096);
+        assert_eq!(buf.peek(), &[0x00, 0x00, 0x10, 0x00]);
+        assert_eq!(read_set_chunk_size(buf.peek()).unwrap(), 4096);
     }
 
     #[test]
@@ -225,7 +231,7 @@ mod tests {
     fn window_ack_size_round_trips() {
         let mut buf = Buffer::new();
         write_window_ack_size(&mut buf, 2_500_000).unwrap();
-        assert_eq!(read_window_ack_size(&buf.peek()[1..]).unwrap(), 2_500_000);
+        assert_eq!(read_window_ack_size(buf.peek()).unwrap(), 2_500_000);
     }
 
     #[test]
@@ -276,7 +282,7 @@ mod tests {
     fn set_peer_bandwidth_round_trips() {
         let mut buf = Buffer::new();
         write_set_peer_bandwidth(&mut buf, 2_500_000, 2).unwrap();
-        let (window, limit_type) = read_set_peer_bandwidth(&buf.peek()[1..]).unwrap();
+        let (window, limit_type) = read_set_peer_bandwidth(buf.peek()).unwrap();
         assert_eq!(window, 2_500_000);
         assert_eq!(limit_type, 2);
     }

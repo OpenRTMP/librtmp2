@@ -525,7 +525,7 @@ impl Server {
         {
             return Err(ErrorCode::Internal);
         }
-        let normalized = normalize_modex_payload(payload, CAPS_EX_MASK_MODEX);
+        let normalized = normalize_modex_payload(payload, CAPS_EX_MASK_MODEX, frame_type);
         let cache_payload = if normalized.as_ref().len() == payload.len()
             && std::ptr::eq(normalized.as_ref().as_ptr(), payload.as_ptr())
         {
@@ -1407,7 +1407,15 @@ impl Server {
                         .connections
                         .iter()
                         .any(|c| c.conn_id == frame.publisher_conn_id);
-                if !local_publisher_gone {
+                // A budget-deferred frame can cross into a later poll where
+                // `abandoned_this_batch` is empty; re-check the publisher's
+                // persisted abandoned-route set so an old-route frame cannot
+                // recreate the cache entry its rename/teardown evicted.
+                let route_abandoned = self.connections.iter().any(|c| {
+                    c.conn_id == frame.publisher_conn_id
+                        && c.relay_route_abandoned(&frame.app, &frame.stream_name)
+                });
+                if !local_publisher_gone && !route_abandoned {
                     self.cache_relay_frame(frame);
                 }
             }
@@ -1721,7 +1729,7 @@ impl Server {
     }
 
     fn cached_payload_is_multitrack(frame_type: FrameType, payload: &[u8]) -> bool {
-        let normalized = normalize_modex_payload(payload, CAPS_EX_MASK_MODEX);
+        let normalized = normalize_modex_payload(payload, CAPS_EX_MASK_MODEX, frame_type);
         is_multitrack_container(frame_type, normalized.as_ref())
     }
 
@@ -2085,7 +2093,9 @@ impl Server {
     ) -> std::collections::HashSet<(String, String, u64)> {
         let mut abandoned = std::collections::HashSet::new();
         for conn in &mut self.connections {
-            for key in conn.pending_cache_evictions.drain(..) {
+            let pending: Vec<(String, String)> =
+                conn.pending_cache_evictions.drain(..).collect();
+            for key in pending {
                 // Record the raw request regardless of ownership outcome
                 // below: a connection's own frame, queued under this key
                 // earlier in the same batch (before this rename/abandon was
@@ -2094,6 +2104,11 @@ impl Server {
                 // Scoped by conn_id so this doesn't suppress a *different*
                 // publisher's frame for the same (app, name).
                 abandoned.insert((key.0.clone(), key.1.clone(), conn.conn_id));
+                // Persist on the connection too: a frame deferred by the send
+                // budget outlives this batch, and on the next poll the set
+                // above is recomputed empty, so caching must still be able to
+                // tell the route was abandoned.
+                conn.note_abandoned_relay_route(key.0.clone(), key.1.clone());
 
                 let owns_key = self
                     .publisher_cache_keys

@@ -173,7 +173,13 @@ pub struct Conn {
     /// Canonical relay route key. When set, publisher/player media is matched
     /// on this value instead of the RTMP stream name (e.g. separate publish/play keys).
     pub relay_key: String,
+    /// Monotonic id generator for `createStream` responses. Never used as a cap.
     pub next_stream_id: u32,
+    /// Number of stream slots currently allocated on this connection. A fresh
+    /// `createStream` replaces the previous stream (net zero), and teardown
+    /// commands free their slot, so this stays bounded by actual concurrent
+    /// streams rather than the lifetime id counter.
+    active_stream_count: u32,
     pub current_stream: Option<Box<Stream>>,
     pub connect_cb_fired: bool,
     pub send_mutex: Mutex<()>,
@@ -235,6 +241,13 @@ pub struct Conn {
     claimed_publish_route: Option<String>,
     /// Cache keys to evict after the publisher renames its stream.
     pub pending_cache_evictions: Vec<(String, String)>,
+    /// Routes this connection abandoned via rename/teardown for which relay
+    /// frames may still be queued (e.g. deferred by the server send budget).
+    /// The built-in server consults this across poll ticks so an old-route
+    /// frame cannot recreate the stream-cache entry its eviction removed.
+    /// Entries are cleared when the connection queues fresh media for the
+    /// route again.
+    pub(crate) abandoned_relay_routes: std::collections::HashSet<(String, String)>,
     /// Last measured client↔server RTT in milliseconds (RTMP UserControl ping).
     pub rtt_ms: f64,
     pending_pings: HashMap<u32, Instant>,
@@ -294,6 +307,7 @@ impl Conn {
             app: String::new(),
             relay_key: String::new(),
             next_stream_id: 0,
+            active_stream_count: 0,
             current_stream: None,
             connect_cb_fired: false,
             send_mutex: Mutex::new(()),
@@ -322,6 +336,7 @@ impl Conn {
             publish_routes: None,
             claimed_publish_route: None,
             pending_cache_evictions: Vec::new(),
+            abandoned_relay_routes: std::collections::HashSet::new(),
             rtt_ms: 0.0,
             pending_pings: HashMap::new(),
             queued_ping: None,
@@ -523,6 +538,21 @@ impl Conn {
         Ok(())
     }
 
+    /// Record that `route` was abandoned so a still-queued (budget-deferred)
+    /// frame for it is not cached on a later poll. Capped so a peer that
+    /// renames many times cannot grow this set without bound.
+    pub(crate) fn note_abandoned_relay_route(&mut self, app: String, route: String) {
+        if self.abandoned_relay_routes.len() < MAX_PENDING_CACHE_EVICTIONS {
+            self.abandoned_relay_routes.insert((app, route));
+        }
+    }
+
+    pub(crate) fn relay_route_abandoned(&self, app: &str, route: &str) -> bool {
+        self.abandoned_relay_routes
+            .iter()
+            .any(|(a, r)| a == app && r == route)
+    }
+
     fn claim_publish_route(&mut self, stream: &str) -> bool {
         let claimed = match self.publish_routes.as_ref() {
             Some(routes) => routes.claim(self.conn_id, &self.app, stream),
@@ -664,7 +694,8 @@ impl Conn {
             }
             return Err(ErrorCode::Internal);
         }
-        let normalized = normalize_modex_payload(payload, self.negotiated_caps.caps_ex_mask);
+        let normalized =
+            normalize_modex_payload(payload, self.negotiated_caps.caps_ex_mask, frame_type);
         if let Err(e) = self.queue_relay_frame(frame_type, timestamp, payload, normalized.as_ref())
         {
             // Don't let a rejected frame (e.g. over the pending-byte budget)
@@ -735,6 +766,12 @@ impl Conn {
                 > self.max_pending_relay_bytes
         {
             return Err(ErrorCode::Internal);
+        }
+        // Fresh media on this route re-establishes ownership; it is only
+        // "abandoned" while no new frames for it are being produced.
+        if !self.abandoned_relay_routes.is_empty() {
+            self.abandoned_relay_routes
+                .remove(&(app.clone(), stream_name.clone()));
         }
         self.pending_relay.push(RelayFrame {
             frame_type,
@@ -943,7 +980,7 @@ impl Conn {
         // Gating on negotiated `caps_ex_mask` let publishers craft ModEx
         // frames whose extension bytes spell an allowed FourCC while relaying
         // a different inner codec to players.
-        let normalized_payload = normalize_modex_payload(payload, CAPS_EX_MASK_MODEX);
+        let normalized_payload = normalize_modex_payload(payload, CAPS_EX_MASK_MODEX, frame_type);
         let parse_payload = normalized_payload.as_ref();
         let current_codec = match frame_type {
             FrameType::Video => detect_video_codec(parse_payload),
@@ -1634,9 +1671,13 @@ impl Conn {
         self.chunk_reg.set_all_chunk_size(chunk_size);
     }
 
+    /// Switch the outbound chunk size to the size announced to the peer.
+    /// Inbound reassembly is deliberately left untouched: a peer's inbound
+    /// chunk size is only known from *its* SetChunkSize (see `handle_control`),
+    /// and applying our own announced size here would misparse peers that keep
+    /// sending at the default 128.
     fn activate_announced_chunk_size(&mut self) {
         self.active_chunk_size = self.chunk_size;
-        self.chunk_reg.set_all_chunk_size(self.chunk_size);
     }
 
     fn handle_user_control(&mut self, payload: &[u8]) -> Result<()> {
@@ -1832,7 +1873,18 @@ impl Conn {
                     );
                 }
                 let txn = command::read_create_stream(&mut buf)?;
-                if self.next_stream_id >= MAX_STREAMS_PER_CONN {
+                // Cap *concurrent* streams, not the lifetime id counter: a
+                // fresh createStream replaces current_stream (net zero), so a
+                // long-lived connection that repeatedly creates streams must
+                // never be permanently locked out once `next_stream_id` passes
+                // the limit. `next_stream_id` stays a pure id generator.
+                let replacing_stream = self.current_stream.is_some();
+                let projected_stream_count = if replacing_stream {
+                    self.active_stream_count
+                } else {
+                    self.active_stream_count.saturating_add(1)
+                };
+                if projected_stream_count > MAX_STREAMS_PER_CONN {
                     self.send_onstatus(0, "error", "NetStream.Failed", "Too many streams")?;
                 } else {
                     // A fresh createStream replaces current_stream outright;
@@ -1852,6 +1904,7 @@ impl Conn {
                     // be bypassed by createStream -> publish without
                     // re-authorization.
                     self.relay_enabled = false;
+                    self.active_stream_count = projected_stream_count;
                     self.next_stream_id += 1;
                     let stream_id = self.next_stream_id;
                     self.current_stream = Some(Box::new(Stream::new(stream_id)));
@@ -1934,6 +1987,12 @@ impl Conn {
                 let renaming_route = was_publishing
                     && !prev_route_key.is_empty()
                     && prev_route_key != next_route_key;
+                // `claim_publish_route` already queues an eviction for the
+                // previous route key on a rename (when a PublishRouteRegistry is
+                // active); remember what was pending so the block below does not
+                // queue the same eviction a second time and burn two slots of
+                // MAX_PENDING_CACHE_EVICTIONS for one rename.
+                let eviction_len_before_claim = self.pending_cache_evictions.len();
                 if !self.claim_publish_route(&next_route_key) {
                     return self.send_onstatus(
                         0,
@@ -1942,6 +2001,10 @@ impl Conn {
                         "Route already publishing",
                     );
                 }
+                let claim_queued_prev_eviction = self
+                    .pending_cache_evictions
+                    .get(eviction_len_before_claim..)
+                    .is_some_and(|queued| queued.iter().any(|(_, route)| route == &prev_route_key));
                 // Start a publish-media deadline only for a genuinely new
                 // publish session or route. Repeating `publish` for the route
                 // already owned by this connection must not refresh the timer.
@@ -1951,7 +2014,7 @@ impl Conn {
                     // not exempt a new empty publish from the media deadline.
                     self.injected_media_bytes = 0;
                 }
-                if renaming_route {
+                if renaming_route && !claim_queued_prev_eviction {
                     if self
                         .push_pending_cache_eviction(self.app.clone(), prev_route_key.clone())
                         .is_err()
@@ -2071,6 +2134,12 @@ impl Conn {
                     if let Some(ref mut stream) = self.current_stream {
                         stream.is_playing = true;
                         stream.is_publishing = false;
+                        // Mirror the FCUnpublish/deleteStream/closeStream
+                        // teardown arms: relay delivery is gated on !paused, so
+                        // a fresh play (resume/stream switch) on a previously
+                        // paused stream must clear it or the player receives no
+                        // relayed frames and gets reaped.
+                        stream.paused = false;
                         stream.name = name_str;
                     }
                     if !already_playing_same {
@@ -2114,6 +2183,8 @@ impl Conn {
                     // (relay delivery is gated on !paused).
                     stream.paused = false;
                 }
+                // Free this stream's slot for the concurrent-stream cap.
+                self.active_stream_count = self.active_stream_count.saturating_sub(1);
                 // Give this connection a fresh setup-timeout window now that
                 // it's gone idle, rather than treating the moment it stops
                 // publishing/playing as an immediate setup failure --
@@ -2233,6 +2304,8 @@ impl Conn {
                         stream.is_publishing = false;
                         stream.paused = false;
                     }
+                    // Free this stream's slot for the concurrent-stream cap.
+                    self.active_stream_count = self.active_stream_count.saturating_sub(1);
                     // See the matching comment in the FCUnpublish/deleteStream
                     // arm: give this connection a fresh setup-timeout window
                     // now that it's gone idle, but only on a genuine
@@ -2265,8 +2338,9 @@ impl Conn {
         self.send_control(0x06, &bw)?;
         let cs = self.chunk_size.to_be_bytes();
         self.send_control(0x01, &cs)?;
-        // Negotiation complete: subsequent server chunks and client sends use
-        // the announced size (connect AMF above was still at 128).
+        // Negotiation complete: subsequent server chunks use the announced
+        // size (connect AMF above was still at 128). Inbound parsing keeps the
+        // default until the peer sends its own SetChunkSize.
         self.activate_announced_chunk_size();
         let mut amf_buf = Buffer::with_capacity(512);
         crate::amf::amf0::write_string(&mut amf_buf, "_result")?;

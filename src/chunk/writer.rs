@@ -4,6 +4,7 @@
 
 use crate::buffer::Buffer;
 use crate::chunk::reader::ChunkMessage;
+use crate::chunk::state::RTMP_WIRE_MAX_MSG_LENGTH;
 use crate::types::ErrorCode;
 use crate::types::Result;
 
@@ -17,6 +18,23 @@ pub fn chunk_write(
 ) -> Result<()> {
     if chunk_size == 0 {
         return chunk_write(out, msg, payload, payload_len, 128);
+    }
+
+    // fmt=1 and fmt=2 carry a timestamp *delta* on the wire (RTMP spec 5.3.1.1),
+    // which the reader adds to the running per-CSID timestamp. This writer is
+    // stateless (it has no per-CSID prior-timestamp state), so it cannot compute
+    // a correct delta. Emitting `msg.timestamp` (an absolute value) here would
+    // make the far end accumulate a wrong cumulative timestamp, so reject
+    // instead of silently writing wrong bytes.
+    if msg.fmt == 1 || msg.fmt == 2 {
+        return Err(ErrorCode::Internal);
+    }
+
+    // The 24-bit message-length field cannot represent values above
+    // RTMP_WIRE_MAX_MSG_LENGTH; reject rather than silently truncating the
+    // header while still writing the full payload.
+    if msg.msg_length > RTMP_WIRE_MAX_MSG_LENGTH {
+        return Err(ErrorCode::Internal);
     }
 
     if msg.fmt <= 1 && payload_len != msg.msg_length as usize {
@@ -70,7 +88,14 @@ pub fn chunk_write(
         .map_err(|_| ErrorCode::Internal)?;
     }
 
-    if ext_ts && fmt <= 2 {
+    // Emit the 4-byte extended timestamp whenever the message's timestamp
+    // requires it. This must apply to the first fmt=3 chunk as well: a fmt=3
+    // chunk inherits the prior CSID header (including its `type0_ext_ts` flag),
+    // and the reader consumes 4 extra bytes on *every* fmt=3 chunk whose
+    // inherited state has ext_ts set. The continuation-chunk path below already
+    // does this; keeping the first chunk consistent avoids a writer/reader
+    // desync for fmt=3 messages with ts >= 0xFFFFFF.
+    if ext_ts {
         out.write(&ts.to_be_bytes())
             .map_err(|_| ErrorCode::Internal)?;
     }
@@ -264,5 +289,87 @@ mod tests {
         };
         let mut wire = Buffer::new();
         chunk_write(&mut wire, &msg, payload, payload.len(), 128).unwrap();
+    }
+
+    #[test]
+    fn fmt1_and_fmt2_are_rejected_by_stateless_writer() {
+        let payload = b"x";
+        for fmt in [1u8, 2u8] {
+            let msg = ChunkMessage {
+                csid: 3,
+                fmt,
+                timestamp: 5,
+                msg_length: payload.len() as u32,
+                msg_type_id: 0x14,
+                msg_stream_id: 1,
+                is_complete: false,
+            };
+            let mut wire = Buffer::new();
+            assert_eq!(
+                chunk_write(&mut wire, &msg, payload, payload.len(), 128),
+                Err(ErrorCode::Internal),
+                "fmt={fmt} must be rejected (delta encoding unsupported)"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_msg_length_above_wire_max() {
+        let msg = ChunkMessage {
+            csid: 3,
+            fmt: 0,
+            timestamp: 0,
+            msg_length: RTMP_WIRE_MAX_MSG_LENGTH + 1,
+            msg_type_id: 0x14,
+            msg_stream_id: 1,
+            is_complete: false,
+        };
+        let mut wire = Buffer::new();
+        assert_eq!(
+            chunk_write(&mut wire, &msg, &[], 0, 128),
+            Err(ErrorCode::Internal)
+        );
+    }
+
+    #[test]
+    fn fmt3_first_chunk_emits_extended_timestamp_when_set() {
+        // A fmt=0 message with an extended timestamp establishes the per-CSID
+        // state (type0_ext_ts = true) on the reader.
+        let first = ChunkMessage {
+            csid: 6,
+            fmt: 0,
+            timestamp: 0x0100_0000,
+            msg_length: 1,
+            msg_type_id: 0x09,
+            msg_stream_id: 1,
+            is_complete: false,
+        };
+        let mut wire0 = Buffer::new();
+        chunk_write(&mut wire0, &first, b"x", 1, 128).unwrap();
+
+        let mut reg = ChunkRegistry::new();
+        let mut out_msg = ChunkMessage::default();
+        let mut ptr = std::ptr::null();
+        let mut len = 0usize;
+        chunk_read(&mut wire0, &mut reg, None, &mut out_msg, &mut ptr, &mut len).unwrap();
+        assert_eq!(out_msg.timestamp, 0x0100_0000);
+
+        // A fmt=3 message reusing the inherited header must also carry the
+        // 4-byte extended timestamp, matching what the reader consumes.
+        let next = ChunkMessage {
+            csid: 6,
+            fmt: 3,
+            timestamp: 0x0100_0000,
+            msg_length: 1,
+            msg_type_id: 0x09,
+            msg_stream_id: 1,
+            is_complete: false,
+        };
+        let mut wire3 = Buffer::new();
+        chunk_write(&mut wire3, &next, b"y", 1, 128).unwrap();
+        let rc = chunk_read(&mut wire3, &mut reg, None, &mut out_msg, &mut ptr, &mut len).unwrap();
+        assert_eq!(rc, 1);
+        assert!(out_msg.is_complete);
+        assert_eq!(out_msg.timestamp, 0x0100_0000);
     }
 }

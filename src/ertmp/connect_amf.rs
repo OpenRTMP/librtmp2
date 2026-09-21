@@ -244,7 +244,13 @@ fn read_four_cc_strict_array(buf: &mut Buffer, list: &mut FourCcList) -> Result<
 fn read_fourcc_number(buf: &mut Buffer) -> Result<i32> {
     let ty = amf0::read_type(buf)?;
     if ty == Amf0Type::Number {
-        Ok(amf0::read_number(buf)? as i32)
+        let value = amf0::read_number(buf)?;
+        // Mirror read_caps_ex_amf's validation before narrowing to 32 bits.
+        if !value.is_finite() || value < 0.0 || value > u32::MAX as f64 || value.fract() != 0.0 {
+            return Err(ErrorCode::Protocol);
+        }
+        // Go through u32 so a FourCC with bit 31 set keeps its bit pattern.
+        Ok(value as u32 as i32)
     } else if ty == Amf0Type::String {
         let len = read_u16(buf)? as usize;
         if !(4..=MAX_CAPS_BLOB_BYTES).contains(&len) || buf.available() < len {

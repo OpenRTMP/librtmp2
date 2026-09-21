@@ -271,11 +271,20 @@ fn populate_audio_frame(frame: &mut Frame, payload: &[u8]) {
 
 fn legacy_video_codec(codec_id: u8) -> VideoCodec {
     match codec_id {
+        1 => VideoCodec::Jpeg,
+        2 => VideoCodec::Sorenson,
+        3 => VideoCodec::Screen,
+        4 => VideoCodec::Vp6,
+        5 => VideoCodec::Vp6a,
+        6 => VideoCodec::Screen2,
         7 => VideoCodec::H264,
         12 => VideoCodec::H265,
         13 => VideoCodec::Av1,
         14 => VideoCodec::Vp9,
-        _ => VideoCodec::H264,
+        // Reserved/unknown nibbles: `VideoCodec` is ABI-stable and has no
+        // Unknown variant, so fall back to its default (Jpeg) rather than
+        // falsely reporting the frame as AVC.
+        _ => VideoCodec::default(),
     }
 }
 

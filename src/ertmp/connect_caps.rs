@@ -159,7 +159,29 @@ pub fn video_fourcc_info_map_parse(map: &mut VideoFourCcInfoMap, data: &[u8]) ->
 
     let count = u32::from_be_bytes([data[0], data[1], data[2], data[3]])
         .min(crate::types::MAX_FOURCCS as u32) as usize;
-    let legacy_key_only = data.len() == 4 + count * 6;
+
+    // Key positions are identical in the legacy key-only and the new
+    // key+UI32-mask encodings; only the masks differ. Compute the length the
+    // legacy encoding would have (2-byte length + key per entry, with a
+    // wildcard taking a single key byte) so wildcard entries are handled
+    // instead of assuming every entry is 6 bytes.
+    let mut legacy_len = 4usize;
+    {
+        let mut scan = 4usize;
+        for _ in 0..count {
+            if scan + 2 > data.len() {
+                return Err(ErrorCode::Io);
+            }
+            let slen = u16::from_be_bytes([data[scan], data[scan + 1]]) as usize;
+            scan += 2;
+            if !matches!(slen, 1 | 4) || scan + slen > data.len() {
+                return Err(ErrorCode::Io);
+            }
+            scan += slen;
+            legacy_len += 2 + slen;
+        }
+    }
+    let legacy_key_only = data.len() == legacy_len;
     let mut offset = 4;
 
     for _ in 0..count {
@@ -246,6 +268,24 @@ mod video_map_tests {
         fourcc_list_parse(&mut parsed, &wire[..len]).unwrap();
         assert_eq!(parsed.count, 1);
         assert_eq!(parsed.entries[0].cc[0], b'*');
+    }
+
+    #[test]
+    fn video_info_map_parses_legacy_key_only_with_wildcard() {
+        // Legacy key-only encoding (no per-entry UI32 mask) containing a
+        // 3-byte wildcard entry: count=2, "*" + "vp09".
+        let wire: [u8; 13] = [
+            0, 0, 0, 2, // count
+            0, 1, b'*', // length 1 wildcard
+            0, 4, b'v', b'p', b'0', b'9', // length 4 fourcc
+        ];
+        let mut parsed = VideoFourCcInfoMap::default();
+        video_fourcc_info_map_parse(&mut parsed, &wire).unwrap();
+        assert_eq!(parsed.count, 2);
+        assert_eq!(parsed.entries[0].cc[0], b'*');
+        assert_eq!(&parsed.entries[1].cc[..4], b"vp09");
+        assert_eq!(parsed.masks[0], crate::types::FOUR_CC_INFO_ALL);
+        assert_eq!(parsed.masks[1], crate::types::FOUR_CC_INFO_ALL);
     }
 
     #[test]
