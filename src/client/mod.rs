@@ -15,7 +15,8 @@ use crate::chunk::writer::chunk_write;
 use crate::ertmp::multitrack_media::{foreach_track, is_multitrack_container};
 use crate::handshake::{self, Handshake};
 use crate::media::{
-    is_on_metadata_payload, normalize_modex_payload, populate_av_frame, populate_multitrack_frame,
+    is_on_metadata_payload, normalize_modex_payload_with_frame_type, populate_av_frame,
+    populate_multitrack_frame,
 };
 use crate::message::command;
 use crate::message::control;
@@ -873,8 +874,11 @@ impl Client {
         payload: &[u8],
         messages_processed: &mut usize,
     ) -> Result<()> {
-        let normalized =
-            normalize_modex_payload(payload, self.negotiated_caps.caps_ex_mask, frame_type);
+        let normalized = normalize_modex_payload_with_frame_type(
+            payload,
+            self.negotiated_caps.caps_ex_mask,
+            frame_type,
+        );
         let parse_payload = normalized.as_ref();
         let is_multitrack = is_multitrack_container(frame_type, parse_payload);
         let mut track_index = 0usize;
