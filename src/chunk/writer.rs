@@ -20,13 +20,17 @@ pub fn chunk_write(
         return chunk_write(out, msg, payload, payload_len, 128);
     }
 
-    // fmt=1 and fmt=2 carry a timestamp *delta* on the wire (RTMP spec 5.3.1.1),
-    // which the reader adds to the running per-CSID timestamp. This writer is
-    // stateless (it has no per-CSID prior-timestamp state), so it cannot compute
-    // a correct delta. Emitting `msg.timestamp` (an absolute value) here would
-    // make the far end accumulate a wrong cumulative timestamp, so reject
-    // instead of silently writing wrong bytes.
-    if msg.fmt == 1 || msg.fmt == 2 {
+    // Only fmt=0 is safe for this stateless writer:
+    // - fmt=1/2 carry a timestamp *delta* on the wire (RTMP spec 5.3.1.1),
+    //   which the reader adds to the running per-CSID timestamp; this writer
+    //   has no per-CSID prior-timestamp state, so it cannot compute a delta.
+    // - fmt=3 carries no message header at all; its extended-timestamp field is
+    //   present only when the inherited per-CSID header used one, which this
+    //   writer cannot know either.
+    // Emitting `msg.timestamp` for any of these would desynchronize the far
+    // end, so reject caller-supplied fmt 1/2/3. The continuation chunks
+    // generated internally below are unaffected.
+    if msg.fmt != 0 {
         return Err(ErrorCode::Internal);
     }
 
@@ -37,7 +41,7 @@ pub fn chunk_write(
         return Err(ErrorCode::Internal);
     }
 
-    if msg.fmt <= 1 && payload_len != msg.msg_length as usize {
+    if payload_len != msg.msg_length as usize {
         return Err(ErrorCode::Internal);
     }
     if payload_len > payload.len() {
@@ -49,52 +53,39 @@ pub fn chunk_write(
     let ts = msg.timestamp;
     let ext_ts = ts >= 0xFFFFFF;
 
-    // --- First chunk: basic header + conditional message header ---
+    // --- First chunk: basic header + fmt=0 message header ---
     let hdr = basic_header(csid, fmt);
     out.write(&hdr).map_err(|_| ErrorCode::Internal)?;
 
-    // fmt=0: timestamp+length+type+streamid (11 bytes)
-    // fmt=1: timestamp+length+type         ( 7 bytes, no stream id)
-    // fmt=2: timestamp only                ( 3 bytes)
-    // fmt=3: no message header at all
+    // fmt=0 header: timestamp(3) + length(3) + type(1) + stream id(4 LE).
 
-    if fmt <= 2 {
-        // timestamp (3 bytes)
-        let mut ts_buf = [0u8; 3];
-        hton24(&mut ts_buf, if ext_ts { 0xFFFFFF } else { ts });
-        out.write(&ts_buf).map_err(|_| ErrorCode::Internal)?;
-    }
+    // timestamp (3 bytes; 0xFFFFFF signals the 4-byte extended timestamp below)
+    let mut ts_buf = [0u8; 3];
+    hton24(&mut ts_buf, if ext_ts { 0xFFFFFF } else { ts });
+    out.write(&ts_buf).map_err(|_| ErrorCode::Internal)?;
 
-    if fmt <= 1 {
-        // message length (3 bytes)
-        let mut len_buf = [0u8; 3];
-        hton24(&mut len_buf, msg.msg_length);
-        out.write(&len_buf).map_err(|_| ErrorCode::Internal)?;
+    // message length (3 bytes)
+    let mut len_buf = [0u8; 3];
+    hton24(&mut len_buf, msg.msg_length);
+    out.write(&len_buf).map_err(|_| ErrorCode::Internal)?;
 
-        // message type id (1 byte)
-        out.write(&[msg.msg_type_id])
-            .map_err(|_| ErrorCode::Internal)?;
-    }
-
-    if fmt == 0 {
-        // stream id (4 bytes, little-endian)
-        let sid = msg.msg_stream_id;
-        out.write(&[
-            (sid & 0xFF) as u8,
-            ((sid >> 8) & 0xFF) as u8,
-            ((sid >> 16) & 0xFF) as u8,
-            ((sid >> 24) & 0xFF) as u8,
-        ])
+    // message type id (1 byte)
+    out.write(&[msg.msg_type_id])
         .map_err(|_| ErrorCode::Internal)?;
-    }
 
-    // Emit the 4-byte extended timestamp whenever the message's timestamp
-    // requires it. This must apply to the first fmt=3 chunk as well: a fmt=3
-    // chunk inherits the prior CSID header (including its `type0_ext_ts` flag),
-    // and the reader consumes 4 extra bytes on *every* fmt=3 chunk whose
-    // inherited state has ext_ts set. The continuation-chunk path below already
-    // does this; keeping the first chunk consistent avoids a writer/reader
-    // desync for fmt=3 messages with ts >= 0xFFFFFF.
+    // stream id (4 bytes, little-endian)
+    let sid = msg.msg_stream_id;
+    out.write(&[
+        (sid & 0xFF) as u8,
+        ((sid >> 8) & 0xFF) as u8,
+        ((sid >> 16) & 0xFF) as u8,
+        ((sid >> 24) & 0xFF) as u8,
+    ])
+    .map_err(|_| ErrorCode::Internal)?;
+
+    // 4-byte extended timestamp when the 24-bit field is saturated. The
+    // internally generated continuation chunks below carry the same field, so
+    // the reader (which inherits `type0_ext_ts` for the CSID) stays in sync.
     if ext_ts {
         out.write(&ts.to_be_bytes())
             .map_err(|_| ErrorCode::Internal)?;
@@ -276,25 +267,9 @@ mod tests {
     }
 
     #[test]
-    fn fmt3_ignores_stale_msg_length_field() {
-        let payload = b"continuation";
-        let msg = ChunkMessage {
-            csid: 3,
-            fmt: 3,
-            timestamp: 0,
-            msg_length: 0,
-            msg_type_id: 0x14,
-            msg_stream_id: 1,
-            is_complete: false,
-        };
-        let mut wire = Buffer::new();
-        chunk_write(&mut wire, &msg, payload, payload.len(), 128).unwrap();
-    }
-
-    #[test]
-    fn fmt1_and_fmt2_are_rejected_by_stateless_writer() {
+    fn fmt1_to_fmt3_are_rejected_by_stateless_writer() {
         let payload = b"x";
-        for fmt in [1u8, 2u8] {
+        for fmt in [1u8, 2u8, 3u8] {
             let msg = ChunkMessage {
                 csid: 3,
                 fmt,
@@ -308,7 +283,7 @@ mod tests {
             assert_eq!(
                 chunk_write(&mut wire, &msg, payload, payload.len(), 128),
                 Err(ErrorCode::Internal),
-                "fmt={fmt} must be rejected (delta encoding unsupported)"
+                "fmt={fmt} must be rejected (needs per-CSID state the writer lacks)"
             );
         }
     }
@@ -332,44 +307,36 @@ mod tests {
     }
 
     #[test]
-    fn fmt3_first_chunk_emits_extended_timestamp_when_set() {
-        // A fmt=0 message with an extended timestamp establishes the per-CSID
-        // state (type0_ext_ts = true) on the reader.
-        let first = ChunkMessage {
+    fn fragmented_extended_timestamp_round_trips() {
+        // Internally generated continuation chunks must carry the same 4-byte
+        // extended timestamp the reader inherits for the CSID.
+        let payload = vec![0xAB_u8; 300];
+        let msg = ChunkMessage {
             csid: 6,
             fmt: 0,
             timestamp: 0x0100_0000,
-            msg_length: 1,
+            msg_length: payload.len() as u32,
             msg_type_id: 0x09,
             msg_stream_id: 1,
             is_complete: false,
         };
-        let mut wire0 = Buffer::new();
-        chunk_write(&mut wire0, &first, b"x", 1, 128).unwrap();
+        let mut wire = Buffer::new();
+        chunk_write(&mut wire, &msg, &payload, payload.len(), 128).unwrap();
 
         let mut reg = ChunkRegistry::new();
         let mut out_msg = ChunkMessage::default();
         let mut ptr = std::ptr::null();
         let mut len = 0usize;
-        chunk_read(&mut wire0, &mut reg, None, &mut out_msg, &mut ptr, &mut len).unwrap();
-        assert_eq!(out_msg.timestamp, 0x0100_0000);
-
-        // A fmt=3 message reusing the inherited header must also carry the
-        // 4-byte extended timestamp, matching what the reader consumes.
-        let next = ChunkMessage {
-            csid: 6,
-            fmt: 3,
-            timestamp: 0x0100_0000,
-            msg_length: 1,
-            msg_type_id: 0x09,
-            msg_stream_id: 1,
-            is_complete: false,
-        };
-        let mut wire3 = Buffer::new();
-        chunk_write(&mut wire3, &next, b"y", 1, 128).unwrap();
-        let rc = chunk_read(&mut wire3, &mut reg, None, &mut out_msg, &mut ptr, &mut len).unwrap();
+        let mut rc;
+        loop {
+            rc = chunk_read(&mut wire, &mut reg, None, &mut out_msg, &mut ptr, &mut len).unwrap();
+            if rc == 1 || (rc == 0 && wire.available() == 0) {
+                break;
+            }
+        }
         assert_eq!(rc, 1);
-        assert!(out_msg.is_complete);
         assert_eq!(out_msg.timestamp, 0x0100_0000);
+        let received = unsafe { std::slice::from_raw_parts(ptr, len) };
+        assert_eq!(received, payload.as_slice());
     }
 }
