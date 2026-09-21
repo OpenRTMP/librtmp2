@@ -19,7 +19,23 @@ const MAX_MODEX_CHAIN_LAYERS: usize = 32;
 /// `detected_audio_codec`) will not fire for that frame. This is a deliberate
 /// CPU-amplification tradeoff, not a parsing bug — callers that surface
 /// detected-codec stats should expect them to be absent for such frames.
-pub fn normalize_modex_payload<'a>(
+///
+/// This is the legacy two-argument entry point: it treats the payload as a
+/// video tag, so legacy audio tags that also set bit 7 are peeled as before.
+/// Prefer [`normalize_modex_payload_with_frame_type`] when the frame type is
+/// known so legacy audio is not peeled.
+pub fn normalize_modex_payload<'a>(payload: &'a [u8], caps_ex_mask: u32) -> Cow<'a, [u8]> {
+    normalize_modex_payload_with_frame_type(payload, caps_ex_mask, FrameType::Video)
+}
+
+/// Frame-type-aware variant of [`normalize_modex_payload`].
+///
+/// Audio is peeled only when the tag carries the reserved E-RTMP ExHeader
+/// nibble 9 (see `ertmp::exaudio`): legacy SoundFormat 8/10/11/14 also set
+/// bit 7 and can carry a low nibble of 7 (e.g. `0x87` G.711U), which must not
+/// be treated as a ModEx wrapper. Video is unambiguous (legacy video never
+/// sets bit 7), so it keeps the previous behavior.
+pub fn normalize_modex_payload_with_frame_type<'a>(
     payload: &'a [u8],
     caps_ex_mask: u32,
     frame_type: FrameType,
@@ -32,11 +48,8 @@ pub fn normalize_modex_payload<'a>(
         return Cow::Borrowed(payload);
     }
 
-    // Legacy audio SoundFormat 8/10/11/14 also set bit 7 and can carry a low
-    // nibble of 7 (e.g. 0x87 G.711U), which must not be peeled as a ModEx
-    // wrapper. Genuine E-RTMP enhanced audio uses the reserved ExHeader nibble
-    // 9 (see `ertmp::exaudio`), so only peel audio when that nibble is present.
-    // Video is unambiguous: legacy video never sets bit 7 (frame type 1-5).
+    // Audio: only genuine E-RTMP enhanced tags (ExHeader nibble 9) may be
+    // peeled; see the function docs. Video keeps the previous behavior.
     if frame_type == FrameType::Audio && (payload[0] >> 4) & 0x0F != 0x09 {
         return Cow::Borrowed(payload);
     }
@@ -94,7 +107,8 @@ mod tests {
             0x97, 0x02, 0x00, 0x01, 0x02, 0x01, b'a', b'v', b'c', b'1', 0, 0, 0, 0xAA,
         ];
         assert_eq!(
-            normalize_modex_payload(&payload, CAPS_EX_MASK_MODEX, FrameType::Video).as_ref(),
+            normalize_modex_payload_with_frame_type(&payload, CAPS_EX_MASK_MODEX, FrameType::Video)
+                .as_ref(),
             &[0x91, b'a', b'v', b'c', b'1', 0, 0, 0, 0xAA]
         );
     }
@@ -104,7 +118,7 @@ mod tests {
         // 0x87 is legacy G.711U (SoundFormat 8), not a genuine enhanced tag.
         let payload = [0x87, 0x02, 0x00, 0x01, 0x02, 0x01, b'a', b'v', b'c', b'1'];
         assert!(matches!(
-            normalize_modex_payload(&payload, CAPS_EX_MASK_MODEX, FrameType::Audio),
+            normalize_modex_payload_with_frame_type(&payload, CAPS_EX_MASK_MODEX, FrameType::Audio),
             Cow::Borrowed(_)
         ));
     }
@@ -116,7 +130,8 @@ mod tests {
             0x97, 0x02, 0x00, 0x01, 0x02, 0x01, b'O', b'p', b'u', b's', 0xAA,
         ];
         assert_eq!(
-            normalize_modex_payload(&payload, CAPS_EX_MASK_MODEX, FrameType::Audio).as_ref(),
+            normalize_modex_payload_with_frame_type(&payload, CAPS_EX_MASK_MODEX, FrameType::Audio)
+                .as_ref(),
             &[0x91, b'O', b'p', b'u', b's', 0xAA]
         );
     }
@@ -125,16 +140,30 @@ mod tests {
     fn legacy_aac_is_unchanged() {
         let payload = [0xAF, 0x00, 0x12, 0x10];
         assert!(matches!(
-            normalize_modex_payload(&payload, CAPS_EX_MASK_MODEX, FrameType::Audio),
+            normalize_modex_payload_with_frame_type(&payload, CAPS_EX_MASK_MODEX, FrameType::Audio),
             Cow::Borrowed(_)
         ));
+    }
+
+    #[test]
+    fn legacy_two_argument_entry_point_keeps_video_behavior() {
+        // The compatibility wrapper treats the payload as video, preserving the
+        // pre-existing behavior for external callers.
+        let payload = [
+            0x97, 0x02, 0x00, 0x01, 0x02, 0x01, b'a', b'v', b'c', b'1', 0, 0, 0, 0xAA,
+        ];
+        assert_eq!(
+            normalize_modex_payload(&payload, CAPS_EX_MASK_MODEX).as_ref(),
+            &[0x91, b'a', b'v', b'c', b'1', 0, 0, 0, 0xAA]
+        );
     }
 
     #[test]
     fn malformed_modex_is_left_opaque() {
         let payload = [0x97, 0x05, 0x00];
         assert_eq!(
-            normalize_modex_payload(&payload, CAPS_EX_MASK_MODEX, FrameType::Video).as_ref(),
+            normalize_modex_payload_with_frame_type(&payload, CAPS_EX_MASK_MODEX, FrameType::Video)
+                .as_ref(),
             payload
         );
     }
@@ -147,7 +176,7 @@ mod tests {
         }
         payload.extend_from_slice(&[0x91, b'a', b'v', b'c', b'1', 0xAA]);
         assert!(matches!(
-            normalize_modex_payload(&payload, CAPS_EX_MASK_MODEX, FrameType::Video),
+            normalize_modex_payload_with_frame_type(&payload, CAPS_EX_MASK_MODEX, FrameType::Video),
             Cow::Borrowed(_)
         ));
     }

@@ -12,7 +12,7 @@ use crate::ertmp::connect_amf::{negotiate_caps, write_negotiated_caps};
 use crate::ertmp::multitrack_media::{first_track_fourcc, foreach_track, is_multitrack_container};
 use crate::handshake::{self, Handshake, HandshakeState};
 use crate::media::{
-    ERTMP_PACKET_TYPE_MODEX, is_on_metadata_payload, normalize_modex_payload,
+    ERTMP_PACKET_TYPE_MODEX, is_on_metadata_payload, normalize_modex_payload_with_frame_type,
     parse_video_metadata_hdr, populate_av_frame, populate_multitrack_frame,
 };
 use crate::message::command;
@@ -694,8 +694,11 @@ impl Conn {
             }
             return Err(ErrorCode::Internal);
         }
-        let normalized =
-            normalize_modex_payload(payload, self.negotiated_caps.caps_ex_mask, frame_type);
+        let normalized = normalize_modex_payload_with_frame_type(
+            payload,
+            self.negotiated_caps.caps_ex_mask,
+            frame_type,
+        );
         if let Err(e) = self.queue_relay_frame(frame_type, timestamp, payload, normalized.as_ref())
         {
             // Don't let a rejected frame (e.g. over the pending-byte budget)
@@ -980,7 +983,8 @@ impl Conn {
         // Gating on negotiated `caps_ex_mask` let publishers craft ModEx
         // frames whose extension bytes spell an allowed FourCC while relaying
         // a different inner codec to players.
-        let normalized_payload = normalize_modex_payload(payload, CAPS_EX_MASK_MODEX, frame_type);
+        let normalized_payload =
+            normalize_modex_payload_with_frame_type(payload, CAPS_EX_MASK_MODEX, frame_type);
         let parse_payload = normalized_payload.as_ref();
         let current_codec = match frame_type {
             FrameType::Video => detect_video_codec(parse_payload),

@@ -207,14 +207,18 @@ mod tests {
     fn legacy_audio_with_multitrack_shaped_nibble_is_not_a_container() {
         // 0x85 is legacy G.711U (SoundFormat 8) with low nibble 5, not an
         // E-RTMP enhanced audio multitrack container.
-        let legacy = [0x85, 0x10, b'a', b'v', b'c', b'1', 0x00, 0x00, 0x00, 0x01, 0xAA];
+        let legacy = [
+            0x85, 0x10, b'a', b'v', b'c', b'1', 0x00, 0x00, 0x00, 0x01, 0xAA,
+        ];
         assert!(!is_multitrack_container(FrameType::Audio, &legacy));
     }
 
     #[test]
     fn enhanced_audio_multitrack_container_is_detected() {
         // 0x95 = E-RTMP ExHeader nibble 9 + audio multitrack packet type 5.
-        let enhanced = [0x95, 0x10, b'O', b'p', b'u', b's', 0x00, 0x00, 0x00, 0x01, 0xAA];
+        let enhanced = [
+            0x95, 0x10, b'O', b'p', b'u', b's', 0x00, 0x00, 0x00, 0x01, 0xAA,
+        ];
         assert!(is_multitrack_container(FrameType::Audio, &enhanced));
     }
 
@@ -294,7 +298,9 @@ mod tests {
     fn rejects_multitrack_messages_with_zero_size_subtracks() {
         let zero_payload = build_many_tracks_zero_payload_message(2);
         let mut calls = 0;
-        assert!(!foreach_track(FrameType::Video, &zero_payload, |_| calls += 1));
+        assert!(!foreach_track(FrameType::Video, &zero_payload, |_| {
+            calls += 1
+        }));
         assert_eq!(calls, 0);
     }
 }
