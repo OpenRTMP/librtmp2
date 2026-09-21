@@ -25,7 +25,11 @@ pub fn parse(data: &[u8], tag: &mut AudioTag) -> Result<()> {
         10 => AudioCodec::Aac,
         11 => AudioCodec::Speex,
         14 => AudioCodec::Opus,
-        _ => AudioCodec::Aac,
+        // SoundFormat 9 is E-RTMP's ExHeader and 12/13/15 are reserved; reject
+        // rather than silently mapping to AAC. Enhanced audio must be parsed
+        // via `ertmp::exaudio` (see the `flv` module docs). Legacy SoundFormat
+        // 8/10/11/14 keep bit 7 set and stay on the legacy path below.
+        _ => return Err(ErrorCode::Unsupported),
     };
     tag.sample_rate = (data[0] >> 2) & 0x03;
     tag.bit_depth = (data[0] >> 1) & 0x01;

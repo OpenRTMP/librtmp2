@@ -38,7 +38,16 @@ pub fn is_multitrack_container(frame_type: FrameType, payload: &[u8]) -> bool {
     }
     let expected = match frame_type {
         FrameType::Video => ERTMP_VIDEO_PACKET_TYPE_MULTITRACK,
-        FrameType::Audio => ERTMP_AUDIO_PACKET_TYPE_MULTITRACK,
+        FrameType::Audio => {
+            // Genuine E-RTMP enhanced audio uses the reserved ExHeader nibble 9
+            // (see `ertmp::exaudio`). Legacy SoundFormat 8/10/11/14 also set
+            // bit 7 and can carry a low nibble of 5 (e.g. 0x85 G.711U), which
+            // must not be misread as an audio multitrack container.
+            if (payload[0] >> 4) & 0x0F != 0x09 {
+                return false;
+            }
+            ERTMP_AUDIO_PACKET_TYPE_MULTITRACK
+        }
         _ => return false,
     };
     (payload[0] & 0x0F) == expected
@@ -192,6 +201,21 @@ mod tests {
     fn detects_multitrack_container() {
         let payload = build_many_tracks_video_message();
         assert!(is_multitrack_container(FrameType::Video, &payload));
+    }
+
+    #[test]
+    fn legacy_audio_with_multitrack_shaped_nibble_is_not_a_container() {
+        // 0x85 is legacy G.711U (SoundFormat 8) with low nibble 5, not an
+        // E-RTMP enhanced audio multitrack container.
+        let legacy = [0x85, 0x10, b'a', b'v', b'c', b'1', 0x00, 0x00, 0x00, 0x01, 0xAA];
+        assert!(!is_multitrack_container(FrameType::Audio, &legacy));
+    }
+
+    #[test]
+    fn enhanced_audio_multitrack_container_is_detected() {
+        // 0x95 = E-RTMP ExHeader nibble 9 + audio multitrack packet type 5.
+        let enhanced = [0x95, 0x10, b'O', b'p', b'u', b's', 0x00, 0x00, 0x00, 0x01, 0xAA];
+        assert!(is_multitrack_container(FrameType::Audio, &enhanced));
     }
 
     #[test]

@@ -2,7 +2,7 @@
 
 use std::borrow::Cow;
 
-use crate::types::CAPS_EX_MASK_MODEX;
+use crate::types::{CAPS_EX_MASK_MODEX, FrameType};
 
 /// Enhanced RTMP packet type for ModEx wrappers (E-RTMP v2 §16).
 pub const ERTMP_PACKET_TYPE_MODEX: u8 = 7;
@@ -19,12 +19,25 @@ const MAX_MODEX_CHAIN_LAYERS: usize = 32;
 /// `detected_audio_codec`) will not fire for that frame. This is a deliberate
 /// CPU-amplification tradeoff, not a parsing bug — callers that surface
 /// detected-codec stats should expect them to be absent for such frames.
-pub fn normalize_modex_payload<'a>(payload: &'a [u8], caps_ex_mask: u32) -> Cow<'a, [u8]> {
+pub fn normalize_modex_payload<'a>(
+    payload: &'a [u8],
+    caps_ex_mask: u32,
+    frame_type: FrameType,
+) -> Cow<'a, [u8]> {
     if payload.is_empty()
         || (caps_ex_mask & CAPS_EX_MASK_MODEX) == 0
         || payload[0] & 0x80 == 0
         || payload[0] & 0x0F != ERTMP_PACKET_TYPE_MODEX
     {
+        return Cow::Borrowed(payload);
+    }
+
+    // Legacy audio SoundFormat 8/10/11/14 also set bit 7 and can carry a low
+    // nibble of 7 (e.g. 0x87 G.711U), which must not be peeled as a ModEx
+    // wrapper. Genuine E-RTMP enhanced audio uses the reserved ExHeader nibble
+    // 9 (see `ertmp::exaudio`), so only peel audio when that nibble is present.
+    // Video is unambiguous: legacy video never sets bit 7 (frame type 1-5).
+    if frame_type == FrameType::Audio && (payload[0] >> 4) & 0x0F != 0x09 {
         return Cow::Borrowed(payload);
     }
 
@@ -81,8 +94,30 @@ mod tests {
             0x97, 0x02, 0x00, 0x01, 0x02, 0x01, b'a', b'v', b'c', b'1', 0, 0, 0, 0xAA,
         ];
         assert_eq!(
-            normalize_modex_payload(&payload, CAPS_EX_MASK_MODEX).as_ref(),
+            normalize_modex_payload(&payload, CAPS_EX_MASK_MODEX, FrameType::Video).as_ref(),
             &[0x91, b'a', b'v', b'c', b'1', 0, 0, 0, 0xAA]
+        );
+    }
+
+    #[test]
+    fn legacy_audio_g711u_with_modex_shaped_tail_is_unchanged() {
+        // 0x87 is legacy G.711U (SoundFormat 8), not a genuine enhanced tag.
+        let payload = [0x87, 0x02, 0x00, 0x01, 0x02, 0x01, b'a', b'v', b'c', b'1'];
+        assert!(matches!(
+            normalize_modex_payload(&payload, CAPS_EX_MASK_MODEX, FrameType::Audio),
+            Cow::Borrowed(_)
+        ));
+    }
+
+    #[test]
+    fn enhanced_audio_modex_wrapper_is_peeled() {
+        // 0x97 = E-RTMP ExHeader nibble 9 + ModEx packet type 7.
+        let payload = [
+            0x97, 0x02, 0x00, 0x01, 0x02, 0x01, b'O', b'p', b'u', b's', 0xAA,
+        ];
+        assert_eq!(
+            normalize_modex_payload(&payload, CAPS_EX_MASK_MODEX, FrameType::Audio).as_ref(),
+            &[0x91, b'O', b'p', b'u', b's', 0xAA]
         );
     }
 
@@ -90,7 +125,7 @@ mod tests {
     fn legacy_aac_is_unchanged() {
         let payload = [0xAF, 0x00, 0x12, 0x10];
         assert!(matches!(
-            normalize_modex_payload(&payload, CAPS_EX_MASK_MODEX),
+            normalize_modex_payload(&payload, CAPS_EX_MASK_MODEX, FrameType::Audio),
             Cow::Borrowed(_)
         ));
     }
@@ -99,7 +134,7 @@ mod tests {
     fn malformed_modex_is_left_opaque() {
         let payload = [0x97, 0x05, 0x00];
         assert_eq!(
-            normalize_modex_payload(&payload, CAPS_EX_MASK_MODEX).as_ref(),
+            normalize_modex_payload(&payload, CAPS_EX_MASK_MODEX, FrameType::Video).as_ref(),
             payload
         );
     }
@@ -112,7 +147,7 @@ mod tests {
         }
         payload.extend_from_slice(&[0x91, b'a', b'v', b'c', b'1', 0xAA]);
         assert!(matches!(
-            normalize_modex_payload(&payload, CAPS_EX_MASK_MODEX),
+            normalize_modex_payload(&payload, CAPS_EX_MASK_MODEX, FrameType::Video),
             Cow::Borrowed(_)
         ));
     }

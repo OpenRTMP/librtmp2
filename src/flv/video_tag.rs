@@ -35,8 +35,15 @@ pub fn parse(data: &[u8], tag: &mut VideoTag) -> Result<()> {
 
     if data.len() >= 5 && tag.codec == VideoCodec::H264 {
         tag.avc_packet_type = data[1];
-        tag.composition_time =
-            ((data[2] as u32) << 16) | ((data[3] as u32) << 8) | (data[4] as u32);
+        // CompositionTime is a signed 24-bit integer (SI24); sign-extend so
+        // negative B-frame offsets do not read back as ~16.7M.
+        let ct = ((data[2] as i32) << 16) | ((data[3] as i32) << 8) | (data[4] as i32);
+        let ct = if ct & 0x00800000 != 0 {
+            ct | 0xFF000000u32 as i32
+        } else {
+            ct
+        };
+        tag.composition_time = ct as u32;
     }
 
     tag.data = data.as_ptr();
@@ -58,6 +65,15 @@ mod tests {
         assert_eq!(tag.codec, VideoCodec::H264);
         assert_eq!(tag.avc_packet_type, 1);
         assert_eq!(tag.composition_time, 0x00012C);
+    }
+
+    #[test]
+    fn parse_h264_keyframe_sign_extends_negative_cts() {
+        // CompositionTime -1 (SI24 0xFFFFFF) must not read as 0x00FFFFFF.
+        let payload = [0x17, 0x01, 0xFF, 0xFF, 0xFF];
+        let mut tag = VideoTag::default();
+        parse(&payload, &mut tag).unwrap();
+        assert_eq!(tag.composition_time, (-1i32) as u32);
     }
 
     #[test]
