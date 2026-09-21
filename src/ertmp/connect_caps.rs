@@ -160,28 +160,34 @@ pub fn video_fourcc_info_map_parse(map: &mut VideoFourCcInfoMap, data: &[u8]) ->
     let count = u32::from_be_bytes([data[0], data[1], data[2], data[3]])
         .min(crate::types::MAX_FOURCCS as u32) as usize;
 
-    // Key positions are identical in the legacy key-only and the new
-    // key+UI32-mask encodings; only the masks differ. Compute the length the
-    // legacy encoding would have (2-byte length + key per entry, with a
-    // wildcard taking a single key byte) so wildcard entries are handled
-    // instead of assuming every entry is 6 bytes.
-    let mut legacy_len = 4usize;
-    {
+    // The two encodings store keys at the same positions and differ only by
+    // the trailing UI32 mask per entry. Probe both layouts without erroring:
+    // walking a key+mask blob as if it were key-only would otherwise read a
+    // mask (e.g. 0x00000003) as the next entry's string length and reject the
+    // whole map. Each walk returns the total length it would consume.
+    let walk = |entry_extra: usize| -> Option<usize> {
         let mut scan = 4usize;
         for _ in 0..count {
             if scan + 2 > data.len() {
-                return Err(ErrorCode::Io);
+                return None;
             }
             let slen = u16::from_be_bytes([data[scan], data[scan + 1]]) as usize;
             scan += 2;
-            if !matches!(slen, 1 | 4) || scan + slen > data.len() {
-                return Err(ErrorCode::Io);
+            if !matches!(slen, 1 | 4) || scan + slen + entry_extra > data.len() {
+                return None;
             }
-            scan += slen;
-            legacy_len += 2 + slen;
+            scan += slen + entry_extra;
         }
-    }
-    let legacy_key_only = data.len() == legacy_len;
+        Some(scan)
+    };
+    // Prefer the new key+mask layout when both happen to match: a genuine
+    // legacy blob can never satisfy it (it is 4*count bytes shorter), while a
+    // new blob can coincidentally satisfy the legacy walk.
+    let legacy_key_only = match (walk(4), walk(0)) {
+        (Some(len), _) if len == data.len() => false,
+        (_, Some(len)) if len == data.len() => true,
+        _ => return Err(ErrorCode::Io),
+    };
     let mut offset = 4;
 
     for _ in 0..count {
@@ -303,5 +309,30 @@ mod video_map_tests {
         assert_eq!(parsed.count, 1);
         assert_eq!(&parsed.entries[0].cc[..4], b"vp09");
         assert_eq!(parsed.masks[0], map.masks[0]);
+    }
+
+    #[test]
+    fn video_info_map_round_trips_multiple_masked_entries() {
+        // Regression: the layout probe must not read an entry's UI32 mask as
+        // the next entry's string length. A 0x00000003 mask previously made
+        // the parser reject any valid new-format map with two or more entries.
+        let mut map = VideoFourCcInfoMap::default();
+        map.entries[0].cc[..4].copy_from_slice(b"avc1");
+        map.masks[0] = 3;
+        map.entries[1].cc[..4].copy_from_slice(b"hvc1");
+        map.masks[1] = FOUR_CC_INFO_CAN_DECODE;
+        map.count = 2;
+
+        let mut wire = [0u8; 64];
+        let len = video_fourcc_info_map_write(&map, &mut wire);
+        assert!(len > 0);
+
+        let mut parsed = VideoFourCcInfoMap::default();
+        video_fourcc_info_map_parse(&mut parsed, &wire[..len]).unwrap();
+        assert_eq!(parsed.count, 2);
+        assert_eq!(&parsed.entries[0].cc[..4], b"avc1");
+        assert_eq!(&parsed.entries[1].cc[..4], b"hvc1");
+        assert_eq!(parsed.masks[0], 3);
+        assert_eq!(parsed.masks[1], FOUR_CC_INFO_CAN_DECODE);
     }
 }
