@@ -35,7 +35,11 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
-        with:
-          manifest-path: ${{ matrix.manifest }}
-          command: check ${{ matrix.checks }}
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@deb6b2ccc5004cae3fb73fe4dcd60492786cb1dd # cargo-deny
+
+      - name: Run cargo-deny
+        run: cargo deny --log-level warn --manifest-path "${{ matrix.manifest }}" --all-features check ${{ matrix.checks }}
