@@ -22,9 +22,11 @@
 //! Example (stream must already be publishing before this runs):
 //!   bench_relay rtmp://127.0.0.1:1935/live/bench --players 100 --run-secs 20
 
+#[path = "bench_common/mod.rs"]
+mod bench_common;
+
 use std::cell::RefCell;
 use std::env;
-use std::fs;
 use std::process::ExitCode;
 use std::sync::Mutex;
 use std::thread;
@@ -94,20 +96,9 @@ fn parse_args() -> Option<Args> {
         }
     }
 
-    let source = if let Some(path) = url_list_path {
-        let text = fs::read_to_string(&path).ok()?;
-        let urls: Vec<String> = text
-            .lines()
-            .map(str::trim)
-            .filter(|l| !l.is_empty())
-            .map(str::to_string)
-            .collect();
-        if urls.is_empty() {
-            return None;
-        }
-        UrlSource::List(urls)
-    } else {
-        UrlSource::Single(url?)
+    let source = match url_list_path {
+        Some(path) => UrlSource::List(bench_common::read_url_list(&path)?),
+        None => UrlSource::Single(url?),
     };
 
     Some(Args {
@@ -213,14 +204,6 @@ fn run_player(url: String, run_secs: u64, warmup: Duration, epoch: Instant) -> P
     })
 }
 
-fn percentile(sorted: &[f64], p: f64) -> f64 {
-    if sorted.is_empty() {
-        return 0.0;
-    }
-    let idx = ((sorted.len() as f64 - 1.0) * p).round() as usize;
-    sorted[idx.min(sorted.len() - 1)]
-}
-
 fn main() -> ExitCode {
     let args = match parse_args() {
         Some(a) => a,
@@ -280,9 +263,9 @@ fn main() -> ExitCode {
     println!(
         "join latency ms (connect -> first frame): avg={:.2} p50={:.2} p95={:.2} p99={:.2} max={:.2}",
         join_ms.iter().sum::<f64>() / join_ms.len().max(1) as f64,
-        percentile(&join_ms, 0.50),
-        percentile(&join_ms, 0.95),
-        percentile(&join_ms, 0.99),
+        bench_common::percentile(&join_ms, 0.50),
+        bench_common::percentile(&join_ms, 0.95),
+        bench_common::percentile(&join_ms, 0.99),
         join_ms.last().copied().unwrap_or(0.0),
     );
     println!(

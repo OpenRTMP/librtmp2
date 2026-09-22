@@ -28,9 +28,9 @@ Criterion writes full HTML reports to `target/criterion/report/index.html`.
 
 ## Environment for the numbers below
 
-- CPU: Intel Xeon @ 2.80GHz, 4 vCPUs (cloud sandbox VM, not bare metal —
-  treat absolute numbers as illustrative and re-run on your own target
-  hardware for capacity planning)
+- CPU: Intel Xeon @ 2.80GHz, 4 vCPUs (a shared VM, not bare metal — treat
+  absolute numbers as illustrative and re-run on your own target hardware
+  for capacity planning)
 - RAM: 15 GiB
 - Kernel: Linux 6.18 x86_64
 - rustc 1.98.1, `cargo build --release` (`tls` feature enabled, default)
