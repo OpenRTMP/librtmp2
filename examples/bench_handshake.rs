@@ -24,8 +24,10 @@
 //! Example:
 //!   bench_handshake rtmp://127.0.0.1:1936/live/bench --count 200 --concurrency 50
 
+#[path = "bench_common/mod.rs"]
+mod bench_common;
+
 use std::env;
-use std::fs;
 use std::process::ExitCode;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -73,20 +75,9 @@ fn parse_args() -> Option<Args> {
         }
     }
 
-    let source = if let Some(path) = url_list_path {
-        let text = fs::read_to_string(&path).ok()?;
-        let urls: Vec<String> = text
-            .lines()
-            .map(str::trim)
-            .filter(|l| !l.is_empty())
-            .map(str::to_string)
-            .collect();
-        if urls.is_empty() {
-            return None;
-        }
-        UrlSource::List(urls)
-    } else {
-        UrlSource::Prefix(url_prefix?)
+    let source = match url_list_path {
+        Some(path) => UrlSource::List(bench_common::read_url_list(&path)?),
+        None => UrlSource::Prefix(url_prefix?),
     };
 
     Some(Args {
@@ -94,14 +85,6 @@ fn parse_args() -> Option<Args> {
         count,
         concurrency,
     })
-}
-
-fn percentile(sorted_ms: &[f64], p: f64) -> f64 {
-    if sorted_ms.is_empty() {
-        return 0.0;
-    }
-    let idx = ((sorted_ms.len() as f64 - 1.0) * p).round() as usize;
-    sorted_ms[idx.min(sorted_ms.len() - 1)]
 }
 
 fn main() -> ExitCode {
@@ -186,9 +169,9 @@ fn main() -> ExitCode {
     println!(
         "connect+publish latency ms: avg={:.2} p50={:.2} p95={:.2} p99={:.2} max={:.2}",
         avg,
-        percentile(&latencies, 0.50),
-        percentile(&latencies, 0.95),
-        percentile(&latencies, 0.99),
+        bench_common::percentile(&latencies, 0.50),
+        bench_common::percentile(&latencies, 0.95),
+        bench_common::percentile(&latencies, 0.99),
         latencies.last().copied().unwrap_or(0.0),
     );
 
