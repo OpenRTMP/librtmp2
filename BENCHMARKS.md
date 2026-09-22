@@ -33,9 +33,9 @@ Criterion writes full HTML reports to `target/criterion/report/index.html`.
   for capacity planning)
 - RAM: 15 GiB
 - Kernel: Linux 6.18 x86_64
-- rustc 1.98.1, `cargo build --release` (`tls` feature enabled, default)
-- librtmp2 0.8.1
-- Date: 2026-09-22
+- rustc 1.95.0, `cargo build --release` (`tls` feature enabled, default)
+- librtmp2 0.9.0
+- Date: 2026-09-23
 
 ## `protocol` benchmarks (`benches/protocol.rs`)
 
@@ -44,12 +44,12 @@ first iteration.
 
 | Benchmark | Time | Throughput |
 |---|---|---|
-| `chunk/write_read_roundtrip` (4096-byte payload, chunk size 128) | 7.17 µs | ~545 MiB/s |
-| `amf0_build_connect` | 335 ns | — |
-| `flv/video_tag_h264` (parse) | 1.54 ns | — |
-| `flv/audio_tag_aac` (parse) | 1.58 ns | — |
-| `fourcc_to_video_codec_avc1` | 3.84 ns | — |
-| `server_read_c1` (handshake C1 parse + S0/S1/S2 build) | 1.44 µs | — |
+| `chunk/write_read_roundtrip` (4096-byte payload, chunk size 128) | 3.91 µs | ~998 MiB/s |
+| `amf0_build_connect` | 231 ns | — |
+| `flv/video_tag_h264` (parse) | 0.88 ns | — |
+| `flv/audio_tag_aac` (parse) | 0.94 ns | — |
+| `fourcc_to_video_codec_avc1` | 1.58 ns | — |
+| `server_read_c1` (handshake C1 parse + S0/S1/S2 build) | 0.92 µs | — |
 
 ## `relay` benchmark (`benches/relay.rs`)
 
@@ -67,6 +67,12 @@ same idea against a real server.
 |---|---|---|
 | `relay/publish_to_player/100` (100 frames) | 223.7 ms | ~447 elem/s |
 | `relay/publish_to_player/500` (500 frames) | 180.8 ms | ~2765 elem/s |
+
+The publish/play handling these two benchmarks drive through gained an
+`AuthorizationResult`-pending check in `0.9.0` (an `Option::is_some()` guard
+against overwriting an in-flight async authorization); it's within measurement
+noise of `0.8.1`'s numbers, as expected for a single branch on the connect/
+publish path rather than the frame relay loop itself.
 
 ## `examples/bench_handshake.rs` and `examples/bench_relay.rs`
 
