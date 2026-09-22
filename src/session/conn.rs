@@ -71,6 +71,12 @@ struct QueuedPing {
 /// Cap inbound Ping-Request reflections per connection to prevent trivial
 /// outbound bandwidth/CPU amplification from unauthenticated peers.
 const MAX_INBOUND_PING_RESPONSES: usize = 8;
+/// Default deadline for a `Pending` publish/play authorization. Bounds how
+/// long a connection can sit waiting for `complete_publish_authorization`/
+/// `complete_play_authorization` before it's auto-denied, so a stuck or
+/// forgotten integrator worker cannot hold a connection slot forever.
+/// Overridable via [`crate::server::Server::pending_auth_timeout`].
+pub const DEFAULT_PENDING_AUTH_TIMEOUT: Duration = Duration::from_secs(15);
 /// Minimum wall-clock gap between init-frame replay requests caused by
 /// switching play routes. This prevents a client from alternating stream
 /// names to force cached headers and keyframes to be resent every poll batch.
@@ -115,6 +121,16 @@ pub struct RelayFrame {
     /// external id ([`crate::server::is_external_publisher_id`]); the sentinel
     /// [`crate::server::EXTERNAL_RELAY_PUBLISHER_ID`] remains `u64::MAX`.
     pub publisher_conn_id: u64,
+}
+
+/// A publish or play request whose authorization callback returned
+/// [`AuthorizationResult::Pending`]. Captures what's needed to resume the
+/// normal publish/play flow from `complete_publish_authorization`/
+/// `complete_play_authorization` without re-parsing the original command.
+#[derive(Debug, Clone)]
+struct PendingAuth {
+    stream_name: String,
+    requested_at: Instant,
 }
 
 impl RelayFrame {
@@ -214,6 +230,21 @@ pub struct Conn {
     pub on_connect_cb: Option<fn()>,
     pub on_publish_cb: Option<fn(conn_id: u64, app: &str, stream_name: &str) -> bool>,
     pub on_play_cb: Option<fn(conn_id: u64, app: &str, stream_name: &str) -> bool>,
+    /// Three-state publish authorization: `Allow`/`Deny` behave like
+    /// `on_publish_cb` returning `true`/`false`; `Pending` holds the
+    /// connection (no media in or out) until `complete_publish_authorization`
+    /// is called. Takes priority over `on_publish_cb` when both are set.
+    pub on_publish_auth_cb:
+        Option<fn(conn_id: u64, app: &str, stream_name: &str) -> AuthorizationResult>,
+    /// Three-state play authorization; see [`Self::on_publish_auth_cb`].
+    pub on_play_auth_cb:
+        Option<fn(conn_id: u64, app: &str, stream_name: &str) -> AuthorizationResult>,
+    /// Set while a `publish` request is waiting on `on_publish_auth_cb`
+    /// (`Pending`) for a decision via `complete_publish_authorization`.
+    pending_publish_auth: Option<PendingAuth>,
+    /// Set while a `play` request is waiting on `on_play_auth_cb` (`Pending`)
+    /// for a decision via `complete_play_authorization`.
+    pending_play_auth: Option<PendingAuth>,
     /// Must return true before a parsed AMF3 Shared Object message is delivered
     /// to [`Self::on_shared_object_cb`]. When unset while `on_publish_cb` or
     /// `on_play_cb` is configured, inbound shared objects are dropped so a
@@ -330,6 +361,10 @@ impl Conn {
             on_connect_cb: None,
             on_publish_cb: None,
             on_play_cb: None,
+            on_publish_auth_cb: None,
+            on_play_auth_cb: None,
+            pending_publish_auth: None,
+            pending_play_auth: None,
             on_shared_object_auth_cb: None,
             on_shared_object_cb: None,
             on_release_stream_cb: None,
@@ -1781,6 +1816,7 @@ impl Conn {
     /// used for `on_media_cb` / `on_frame_cb`).
     fn requires_explicit_publish_auth(&self) -> bool {
         self.on_play_cb.is_some()
+            || self.on_play_auth_cb.is_some()
             || self.on_media_cb.is_some()
             || self.on_frame_cb.is_some()
             || self.on_shared_object_auth_cb.is_some()
@@ -1789,10 +1825,239 @@ impl Conn {
 
     fn requires_explicit_play_auth(&self) -> bool {
         self.on_publish_cb.is_some()
+            || self.on_publish_auth_cb.is_some()
             || self.on_media_cb.is_some()
             || self.on_frame_cb.is_some()
             || self.on_shared_object_auth_cb.is_some()
             || self.on_release_stream_cb.is_some()
+    }
+
+    fn send_publish_denied(&mut self) -> Result<()> {
+        self.send_onstatus(
+            0,
+            "error",
+            "NetStream.Publish.BadName",
+            "Publish not authorized",
+        )
+    }
+
+    fn send_play_denied(&mut self) -> Result<()> {
+        self.send_onstatus(0, "error", "NetStream.Play.Failed", "Play not authorized")
+    }
+
+    /// Finish an authorized `publish` request: claim the route, transition
+    /// the state machine, and send `NetStream.Publish.Start`. Called either
+    /// immediately (synchronous `Allow`) or later from
+    /// [`Self::complete_publish_authorization`] (`Pending` -> `Allow`).
+    fn complete_publish_authorized(&mut self, name_str: String) -> Result<()> {
+        // Use current_stream.is_publishing rather than self.state here:
+        // conn_transition() only allows forward moves through ConnState, so
+        // a play-then-publish sequence leaves self.state stuck at Playing
+        // (Publishing < Playing) even though this stream is genuinely
+        // publishing again. `play` explicitly clears is_publishing when it
+        // takes over a stream, so the flag accurately reflects whether this
+        // specific current_stream is the one actively publishing.
+        let was_publishing = self
+            .current_stream
+            .as_ref()
+            .map(|s| s.is_publishing)
+            .unwrap_or(false);
+        let prev_route_key = self.relay_route_key();
+        let next_route_key = if !self.relay_key.is_empty() {
+            self.relay_key.clone()
+        } else {
+            name_str.clone()
+        };
+        let renaming_route =
+            was_publishing && !prev_route_key.is_empty() && prev_route_key != next_route_key;
+        // `claim_publish_route` already queues an eviction for the previous
+        // route key on a rename (when a PublishRouteRegistry is active);
+        // remember what was pending so the block below does not queue the
+        // same eviction a second time and burn two slots of
+        // MAX_PENDING_CACHE_EVICTIONS for one rename.
+        let eviction_len_before_claim = self.pending_cache_evictions.len();
+        if !self.claim_publish_route(&next_route_key) {
+            return self.send_onstatus(
+                0,
+                "error",
+                "NetStream.Publish.BadName",
+                "Route already publishing",
+            );
+        }
+        let claim_queued_prev_eviction = self
+            .pending_cache_evictions
+            .get(eviction_len_before_claim..)
+            .is_some_and(|queued| queued.iter().any(|(_, route)| route == &prev_route_key));
+        // Start a publish-media deadline only for a genuinely new publish
+        // session or route. Repeating `publish` for the route already owned
+        // by this connection must not refresh the timer.
+        if !was_publishing || renaming_route {
+            self.session_setup_started = Instant::now();
+            // Injected activity from a prior publish/idle epoch must not
+            // exempt a new empty publish from the media deadline.
+            self.injected_media_bytes = 0;
+        }
+        if renaming_route && !claim_queued_prev_eviction {
+            if self
+                .push_pending_cache_eviction(self.app.clone(), prev_route_key.clone())
+                .is_err()
+            {
+                if let Some(routes) = self.publish_routes.as_ref() {
+                    routes.release(self.conn_id, &self.app, &next_route_key);
+                    let _ = routes.claim(self.conn_id, &self.app, &prev_route_key);
+                }
+                self.claimed_publish_route = Some(prev_route_key);
+                return self.send_onstatus(
+                    0,
+                    "error",
+                    "NetStream.Publish.BadName",
+                    "Publish not authorized",
+                );
+            }
+        }
+        if self.defer_media_relay {
+            // Reset only when leaving a prior play role or switching the
+            // RTMP publish name. Duplicate `publish` for the same name must
+            // keep an already-authorized deferred relay and its pending
+            // frames (integrator re-auth is unchanged). Detect switches via
+            // stream.name — with a pinned relay_key, next_route_key stays on
+            // the old DB id so renaming_route alone cannot see A→B.
+            let was_playing = self.current_stream.as_ref().is_some_and(|s| s.is_playing);
+            let publish_name_changed = self
+                .current_stream
+                .as_ref()
+                .is_none_or(|s| s.name != name_str);
+            if was_playing || (was_publishing && publish_name_changed) {
+                self.relay_enabled = false;
+                self.pending_relay.clear();
+            }
+        } else {
+            self.relay_enabled = true;
+        }
+        {
+            if let Some(ref mut stream) = self.current_stream {
+                stream.is_publishing = true;
+                stream.is_playing = false;
+                stream.name = name_str;
+            }
+            self.clear_detected_stream_metadata();
+            let _ = state_machine::conn_transition(&mut self.state, ConnState::Publishing);
+            let sid = self
+                .current_stream
+                .as_ref()
+                .map(|s| s.stream_id)
+                .unwrap_or(0);
+            self.send_onstatus(sid, "status", "NetStream.Publish.Start", "Publishing")?;
+        }
+        Ok(())
+    }
+
+    /// Finish an authorized `play` request: transition the state machine and
+    /// send `NetStream.Play.Start`. Called either immediately (synchronous
+    /// `Allow`) or later from [`Self::complete_play_authorization`]
+    /// (`Pending` -> `Allow`).
+    fn complete_play_authorized(&mut self, name_str: String) -> Result<()> {
+        if !self.defer_media_relay {
+            self.relay_enabled = true;
+        }
+        // `play` supersedes any publish role this current_stream held: evict
+        // the abandoned publish route's cache key now (there's no "next"
+        // publish route to preserve it for), and clear is_publishing so it
+        // can't be mistaken for an active publish by a later command.
+        self.evict_active_publish_route();
+        let already_playing_same = self
+            .current_stream
+            .as_ref()
+            .map(|s| s.is_playing && s.name == name_str)
+            .unwrap_or(false);
+        if let Some(ref mut stream) = self.current_stream {
+            stream.is_playing = true;
+            stream.is_publishing = false;
+            // Mirror the FCUnpublish/deleteStream/closeStream teardown arms:
+            // relay delivery is gated on !paused, so a fresh play
+            // (resume/stream switch) on a previously paused stream must
+            // clear it or the player receives no relayed frames and gets
+            // reaped.
+            stream.paused = false;
+            stream.name = name_str;
+        }
+        if !already_playing_same {
+            // Relay bytes from a previous play route are historical for
+            // pause-grace purposes. A new route must deliver fresh bytes
+            // before it can earn another grace reset.
+            self.pause_grace_media_bytes_sent = self.media_bytes_sent;
+            self.request_init_replay();
+        }
+        let _ = state_machine::conn_transition(&mut self.state, ConnState::Playing);
+        let sid = self
+            .current_stream
+            .as_ref()
+            .map(|s| s.stream_id)
+            .unwrap_or(0);
+        self.send_onstatus(sid, "status", "NetStream.Play.Start", "Playing")?;
+        self.send_stream_lifecycle_begin(sid)?;
+        Ok(())
+    }
+
+    /// Resolve a `publish` request left `Pending` by `on_publish_auth_cb`.
+    ///
+    /// Harmless no-op when there is no pending publish authorization on this
+    /// connection -- covers a second completion call, and a completion for a
+    /// connection that already disconnected (the built-in server just won't
+    /// find the `conn_id` at all in that case; see
+    /// [`crate::server::Server::complete_publish_authorization`]).
+    pub fn complete_publish_authorization(&mut self, allow: bool) -> Result<()> {
+        let Some(pending) = self.pending_publish_auth.take() else {
+            return Ok(());
+        };
+        if allow {
+            self.complete_publish_authorized(pending.stream_name)
+        } else {
+            self.send_publish_denied()
+        }
+    }
+
+    /// Resolve a `play` request left `Pending` by `on_play_auth_cb`. See
+    /// [`Self::complete_publish_authorization`] for no-op semantics.
+    pub fn complete_play_authorization(&mut self, allow: bool) -> Result<()> {
+        let Some(pending) = self.pending_play_auth.take() else {
+            return Ok(());
+        };
+        if allow {
+            self.complete_play_authorized(pending.stream_name)
+        } else {
+            self.send_play_denied()
+        }
+    }
+
+    /// True while this connection is waiting on `complete_publish_authorization`
+    /// or `complete_play_authorization`. While pending, no media flows either
+    /// direction: `is_active_publisher_stream`/relay delivery both stay gated
+    /// on `stream.is_publishing`/`stream.is_playing`, which are only set once
+    /// the authorization completes as `Allow`.
+    pub fn has_pending_authorization(&self) -> bool {
+        self.pending_publish_auth.is_some() || self.pending_play_auth.is_some()
+    }
+
+    /// Auto-deny any publish/play authorization that has been `Pending`
+    /// longer than `timeout`, so a stuck or forgotten integrator worker
+    /// cannot hold this connection open forever. Called every
+    /// [`crate::server::Server::poll`] tick; harmless when nothing is pending.
+    pub(crate) fn reap_timed_out_pending_auth(&mut self, timeout: Duration) {
+        if self
+            .pending_publish_auth
+            .as_ref()
+            .is_some_and(|p| p.requested_at.elapsed() >= timeout)
+        {
+            let _ = self.complete_publish_authorization(false);
+        }
+        if self
+            .pending_play_auth
+            .as_ref()
+            .is_some_and(|p| p.requested_at.elapsed() >= timeout)
+        {
+            let _ = self.complete_play_authorization(false);
+        }
     }
 
     pub fn handle_command(&mut self, payload: &[u8]) -> Result<()> {
@@ -1951,126 +2216,31 @@ impl Conn {
                         "No stream created",
                     );
                 }
-                if self.on_publish_cb.is_none() && self.requires_explicit_publish_auth() {
-                    return self.send_onstatus(
-                        0,
-                        "error",
-                        "NetStream.Publish.BadName",
-                        "Publish not authorized",
-                    );
-                }
-                if let Some(cb) = self.on_publish_cb {
-                    if !cb(self.conn_id, &self.app, &name_str) {
-                        return self.send_onstatus(
-                            0,
-                            "error",
-                            "NetStream.Publish.BadName",
-                            "Publish not authorized",
-                        );
-                    }
-                }
-                // Use current_stream.is_publishing rather than self.state
-                // here: conn_transition() only allows forward moves through
-                // ConnState, so a play-then-publish sequence leaves
-                // self.state stuck at Playing (Publishing < Playing) even
-                // though this stream is genuinely publishing again. `play`
-                // explicitly clears is_publishing when it takes over a
-                // stream, so the flag accurately reflects whether this
-                // specific current_stream is the one actively publishing.
-                let was_publishing = self
-                    .current_stream
-                    .as_ref()
-                    .map(|s| s.is_publishing)
-                    .unwrap_or(false);
-                let prev_route_key = self.relay_route_key();
-                let next_route_key = if !self.relay_key.is_empty() {
-                    self.relay_key.clone()
-                } else {
-                    name_str.clone()
-                };
-                let renaming_route = was_publishing
-                    && !prev_route_key.is_empty()
-                    && prev_route_key != next_route_key;
-                // `claim_publish_route` already queues an eviction for the
-                // previous route key on a rename (when a PublishRouteRegistry is
-                // active); remember what was pending so the block below does not
-                // queue the same eviction a second time and burn two slots of
-                // MAX_PENDING_CACHE_EVICTIONS for one rename.
-                let eviction_len_before_claim = self.pending_cache_evictions.len();
-                if !self.claim_publish_route(&next_route_key) {
-                    return self.send_onstatus(
-                        0,
-                        "error",
-                        "NetStream.Publish.BadName",
-                        "Route already publishing",
-                    );
-                }
-                let claim_queued_prev_eviction = self
-                    .pending_cache_evictions
-                    .get(eviction_len_before_claim..)
-                    .is_some_and(|queued| queued.iter().any(|(_, route)| route == &prev_route_key));
-                // Start a publish-media deadline only for a genuinely new
-                // publish session or route. Repeating `publish` for the route
-                // already owned by this connection must not refresh the timer.
-                if !was_publishing || renaming_route {
-                    self.session_setup_started = Instant::now();
-                    // Injected activity from a prior publish/idle epoch must
-                    // not exempt a new empty publish from the media deadline.
-                    self.injected_media_bytes = 0;
-                }
-                if renaming_route && !claim_queued_prev_eviction {
-                    if self
-                        .push_pending_cache_eviction(self.app.clone(), prev_route_key.clone())
-                        .is_err()
-                    {
-                        if let Some(routes) = self.publish_routes.as_ref() {
-                            routes.release(self.conn_id, &self.app, &next_route_key);
-                            let _ = routes.claim(self.conn_id, &self.app, &prev_route_key);
+                if let Some(cb) = self.on_publish_auth_cb {
+                    match cb(self.conn_id, &self.app, &name_str) {
+                        AuthorizationResult::Allow => {}
+                        AuthorizationResult::Deny => {
+                            return self.send_publish_denied();
                         }
-                        self.claimed_publish_route = Some(prev_route_key);
-                        return self.send_onstatus(
-                            0,
-                            "error",
-                            "NetStream.Publish.BadName",
-                            "Publish not authorized",
-                        );
-                    }
-                }
-                if self.defer_media_relay {
-                    // Reset only when leaving a prior play role or switching
-                    // the RTMP publish name. Duplicate `publish` for the same
-                    // name must keep an already-authorized deferred relay and
-                    // its pending frames (integrator re-auth is unchanged).
-                    // Detect switches via stream.name — with a pinned
-                    // relay_key, next_route_key stays on the old DB id so
-                    // renaming_route alone cannot see A→B.
-                    let was_playing = self.current_stream.as_ref().is_some_and(|s| s.is_playing);
-                    let publish_name_changed = self
-                        .current_stream
-                        .as_ref()
-                        .is_none_or(|s| s.name != name_str);
-                    if was_playing || (was_publishing && publish_name_changed) {
-                        self.relay_enabled = false;
-                        self.pending_relay.clear();
+                        AuthorizationResult::Pending => {
+                            self.pending_publish_auth = Some(PendingAuth {
+                                stream_name: name_str,
+                                requested_at: Instant::now(),
+                            });
+                            return Ok(());
+                        }
                     }
                 } else {
-                    self.relay_enabled = true;
-                }
-                {
-                    if let Some(ref mut stream) = self.current_stream {
-                        stream.is_publishing = true;
-                        stream.is_playing = false;
-                        stream.name = name_str;
+                    if self.on_publish_cb.is_none() && self.requires_explicit_publish_auth() {
+                        return self.send_publish_denied();
                     }
-                    self.clear_detected_stream_metadata();
-                    let _ = state_machine::conn_transition(&mut self.state, ConnState::Publishing);
-                    let sid = self
-                        .current_stream
-                        .as_ref()
-                        .map(|s| s.stream_id)
-                        .unwrap_or(0);
-                    self.send_onstatus(sid, "status", "NetStream.Publish.Start", "Publishing")?;
+                    if let Some(cb) = self.on_publish_cb {
+                        if !cb(self.conn_id, &self.app, &name_str) {
+                            return self.send_publish_denied();
+                        }
+                    }
                 }
+                self.complete_publish_authorized(name_str)?;
             }
             "play" => {
                 let mut stream_name = [0u8; 256];
@@ -2102,66 +2272,31 @@ impl Conn {
                         "No stream created",
                     );
                 }
-                if self.on_play_cb.is_none() && self.requires_explicit_play_auth() {
-                    return self.send_onstatus(
-                        0,
-                        "error",
-                        "NetStream.Play.Failed",
-                        "Play not authorized",
-                    );
-                }
-                if let Some(cb) = self.on_play_cb {
-                    if !cb(self.conn_id, &self.app, &name_str) {
-                        return self.send_onstatus(
-                            0,
-                            "error",
-                            "NetStream.Play.Failed",
-                            "Play not authorized",
-                        );
+                if let Some(cb) = self.on_play_auth_cb {
+                    match cb(self.conn_id, &self.app, &name_str) {
+                        AuthorizationResult::Allow => {}
+                        AuthorizationResult::Deny => {
+                            return self.send_play_denied();
+                        }
+                        AuthorizationResult::Pending => {
+                            self.pending_play_auth = Some(PendingAuth {
+                                stream_name: name_str,
+                                requested_at: Instant::now(),
+                            });
+                            return Ok(());
+                        }
+                    }
+                } else {
+                    if self.on_play_cb.is_none() && self.requires_explicit_play_auth() {
+                        return self.send_play_denied();
+                    }
+                    if let Some(cb) = self.on_play_cb {
+                        if !cb(self.conn_id, &self.app, &name_str) {
+                            return self.send_play_denied();
+                        }
                     }
                 }
-                if !self.defer_media_relay {
-                    self.relay_enabled = true;
-                }
-                {
-                    // `play` supersedes any publish role this current_stream
-                    // held: evict the abandoned publish route's cache key
-                    // now (there's no "next" publish route to preserve it
-                    // for), and clear is_publishing so it can't be
-                    // mistaken for an active publish by a later command.
-                    self.evict_active_publish_route();
-                    let already_playing_same = self
-                        .current_stream
-                        .as_ref()
-                        .map(|s| s.is_playing && s.name == name_str)
-                        .unwrap_or(false);
-                    if let Some(ref mut stream) = self.current_stream {
-                        stream.is_playing = true;
-                        stream.is_publishing = false;
-                        // Mirror the FCUnpublish/deleteStream/closeStream
-                        // teardown arms: relay delivery is gated on !paused, so
-                        // a fresh play (resume/stream switch) on a previously
-                        // paused stream must clear it or the player receives no
-                        // relayed frames and gets reaped.
-                        stream.paused = false;
-                        stream.name = name_str;
-                    }
-                    if !already_playing_same {
-                        // Relay bytes from a previous play route are historical
-                        // for pause-grace purposes. A new route must deliver
-                        // fresh bytes before it can earn another grace reset.
-                        self.pause_grace_media_bytes_sent = self.media_bytes_sent;
-                        self.request_init_replay();
-                    }
-                    let _ = state_machine::conn_transition(&mut self.state, ConnState::Playing);
-                    let sid = self
-                        .current_stream
-                        .as_ref()
-                        .map(|s| s.stream_id)
-                        .unwrap_or(0);
-                    self.send_onstatus(sid, "status", "NetStream.Play.Start", "Playing")?;
-                    self.send_stream_lifecycle_begin(sid)?;
-                }
+                self.complete_play_authorized(name_str)?;
             }
             "FCUnpublish" | "deleteStream" => {
                 // The client is explicitly tearing down its publish or play
@@ -6091,5 +6226,226 @@ mod tests {
 
         conn.handle_data_message(&payload).unwrap();
         assert_eq!(conn.detected_video_width, Some(800));
+    }
+
+    // ── Asynchronous publish/play authorization (AuthorizationResult) ──
+
+    fn app_conn() -> Conn {
+        let mut conn = Conn::new();
+        conn.app = "live".to_string();
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+        conn
+    }
+
+    fn publish_buf(stream_name: &str) -> Buffer {
+        let mut buf = Buffer::with_capacity(128);
+        command::build_publish(&mut buf, stream_name, "live").unwrap();
+        buf
+    }
+
+    fn play_buf(stream_name: &str) -> Buffer {
+        let mut buf = Buffer::with_capacity(128);
+        command::build_play(&mut buf, stream_name).unwrap();
+        buf
+    }
+
+    #[test]
+    fn publish_auth_immediate_allow() {
+        let mut conn = app_conn();
+        conn.on_publish_auth_cb = Some(|_, _, _| AuthorizationResult::Allow);
+        conn.handle_command(publish_buf("s").as_slice()).unwrap();
+        assert!(conn.current_stream.as_ref().unwrap().is_publishing);
+        assert!(!conn.has_pending_authorization());
+    }
+
+    #[test]
+    fn publish_auth_immediate_deny() {
+        let mut conn = app_conn();
+        conn.on_publish_auth_cb = Some(|_, _, _| AuthorizationResult::Deny);
+        conn.handle_command(publish_buf("s").as_slice()).unwrap();
+        assert!(!conn.current_stream.as_ref().unwrap().is_publishing);
+        assert!(!conn.has_pending_authorization());
+    }
+
+    #[test]
+    fn play_auth_immediate_allow() {
+        let mut conn = app_conn();
+        conn.on_play_auth_cb = Some(|_, _, _| AuthorizationResult::Allow);
+        conn.handle_command(play_buf("s").as_slice()).unwrap();
+        assert!(conn.current_stream.as_ref().unwrap().is_playing);
+        assert!(!conn.has_pending_authorization());
+    }
+
+    #[test]
+    fn play_auth_immediate_deny() {
+        let mut conn = app_conn();
+        conn.on_play_auth_cb = Some(|_, _, _| AuthorizationResult::Deny);
+        conn.handle_command(play_buf("s").as_slice()).unwrap();
+        assert!(!conn.current_stream.as_ref().unwrap().is_playing);
+        assert!(!conn.has_pending_authorization());
+    }
+
+    #[test]
+    fn publish_auth_pending_then_allow() {
+        let mut conn = app_conn();
+        conn.on_publish_auth_cb = Some(|_, _, _| AuthorizationResult::Pending);
+        conn.handle_command(publish_buf("s").as_slice()).unwrap();
+        assert!(
+            !conn.current_stream.as_ref().unwrap().is_publishing,
+            "must not publish while authorization is pending"
+        );
+        assert!(conn.has_pending_authorization());
+        assert!(!conn.relay_enabled);
+
+        conn.complete_publish_authorization(true).unwrap();
+        assert!(conn.current_stream.as_ref().unwrap().is_publishing);
+        assert_eq!(conn.state, ConnState::Publishing);
+        assert!(!conn.has_pending_authorization());
+    }
+
+    #[test]
+    fn publish_auth_pending_then_deny() {
+        let mut conn = app_conn();
+        conn.on_publish_auth_cb = Some(|_, _, _| AuthorizationResult::Pending);
+        conn.handle_command(publish_buf("s").as_slice()).unwrap();
+        assert!(conn.has_pending_authorization());
+
+        conn.complete_publish_authorization(false).unwrap();
+        assert!(!conn.current_stream.as_ref().unwrap().is_publishing);
+        assert!(!conn.has_pending_authorization());
+    }
+
+    #[test]
+    fn play_auth_pending_then_allow() {
+        let mut conn = app_conn();
+        conn.on_play_auth_cb = Some(|_, _, _| AuthorizationResult::Pending);
+        conn.handle_command(play_buf("s").as_slice()).unwrap();
+        assert!(
+            !conn.current_stream.as_ref().unwrap().is_playing,
+            "must not play while authorization is pending"
+        );
+        assert!(conn.has_pending_authorization());
+
+        conn.complete_play_authorization(true).unwrap();
+        assert!(conn.current_stream.as_ref().unwrap().is_playing);
+        assert_eq!(conn.state, ConnState::Playing);
+        assert!(!conn.has_pending_authorization());
+    }
+
+    #[test]
+    fn play_auth_pending_then_deny() {
+        let mut conn = app_conn();
+        conn.on_play_auth_cb = Some(|_, _, _| AuthorizationResult::Pending);
+        conn.handle_command(play_buf("s").as_slice()).unwrap();
+        assert!(conn.has_pending_authorization());
+
+        conn.complete_play_authorization(false).unwrap();
+        assert!(!conn.current_stream.as_ref().unwrap().is_playing);
+        assert!(!conn.has_pending_authorization());
+    }
+
+    #[test]
+    fn pending_publish_media_is_dropped_until_authorized() {
+        let mut conn = app_conn();
+        conn.on_publish_auth_cb = Some(|_, _, _| AuthorizationResult::Pending);
+        conn.handle_command(publish_buf("s").as_slice()).unwrap();
+
+        // Media sent while pending must not be relayed -- is_publishing is
+        // still false, so handle_media_frame's is_active_publisher_stream
+        // gate silently drops it rather than erroring.
+        conn.handle_media_frame(1, FrameType::Video, 0, &[0x17, 0, 0, 0, 0], None)
+            .unwrap();
+        assert!(conn.pending_relay.is_empty());
+
+        conn.complete_publish_authorization(true).unwrap();
+        conn.handle_media_frame(1, FrameType::Video, 0, &[0x17, 0, 0, 0, 0], None)
+            .unwrap();
+        assert_eq!(conn.pending_relay.len(), 1);
+    }
+
+    #[test]
+    fn disconnect_during_pending_publish_auth_is_safe() {
+        // A dropped Conn (simulating TCP disconnect while authorization is
+        // still pending) must not panic and leaves nothing to clean up --
+        // no route was ever claimed for a request that never got Allow.
+        let mut conn = app_conn();
+        conn.on_publish_auth_cb = Some(|_, _, _| AuthorizationResult::Pending);
+        conn.handle_command(publish_buf("s").as_slice()).unwrap();
+        assert!(conn.has_pending_authorization());
+        drop(conn);
+    }
+
+    #[test]
+    fn duplicate_publish_authorization_completion_is_harmless() {
+        let mut conn = app_conn();
+        conn.on_publish_auth_cb = Some(|_, _, _| AuthorizationResult::Pending);
+        conn.handle_command(publish_buf("s").as_slice()).unwrap();
+
+        conn.complete_publish_authorization(true).unwrap();
+        assert!(conn.current_stream.as_ref().unwrap().is_publishing);
+        // Second completion for the same (now-resolved) request is a no-op,
+        // not a panic or a state change (e.g. it must not re-deny an already
+        // -allowed publish).
+        conn.complete_publish_authorization(false).unwrap();
+        assert!(conn.current_stream.as_ref().unwrap().is_publishing);
+    }
+
+    #[test]
+    fn multiple_concurrent_pending_connections_are_independent() {
+        let mut a = app_conn();
+        let mut b = app_conn();
+        a.on_publish_auth_cb = Some(|_, _, _| AuthorizationResult::Pending);
+        b.on_publish_auth_cb = Some(|_, _, _| AuthorizationResult::Pending);
+        a.handle_command(publish_buf("stream-a").as_slice())
+            .unwrap();
+        b.handle_command(publish_buf("stream-b").as_slice())
+            .unwrap();
+        assert!(a.has_pending_authorization());
+        assert!(b.has_pending_authorization());
+
+        a.complete_publish_authorization(true).unwrap();
+        assert!(a.current_stream.as_ref().unwrap().is_publishing);
+        assert!(
+            !b.current_stream.as_ref().unwrap().is_publishing,
+            "resolving one connection's pending auth must not affect another's"
+        );
+        assert!(b.has_pending_authorization());
+
+        b.complete_publish_authorization(true).unwrap();
+        assert!(b.current_stream.as_ref().unwrap().is_publishing);
+    }
+
+    #[test]
+    fn pending_publish_auth_times_out_and_denies() {
+        let mut conn = app_conn();
+        conn.on_publish_auth_cb = Some(|_, _, _| AuthorizationResult::Pending);
+        conn.handle_command(publish_buf("s").as_slice()).unwrap();
+        assert!(conn.has_pending_authorization());
+
+        conn.reap_timed_out_pending_auth(Duration::from_secs(30));
+        assert!(
+            conn.has_pending_authorization(),
+            "must not deny before the timeout elapses"
+        );
+
+        // Backdate the request instead of sleeping in the test.
+        if let Some(pending) = conn.pending_publish_auth.as_mut() {
+            pending.requested_at = Instant::now() - Duration::from_secs(60);
+        }
+        conn.reap_timed_out_pending_auth(Duration::from_secs(30));
+        assert!(!conn.has_pending_authorization());
+        assert!(!conn.current_stream.as_ref().unwrap().is_publishing);
+    }
+
+    #[test]
+    fn publish_auth_cb_takes_priority_over_legacy_bool_cb() {
+        // When both the new and legacy callbacks are set, the three-state
+        // callback decides -- a legacy `false` must not leak through once
+        // the auth callback allows.
+        let mut conn = app_conn();
+        conn.on_publish_cb = Some(|_, _, _| false);
+        conn.on_publish_auth_cb = Some(|_, _, _| AuthorizationResult::Allow);
+        conn.handle_command(publish_buf("s").as_slice()).unwrap();
+        assert!(conn.current_stream.as_ref().unwrap().is_publishing);
     }
 }
