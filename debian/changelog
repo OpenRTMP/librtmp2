@@ -1,3 +1,13 @@
+librtmp2 (0.9.0-1) UNRELEASED; urgency=medium
+
+  * Add AuthorizationResult (Allow/Deny/Pending) publish/play authorization
+    callbacks so a host can defer a decision (e.g. an async database or
+    cluster lookup) instead of answering synchronously from the RTMP poll
+    loop; a pending decision left unresolved for 15 seconds auto-denies.
+    Existing synchronous callbacks keep working unchanged.
+
+ -- OpenRTMP <info@openrtmp.org>  Wed, 23 Sep 2026 00:00:00 +0000
+
 librtmp2 (0.8.1-1) UNRELEASED; urgency=medium
 
   * Security: cap multitrack/aggregate media fan-out against the per-poll

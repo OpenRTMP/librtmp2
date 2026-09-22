@@ -13,7 +13,16 @@ begin at `1.0.0`.
 
 ## [Unreleased]
 
-## [0.9.0] — 2026-09-22
+### Documentation
+- Documented, for the first time in this file, two pieces of release
+  infrastructure that predate this entry and were previously described
+  only in `CLAUDE.md`/`docs/`: Debian/Ubuntu packaging (`librtmp2` +
+  `librtmp2-dev`, built from `debian/`) published to a Launchpad PPA on
+  tag push (`.github/workflows/publish-ppa.yml`, see
+  `docs/publishing-ppa.md`), and automated crates.io publishing on tag
+  push (`.github/workflows/publish-crates-io.yml`, `release.yml`).
+
+## [0.9.0] — 2026-09-23
 
 ### Added
 - `AuthorizationResult` (`Allow` / `Deny` / `Pending`) as the return type for
@@ -29,11 +38,6 @@ begin at `1.0.0`.
   two callback styles can't both be registered on the same connection.
 - `Conn::has_pending_authorization()` to check whether a connection is
   currently waiting on an async publish/play decision.
-
-### Changed
-- No public API was removed or changed incompatibly; this is purely
-  additive. The `extern "C"` FFI surface (`src/lib.rs`) is unaffected — the
-  new API is Rust-only for now.
 
 ## [0.8.1] — 2026-09-18
 
