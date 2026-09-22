@@ -13,6 +13,28 @@ begin at `1.0.0`.
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-09-22
+
+### Added
+- `AuthorizationResult` (`Allow` / `Deny` / `Pending`) as the return type for
+  the server's publish/play authorization callbacks, so a host application
+  can defer a decision (e.g. an async database or cluster lookup) instead of
+  answering synchronously from inside the RTMP poll loop. A connection with a
+  pending authorization is held open — no media flows and the state machine
+  doesn't advance — until the host resolves it via the new
+  `Conn`/`Server::complete_publish_authorization` /
+  `complete_play_authorization`. A pending authorization left unresolved for
+  15 seconds (`DEFAULT_PENDING_AUTH_TIMEOUT`) is automatically denied.
+  Existing synchronous bool-returning callbacks keep working unchanged; the
+  two callback styles can't both be registered on the same connection.
+- `Conn::has_pending_authorization()` to check whether a connection is
+  currently waiting on an async publish/play decision.
+
+### Changed
+- No public API was removed or changed incompatibly; this is purely
+  additive. The `extern "C"` FFI surface (`src/lib.rs`) is unaffected — the
+  new API is Rust-only for now.
+
 ## [0.8.1] — 2026-09-18
 
 ### Security
