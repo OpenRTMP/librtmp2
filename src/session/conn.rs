@@ -396,6 +396,16 @@ impl Conn {
     /// transition -- see `FCUnpublish`/`deleteStream`/`closeStream` in
     /// `handle_command`).
     pub fn session_setup_timed_out(&self) -> bool {
+        // A connection waiting on `on_publish_auth_cb`/`on_play_auth_cb` is
+        // governed exclusively by `reap_timed_out_pending_auth`'s longer
+        // `pending_auth_timeout` (15s by default) -- without this exemption
+        // the generic 10s `RTMP_SESSION_SETUP_TIMEOUT` below would always
+        // reap it first, since `reap_timed_out_pending_auth` runs before this
+        // check on every poll tick and neither `is_publishing` nor
+        // `is_playing` is set yet while the decision is in flight.
+        if self.has_pending_authorization() {
+            return false;
+        }
         // `ConnState` only moves forward, so a peer that briefly published
         // (or played) and then unpublished before the deadline would stay
         // "exempt" forever if this checked `self.state`. Check the current
@@ -850,7 +860,13 @@ impl Conn {
     }
 
     fn is_active_publisher_stream(&self, msg_stream_id: u32) -> bool {
+        // A republish on an already-publishing connection (e.g. a stream
+        // rename) leaves `stream.is_publishing` set while the new decision
+        // is `Pending` -- without this check inbound media would keep being
+        // relayed under the still-active old authorization instead of
+        // stopping until the new one resolves.
         self.relay_enabled
+            && !self.has_pending_authorization()
             && self
                 .current_stream
                 .as_ref()
@@ -1445,6 +1461,8 @@ impl Conn {
             Some(auth_cb) if !auth_cb(self.conn_id, &so) => return Ok(()),
             None if self.on_publish_cb.is_some()
                 || self.on_play_cb.is_some()
+                || self.on_publish_auth_cb.is_some()
+                || self.on_play_auth_cb.is_some()
                 || self.on_media_cb.is_some()
                 || self.on_frame_cb.is_some()
                 || self.on_release_stream_cb.is_some() =>
@@ -2216,6 +2234,14 @@ impl Conn {
                         "No stream created",
                     );
                 }
+                // A decision is already in flight for this connection -- never
+                // overwrite `pending_publish_auth` with a second request, or
+                // the completion that eventually arrives (looked up purely by
+                // conn_id) would authorize whichever stream name was stored
+                // last rather than the one the resolving decision was for.
+                if self.pending_publish_auth.is_some() {
+                    return self.send_publish_denied();
+                }
                 if let Some(cb) = self.on_publish_auth_cb {
                     match cb(self.conn_id, &self.app, &name_str) {
                         AuthorizationResult::Allow => {}
@@ -2271,6 +2297,11 @@ impl Conn {
                         "NetStream.Play.BadConnection",
                         "No stream created",
                     );
+                }
+                // See the matching guard in the "publish" arm above: never let
+                // a second request overwrite an in-flight `pending_play_auth`.
+                if self.pending_play_auth.is_some() {
+                    return self.send_play_denied();
                 }
                 if let Some(cb) = self.on_play_auth_cb {
                     match cb(self.conn_id, &self.app, &name_str) {
@@ -5575,6 +5606,56 @@ mod tests {
     }
 
     #[test]
+    fn amf3_shared_object_dropped_when_only_on_publish_auth_cb_configured() {
+        use crate::message::shared_object::{SharedObjectEvent, SharedObjectEventType};
+        use std::sync::{LazyLock, Mutex};
+
+        static SEEN: LazyLock<Mutex<bool>> = LazyLock::new(|| Mutex::new(false));
+
+        fn record_so(_conn_id: u64, _so: &SharedObjectMessage) {
+            *SEEN.lock().unwrap() = true;
+        }
+
+        *SEEN.lock().unwrap() = false;
+        let mut conn = Conn::new();
+        conn.conn_id = 42;
+        conn.state = ConnState::AppConnected;
+        // A peer using only the new async auth callback (no legacy
+        // on_publish_cb/on_play_cb, no dedicated on_shared_object_auth_cb)
+        // must still be fail-closed for shared objects.
+        conn.on_publish_auth_cb = Some(|_, _, _| AuthorizationResult::Pending);
+        conn.on_shared_object_cb = Some(record_so);
+
+        let so = SharedObjectMessage {
+            name: "chat".to_string(),
+            version: 1,
+            flags: 0,
+            events: vec![SharedObjectEvent {
+                event_type: SharedObjectEventType::Change,
+                data: b"evil".to_vec(),
+            }],
+        };
+        let mut amf_buf = Buffer::with_capacity(64);
+        shared_object::write(&so, &mut amf_buf).unwrap();
+        let mut payload = vec![0x00];
+        payload.extend_from_slice(amf_buf.as_slice());
+        let msg = ChunkMessage {
+            csid: 3,
+            fmt: 0,
+            timestamp: 0,
+            msg_length: payload.len() as u32,
+            msg_type_id: msg_dispatch::RTMP_MSG_AMF3_SHARED_OBJECT,
+            msg_stream_id: 0,
+            is_complete: true,
+        };
+        conn.handle_message_for_test(&msg, &payload).unwrap();
+        assert!(
+            !*SEEN.lock().unwrap(),
+            "shared objects must not bypass a publish-auth-only configuration"
+        );
+    }
+
+    #[test]
     fn amf3_shared_object_honors_on_shared_object_auth_cb() {
         use crate::message::shared_object::{SharedObjectEvent, SharedObjectEventType};
         use std::sync::{LazyLock, Mutex};
@@ -6435,6 +6516,98 @@ mod tests {
         conn.reap_timed_out_pending_auth(Duration::from_secs(30));
         assert!(!conn.has_pending_authorization());
         assert!(!conn.current_stream.as_ref().unwrap().is_publishing);
+    }
+
+    #[test]
+    fn second_publish_while_pending_does_not_overwrite_first_request() {
+        let mut conn = app_conn();
+        conn.on_publish_auth_cb = Some(|_, _, _| AuthorizationResult::Pending);
+        conn.handle_command(publish_buf("first").as_slice())
+            .unwrap();
+        assert!(conn.has_pending_authorization());
+
+        // A second publish sent while the first decision is still in flight
+        // must be rejected outright, not silently replace
+        // `pending_publish_auth` -- otherwise the completion that eventually
+        // arrives for the first request would authorize whichever stream
+        // name is currently stored instead.
+        conn.handle_command(publish_buf("second").as_slice())
+            .unwrap();
+
+        conn.complete_publish_authorization(true).unwrap();
+        assert_eq!(
+            conn.current_stream.as_ref().unwrap().name,
+            "first",
+            "the rejected second request must not hijack the first request's authorization"
+        );
+    }
+
+    #[test]
+    fn second_play_while_pending_does_not_overwrite_first_request() {
+        let mut conn = app_conn();
+        conn.on_play_auth_cb = Some(|_, _, _| AuthorizationResult::Pending);
+        conn.handle_command(play_buf("first").as_slice()).unwrap();
+        assert!(conn.has_pending_authorization());
+
+        conn.handle_command(play_buf("second").as_slice()).unwrap();
+
+        conn.complete_play_authorization(true).unwrap();
+        assert_eq!(
+            conn.current_stream.as_ref().unwrap().name,
+            "first",
+            "the rejected second request must not hijack the first request's authorization"
+        );
+    }
+
+    #[test]
+    fn media_stops_flowing_while_a_republish_is_pending() {
+        let mut conn = app_conn();
+        conn.on_publish_auth_cb = Some(|_, _, _| AuthorizationResult::Allow);
+        conn.handle_command(publish_buf("first").as_slice())
+            .unwrap();
+        assert!(conn.current_stream.as_ref().unwrap().is_publishing);
+
+        conn.on_publish_auth_cb = Some(|_, _, _| AuthorizationResult::Pending);
+        conn.handle_command(publish_buf("second").as_slice())
+            .unwrap();
+        assert!(conn.has_pending_authorization());
+        assert!(
+            conn.current_stream.as_ref().unwrap().is_publishing,
+            "is_publishing is left set from the prior Allow while the rename is pending"
+        );
+
+        conn.handle_media_frame(1, FrameType::Video, 0, &[0x17, 0, 0, 0, 0], None)
+            .unwrap();
+        assert!(
+            conn.pending_relay.is_empty(),
+            "media must not relay while a re-authorization decision is in flight"
+        );
+
+        conn.complete_publish_authorization(true).unwrap();
+        conn.handle_media_frame(1, FrameType::Video, 0, &[0x17, 0, 0, 0, 0], None)
+            .unwrap();
+        assert_eq!(conn.pending_relay.len(), 1);
+    }
+
+    #[test]
+    fn session_setup_timeout_exempts_pending_authorization() {
+        let mut conn = app_conn();
+        conn.on_publish_auth_cb = Some(|_, _, _| AuthorizationResult::Pending);
+        conn.handle_command(publish_buf("s").as_slice()).unwrap();
+        assert!(conn.has_pending_authorization());
+
+        conn.set_session_setup_started_for_test(Instant::now() - Duration::from_secs(20));
+        assert!(
+            !conn.session_setup_timed_out(),
+            "a pending decision must not be reaped by the shorter generic setup timeout -- \
+             reap_timed_out_pending_auth's own (longer) timeout governs it instead"
+        );
+
+        conn.complete_publish_authorization(false).unwrap();
+        assert!(
+            conn.session_setup_timed_out(),
+            "once resolved, the normal setup timeout applies again"
+        );
     }
 
     #[test]

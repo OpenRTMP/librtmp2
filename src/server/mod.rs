@@ -1367,7 +1367,7 @@ impl Server {
             let Some(ref stream) = conn.current_stream else {
                 continue;
             };
-            if !stream.is_playing || !conn.relay_enabled {
+            if !stream.is_playing || !conn.relay_enabled || conn.has_pending_authorization() {
                 continue;
             }
             conn.needs_init_frames = false;
@@ -1577,6 +1577,11 @@ impl Server {
             || !stream.is_playing
             || conn.relay_route_key() != frame.stream_name
             || stream.paused
+            // A re-play on an already-playing connection (stream/route
+            // switch) leaves `stream.is_playing` set while the new decision
+            // is `Pending` -- media must stop until it resolves, not keep
+            // delivering frames for the still-active prior authorization.
+            || conn.has_pending_authorization()
         {
             return false;
         }
@@ -4937,5 +4942,49 @@ mod tests {
         let conn = server.connections.iter().find(|c| c.conn_id == 44).unwrap();
         assert!(!conn.has_pending_authorization());
         assert!(!conn.current_stream.as_ref().unwrap().is_publishing);
+    }
+
+    #[test]
+    fn conn_will_receive_relay_frame_is_false_while_a_re_play_is_pending() {
+        use crate::session::stream::Stream;
+        use crate::transport::Transport;
+        use std::os::unix::io::IntoRawFd;
+        use std::os::unix::net::UnixStream;
+
+        let (server_end, _peer_end) = UnixStream::pair().unwrap();
+        server_end.set_nonblocking(true).unwrap();
+
+        let mut player = Conn::new();
+        player.app = "live".to_string();
+        player.relay_enabled = true;
+        player.transport = Some(Transport::new_plain(server_end.into_raw_fd()));
+        player.current_stream = Some(Box::new(Stream {
+            stream_id: 1,
+            name: "stream".to_string(),
+            is_publishing: false,
+            is_playing: true,
+            paused: false,
+            receive_audio: true,
+            receive_video: true,
+        }));
+
+        let frame =
+            relay_frame_for_publisher(1, "stream", FrameType::Video, vec![0x27, 0x01, 0x00]);
+        assert!(Server::conn_will_receive_relay_frame(&player, &frame));
+
+        // A re-play (stream/route switch) on this already-playing connection
+        // is now awaiting a fresh authorization decision -- delivery must
+        // stop even though `stream.is_playing` is still true from the prior
+        // Allow.
+        player.on_play_auth_cb = Some(|_, _, _| AuthorizationResult::Pending);
+        let mut buf = crate::buffer::Buffer::with_capacity(128);
+        crate::message::command::build_play(&mut buf, "stream").unwrap();
+        player.handle_command(buf.as_slice()).unwrap();
+        assert!(player.has_pending_authorization());
+
+        assert!(
+            !Server::conn_will_receive_relay_frame(&player, &frame),
+            "relay must stop while a re-authorization decision is in flight"
+        );
     }
 }
