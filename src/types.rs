@@ -107,6 +107,35 @@ pub enum ConnState {
     Closed,
 }
 
+/* ── Asynchronous publish/play authorization ── */
+
+/// Outcome of a play/publish authorization check.
+///
+/// `on_publish_cb`/`on_play_cb` (and their FFI equivalents) can only answer
+/// synchronously with a `bool`. [`Conn::on_publish_auth_cb`]/
+/// [`Conn::on_play_auth_cb`] (see `session::conn`) return this instead, so an
+/// integrator whose authorization work is itself asynchronous (e.g. a
+/// database lookup dispatched to a worker thread) can return `Pending`
+/// without blocking the RTMP processing loop. The connection then waits --
+/// sending and receiving no media -- until the integrator calls
+/// `complete_publish_authorization`/`complete_play_authorization` (on
+/// [`Conn`] or [`crate::server::Server`]) with the final `Allow`/`Deny`
+/// decision, or until the pending-authorization timeout denies it.
+///
+/// [`Conn`]: crate::session::conn::Conn
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
+pub enum AuthorizationResult {
+    /// Authorization succeeded; proceed with the normal publish/play flow.
+    Allow = 0,
+    /// Authorization failed; proceed with the normal rejection flow.
+    Deny = 1,
+    /// Authorization is still in progress. The connection is held open with
+    /// media blocked until a later `complete_*_authorization` call (or a
+    /// timeout) resolves it.
+    Pending = 2,
+}
+
 /* ── Frame types ── */
 
 /// Frame type classification.
