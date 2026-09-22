@@ -6,8 +6,9 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::TcpListener;
 use std::os::unix::io::{AsRawFd, IntoRawFd};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 #[cfg(feature = "tls")]
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use crate::chunk::state::{DEFAULT_CHUNK_SIZE, DEFAULT_MAX_MSG_LENGTH, RTMP_WIRE_MAX_MSG_LENGTH};
 use crate::ertmp::multitrack_media::{foreach_track, is_multitrack_container};
@@ -301,6 +302,18 @@ pub struct Server {
     pub on_publish_cb: Option<fn(conn_id: u64, app: &str, stream_name: &str) -> bool>,
     /// When set, must return true to allow `play`; false rejects the command.
     pub on_play_cb: Option<fn(conn_id: u64, app: &str, stream_name: &str) -> bool>,
+    /// Three-state publish authorization (`Allow`/`Deny`/`Pending`). Takes
+    /// priority over `on_publish_cb` when both are set; see
+    /// [`crate::session::conn::Conn::on_publish_auth_cb`].
+    pub on_publish_auth_cb:
+        Option<fn(conn_id: u64, app: &str, stream_name: &str) -> AuthorizationResult>,
+    /// Three-state play authorization; see [`Self::on_publish_auth_cb`].
+    pub on_play_auth_cb:
+        Option<fn(conn_id: u64, app: &str, stream_name: &str) -> AuthorizationResult>,
+    /// Deadline for a `Pending` publish/play authorization before it's
+    /// auto-denied. Defaults to
+    /// [`crate::session::conn::DEFAULT_PENDING_AUTH_TIMEOUT`].
+    pub pending_auth_timeout: Duration,
     /// When set, must return true before publisher media is queued for relay.
     pub on_media_cb: Option<fn(u64, FrameType, Option<&str>) -> bool>,
     /// Must return true before a parsed AMF3 Shared Object message is delivered
@@ -390,6 +403,9 @@ impl Server {
             on_connect_cb: None,
             on_publish_cb: None,
             on_play_cb: None,
+            on_publish_auth_cb: None,
+            on_play_auth_cb: None,
+            pending_auth_timeout: crate::session::conn::DEFAULT_PENDING_AUTH_TIMEOUT,
             on_media_cb: None,
             on_shared_object_auth_cb: None,
             on_shared_object_cb: None,
@@ -857,6 +873,45 @@ impl Server {
         Ok(())
     }
 
+    /// Resolve a `publish` request that `on_publish_auth_cb` left `Pending`
+    /// on connection `conn_id`.
+    ///
+    /// Harmless no-op if `conn_id` no longer exists (the connection
+    /// disconnected while authorization was pending) or if this
+    /// authorization was already completed -- safe to call at most once per
+    /// pending request, or extra times, without side effects.
+    pub fn complete_publish_authorization(&mut self, conn_id: u64, allow: bool) -> Result<()> {
+        let Some(conn) = self.connections.iter_mut().find(|c| c.conn_id == conn_id) else {
+            return Ok(());
+        };
+        conn.complete_publish_authorization(allow)?;
+        let _ = conn.flush();
+        Ok(())
+    }
+
+    /// Resolve a `play` request that `on_play_auth_cb` left `Pending` on
+    /// connection `conn_id`. See [`Self::complete_publish_authorization`]
+    /// for no-op semantics.
+    pub fn complete_play_authorization(&mut self, conn_id: u64, allow: bool) -> Result<()> {
+        let Some(conn) = self.connections.iter_mut().find(|c| c.conn_id == conn_id) else {
+            return Ok(());
+        };
+        conn.complete_play_authorization(allow)?;
+        let _ = conn.flush();
+        Ok(())
+    }
+
+    /// Auto-deny any publish/play authorization that's been `Pending` longer
+    /// than `self.pending_auth_timeout` across all connections. Called every
+    /// [`Self::poll`] tick.
+    fn reap_timed_out_pending_auth(&mut self) {
+        let timeout = self.pending_auth_timeout;
+        for conn in self.connections.iter_mut() {
+            conn.reap_timed_out_pending_auth(timeout);
+            let _ = conn.flush();
+        }
+    }
+
     /// Stop the server.
     pub fn stop(&mut self) {
         self.running = false;
@@ -1014,6 +1069,8 @@ impl Server {
         conn.on_connect_cb = self.on_connect_cb;
         conn.on_publish_cb = self.on_publish_cb;
         conn.on_play_cb = self.on_play_cb;
+        conn.on_publish_auth_cb = self.on_publish_auth_cb;
+        conn.on_play_auth_cb = self.on_play_auth_cb;
         conn.on_shared_object_auth_cb = self.on_shared_object_auth_cb;
         conn.on_shared_object_cb = self.on_shared_object_cb;
         conn.on_release_stream_cb = self.on_release_stream_cb;
@@ -1142,6 +1199,7 @@ impl Server {
         let mut closed = Vec::new();
 
         // Drive recv/processing for every connection.
+        self.reap_timed_out_pending_auth();
         self.drain_pending_cache_evictions();
         // Reap expired external inject claims *before* receiving publish
         // commands — otherwise a socket publisher on a stale inject route
@@ -4808,5 +4866,76 @@ mod tests {
             server.drain_exported_relay_frames().is_empty(),
             "injected frames must not be exported"
         );
+    }
+
+    // ── Server-level pending publish/play authorization ──
+
+    fn pending_publish_conn(conn_id: u64) -> Conn {
+        use crate::session::stream::Stream;
+        let mut conn = Conn::new();
+        conn.conn_id = conn_id;
+        conn.app = "live".to_string();
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+        conn.on_publish_auth_cb = Some(|_, _, _| AuthorizationResult::Pending);
+        let mut buf = crate::buffer::Buffer::with_capacity(128);
+        crate::message::command::build_publish(&mut buf, "s", "live").unwrap();
+        conn.handle_command(buf.as_slice()).unwrap();
+        assert!(conn.has_pending_authorization());
+        conn
+    }
+
+    fn pending_play_conn(conn_id: u64) -> Conn {
+        use crate::session::stream::Stream;
+        let mut conn = Conn::new();
+        conn.conn_id = conn_id;
+        conn.app = "live".to_string();
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+        conn.on_play_auth_cb = Some(|_, _, _| AuthorizationResult::Pending);
+        let mut buf = crate::buffer::Buffer::with_capacity(128);
+        crate::message::command::build_play(&mut buf, "s").unwrap();
+        conn.handle_command(buf.as_slice()).unwrap();
+        assert!(conn.has_pending_authorization());
+        conn
+    }
+
+    #[test]
+    fn completion_for_unknown_connection_is_harmless() {
+        let mut server = test_server();
+        assert!(server.complete_publish_authorization(9999, true).is_ok());
+        assert!(server.complete_play_authorization(9999, false).is_ok());
+    }
+
+    #[test]
+    fn server_resolves_pending_publish_authorization_by_conn_id() {
+        let mut server = test_server();
+        server.connections.push(pending_publish_conn(42));
+
+        server.complete_publish_authorization(42, true).unwrap();
+        let conn = server.connections.iter().find(|c| c.conn_id == 42).unwrap();
+        assert!(conn.current_stream.as_ref().unwrap().is_publishing);
+        assert!(!conn.has_pending_authorization());
+    }
+
+    #[test]
+    fn server_resolves_pending_play_authorization_by_conn_id() {
+        let mut server = test_server();
+        server.connections.push(pending_play_conn(43));
+
+        server.complete_play_authorization(43, false).unwrap();
+        let conn = server.connections.iter().find(|c| c.conn_id == 43).unwrap();
+        assert!(!conn.current_stream.as_ref().unwrap().is_playing);
+        assert!(!conn.has_pending_authorization());
+    }
+
+    #[test]
+    fn reap_timed_out_pending_auth_denies_stuck_publish_requests() {
+        let mut server = test_server();
+        server.pending_auth_timeout = Duration::from_secs(0);
+        server.connections.push(pending_publish_conn(44));
+
+        server.reap_timed_out_pending_auth();
+        let conn = server.connections.iter().find(|c| c.conn_id == 44).unwrap();
+        assert!(!conn.has_pending_authorization());
+        assert!(!conn.current_stream.as_ref().unwrap().is_publishing);
     }
 }
