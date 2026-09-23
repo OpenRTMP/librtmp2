@@ -2536,6 +2536,7 @@ mod tests {
         use crate::transport::Transport;
         use std::os::unix::io::IntoRawFd;
         use std::os::unix::net::UnixStream;
+        use std::time::Instant;
 
         let (server_end, _peer_end) = UnixStream::pair().unwrap();
         server_end.set_nonblocking(true).unwrap();
