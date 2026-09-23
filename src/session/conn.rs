@@ -1694,9 +1694,8 @@ impl Conn {
         match msg_type_id {
             msg_dispatch::RTMP_MSG_SET_CHUNK_SIZE => {
                 if payload.len() >= 4 {
-                    if let Ok(cs) = control::read_set_chunk_size(payload) {
-                        self.chunk_reg.set_all_chunk_size(cs);
-                    }
+                    let cs = control::read_set_chunk_size(payload)?;
+                    self.chunk_reg.set_all_chunk_size(cs);
                 }
             }
             msg_dispatch::RTMP_MSG_ABORT_MESSAGE => {

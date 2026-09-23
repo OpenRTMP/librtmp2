@@ -702,9 +702,8 @@ impl Client {
                         }
                         *messages_processed += 1;
                         if msg.msg_type_id == msg_dispatch::RTMP_MSG_SET_CHUNK_SIZE {
-                            if let Ok(cs) = control::read_set_chunk_size(&payload) {
-                                self.chunk_reg.set_all_chunk_size(cs);
-                            }
+                            let cs = control::read_set_chunk_size(&payload)?;
+                            self.chunk_reg.set_all_chunk_size(cs);
                         } else if msg.msg_type_id == msg_dispatch::RTMP_MSG_USER_CONTROL {
                             self.handle_user_control(&payload)?;
                         } else if msg.msg_type_id == msg_dispatch::RTMP_MSG_AUDIO
@@ -1279,9 +1278,8 @@ impl Client {
             match chunk_read_owned(&mut self.recv_buffer, &mut self.chunk_reg, &mut msg) {
                 Ok((1, payload)) if msg.is_complete => {
                     if msg.msg_type_id == msg_dispatch::RTMP_MSG_SET_CHUNK_SIZE {
-                        if let Ok(cs) = control::read_set_chunk_size(&payload) {
-                            self.chunk_reg.set_all_chunk_size(cs);
-                        }
+                        let cs = control::read_set_chunk_size(&payload)?;
+                        self.chunk_reg.set_all_chunk_size(cs);
                         continue;
                     }
                     if msg.msg_type_id == msg_dispatch::RTMP_MSG_USER_CONTROL {
