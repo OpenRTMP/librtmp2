@@ -161,9 +161,12 @@ pub fn chunk_read(
 
     // ── Phase 2: all bytes confirmed present — consume them ──
 
-    // Consume basic header
-    let mut hdr = vec![0u8; header_size];
-    buf.read(&mut hdr).map_err(|_| ErrorCode::Io)?;
+    // Consume basic header. Its bytes were already extracted from `peek()`
+    // above (csid/fmt), so this only needs to advance the read cursor --
+    // no need to copy them into a fresh heap allocation just to discard it.
+    // Availability was already confirmed in phase 1, so this cannot skip
+    // past unwritten data.
+    buf.drain(header_size);
 
     // Consume message header and extract fields
     let timestamp: u32;
@@ -370,21 +373,21 @@ pub fn chunk_read(
         msg.msg_stream_id = effective_stream_id;
         msg.is_complete = true;
 
-        // Copy out before reset: shrinking the reassembly buffer would
-        // invalidate a pointer into its storage. Reuse last_payload's
-        // allocation to avoid allocator churn on every complete message.
+        // Move the reassembled bytes out of `reassembly_buf` into
+        // `last_payload` instead of copying them: `reassembly_buf` is only
+        // ever appended to between resets (never partially `.read()` from),
+        // so `Buffer::take` is a zero-copy move here, not a memcpy of the
+        // whole message body.
+        let released_len;
         {
             let stream = &mut reg.streams[stream_idx];
-            stream.last_payload.clear();
-            stream
-                .last_payload
-                .extend_from_slice(stream.reassembly_buf.peek());
+            released_len = stream.reassembly_buf.available();
+            stream.last_payload = stream.reassembly_buf.take();
             *payload_len = stream.last_payload.len();
             *payload = stream.last_payload.as_ptr();
             stream.reassembly_bytes_read = 0;
         }
-        reg.release_stream_reassembly(stream_idx);
-        reg.streams[stream_idx].reassembly_buf.reset();
+        reg.release_reassembly_bytes(released_len);
 
         Ok(1)
     } else {
@@ -402,25 +405,20 @@ pub fn chunk_read_owned(
     let mut payload_ptr: *const u8 = std::ptr::null();
     let mut payload_len = 0;
     let rc = chunk_read(buf, reg, None, msg, &mut payload_ptr, &mut payload_len)?;
-    let payload = if rc == 1 && msg.is_complete && payload_len > 0 && !payload_ptr.is_null() {
-        // SAFETY: chunk_read only returns non-null pointers into `last_payload`,
-        // which remains valid until the next complete message on this CSID.
-        unsafe { std::slice::from_raw_parts(payload_ptr, payload_len).to_vec() }
+    let _ = (payload_ptr, payload_len);
+    // Move `last_payload` out instead of copying it: `chunk_read` already
+    // moved the reassembled bytes into it, so this is an O(1) ownership
+    // transfer, not another memcpy of the message body. It also leaves the
+    // per-CSID slot holding a fresh, empty `Vec` -- equivalent to (and
+    // replacing) the old explicit "release so a peer can't pin retained
+    // payload bytes" clear step.
+    let payload = if rc == 1 && msg.is_complete {
+        reg.get_mut(msg.csid)
+            .map(|stream| std::mem::take(&mut stream.last_payload))
+            .unwrap_or_default()
     } else {
         Vec::new()
     };
-    // Production callers use this owned path exclusively. Release the per-CSID
-    // `last_payload` copy immediately so a peer cannot pin up to
-    // `max_active_csids * max_msg_length` bytes of completed message bodies on
-    // one connection.
-    if rc == 1 && msg.is_complete {
-        if let Some(stream) = reg.get_mut(msg.csid) {
-            stream.last_payload.clear();
-            if stream.last_payload.capacity() > crate::buffer::BUFFER_RESET_CAPACITY {
-                stream.last_payload.shrink_to_fit();
-            }
-        }
-    }
     Ok((rc, payload))
 }
 

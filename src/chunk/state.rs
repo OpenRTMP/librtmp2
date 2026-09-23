@@ -223,8 +223,15 @@ impl ChunkRegistry {
 
     pub(crate) fn release_stream_reassembly(&mut self, idx: usize) -> usize {
         let released = self.streams[idx].reassembly_buf.available();
-        self.reassembly_bytes_in_use = self.reassembly_bytes_in_use.saturating_sub(released);
+        self.release_reassembly_bytes(released);
         released
+    }
+
+    /// Subtract an already-known byte count from the running reassembly
+    /// total. For use when the buffer itself has already been drained (e.g.
+    /// via `Buffer::take`), so `available()` can no longer report it.
+    pub(crate) fn release_reassembly_bytes(&mut self, released: usize) {
+        self.reassembly_bytes_in_use = self.reassembly_bytes_in_use.saturating_sub(released);
     }
 
     /// Account for newly written reassembly bytes on a stream.
