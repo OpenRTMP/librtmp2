@@ -54,8 +54,9 @@ pub fn chunk_write(
     let ext_ts = ts >= 0xFFFFFF;
 
     // --- First chunk: basic header + fmt=0 message header ---
-    let hdr = basic_header(csid, fmt);
-    out.write(&hdr).map_err(|_| ErrorCode::Internal)?;
+    let (hdr, hdr_len) = basic_header(csid, fmt);
+    out.write(&hdr[..hdr_len])
+        .map_err(|_| ErrorCode::Internal)?;
 
     // fmt=0 header: timestamp(3) + length(3) + type(1) + stream id(4 LE).
 
@@ -101,8 +102,9 @@ pub fn chunk_write(
 
         if offset < payload_len {
             // Continuation chunk header (fmt=3, no message header)
-            let chdr = basic_header(csid, 3);
-            out.write(&chdr).map_err(|_| ErrorCode::Internal)?;
+            let (chdr, chdr_len) = basic_header(csid, 3);
+            out.write(&chdr[..chdr_len])
+                .map_err(|_| ErrorCode::Internal)?;
             if ext_ts {
                 out.write(&ts.to_be_bytes())
                     .map_err(|_| ErrorCode::Internal)?;
@@ -127,17 +129,27 @@ pub fn chunk_write_extended_timestamp(out: &mut Buffer, timestamp: u32) -> Resul
 }
 
 /// Build a basic header for the given csid and fmt.
-fn basic_header(csid: u32, fmt: u8) -> Vec<u8> {
+///
+/// Returns a fixed-size, stack-allocated buffer plus the number of leading
+/// bytes that are valid (1-3, matching the RTMP basic-header encoding). This
+/// runs once per outbound message and again per continuation chunk for a
+/// fragmented message, so on a busy relay (many viewers, large frames split
+/// across `chunk_size`) a heap allocation here would run per chunk per
+/// viewer; a `[u8; 3]` avoids that entirely.
+fn basic_header(csid: u32, fmt: u8) -> ([u8; 3], usize) {
     if csid < 64 {
-        vec![(fmt << 6) | (csid as u8)]
+        ([(fmt << 6) | (csid as u8), 0, 0], 1)
     } else if csid < 320 {
-        vec![fmt << 6, (csid - 64) as u8]
+        ([fmt << 6, (csid - 64) as u8, 0], 2)
     } else {
-        vec![
-            (fmt << 6) | 1,
-            ((csid - 64) & 0xFF) as u8,
-            (((csid - 64) >> 8) & 0xFF) as u8,
-        ]
+        (
+            [
+                (fmt << 6) | 1,
+                ((csid - 64) & 0xFF) as u8,
+                (((csid - 64) >> 8) & 0xFF) as u8,
+            ],
+            3,
+        )
     }
 }
 

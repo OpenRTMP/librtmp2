@@ -141,6 +141,23 @@ impl Buffer {
         self.read_pos += len.min(available);
     }
 
+    /// Take ownership of the unread bytes, leaving the buffer empty.
+    ///
+    /// Unlike `peek().to_vec()`, this avoids copying: when `read_pos` is 0
+    /// (the common case for a buffer that is only ever appended to and never
+    /// partially read, e.g. per-CSID chunk reassembly) it just truncates and
+    /// moves out the backing `Vec` in O(1).
+    pub fn take(&mut self) -> Vec<u8> {
+        let mut out = std::mem::take(&mut self.data);
+        out.truncate(self.size);
+        if self.read_pos > 0 {
+            out.drain(0..self.read_pos.min(out.len()));
+        }
+        self.size = 0;
+        self.read_pos = 0;
+        out
+    }
+
     /// Get the raw data slice.
     pub fn as_slice(&self) -> &[u8] {
         &self.data[..self.size]
