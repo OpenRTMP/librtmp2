@@ -500,12 +500,19 @@ impl Conn {
 
     /// Key used to route relayed media between publishers and players.
     pub fn relay_route_key(&self) -> String {
+        self.relay_route_key_str().to_string()
+    }
+
+    /// Borrowing form of [`relay_route_key`](Self::relay_route_key) for
+    /// comparisons on the relay fanout path, which runs once per player
+    /// connection for every relayed frame — avoid the allocation there.
+    pub fn relay_route_key_str(&self) -> &str {
         if !self.relay_key.is_empty() {
-            return self.relay_key.clone();
+            return &self.relay_key;
         }
         self.current_stream
             .as_ref()
-            .map(|s| s.name.clone())
+            .map(|s| s.name.as_str())
             .unwrap_or_default()
     }
 

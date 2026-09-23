@@ -1584,7 +1584,7 @@ impl Server {
             || conn.transport.is_none()
             || conn.app != frame.app
             || !stream.is_playing
-            || conn.relay_route_key() != frame.stream_name
+            || conn.relay_route_key_str() != frame.stream_name
             || stream.paused
             // A re-play on an already-playing connection (stream/route
             // switch) leaves `stream.is_playing` set while the new decision
