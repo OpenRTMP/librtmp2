@@ -1321,8 +1321,11 @@ impl Server {
         self.process_connections_impl(Some(readable))
     }
 
+    /// Drive one poll tick: recv/timeout reaping, then relay-frame batching,
+    /// init-frame replay, relay send/export, flush, and teardown of whatever
+    /// closed along the way. Split into focused per-phase helpers below --
+    /// see each one's doc comment for what it covers.
     fn process_connections_impl(&mut self, readable: Option<&HashSet<u64>>) -> Result<()> {
-        let mut buf = [0u8; 65536];
         let mut closed = Vec::new();
 
         // Drive recv/processing for every connection.
@@ -1332,6 +1335,47 @@ impl Server {
         // commands — otherwise a socket publisher on a stale inject route
         // gets BadName in this poll and never retries after the reaper runs.
         self.reap_stale_inject_routes();
+        self.recv_and_reap_connections(readable, &mut closed);
+
+        // Ordering within this function is deliberate: evictions from
+        // renames processed by the recv loop just above are applied here,
+        // *after* that recv loop but *before* both init-frame replay and
+        // caching of this batch's freshly-relayed frames below. This means
+        // init-frame replay never sees a cache entry under a route key its
+        // publisher abandoned earlier in this same batch, and a same-batch
+        // rename can't leave a stale entry alive until the next poll() call.
+        //
+        // The returned set also guards the caching step below: a frame
+        // queued (via pending_relay) under the old route *before* its
+        // publisher's rename was processed in this same recv loop must not
+        // resurrect the entry we just evicted. It's keyed by (app, name,
+        // conn_id) -- not just (app, name) -- so this only suppresses
+        // caching for the connection that actually abandoned the route;
+        // a *different* publisher's legitimate same-batch frame for an
+        // identical (app, name) is unaffected.
+        let abandoned_this_batch = self.drain_pending_cache_evictions();
+
+        self.drop_stale_pending_relay_for_abandoned_routes(&abandoned_this_batch);
+        let relay_frames = self.build_relay_frame_batch();
+        self.replay_init_frames_for_new_players(&mut closed);
+        self.send_and_export_relay_frames(relay_frames, &abandoned_this_batch, &mut closed);
+        self.flush_connections(&mut closed);
+        self.remove_closed_connections(closed);
+        Ok(())
+    }
+
+    /// Recv/timeout phase of [`Self::process_connections_impl`]: session-setup
+    /// timeouts, connections whose transport already died on an earlier tick,
+    /// and (when `readable` is `Some`) skipping the `recv()` syscall entirely
+    /// for connections outside the caller's poll-ready set -- e.g. player
+    /// connections, which send nothing after the initial handshake/play
+    /// command, still got probed every poll before this. Timeout reaping and
+    /// the buffered-message drain still run for every connection regardless
+    /// of `readable`, since those aren't contingent on new bytes having
+    /// arrived. Indices of connections that closed this tick are pushed onto
+    /// `closed`.
+    fn recv_and_reap_connections(&mut self, readable: Option<&HashSet<u64>>, closed: &mut Vec<usize>) {
+        let mut buf = [0u8; 65536];
         // Cloned so a closed connection's publish route can be released
         // immediately (below) without conflicting with the mutable borrow
         // of `self.connections` this loop holds via `iter_mut()`.
@@ -1417,37 +1461,20 @@ impl Server {
                 }
             }
         }
+    }
 
-        // Ordering within this function is deliberate: evictions from
-        // renames processed by the recv loop just above are applied here,
-        // *after* that recv loop but *before* both init-frame replay and
-        // caching of this batch's freshly-relayed frames below. This means
-        // init-frame replay never sees a cache entry under a route key its
-        // publisher abandoned earlier in this same batch, and a same-batch
-        // rename can't leave a stale entry alive until the next poll() call.
-        //
-        // The returned set also guards the caching step below: a frame
-        // queued (via pending_relay) under the old route *before* its
-        // publisher's rename was processed in this same recv loop must not
-        // resurrect the entry we just evicted. It's keyed by (app, name,
-        // conn_id) -- not just (app, name) -- so this only suppresses
-        // caching for the connection that actually abandoned the route;
-        // a *different* publisher's legitimate same-batch frame for an
-        // identical (app, name) is unaffected.
-        let abandoned_this_batch = self.drain_pending_cache_evictions();
-
-        // Interleave socket-less injects with local publisher frames so neither
-        // source starves the other under a tight relay-send budget. Relative
-        // order within each source is preserved.
-        // (Stale inject claims were already reaped at the start of this poll.)
-        // When defer_media_relay clears relay_enabled (FCUnpublish/deleteStream)
-        // after media was already queued, drop abandoned-route frames so they
-        // cannot resurrect after a later reauth. Normal (non-deferred)
-        // publishers must still fan out / export frames already accepted in
-        // this batch — abandonment only skips init-cache writes for them.
-        // Do not wipe the whole queue when injects arrived before publish:
-        // publish resets `injected_media_bytes` for the media deadline while
-        // those frames are still pending.
+    /// When `defer_media_relay` cleared `relay_enabled` (FCUnpublish/
+    /// deleteStream) after media was already queued, drop abandoned-route
+    /// frames so they cannot resurrect after a later reauth. Normal
+    /// (non-deferred) publishers must still fan out / export frames already
+    /// accepted in this batch — abandonment only skips init-cache writes for
+    /// them. Does not wipe the whole queue when injects arrived before
+    /// publish: publish resets `injected_media_bytes` for the media deadline
+    /// while those frames are still pending.
+    fn drop_stale_pending_relay_for_abandoned_routes(
+        &mut self,
+        abandoned_this_batch: &HashSet<(String, String, u64)>,
+    ) {
         for conn in &mut self.connections {
             if conn.defer_media_relay && !conn.relay_enabled && !abandoned_this_batch.is_empty() {
                 let conn_id = conn.conn_id;
@@ -1463,8 +1490,15 @@ impl Server {
                 continue;
             }
         }
-        // Round-robin across local publishers (not flat_map by connection
-        // order) so the first publisher cannot monopolize the send budget.
+    }
+
+    /// Round-robin across local publishers (not flat_map by connection
+    /// order) so the first publisher cannot monopolize the send budget, then
+    /// interleave with socket-less injects (alternating which source goes
+    /// first each poll, so neither source starves the other under a tight
+    /// relay-send budget) with relative order within each source preserved.
+    /// (Stale inject claims were already reaped at the start of this poll.)
+    fn build_relay_frame_batch(&mut self) -> Vec<RelayFrame> {
         let local_queues: Vec<Vec<_>> = self
             .connections
             .iter_mut()
@@ -1496,12 +1530,13 @@ impl Server {
         let injected_frames = std::mem::take(&mut self.pending_injected_relay);
         let inject_first = self.relay_interleave_inject_first;
         self.relay_interleave_inject_first = !inject_first;
-        let mut relay_frames =
-            merge_local_and_injected_by_route(local_frames, injected_frames, inject_first);
+        merge_local_and_injected_by_route(local_frames, injected_frames, inject_first)
+    }
 
-        // Replay cached codec headers and last keyframe to newly-joined players
-        // using the pre-batch cache state, so init frames always precede live
-        // frames from the current batch.
+    /// Replay cached codec headers and last keyframe to newly-joined players
+    /// using the pre-batch cache state, so init frames always precede live
+    /// frames from the current batch.
+    fn replay_init_frames_for_new_players(&mut self, closed: &mut Vec<usize>) {
         for (i, conn) in self.connections.iter_mut().enumerate() {
             if conn.transport.is_none() || !conn.needs_init_frames {
                 continue;
@@ -1578,9 +1613,19 @@ impl Server {
                 }
             }
         }
+    }
 
-        // Update per-stream cache and relay each frame in order so players
-        // receive frames in the same sequence the publisher sent them.
+    /// Update per-stream cache and relay each frame in order so players
+    /// receive frames in the same sequence the publisher sent them, then
+    /// export the frames that completed this poll (not requeued -- injected
+    /// frames stay off the export path to avoid remote→local echo loops) and
+    /// requeue whatever the send budget deferred to a later poll.
+    fn send_and_export_relay_frames(
+        &mut self,
+        mut relay_frames: Vec<RelayFrame>,
+        abandoned_this_batch: &HashSet<(String, String, u64)>,
+        closed: &mut Vec<usize>,
+    ) {
         let mut relay_sends = 0usize;
         let mut relay_processed = 0usize;
         for frame in &relay_frames {
@@ -1653,8 +1698,11 @@ impl Server {
         for frame in relay_frames.drain(relay_processed..) {
             self.requeue_relay_frame(frame);
         }
+    }
 
-        // Flush all connections.
+    /// Flush every connection's pending writes; close on a ping or flush
+    /// failure.
+    fn flush_connections(&mut self, closed: &mut Vec<usize>) {
         for (i, conn) in self.connections.iter_mut().enumerate() {
             if conn.transport.is_none() {
                 closed.push(i);
@@ -1668,9 +1716,12 @@ impl Server {
                 closed.push(i);
             }
         }
+    }
 
-        // A connection that errors on both recv and flush gets pushed twice.
-        // Sort then dedup so each index is removed exactly once.
+    /// Tear down every connection index collected in `closed` this poll
+    /// tick. A connection that errors on both recv and flush gets pushed
+    /// twice, so indices are sorted and deduped before removal.
+    fn remove_closed_connections(&mut self, mut closed: Vec<usize>) {
         closed.sort_unstable();
         closed.dedup();
         for i in closed.into_iter().rev() {
@@ -1706,7 +1757,6 @@ impl Server {
             }
             self.connections.remove(i);
         }
-        Ok(())
     }
 
     fn conn_will_receive_relay_frame(conn: &Conn, frame: &RelayFrame) -> bool {
