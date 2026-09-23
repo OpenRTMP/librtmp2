@@ -22,6 +22,19 @@ begin at `1.0.0`.
   `docs/publishing-ppa.md`), and automated crates.io publishing on tag
   push (`.github/workflows/publish-crates-io.yml`, `release.yml`).
 
+## [0.9.1] — 2026-09-23
+
+### Security
+- Require explicit publish/play authorization when a server registers only
+  `on_shared_object_cb`. Previously, that observer-only configuration could
+  implicitly accept publish/play commands and enable relay without the matching
+  publish/play authorization callback. Such commands are now rejected and
+  `relay_enabled` remains false unless the corresponding authorization path is
+  configured.
+
+### Changed
+- Crate version `0.9.0` → `0.9.1`.
+
 ## [0.9.0] — 2026-09-23
 
 ### Added
