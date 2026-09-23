@@ -1837,6 +1837,7 @@ impl Conn {
             || self.on_play_auth_cb.is_some()
             || self.on_media_cb.is_some()
             || self.on_frame_cb.is_some()
+            || self.on_shared_object_cb.is_some()
             || self.on_shared_object_auth_cb.is_some()
             || self.on_release_stream_cb.is_some()
     }
@@ -1846,6 +1847,7 @@ impl Conn {
             || self.on_publish_auth_cb.is_some()
             || self.on_media_cb.is_some()
             || self.on_frame_cb.is_some()
+            || self.on_shared_object_cb.is_some()
             || self.on_shared_object_auth_cb.is_some()
             || self.on_release_stream_cb.is_some()
     }
@@ -3318,6 +3320,46 @@ mod tests {
         assert!(
             !conn.relay_enabled,
             "relay must stay disabled when play is rejected on a shared-object-auth server"
+        );
+    }
+
+    #[test]
+    fn publish_rejects_shared_object_cb_only_connections_when_publish_cb_missing() {
+        let mut conn = Conn::new();
+        conn.app = "live".to_string();
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+        conn.on_shared_object_cb = Some(|_, _| {});
+
+        let mut publish = Buffer::with_capacity(128);
+        command::build_publish(&mut publish, "inject", "live").unwrap();
+        conn.handle_command(publish.as_slice()).unwrap();
+        assert!(
+            !conn.current_stream.as_ref().unwrap().is_publishing,
+            "shared-object observer servers must not accept publish without on_publish_cb"
+        );
+        assert!(
+            !conn.relay_enabled,
+            "relay must stay disabled when publish is rejected on a shared-object-only server"
+        );
+    }
+
+    #[test]
+    fn play_rejects_shared_object_cb_only_connections_when_play_cb_missing() {
+        let mut conn = Conn::new();
+        conn.app = "live".to_string();
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+        conn.on_shared_object_cb = Some(|_, _| {});
+
+        let mut play = Buffer::with_capacity(128);
+        command::build_play(&mut play, "viewer").unwrap();
+        conn.handle_command(play.as_slice()).unwrap();
+        assert!(
+            !conn.current_stream.as_ref().unwrap().is_playing,
+            "shared-object observer servers must not accept play without on_play_cb"
+        );
+        assert!(
+            !conn.relay_enabled,
+            "relay must stay disabled when play is rejected on a shared-object-only server"
         );
     }
 
