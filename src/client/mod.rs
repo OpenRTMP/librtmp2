@@ -372,6 +372,12 @@ impl Client {
         } else {
             ErrorCode::Io
         })?;
+        // RTMP's handshake and command exchange are many small,
+        // latency-sensitive round trips; without TCP_NODELAY, Nagle's
+        // algorithm here combined with the peer's delayed ACK can stall each
+        // one by tens of ms. Best-effort: an unsupported/dead socket just
+        // keeps Nagle's default behavior.
+        let _ = stream.set_nodelay(true);
         let mut transport = if use_tls {
             let remaining = deadline.saturating_duration_since(Instant::now());
             Transport::connect_tls_with_timeout(

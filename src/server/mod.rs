@@ -1150,6 +1150,15 @@ impl Server {
                         self.next_listener_accept = (i + 1) % listener_count;
                         let remote_addr = addr.to_string();
                         let tls_ctx = self.listeners[i].tls_ctx.clone();
+                        // RTMP's handshake and command exchange are many small,
+                        // latency-sensitive round trips (C0/C1/C2, connect,
+                        // createStream, publish/play). Without TCP_NODELAY,
+                        // Nagle's algorithm on this socket combined with a peer's
+                        // delayed ACK can stall each one by tens of ms; there is
+                        // no bulk-transfer benefit to coalescing here that would
+                        // offset that. Best-effort: an unsupported/dead socket
+                        // just keeps Nagle's default behavior.
+                        let _ = stream.set_nodelay(true);
                         if let Some(ctx) = tls_ctx.as_ref() {
                             #[cfg(feature = "tls")]
                             {
