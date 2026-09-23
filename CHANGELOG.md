@@ -13,6 +13,16 @@ begin at `1.0.0`.
 
 ## [Unreleased]
 
+## [0.9.2] — 2026-09-23
+
+### Changed
+- Split `Server::process_connections_impl()`, the poll loop's per-tick
+  driver, into seven focused phase methods: recv/timeout reaping,
+  abandoned-route cleanup, relay-frame batching, init-frame replay, relay
+  send/export, connection flush, and closed-connection teardown. Behavior
+  is unchanged; this addresses a SonarCloud Cognitive Complexity finding
+  (175 against a limit of 30) with no functional difference.
+
 ### Documentation
 - Documented, for the first time in this file, two pieces of release
   infrastructure that predate this entry and were previously described
