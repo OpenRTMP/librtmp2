@@ -148,6 +148,7 @@ impl Buffer {
     /// partially read, e.g. per-CSID chunk reassembly) it just truncates and
     /// moves out the backing `Vec` in O(1).
     pub fn take(&mut self) -> Vec<u8> {
+        let fixed_capacity = self.data.len();
         let mut out = std::mem::take(&mut self.data);
         out.truncate(self.size);
         if self.read_pos > 0 {
@@ -155,6 +156,13 @@ impl Buffer {
         }
         self.size = 0;
         self.read_pos = 0;
+        if !self.owned {
+            // `ensure_capacity` never grows an unowned buffer, so leaving it
+            // with the empty, zero-capacity `Vec` that `mem::take` put in
+            // `self.data` above would permanently reject the next `write()`.
+            // Restore its original fixed capacity instead.
+            self.data = vec![0u8; fixed_capacity];
+        }
         out
     }
 
@@ -303,5 +311,39 @@ mod tests {
     fn write_over_max_size_errors() {
         let mut buf = Buffer::new();
         assert!(buf.write(&vec![0u8; BUFFER_MAX_SIZE + 1]).is_err());
+    }
+
+    #[test]
+    fn take_returns_written_bytes_and_leaves_buffer_writable() {
+        let mut buf = Buffer::new();
+        buf.write(b"hello world").unwrap();
+        assert_eq!(buf.take(), b"hello world");
+        assert_eq!(buf.available(), 0);
+        // Owned buffers reallocate on demand, so this must still work.
+        buf.write(b"more").unwrap();
+        assert_eq!(buf.peek(), b"more");
+    }
+
+    #[test]
+    fn take_respects_unread_prefix() {
+        let mut buf = Buffer::new();
+        buf.write(b"abcdef").unwrap();
+        let mut out = [0u8; 2];
+        buf.read(&mut out).unwrap();
+        assert_eq!(buf.take(), b"cdef");
+    }
+
+    #[test]
+    fn take_on_unowned_buffer_leaves_it_writable() {
+        // Regression test: `take()` used to leave an unowned (`from_static`)
+        // buffer with zero capacity, permanently rejecting any further
+        // write since `ensure_capacity` never grows an unowned buffer.
+        // `from_static` treats the whole slice as already written, so
+        // `take()` is what empties it out for reuse.
+        let mut backing = *b"abcdefgh";
+        let mut buf = Buffer::from_static(&mut backing);
+        assert_eq!(buf.take(), b"abcdefgh");
+        buf.write(b"ef").unwrap();
+        assert_eq!(buf.peek(), b"ef");
     }
 }
