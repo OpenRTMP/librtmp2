@@ -790,6 +790,39 @@ impl Server {
         Ok(listener)
     }
 
+    /// Like [`Self::bind_listener`], but sets `SO_REUSEPORT` (and
+    /// `SO_REUSEADDR`) before binding, so multiple independent `Server`
+    /// instances -- e.g. one per worker thread in a sharded deployment --
+    /// can each bind their own listener to the same address/port. The
+    /// kernel load-balances incoming connections across every listener
+    /// bound this way.
+    fn bind_listener_reuseport(&mut self, addr: &str) -> Result<TcpListener> {
+        use std::net::ToSocketAddrs;
+        let sockaddr = addr
+            .to_socket_addrs()
+            .map_err(|_| ErrorCode::Io)?
+            .next()
+            .ok_or(ErrorCode::Io)?;
+        let domain = if sockaddr.is_ipv6() {
+            socket2::Domain::IPV6
+        } else {
+            socket2::Domain::IPV4
+        };
+        let sock = socket2::Socket::new(domain, socket2::Type::STREAM, Some(socket2::Protocol::TCP))
+            .map_err(|_| ErrorCode::Io)?;
+        sock.set_reuse_address(true).map_err(|_| ErrorCode::Io)?;
+        sock.set_reuse_port(true).map_err(|_| ErrorCode::Io)?;
+        sock.set_nonblocking(true).map_err(|_| ErrorCode::Io)?;
+        sock.bind(&sockaddr.into()).map_err(|_| ErrorCode::Io)?;
+        sock.listen(1024).map_err(|_| ErrorCode::Io)?;
+        let listener: TcpListener = sock.into();
+        if self.server_fd < 0 {
+            self.server_fd = listener.as_raw_fd();
+        }
+        self.running = true;
+        Ok(listener)
+    }
+
     /// Return the file descriptor for every currently bound listener.
     ///
     /// Use this instead of the legacy [`Server::server_fd`] field when an
@@ -819,6 +852,23 @@ impl Server {
         Ok(())
     }
 
+    /// Like [`Self::listen`], but binds with `SO_REUSEPORT` so this listener
+    /// can share its address/port with listeners bound the same way by
+    /// other `Server` instances (typically one per worker thread in a
+    /// sharded deployment, each handling a disjoint subset of connections
+    /// the kernel load-balances across them). Use [`Self::set_conn_id_base`]
+    /// on each shard's `Server` beforehand so their connection ids don't
+    /// collide.
+    pub fn listen_reuseport(&mut self, bind_addr: &str) -> Result<()> {
+        let addr = Self::resolve_bind_addr(bind_addr)?;
+        let tcp = self.bind_listener_reuseport(&addr)?;
+        self.listeners.push(ListenerEntry {
+            tcp,
+            tls_ctx: self.tls_ctx.clone(),
+        });
+        Ok(())
+    }
+
     /// Start an additional RTMPS listener with its own certificate/key,
     /// independent of the TLS/plaintext mode passed to [`Server::new`].
     ///
@@ -829,6 +879,24 @@ impl Server {
         let ctx = TlsCtx::new_server(cert_file, key_file)?;
         let addr = Self::resolve_bind_addr(bind_addr)?;
         let tcp = self.bind_listener(&addr)?;
+        self.listeners.push(ListenerEntry {
+            tcp,
+            tls_ctx: Some(ctx),
+        });
+        Ok(())
+    }
+
+    /// Like [`Self::listen_tls`], but binds with `SO_REUSEPORT` -- see
+    /// [`Self::listen_reuseport`].
+    pub fn listen_tls_reuseport(
+        &mut self,
+        bind_addr: &str,
+        cert_file: &str,
+        key_file: &str,
+    ) -> Result<()> {
+        let ctx = TlsCtx::new_server(cert_file, key_file)?;
+        let addr = Self::resolve_bind_addr(bind_addr)?;
+        let tcp = self.bind_listener_reuseport(&addr)?;
         self.listeners.push(ListenerEntry {
             tcp,
             tls_ctx: Some(ctx),
@@ -2665,6 +2733,41 @@ mod tests {
             max_connections_per_addr: 0,
         })
         .unwrap()
+    }
+
+    #[test]
+    fn listen_reuseport_allows_a_second_server_to_bind_the_same_port() {
+        let mut server_a = test_server();
+        server_a.listen_reuseport("127.0.0.1:0").unwrap();
+
+        let port = {
+            let mut addr: libc::sockaddr_in = unsafe { std::mem::zeroed() };
+            let mut len = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
+            let rc = unsafe {
+                libc::getsockname(
+                    server_a.server_fd,
+                    &mut addr as *mut _ as *mut libc::sockaddr,
+                    &mut len,
+                )
+            };
+            assert_eq!(rc, 0);
+            u16::from_be(addr.sin_port)
+        };
+
+        // A second, independent `Server` binding the same port with a plain
+        // `listen()` must fail (proves the port really was taken)...
+        let mut plain = test_server();
+        assert!(plain.listen(&format!("127.0.0.1:{port}")).is_err());
+
+        // ...but with `listen_reuseport()` it succeeds, and both listeners'
+        // fds are distinct and valid.
+        let mut server_b = test_server();
+        server_b
+            .listen_reuseport(&format!("127.0.0.1:{port}"))
+            .unwrap();
+        assert_ne!(server_a.server_fd, server_b.server_fd);
+        assert!(server_a.server_fd >= 0);
+        assert!(server_b.server_fd >= 0);
     }
 
     /// Loopback clients can return from `connect()` before the listener's
