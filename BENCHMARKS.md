@@ -34,7 +34,7 @@ Criterion writes full HTML reports to `target/criterion/report/index.html`.
 - RAM: 15 GiB
 - Kernel: Linux 6.18 x86_64
 - rustc 1.95.0, `cargo build --release` (`tls` feature enabled, default)
-- librtmp2 0.9.0
+- librtmp2 0.9.1
 - Date: 2026-09-23
 
 ## `protocol` benchmarks (`benches/protocol.rs`)
@@ -44,12 +44,12 @@ first iteration.
 
 | Benchmark | Time | Throughput |
 |---|---|---|
-| `chunk/write_read_roundtrip` (4096-byte payload, chunk size 128) | 3.91 µs | ~998 MiB/s |
-| `amf0_build_connect` | 231 ns | — |
-| `flv/video_tag_h264` (parse) | 0.88 ns | — |
-| `flv/audio_tag_aac` (parse) | 0.94 ns | — |
-| `fourcc_to_video_codec_avc1` | 1.58 ns | — |
-| `server_read_c1` (handshake C1 parse + S0/S1/S2 build) | 0.92 µs | — |
+| `chunk/write_read_roundtrip` (4096-byte payload, chunk size 128) | 5.34 µs | ~732 MiB/s |
+| `amf0_build_connect` | 392 ns | — |
+| `flv/video_tag_h264` (parse) | 1.91 ns | — |
+| `flv/audio_tag_aac` (parse) | 1.61 ns | — |
+| `fourcc_to_video_codec_avc1` | 3.03 ns | — |
+| `server_read_c1` (handshake C1 parse + S0/S1/S2 build) | 1.41 µs | — |
 
 ## `relay` benchmark (`benches/relay.rs`)
 
@@ -65,14 +65,13 @@ same idea against a real server.
 
 | Benchmark | Time | Throughput |
 |---|---|---|
-| `relay/publish_to_player/100` (100 frames) | 223.7 ms | ~447 elem/s |
-| `relay/publish_to_player/500` (500 frames) | 180.8 ms | ~2765 elem/s |
+| `relay/publish_to_player/100` (100 frames) | 98.6 ms | ~1014 elem/s |
+| `relay/publish_to_player/500` (500 frames) | 99.8 ms | ~5013 elem/s |
 
-The publish/play handling these two benchmarks drive through gained an
-`AuthorizationResult`-pending check in `0.9.0` (an `Option::is_some()` guard
-against overwriting an in-flight async authorization); it's within measurement
-noise of `0.8.1`'s numbers, as expected for a single branch on the connect/
-publish path rather than the frame relay loop itself.
+Both sizes land at roughly the same wall-clock time regardless of frame
+count, which is the harness's own fixed polling-interval overhead
+dominating (see above), not a per-frame cost — the throughput column is
+the number worth comparing across frame counts here, not the time column.
 
 ## `examples/bench_handshake.rs` and `examples/bench_relay.rs`
 
