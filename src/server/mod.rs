@@ -852,6 +852,21 @@ impl Server {
 
     /// Poll for events (non-blocking).
     pub fn poll(&mut self, timeout_ms: i32) -> Result<()> {
+        self.poll_impl(timeout_ms, None)
+    }
+
+    /// Like [`Self::poll`], but only attempts to `recv()` from a connection
+    /// whose `conn_id` is in `readable` -- see
+    /// [`Self::process_connections_ready`]. A connection accepted during
+    /// this same call (so it could not possibly have been in `readable`,
+    /// computed before it existed) still gets its first processing pass
+    /// immediately, matching [`Self::poll`]'s existing behavior of not
+    /// delaying a freshly-accepted socket's first read by a full cycle.
+    pub fn poll_ready(&mut self, timeout_ms: i32, readable: &HashSet<u64>) -> Result<()> {
+        self.poll_impl(timeout_ms, Some(readable))
+    }
+
+    fn poll_impl(&mut self, timeout_ms: i32, readable: Option<&HashSet<u64>>) -> Result<()> {
         if !self.running {
             return Err(ErrorCode::Internal);
         }
@@ -860,13 +875,30 @@ impl Server {
         // same source IP right as its old sockets die can be rejected by
         // `max_connections_per_addr` for connections that are about to be
         // removed in this very tick anyway.
-        self.process_connections()?;
+        self.process_connections_impl(readable)?;
+        let before_accept: Option<HashSet<u64>> = readable
+            .is_some()
+            .then(|| self.connections.iter().map(|c| c.conn_id).collect());
         self.accept_new_connections();
         // Give sockets accepted just above their first processing pass in
         // this same poll() call, rather than leaving them untouched through
         // the sleep below until the next call -- otherwise every new
-        // connection's handshake is delayed by a full poll cycle.
-        self.process_connections()?;
+        // connection's handshake is delayed by a full poll cycle. A caller-
+        // supplied `readable` set was computed before these connections
+        // existed, so union in whichever conn_ids are new since just above.
+        match (readable, before_accept) {
+            (Some(readable), Some(before_accept)) => {
+                let mut readable_with_new = readable.clone();
+                readable_with_new.extend(
+                    self.connections
+                        .iter()
+                        .map(|c| c.conn_id)
+                        .filter(|id| !before_accept.contains(id)),
+                );
+                self.process_connections_impl(Some(&readable_with_new))?;
+            }
+            _ => self.process_connections_impl(None)?,
+        }
         if timeout_ms > 0 {
             std::thread::sleep(std::time::Duration::from_millis(timeout_ms as u64));
         }
@@ -1204,6 +1236,24 @@ impl Server {
     /// protocol state machine, relay frames from publishers to players,
     /// flush pending writes, and reap closed peers.
     pub fn process_connections(&mut self) -> Result<()> {
+        self.process_connections_impl(None)
+    }
+
+    /// Like [`Self::process_connections`], but skips attempting to `recv()`
+    /// from a connection whose `conn_id` is not in `readable`. For a caller
+    /// driving its own `epoll`/`poll` readiness check across every
+    /// connection's `client_fd` (both are public fields, see [`Conn`]),
+    /// this avoids one `recv()` syscall per idle connection per tick --
+    /// e.g. player connections, which send nothing after the initial
+    /// handshake/play command, still got probed every poll before this.
+    /// Timeout reaping and all other per-tick bookkeeping still run for
+    /// every connection regardless of `readable`, since those aren't
+    /// contingent on new bytes having arrived.
+    pub fn process_connections_ready(&mut self, readable: &HashSet<u64>) -> Result<()> {
+        self.process_connections_impl(Some(readable))
+    }
+
+    fn process_connections_impl(&mut self, readable: Option<&HashSet<u64>>) -> Result<()> {
         let mut buf = [0u8; 65536];
         let mut closed = Vec::new();
 
@@ -1225,8 +1275,23 @@ impl Server {
                 closed.push(i);
                 conn_closed_this_iteration = true;
             }
+            // A transport that became None through some other path (e.g. a
+            // write failure during relay send on an earlier tick) must still
+            // be swept up promptly even if this connection's conn_id never
+            // reappears in a caller's readable set -- its fd is already gone,
+            // so an epoll-based caller has nothing left to report ready on.
+            if !conn_closed_this_iteration && conn.transport.is_none() {
+                closed.push(i);
+                conn_closed_this_iteration = true;
+            }
+            // A connection outside the caller's readable set has nothing new
+            // to recv this tick -- still subject to the timeout/dead-transport
+            // checks above and the buffered-message drain below (in case a
+            // prior tick left a complete message queued), just not a wasted
+            // syscall.
+            let skip_recv = readable.is_some_and(|r| !r.contains(&conn.conn_id));
             let mut bytes_drained = 0usize;
-            while !conn_closed_this_iteration {
+            while !conn_closed_this_iteration && !skip_recv {
                 if bytes_drained >= MAX_RECV_BYTES_PER_CONN_PER_POLL {
                     break;
                 }
@@ -2421,6 +2486,79 @@ mod tests {
     }
 
     #[test]
+    fn process_connections_ready_skips_recv_for_connections_outside_readable_set() {
+        use std::io::Write;
+        use std::os::unix::io::IntoRawFd;
+        use std::os::unix::net::UnixStream;
+
+        fn attached_idle_conn(conn_id: u64) -> (Conn, UnixStream) {
+            let (server_end, peer_end) = UnixStream::pair().unwrap();
+            server_end.set_nonblocking(true).unwrap();
+            peer_end.set_nonblocking(true).unwrap();
+            let mut conn = Conn::new();
+            conn.conn_id = conn_id;
+            conn.transport = Some(Transport::new_plain(server_end.into_raw_fd()));
+            (conn, peer_end)
+        }
+
+        let mut server = test_server();
+        let (conn, mut peer) = attached_idle_conn(42);
+        server.connections = vec![conn];
+
+        // Not a valid RTMP handshake -- `Conn::recv` rejects it and the
+        // connection is closed, which is a clean, observable proxy for
+        // "this connection's bytes were actually read this tick".
+        peer.write_all(&[0xFF; 16]).unwrap();
+
+        // conn_id 42 is not in the (empty) readable set, so
+        // process_connections_ready must not attempt recv() on it at all --
+        // the connection survives this tick with the garbage still unread.
+        server.process_connections_ready(&HashSet::new()).unwrap();
+        assert_eq!(
+            server.connections.len(),
+            1,
+            "a connection outside the readable set must not be touched"
+        );
+
+        // Now included: the buffered garbage gets read and rejected exactly
+        // as plain process_connections() would have done from the start.
+        let mut readable = HashSet::new();
+        readable.insert(42u64);
+        server.process_connections_ready(&readable).unwrap();
+        assert!(
+            server.connections.is_empty(),
+            "a connection in the readable set is still processed normally"
+        );
+    }
+
+    #[test]
+    fn process_connections_ready_still_reaps_a_session_setup_timeout_when_not_readable() {
+        use crate::transport::Transport;
+        use std::os::unix::io::IntoRawFd;
+        use std::os::unix::net::UnixStream;
+
+        let (server_end, _peer_end) = UnixStream::pair().unwrap();
+        server_end.set_nonblocking(true).unwrap();
+        let mut conn = Conn::new();
+        conn.conn_id = 7;
+        conn.transport = Some(Transport::new_plain(server_end.into_raw_fd()));
+        // Force the session-setup timeout regardless of the real clock.
+        conn.set_session_setup_started_for_test(Instant::now() - std::time::Duration::from_secs(3600));
+
+        let mut server = test_server();
+        server.connections = vec![conn];
+
+        // conn_id 7 is deliberately absent from the readable set: timeout
+        // reaping must not depend on epoll-readiness, since a genuinely
+        // idle, timed-out connection may never be reported ready.
+        server.process_connections_ready(&HashSet::new()).unwrap();
+        assert!(
+            server.connections.is_empty(),
+            "a session-setup timeout must still be reaped for a non-readable connection"
+        );
+    }
+
+    #[test]
     fn merge_local_and_injected_keeps_same_route_local_first() {
         let injected = vec![relay_frame_for_publisher(
             EXTERNAL_RELAY_PUBLISHER_ID,
@@ -3229,6 +3367,62 @@ mod tests {
 
         server.process_connections().unwrap();
         assert_eq!(server.connections.len(), 0);
+    }
+
+    #[test]
+    fn poll_ready_still_processes_a_connection_accepted_in_this_same_call() {
+        use std::io::{Read, Write};
+
+        let config = ServerConfig {
+            max_connections: 4,
+            chunk_size: 128,
+            tls_enabled: 0,
+            tls_cert_file: std::ptr::null(),
+            tls_key_file: std::ptr::null(),
+            tls_ca_file: std::ptr::null(),
+            tls_insecure: 0,
+            max_pending_tls_per_addr: 0,
+            max_connections_per_addr: 0,
+        };
+        let mut server = Server::new(config).unwrap();
+        server.listen("127.0.0.1:0").unwrap();
+
+        let port = {
+            let mut addr: libc::sockaddr_in = unsafe { std::mem::zeroed() };
+            let mut len = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
+            let rc = unsafe {
+                libc::getsockname(
+                    server.server_fd,
+                    &mut addr as *mut _ as *mut libc::sockaddr,
+                    &mut len,
+                )
+            };
+            assert_eq!(rc, 0);
+            u16::from_be(addr.sin_port)
+        };
+        let addr = format!("127.0.0.1:{port}");
+
+        let mut stream = std::net::TcpStream::connect(&addr).unwrap();
+        // A minimal C0+C1: version byte + 1536-byte C1 (time + zero + an
+        // all-zero "random" block -- content is never validated).
+        let mut c0c1 = vec![0x03u8];
+        c0c1.extend(std::iter::repeat_n(0u8, 1536));
+        stream.write_all(&c0c1).unwrap();
+        stream.set_read_timeout(Some(std::time::Duration::from_secs(2))).unwrap();
+
+        // Not yet accepted server-side, so this connection's conn_id cannot
+        // possibly be in a readiness set computed beforehand -- an empty set
+        // stands in for that. `poll_ready` must still accept it and give it
+        // its first recv pass in this same call, exactly like poll(0) does.
+        server.poll_ready(0, &HashSet::new()).unwrap();
+
+        assert_eq!(server.connections.len(), 1, "the new TCP connection must be accepted");
+        // The server only sends S0+S1+S2 after processing a client's C0+C1,
+        // so bytes arriving here prove the handshake was actually handled
+        // in this same poll_ready() call rather than deferred a tick.
+        let mut s0s1s2 = [0u8; 1 + 1536 + 1536];
+        stream.read_exact(&mut s0s1s2).unwrap();
+        assert_eq!(s0s1s2[0], 0x03, "S0 must echo the RTMP version");
     }
 
     #[test]
