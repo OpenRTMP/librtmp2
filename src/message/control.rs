@@ -147,10 +147,10 @@ pub fn read_set_chunk_size(data: &[u8]) -> Result<u32> {
         return Err(ErrorCode::Protocol);
     }
     let cs = ntoh32(data);
-    if cs < MIN_CHUNK_SIZE {
+    if cs < MIN_CHUNK_SIZE || cs > MAX_INBOUND_CHUNK_SIZE {
         return Err(ErrorCode::Protocol);
     }
-    Ok(cs.min(MAX_INBOUND_CHUNK_SIZE))
+    Ok(cs)
 }
 
 /// Read an AbortMessage.
@@ -217,12 +217,13 @@ mod tests {
     }
 
     #[test]
-    fn set_chunk_size_rejects_zero_and_clamps_large_values() {
+    fn set_chunk_size_rejects_out_of_range_values() {
         assert!(read_set_chunk_size(&[0, 0, 0, 0]).is_err());
         assert!(read_set_chunk_size(&1u32.to_be_bytes()).is_err());
         assert_eq!(read_set_chunk_size(&128u32.to_be_bytes()).unwrap(), 128);
+        assert!(read_set_chunk_size(&[0xFF, 0xFF, 0xFF, 0xFF]).is_err());
         assert_eq!(
-            read_set_chunk_size(&[0xFF, 0xFF, 0xFF, 0xFF]).unwrap(),
+            read_set_chunk_size(&MAX_INBOUND_CHUNK_SIZE.to_be_bytes()).unwrap(),
             MAX_INBOUND_CHUNK_SIZE
         );
     }

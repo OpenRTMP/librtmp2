@@ -16,6 +16,7 @@ use crate::media::{
     CacheFrameKind, classify_cache_frame, is_on_metadata_payload,
     normalize_modex_payload_with_frame_type,
 };
+use crate::message::control::MAX_INBOUND_CHUNK_SIZE;
 use crate::message::shared_object::SharedObjectMessage;
 use crate::net;
 use crate::session::conn::{Conn, MAX_PENDING_RELAY_FRAMES, RelayFrame};
@@ -1155,7 +1156,8 @@ impl Server {
         // Outbound chunk size only: peers start sending at the RTMP
         // default (128) until SetChunkSize is negotiated.
         conn.chunk_size = if self.config.chunk_size > 0 {
-            self.config.chunk_size as u32
+            (self.config.chunk_size as u32)
+                .clamp(DEFAULT_CHUNK_SIZE, MAX_INBOUND_CHUNK_SIZE)
         } else {
             DEFAULT_CHUNK_SIZE
         };
