@@ -1,3 +1,11 @@
+librtmp2 (0.9.1-1) UNRELEASED; urgency=high
+
+  * Security: require explicit publish/play authorization when only
+    on_shared_object_cb is configured. Prevent unauthorized ingest/playback
+    and relay enablement on shared-object-observer-only server setups.
+
+ -- OpenRTMP <info@openrtmp.org>  Wed, 23 Sep 2026 12:00:00 +0000
+
 librtmp2 (0.9.0-1) UNRELEASED; urgency=medium
 
   * Add AuthorizationResult (Allow/Deny/Pending) publish/play authorization
