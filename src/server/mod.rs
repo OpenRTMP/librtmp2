@@ -1402,37 +1402,12 @@ impl Server {
             // prior tick left a complete message queued), just not a wasted
             // syscall.
             let skip_recv = readable.is_some_and(|r| !r.contains(&conn.conn_id));
-            let mut bytes_drained = 0usize;
-            while !conn_closed_this_iteration && !skip_recv {
-                if bytes_drained >= MAX_RECV_BYTES_PER_CONN_PER_POLL {
-                    break;
-                }
-                let Some(transport) = conn.transport.as_mut() else {
-                    closed.push(i);
-                    conn_closed_this_iteration = true;
-                    break;
-                };
-                let mut again = 0i32;
-                let n = transport.recv(&mut buf, &mut again);
-                if n > 0 {
-                    let chunk_len = n as usize;
-                    if conn.recv(&buf[..chunk_len]).is_err() {
-                        closed.push(i);
-                        conn_closed_this_iteration = true;
-                        break;
-                    }
-                    bytes_drained += chunk_len;
-                } else if n == 0 {
-                    closed.push(i);
-                    conn_closed_this_iteration = true;
-                    break;
-                } else if again != 0 {
-                    break;
-                } else {
-                    closed.push(i);
-                    conn_closed_this_iteration = true;
-                    break;
-                }
+            if !conn_closed_this_iteration
+                && !skip_recv
+                && Self::recv_drain_one_connection(conn, &mut buf)
+            {
+                closed.push(i);
+                conn_closed_this_iteration = true;
             }
             // A batch larger than the per-`recv` message budget leaves
             // complete messages buffered but unprocessed; keep draining them
@@ -1440,15 +1415,9 @@ impl Server {
             // which may never happen if it's waiting on our response. Capped
             // so one connection with a huge batch can't monopolize this poll
             // tick -- any remainder is picked up on the next poll() call.
-            for _ in 0..MAX_BUDGET_DRAIN_PASSES_PER_CONN_PER_POLL {
-                if conn_closed_this_iteration || !conn.has_buffered_messages() {
-                    break;
-                }
-                if conn.recv(&[]).is_err() {
-                    closed.push(i);
-                    conn_closed_this_iteration = true;
-                    break;
-                }
+            if !conn_closed_this_iteration && Self::drain_buffered_messages(conn) {
+                closed.push(i);
+                conn_closed_this_iteration = true;
             }
             // Release this connection's claimed publish route(s) right away
             // rather than deferring to the end-of-batch cleanup below: a
@@ -1461,6 +1430,58 @@ impl Server {
                 }
             }
         }
+    }
+
+    /// Drains `conn`'s socket into its protocol state machine until the
+    /// per-connection-per-poll byte budget is spent, `recv()` would block,
+    /// or the connection needs to close. Returns whether the connection
+    /// closed (dead/errored transport, EOF, or a protocol error), in which
+    /// case the caller must reap it.
+    fn recv_drain_one_connection(conn: &mut Conn, buf: &mut [u8; 65536]) -> bool {
+        let mut bytes_drained = 0usize;
+        loop {
+            if bytes_drained >= MAX_RECV_BYTES_PER_CONN_PER_POLL {
+                return false;
+            }
+            let Some(transport) = conn.transport.as_mut() else {
+                return true;
+            };
+            let mut again = 0i32;
+            let n = transport.recv(buf, &mut again);
+            if n > 0 {
+                let chunk_len = n as usize;
+                if conn.recv(&buf[..chunk_len]).is_err() {
+                    return true;
+                }
+                bytes_drained += chunk_len;
+            } else if n == 0 {
+                return true;
+            } else if again != 0 {
+                return false;
+            } else {
+                return true;
+            }
+        }
+    }
+
+    /// A recv batch larger than the per-`recv` message budget can leave
+    /// complete messages buffered but unprocessed; keep draining them with
+    /// no new bytes instead of waiting on the peer to send more, which may
+    /// never happen if it's waiting on our response. Capped at
+    /// `MAX_BUDGET_DRAIN_PASSES_PER_CONN_PER_POLL` passes so one connection
+    /// with a huge batch can't monopolize this poll tick -- any remainder is
+    /// picked up on the next `poll()` call. Returns whether the connection
+    /// closed (a protocol error), in which case the caller must reap it.
+    fn drain_buffered_messages(conn: &mut Conn) -> bool {
+        for _ in 0..MAX_BUDGET_DRAIN_PASSES_PER_CONN_PER_POLL {
+            if !conn.has_buffered_messages() {
+                return false;
+            }
+            if conn.recv(&[]).is_err() {
+                return true;
+            }
+        }
+        false
     }
 
     /// When `defer_media_relay` cleared `relay_enabled` (FCUnpublish/
@@ -1559,60 +1580,93 @@ impl Server {
                 .as_ref()
                 .map(|s| s.receive_video)
                 .unwrap_or(true);
-            if let Some(cache) = self.stream_cache.get(&key) {
-                let mut send_failed = false;
-                if (receive_audio || receive_video)
-                    && let Some(ref md) = cache.metadata.clone()
-                {
-                    send_failed |= conn.send_data_message(0, md).is_err();
-                }
-                if receive_video {
-                    if let Some(ref hdr) = cache.avc_header.clone() {
-                        if !Self::cached_payload_is_multitrack(FrameType::Video, hdr)
-                            || conn.accepts_multitrack()
-                        {
-                            send_failed |= conn.send_frame(FrameType::Video, 0, hdr).is_err();
-                        }
-                    }
-                    for hdr in cache.video_track_headers.values() {
-                        if conn.accepts_multitrack() {
-                            send_failed |= conn.send_frame(FrameType::Video, 0, hdr).is_err();
-                        }
-                    }
-                }
-                if receive_audio && !send_failed {
-                    if let Some(ref hdr) = cache.aac_header.clone() {
-                        if !Self::cached_payload_is_multitrack(FrameType::Audio, hdr)
-                            || conn.accepts_multitrack()
-                        {
-                            send_failed |= conn.send_frame(FrameType::Audio, 0, hdr).is_err();
-                        }
-                    }
-                    for hdr in cache.audio_track_headers.values() {
-                        if conn.accepts_multitrack() {
-                            send_failed |= conn.send_frame(FrameType::Audio, 0, hdr).is_err();
-                        }
-                    }
-                }
-                if receive_video && !send_failed {
-                    if let Some((ts, ref kf)) = cache.last_keyframe.clone() {
-                        if !Self::cached_payload_is_multitrack(FrameType::Video, kf)
-                            || conn.accepts_multitrack()
-                        {
-                            send_failed |= conn.send_frame(FrameType::Video, ts, kf).is_err();
-                        }
-                    }
-                }
-                if send_failed {
-                    // Cached init-frame replay filled the send buffer for a
-                    // slow player. Close immediately just like live relay sends.
-                    conn.relay_enabled = false;
-                    conn.needs_init_frames = false;
-                    conn.disconnect_transport();
-                    closed.push(i);
-                }
+            let Some(cache) = self.stream_cache.get(&key) else {
+                continue;
+            };
+            let send_failed =
+                Self::replay_cached_headers_to_conn(conn, cache, receive_audio, receive_video);
+            if send_failed {
+                // Cached init-frame replay filled the send buffer for a
+                // slow player. Close immediately just like live relay sends.
+                conn.relay_enabled = false;
+                conn.needs_init_frames = false;
+                conn.disconnect_transport();
+                closed.push(i);
             }
         }
+    }
+
+    /// Sends `conn` the cached metadata, codec headers, and last keyframe
+    /// for its current route (in that order), honoring `receive_audio`/
+    /// `receive_video` and multitrack acceptance. Once a send fails
+    /// (outbound buffer full), later sends within a phase still run --
+    /// only the *next* phase (audio, then keyframe) is skipped -- matching
+    /// [`Self::replay_init_frames_for_new_players`]'s close-on-any-failure
+    /// handling. Returns whether any send failed.
+    fn replay_cached_headers_to_conn(
+        conn: &mut Conn,
+        cache: &StreamCache,
+        receive_audio: bool,
+        receive_video: bool,
+    ) -> bool {
+        let mut send_failed = false;
+        if (receive_audio || receive_video)
+            && let Some(ref md) = cache.metadata.clone()
+        {
+            send_failed |= conn.send_data_message(0, md).is_err();
+        }
+        if receive_video {
+            send_failed |= Self::replay_cached_video_headers(conn, cache);
+        }
+        if receive_audio && !send_failed {
+            send_failed |= Self::replay_cached_audio_headers(conn, cache);
+        }
+        if receive_video && !send_failed {
+            send_failed |= Self::replay_cached_keyframe(conn, cache);
+        }
+        send_failed
+    }
+
+    fn replay_cached_video_headers(conn: &mut Conn, cache: &StreamCache) -> bool {
+        let mut send_failed = false;
+        if let Some(ref hdr) = cache.avc_header.clone() {
+            if !Self::cached_payload_is_multitrack(FrameType::Video, hdr) || conn.accepts_multitrack()
+            {
+                send_failed |= conn.send_frame(FrameType::Video, 0, hdr).is_err();
+            }
+        }
+        for hdr in cache.video_track_headers.values() {
+            if conn.accepts_multitrack() {
+                send_failed |= conn.send_frame(FrameType::Video, 0, hdr).is_err();
+            }
+        }
+        send_failed
+    }
+
+    fn replay_cached_audio_headers(conn: &mut Conn, cache: &StreamCache) -> bool {
+        let mut send_failed = false;
+        if let Some(ref hdr) = cache.aac_header.clone() {
+            if !Self::cached_payload_is_multitrack(FrameType::Audio, hdr) || conn.accepts_multitrack()
+            {
+                send_failed |= conn.send_frame(FrameType::Audio, 0, hdr).is_err();
+            }
+        }
+        for hdr in cache.audio_track_headers.values() {
+            if conn.accepts_multitrack() {
+                send_failed |= conn.send_frame(FrameType::Audio, 0, hdr).is_err();
+            }
+        }
+        send_failed
+    }
+
+    fn replay_cached_keyframe(conn: &mut Conn, cache: &StreamCache) -> bool {
+        let Some((ts, ref kf)) = cache.last_keyframe.clone() else {
+            return false;
+        };
+        if !Self::cached_payload_is_multitrack(FrameType::Video, kf) || conn.accepts_multitrack() {
+            return conn.send_frame(FrameType::Video, ts, kf).is_err();
+        }
+        false
     }
 
     /// Update per-stream cache and relay each frame in order so players

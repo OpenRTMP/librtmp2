@@ -1,3 +1,12 @@
+librtmp2 (0.9.2-1) UNRELEASED; urgency=low
+
+  * Refactor the RTMP poll loop's per-tick driver into focused phase
+    methods (recv/timeout reaping, relay-frame batching, init-frame
+    replay, relay send/export, flush, connection teardown) to address a
+    SonarCloud Cognitive Complexity finding. No functional change.
+
+ -- OpenRTMP <info@openrtmp.org>  Wed, 23 Sep 2026 19:10:00 +0000
+
 librtmp2 (0.9.1-1) UNRELEASED; urgency=high
 
   * Security: require explicit publish/play authorization when only
