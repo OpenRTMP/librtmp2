@@ -75,12 +75,18 @@ the number worth comparing across frame counts here, not the time column.
 
 Because of that harness overhead this benchmark does not show the 0.10.0
 relay changes (frames chunked once per fan-out, compact chunk headers,
-4096-byte client publish chunks, per-player flow control). Their effect on
-real servers is measured with `bench_relay`/`bench_handshake` in
-[`librtmp2-server`'s `BENCHMARKS.md`](https://github.com/OpenRTMP/librtmp2-server/blob/main/BENCHMARKS.md):
-100 concurrent viewers join in 11.9 ms on average (p95 23.2 ms), ahead of
-MediaMTX (14.5 / 26.1 ms) and LiveForge (24.8 / 43.4 ms) on the same box,
-with every viewer receiving the full frame rate.
+4096-byte client publish chunks, per-player flow control). For end-to-end
+numbers see the cross-server comparison in `librtmp2-server`'s
+`BENCHMARKS.md` as of
+[OpenRTMP/librtmp2-server#243](https://github.com/OpenRTMP/librtmp2-server/pull/243)
+(its `main` still has older numbers): with `librtmp2-server` 0.5.0 built on
+librtmp2 0.10.0, 100 concurrent viewers joined in 11.9 ms on average (p95
+23.2 ms), ahead of MediaMTX (14.5 / 26.1 ms) and LiveForge (24.8 /
+43.4 ms) on the same box, with every viewer receiving the full frame rate.
+That is a whole-system result: it includes that server's own changes
+(multi-core sharding, auth wake-ups) and does not isolate the effect of
+any single library change; the full-frame-rate run also never congests a
+player, so it does not exercise flow control.
 
 ## `examples/bench_handshake.rs` and `examples/bench_relay.rs`
 

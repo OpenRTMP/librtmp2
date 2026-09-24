@@ -23,25 +23,28 @@ MEDIAMTX="${MEDIAMTX:-mediamtx}"
 NGINX_RTMP_MODULE="${NGINX_RTMP_MODULE:-/usr/lib/nginx/modules/ngx_rtmp_module.so}"
 BIN_NAME="flv_publish"
 WORK="$(mktemp -d /tmp/publish_interop.XXXXXX)"
+PIDS=()
+cleanup() {
+    for pid in "${PIDS[@]:-}"; do kill "$pid" 2>/dev/null || true; done
+    wait 2>/dev/null || true
+    rm -rf -- "$WORK"
+}
+trap cleanup EXIT
 
 command -v ffmpeg >/dev/null 2>&1 || { echo "ffmpeg not found on PATH"; exit 1; }
 
 echo "== building $BIN_NAME =="
 cargo build --example "$BIN_NAME" --all-features
-BIN="$(find target -type f -name "$BIN_NAME" -path '*/examples/*' | head -n1)"
+# The dev-profile output of the build above (not an older artifact from
+# another profile or target that `find` might pick first).
+BIN="${CARGO_TARGET_DIR:-target}/debug/examples/$BIN_NAME"
+[[ -x "$BIN" ]] || { echo "built example not found at $BIN"; exit 1; }
 
 echo "== encoding test FLV =="
 ffmpeg -hide_banner -loglevel error -y \
     -f lavfi -i "testsrc=size=640x480:rate=25" -f lavfi -i "sine=frequency=1000" \
     -t 12 -c:v libx264 -preset ultrafast -pix_fmt yuv420p -g 25 \
     -c:a aac -b:a 64k -f flv "$WORK/src.flv"
-
-PIDS=()
-cleanup() {
-    for pid in "${PIDS[@]:-}"; do kill "$pid" 2>/dev/null || true; done
-    wait 2>/dev/null || true
-}
-trap cleanup EXIT
 
 wait_port() {
     for _ in $(seq 1 50); do

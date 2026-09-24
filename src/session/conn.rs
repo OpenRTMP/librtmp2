@@ -2068,6 +2068,10 @@ impl Conn {
             stream.paused = false;
             stream.name = name_str;
         }
+        // A fresh play (or resume) starts from the init-frame replay, which
+        // bypasses flow control; congestion from before no longer applies
+        // and would otherwise skip live video until the next keyframe.
+        self.relay_congestion = None;
         if !already_playing_same {
             // Relay bytes from a previous play route are historical for
             // pause-grace purposes. A new route must deliver fresh bytes
@@ -2422,6 +2426,7 @@ impl Conn {
                     // (relay delivery is gated on !paused).
                     stream.paused = false;
                 }
+                self.relay_congestion = None;
                 // Free this stream's slot for the concurrent-stream cap.
                 self.active_stream_count = self.active_stream_count.saturating_sub(1);
                 // Give this connection a fresh setup-timeout window now that
@@ -2490,6 +2495,12 @@ impl Conn {
                         }
                         stream.paused = pause_flag;
                     }
+                    if !pause_flag {
+                        // Nothing was relayed while paused, so congestion
+                        // from before the pause no longer reflects the
+                        // player's backlog.
+                        self.relay_congestion = None;
+                    }
                     let sid = self
                         .current_stream
                         .as_ref()
@@ -2543,6 +2554,7 @@ impl Conn {
                         stream.is_publishing = false;
                         stream.paused = false;
                     }
+                    self.relay_congestion = None;
                     // Free this stream's slot for the concurrent-stream cap.
                     self.active_stream_count = self.active_stream_count.saturating_sub(1);
                     // See the matching comment in the FCUnpublish/deleteStream
@@ -3022,6 +3034,11 @@ mod tests {
             (FrameType::Video, 33, big.clone()), // fmt=2: same length/type
             (FrameType::Audio, 23, vec![0xAF, 1, 4, 5]),
             (FrameType::Audio, 46, vec![0xAF, 1, 4, 5, 6]), // fmt=1: new length
+            // Two empty messages in a row: the second must not be fmt=2,
+            // since a zero prior length reads as "no prior header".
+            (FrameType::Audio, 47, Vec::new()),
+            (FrameType::Audio, 48, Vec::new()),
+            (FrameType::Audio, 49, vec![0xAF, 1, 7]),
             (FrameType::Video, 66, big[..300].to_vec()),
             (FrameType::Script, 70, vec![2, 0, 1, b'x']),
             (FrameType::Video, 50, big[..10].to_vec()), // backwards -> fmt=0
@@ -6290,6 +6307,26 @@ mod tests {
             conn.needs_init_frames,
             "a route change after the cooldown should request cached init frames"
         );
+    }
+
+    #[test]
+    fn new_play_and_unpause_clear_relay_congestion() {
+        let congested = || {
+            Some(RelayCongestion {
+                min_backlog: 1,
+                last_progress: Instant::now(),
+            })
+        };
+        let mut conn = Conn::new();
+        conn.relay_congestion = congested();
+        conn.complete_play_authorized("other".to_string()).unwrap();
+        assert!(conn.relay_congestion.is_none(), "new play");
+
+        conn.relay_congestion = congested();
+        let mut buf = Buffer::with_capacity(128);
+        crate::message::command::build_pause(&mut buf, false).unwrap();
+        conn.handle_command(buf.as_slice()).unwrap();
+        assert!(conn.relay_congestion.is_none(), "unpause");
     }
 
     #[test]

@@ -210,13 +210,15 @@ impl Buffer {
             self.size = 0;
             self.read_pos = 0;
         }
+        // The cap applies to the unread bytes, before the fast path below:
+        // a buffer allocated larger than BUFFER_MAX_SIZE must not hold more.
+        if additional > BUFFER_MAX_SIZE || self.available() > BUFFER_MAX_SIZE - additional {
+            return Err(ErrorCode::Internal);
+        }
         if additional <= self.space() {
             return Ok(());
         }
         self.compact();
-        if additional > BUFFER_MAX_SIZE || self.size > BUFFER_MAX_SIZE - additional {
-            return Err(ErrorCode::Internal);
-        }
         self.ensure_capacity(self.size + additional)
     }
 
@@ -373,6 +375,17 @@ mod tests {
         // Owned buffers reallocate on demand, so this must still work.
         buf.write(b"more").unwrap();
         assert_eq!(buf.peek(), b"more");
+    }
+
+    #[test]
+    fn preallocated_tail_cannot_exceed_the_max_size() {
+        let mut buf = Buffer::with_capacity(BUFFER_MAX_SIZE + 16);
+        assert!(buf.reserve(BUFFER_MAX_SIZE + 1).is_err());
+        buf.write(&[0u8; 8]).unwrap();
+        assert!(buf.reserve(BUFFER_MAX_SIZE - 7).is_err());
+        assert!(buf.write(&vec![0u8; BUFFER_MAX_SIZE - 7]).is_err());
+        assert_eq!(buf.available(), 8, "a rejected write leaves nothing behind");
+        assert!(buf.reserve(BUFFER_MAX_SIZE - 8).is_ok());
     }
 
     #[test]
