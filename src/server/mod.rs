@@ -254,6 +254,83 @@ enum PlayerFlow {
     Disconnect,
 }
 
+/// A relay frame's flow-control class for one fan-out pass (see
+/// [`Server::frame_delivery`]); [`Self::for_player`] adjusts it per player.
+struct FrameDelivery {
+    delivery: RelayDelivery,
+    /// Live audio on a route with video: droppable only for players that
+    /// receive the route's video keyframes.
+    audio_waits_for_video: bool,
+    /// `Some(multitrack)` when the route carries video.
+    route_video_multitrack: Option<bool>,
+}
+
+impl FrameDelivery {
+    fn always() -> Self {
+        Self {
+            delivery: RelayDelivery::Always,
+            audio_waits_for_video: false,
+            route_video_multitrack: None,
+        }
+    }
+
+    fn for_player(&self, conn: &Conn) -> RelayDelivery {
+        if self.audio_waits_for_video
+            && !Server::conn_receives_route_video(conn, self.route_video_multitrack)
+        {
+            RelayDelivery::ResyncPoint
+        } else {
+            self.delivery
+        }
+    }
+}
+
+/// Outcome of [`Server::relay_frame_to_player`].
+enum PlayerOutcome {
+    Skipped,
+    Delivered,
+    /// Queued but the send failed; the player was dropped.
+    DeliveryFailed,
+    /// Dropped by flow control before sending.
+    Dropped,
+}
+
+/// One frame's chunk body (payload plus continuation headers), encoded once
+/// for the most recent chunk size seen and shared by every player on it.
+/// Players almost always share a chunk size, so fan-out costs one chunk
+/// encode per frame plus a small per-player first header and one memcpy per
+/// player, instead of re-chunking the payload for every player.
+#[derive(Default)]
+struct SharedMediaBody {
+    buf: crate::buffer::Buffer,
+    chunk_size: Option<usize>,
+}
+
+impl SharedMediaBody {
+    /// Forget the encoded body; call before each new frame.
+    fn invalidate(&mut self) {
+        self.chunk_size = None;
+    }
+
+    /// The body of `frame` for `chunk_size`, encoding it if needed; `None`
+    /// if encoding failed.
+    fn for_chunk_size(&mut self, frame: &RelayFrame, chunk_size: usize) -> Option<&[u8]> {
+        if self.chunk_size != Some(chunk_size) {
+            self.buf.drain(self.buf.available());
+            self.chunk_size = encode_media_body(
+                &mut self.buf,
+                frame.frame_type,
+                frame.timestamp,
+                &frame.payload,
+                chunk_size,
+            )
+            .ok()
+            .map(|()| chunk_size);
+        }
+        self.chunk_size.map(|_| self.buf.peek())
+    }
+}
+
 /// Bounded ring of cloned publisher [`RelayFrame`]s for integrator export.
 /// On overflow the oldest frames are dropped so the buffer stays within
 /// `max_frames` / `max_bytes`.
@@ -1779,13 +1856,9 @@ impl Server {
         let mut relay_sends = 0usize;
         let mut relay_processed = 0usize;
         // Reused across frames: indices of this frame's receiving players,
-        // and the frame's chunk body (payload plus continuation headers)
-        // encoded once for the most recent chunk size seen. Players almost
-        // always share a chunk size, so fan-out costs one chunk encode per
-        // frame plus a small per-player first header and one memcpy per
-        // player, instead of re-chunking the payload for every player.
+        // and its chunk body shared by every player (see SharedMediaBody).
         let mut players: Vec<usize> = Vec::new();
-        let mut body = crate::buffer::Buffer::new();
+        let mut body = SharedMediaBody::default();
         let now = Instant::now();
         let flow_limits = PlayerFlowLimits {
             soft: self.player_send_buffer_soft_limit,
@@ -1809,110 +1882,36 @@ impl Server {
                 break;
             }
 
-            let abandon_key = (
-                frame.app.clone(),
-                frame.stream_name.clone(),
-                frame.publisher_conn_id,
-            );
-            if !abandoned_this_batch.contains(&abandon_key) {
-                // Orphaned local frames must not recreate stream-cache ownership
-                // for a publisher already removed from `connections`. External
-                // inject ids have no socket row and still cache.
-                //
-                // A budget-deferred frame can cross into a later poll where
-                // `abandoned_this_batch` is empty; re-check the publisher's
-                // persisted abandoned-route set so an old-route frame cannot
-                // recreate the cache entry its rename/teardown evicted.
-                let publisher = self
-                    .connections
-                    .iter()
-                    .find(|c| c.conn_id == frame.publisher_conn_id);
-                let local_publisher_gone =
-                    !is_external_publisher_id(frame.publisher_conn_id) && publisher.is_none();
-                let route_abandoned = publisher
-                    .is_some_and(|c| c.relay_route_abandoned(&frame.app, &frame.stream_name));
-                if !local_publisher_gone && !route_abandoned {
-                    self.cache_relay_frame(frame);
-                }
-            }
+            self.cache_relay_frame_unless_orphaned(frame, abandoned_this_batch);
             // Only classified when some player can actually be congested:
             // it parses the payload header and looks up the route's cache.
-            let route_video = if players.is_empty() || flow_limits.soft == 0 {
-                None
+            let delivery = if players.is_empty() || flow_limits.soft == 0 {
+                FrameDelivery::always()
             } else {
-                Some(self.route_video(frame))
+                self.frame_delivery(frame)
             };
-            let delivery = match route_video {
-                None => RelayDelivery::Always,
-                Some(video) => RelayDelivery::classify(frame, video.is_some()),
-            };
-            // Live audio on a route with video is only droppable for a player
-            // that will get that video's keyframes to resync on; one that
-            // can't (`receiveVideo(false)`, or multitrack video it didn't
-            // negotiate) resyncs on audio like on an audio-only route.
-            let audio_waits_for_video =
-                delivery == RelayDelivery::Droppable && frame.frame_type == FrameType::Audio;
-            let mut body_chunk_size = None;
             // Only actual deliveries count against the send budget: a
             // congested player skipping this frame costs no socket work, and
             // charging it would defer frames for healthy players.
             let mut delivered = 0usize;
+            body.invalidate();
             for &i in &players {
                 let conn = &mut self.connections[i];
-                let backlog = conn.send_buffer.available();
-                let delivery = if audio_waits_for_video
-                    && !Self::conn_receives_route_video(conn, route_video.flatten())
-                {
-                    RelayDelivery::ResyncPoint
-                } else {
-                    delivery
-                };
-                match Self::player_flow_decision(flow_limits, conn, delivery, backlog, now) {
-                    PlayerFlow::Send => {}
-                    PlayerFlow::Skip => {
-                        conn.relay_frames_dropped = conn.relay_frames_dropped.saturating_add(1);
-                        continue;
-                    }
-                    PlayerFlow::Disconnect => {
-                        conn.relay_enabled = false;
-                        conn.needs_init_frames = false;
-                        conn.disconnect_transport();
+                match Self::relay_frame_to_player(
+                    conn,
+                    frame,
+                    &delivery,
+                    flow_limits,
+                    now,
+                    &mut body,
+                ) {
+                    PlayerOutcome::Skipped => {}
+                    PlayerOutcome::Delivered => delivered += 1,
+                    PlayerOutcome::DeliveryFailed => {
+                        delivered += 1;
                         closed.push(i);
-                        continue;
                     }
-                }
-                delivered += 1;
-                let chunk_size = conn.media_chunk_size();
-                if body_chunk_size != Some(chunk_size) {
-                    body.drain(body.available());
-                    body_chunk_size = encode_media_body(
-                        &mut body,
-                        frame.frame_type,
-                        frame.timestamp,
-                        &frame.payload,
-                        chunk_size,
-                    )
-                    .ok()
-                    .map(|()| chunk_size);
-                }
-                let send_result = if body_chunk_size.is_some() {
-                    conn.send_encoded_media_body(
-                        frame.frame_type,
-                        frame.timestamp,
-                        frame.payload.len(),
-                        body.peek(),
-                    )
-                } else {
-                    Err(ErrorCode::Internal)
-                };
-                if send_result.is_err() {
-                    // Player stopped reading; outbound send_buffer is full.
-                    // Drop the connection immediately so later relay frames in
-                    // this poll batch skip it and no more socket work is done.
-                    conn.relay_enabled = false;
-                    conn.needs_init_frames = false;
-                    conn.disconnect_transport();
-                    closed.push(i);
+                    PlayerOutcome::Dropped => closed.push(i),
                 }
             }
             relay_sends += delivered;
@@ -1930,6 +1929,105 @@ impl Server {
         for frame in relay_frames.drain(relay_processed..) {
             self.requeue_relay_frame(frame);
         }
+    }
+
+    /// Cache `frame` for late joiners unless its publisher is gone or has
+    /// abandoned the route.
+    fn cache_relay_frame_unless_orphaned(
+        &mut self,
+        frame: &RelayFrame,
+        abandoned_this_batch: &HashSet<(String, String, u64)>,
+    ) {
+        let abandon_key = (
+            frame.app.clone(),
+            frame.stream_name.clone(),
+            frame.publisher_conn_id,
+        );
+        if abandoned_this_batch.contains(&abandon_key) {
+            return;
+        }
+        // Orphaned local frames must not recreate stream-cache ownership
+        // for a publisher already removed from `connections`. External
+        // inject ids have no socket row and still cache.
+        //
+        // A budget-deferred frame can cross into a later poll where
+        // `abandoned_this_batch` is empty; re-check the publisher's
+        // persisted abandoned-route set so an old-route frame cannot
+        // recreate the cache entry its rename/teardown evicted.
+        let publisher = self
+            .connections
+            .iter()
+            .find(|c| c.conn_id == frame.publisher_conn_id);
+        let local_publisher_gone =
+            !is_external_publisher_id(frame.publisher_conn_id) && publisher.is_none();
+        let route_abandoned =
+            publisher.is_some_and(|c| c.relay_route_abandoned(&frame.app, &frame.stream_name));
+        if !local_publisher_gone && !route_abandoned {
+            self.cache_relay_frame(frame);
+        }
+    }
+
+    /// Flow-control classification of `frame` for this fan-out pass.
+    fn frame_delivery(&self, frame: &RelayFrame) -> FrameDelivery {
+        let route_video = self.route_video(frame);
+        let delivery = RelayDelivery::classify(frame, route_video.is_some());
+        FrameDelivery {
+            delivery,
+            // Live audio on a route with video is only droppable for a
+            // player that will get that video's keyframes to resync on; one
+            // that can't (`receiveVideo(false)`, or multitrack video it
+            // didn't negotiate) resyncs on audio like on an audio-only route.
+            audio_waits_for_video: delivery == RelayDelivery::Droppable
+                && frame.frame_type == FrameType::Audio,
+            route_video_multitrack: route_video,
+        }
+    }
+
+    /// Apply flow control to one player for `frame` and queue it if allowed.
+    fn relay_frame_to_player(
+        conn: &mut Conn,
+        frame: &RelayFrame,
+        delivery: &FrameDelivery,
+        limits: PlayerFlowLimits,
+        now: Instant,
+        body: &mut SharedMediaBody,
+    ) -> PlayerOutcome {
+        let backlog = conn.send_buffer.available();
+        let delivery = delivery.for_player(conn);
+        match Self::player_flow_decision(limits, conn, delivery, backlog, now) {
+            PlayerFlow::Send => {}
+            PlayerFlow::Skip => {
+                conn.relay_frames_dropped = conn.relay_frames_dropped.saturating_add(1);
+                return PlayerOutcome::Skipped;
+            }
+            PlayerFlow::Disconnect => {
+                Self::stop_relay_player(conn);
+                return PlayerOutcome::Dropped;
+            }
+        }
+        let send_result = match body.for_chunk_size(frame, conn.media_chunk_size()) {
+            Some(encoded) => conn.send_encoded_media_body(
+                frame.frame_type,
+                frame.timestamp,
+                frame.payload.len(),
+                encoded,
+            ),
+            None => Err(ErrorCode::Internal),
+        };
+        if send_result.is_err() {
+            // Player stopped reading; outbound send_buffer is full. Drop the
+            // connection immediately so later relay frames in this poll
+            // batch skip it and no more socket work is done.
+            Self::stop_relay_player(conn);
+            return PlayerOutcome::DeliveryFailed;
+        }
+        PlayerOutcome::Delivered
+    }
+
+    fn stop_relay_player(conn: &mut Conn) {
+        conn.relay_enabled = false;
+        conn.needs_init_frames = false;
+        conn.disconnect_transport();
     }
 
     /// Whether `frame`'s route has carried video (a cached video sequence
