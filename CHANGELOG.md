@@ -13,7 +13,7 @@ begin at `1.0.0`.
 
 ## [Unreleased]
 
-## [0.10.0] — 2026-09-24
+## [0.10.0] — 2026-09-25
 
 ### Added
 - Per-player outbound flow control on the server relay. A player whose unsent
