@@ -1836,15 +1836,32 @@ impl Server {
             }
             // Only classified when some player can actually be congested:
             // it parses the payload header and looks up the route's cache.
-            let delivery = if players.is_empty() || flow_limits.soft == 0 {
-                RelayDelivery::Always
+            let route_video = if players.is_empty() || flow_limits.soft == 0 {
+                None
             } else {
-                RelayDelivery::classify(frame, self.route_has_video(frame))
+                Some(self.route_video(frame))
             };
+            let delivery = match route_video {
+                None => RelayDelivery::Always,
+                Some(video) => RelayDelivery::classify(frame, video.is_some()),
+            };
+            // Live audio on a route with video is only droppable for a player
+            // that will get that video's keyframes to resync on; one that
+            // can't (`receiveVideo(false)`, or multitrack video it didn't
+            // negotiate) resyncs on audio like on an audio-only route.
+            let audio_waits_for_video =
+                delivery == RelayDelivery::Droppable && frame.frame_type == FrameType::Audio;
             let mut body_chunk_size = None;
             for &i in &players {
                 let conn = &mut self.connections[i];
                 let backlog = conn.send_buffer.available();
+                let delivery = if audio_waits_for_video
+                    && !Self::conn_receives_route_video(conn, route_video.flatten())
+                {
+                    RelayDelivery::ResyncPoint
+                } else {
+                    delivery
+                };
                 match Self::player_flow_decision(flow_limits, conn, delivery, backlog, now) {
                     PlayerFlow::Send => {}
                     PlayerFlow::Skip => {
@@ -1910,16 +1927,32 @@ impl Server {
     }
 
     /// Whether `frame`'s route has carried video (a cached video sequence
-    /// header or keyframe). Congested players on an audio-only route resync
-    /// on audio, since no keyframe will ever arrive.
-    fn route_has_video(&self, frame: &RelayFrame) -> bool {
-        self.stream_cache
-            .get(&(frame.app.clone(), frame.stream_name.clone()))
-            .is_some_and(|cache| {
-                cache.avc_header.is_some()
-                    || cache.last_keyframe.is_some()
-                    || !cache.video_track_headers.is_empty()
-            })
+    /// header or keyframe) and, if so, whether that video is multitrack
+    /// (`Some(true)`). Congested players on an audio-only route resync on
+    /// audio, since no keyframe will ever arrive.
+    fn route_video(&self, frame: &RelayFrame) -> Option<bool> {
+        let cache = self
+            .stream_cache
+            .get(&(frame.app.clone(), frame.stream_name.clone()))?;
+        let has_video = cache.avc_header.is_some()
+            || cache.last_keyframe.is_some()
+            || !cache.video_track_headers.is_empty();
+        has_video.then(|| {
+            !cache.video_track_headers.is_empty()
+                || cache.last_keyframe.as_ref().is_some_and(|(_, keyframe)| {
+                    Self::cached_payload_is_multitrack(FrameType::Video, keyframe)
+                })
+        })
+    }
+
+    /// Whether `conn` receives the route's video keyframes (see
+    /// [`Self::conn_will_receive_relay_frame`]), given whether that video is
+    /// multitrack.
+    fn conn_receives_route_video(conn: &Conn, multitrack: Option<bool>) -> bool {
+        conn.current_stream
+            .as_ref()
+            .is_some_and(|stream| stream.receive_video)
+            && (!multitrack.unwrap_or(false) || conn.accepts_multitrack())
     }
 
     /// Per-player flow control for one live relay frame: send it, skip it
@@ -1952,8 +1985,9 @@ impl Server {
                     conn.relay_congestion = None;
                     return PlayerFlow::Send;
                 }
-                if backlog < congestion.min_backlog {
-                    // Still draining, just slowly: not stalled.
+                if backlog < congestion.min_backlog || backlog == 0 {
+                    // Still draining (or fully drained and waiting for a
+                    // resync point, e.g. through a long GOP): not stalled.
                     congestion.min_backlog = backlog;
                     congestion.last_progress = now;
                     PlayerFlow::Skip
@@ -3241,6 +3275,77 @@ mod tests {
         let queued = server.connections[0].send_buffer.available();
         server.connections[0].send_buffer.drain(queued);
         assert!(relay_one(&mut server, relay_frame(FrameType::Audio, AAC_RAW.to_vec())) > 0);
+    }
+
+    #[test]
+    fn congested_audio_only_subscriber_on_video_route_resyncs_on_audio() {
+        let mut server = test_server();
+        server.player_send_buffer_soft_limit = 100;
+        let (mut player, _peer) = flow_test_player(2);
+        // receiveVideo(false): this player never gets the route's keyframes.
+        player.current_stream.as_mut().unwrap().receive_video = false;
+        server.connections = vec![player];
+        server.stream_cache.insert(
+            ("live".to_string(), "stream".to_string()),
+            StreamCache {
+                avc_header: Some(AVC_SEQ.to_vec()),
+                last_keyframe: Some((0, AVC_KEY.to_vec())),
+                ..empty_stream_cache()
+            },
+        );
+        server.connections[0]
+            .send_buffer
+            .write(&[0u8; 150])
+            .unwrap();
+        assert_eq!(
+            relay_one(&mut server, relay_frame(FrameType::Audio, AAC_RAW.to_vec())),
+            0
+        );
+        let queued = server.connections[0].send_buffer.available();
+        server.connections[0].send_buffer.drain(queued);
+        assert!(relay_one(&mut server, relay_frame(FrameType::Audio, AAC_RAW.to_vec())) > 0);
+        assert!(server.connections[0].relay_congestion.is_none());
+    }
+
+    #[test]
+    fn fully_drained_congested_player_waits_for_a_keyframe_without_timing_out() {
+        let mut server = test_server();
+        server.player_send_buffer_soft_limit = 100;
+        server.player_congestion_timeout = Duration::ZERO;
+        let (player, _peer) = flow_test_player(2);
+        server.connections = vec![player];
+        server.stream_cache.insert(
+            ("live".to_string(), "stream".to_string()),
+            StreamCache {
+                avc_header: Some(AVC_SEQ.to_vec()),
+                ..empty_stream_cache()
+            },
+        );
+        server.connections[0]
+            .send_buffer
+            .write(&[0u8; 150])
+            .unwrap();
+        assert_eq!(
+            relay_one(
+                &mut server,
+                relay_frame(FrameType::Video, AVC_INTER.to_vec())
+            ),
+            0
+        );
+        let queued = server.connections[0].send_buffer.available();
+        server.connections[0].send_buffer.drain(queued);
+        // Caught up but mid-GOP (e.g. a long GOP): inter frames are still
+        // skipped, yet an empty backlog is never a stalled drain.
+        for _ in 0..3 {
+            assert_eq!(
+                relay_one(
+                    &mut server,
+                    relay_frame(FrameType::Video, AVC_INTER.to_vec())
+                ),
+                0
+            );
+        }
+        assert!(relay_one(&mut server, relay_frame(FrameType::Video, AVC_KEY.to_vec())) > 0);
     }
 
     #[test]

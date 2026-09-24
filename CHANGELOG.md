@@ -19,12 +19,15 @@ begin at `1.0.0`.
 - Per-player outbound flow control on the server relay. A player whose unsent
   backlog exceeds `Server::player_send_buffer_soft_limit` (default 4 MiB)
   skips live audio/video until it has drained to half that and a video
-  keyframe arrives (any audio frame on an audio-only route), so slow viewers
+  keyframe arrives (any audio frame on an audio-only route, or for a player
+  that doesn't receive the route's video), so slow viewers
   jump ahead cleanly instead of accumulating latency and memory. Codec headers
   and metadata are always delivered. Players are disconnected at
   `player_send_buffer_hard_limit` (default 32 MiB, previously the 64 MiB
   buffer cap) or after `player_congestion_timeout` (default 15 s) without any
-  drain progress. Skipped frames are counted in `Conn::relay_frames_dropped`.
+  drain progress; a fully drained player waiting for a keyframe is never
+  timed out. A new play, unpause or stream teardown clears the state.
+  Skipped frames are counted in `Conn::relay_frames_dropped`.
 - `Client::publish_chunk_size` (default 4096, like ffmpeg and OBS): the client
   announces it with `SetChunkSize` when publishing starts instead of sending
   all media in 128-byte chunks.

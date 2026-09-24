@@ -23,13 +23,15 @@ fn flv_tags(data: &[u8]) -> Result<Vec<FlvTag<'_>>, String> {
     }
     let mut pos = FLV_HEADER_LEN + 4; // header + PreviousTagSize0
     let mut tags = Vec::new();
-    while pos + FLV_TAG_HEADER_LEN <= data.len() {
-        let hdr = &data[pos..pos + FLV_TAG_HEADER_LEN];
+    while pos < data.len() {
+        let Some(hdr) = data.get(pos..pos + FLV_TAG_HEADER_LEN) else {
+            return Err(format!("truncated tag header at offset {pos}"));
+        };
         let size = u32::from_be_bytes([0, hdr[1], hdr[2], hdr[3]]) as usize;
         let ts = u32::from_be_bytes([hdr[7], hdr[4], hdr[5], hdr[6]]);
         let body_start = pos + FLV_TAG_HEADER_LEN;
         let Some(body) = data.get(body_start..body_start + size) else {
-            break; // truncated trailing tag
+            return Err(format!("truncated tag body at offset {pos}"));
         };
         let frame_type = match hdr[0] & 0x1F {
             8 => Some(FrameType::Audio),
@@ -40,6 +42,9 @@ fn flv_tags(data: &[u8]) -> Result<Vec<FlvTag<'_>>, String> {
             tags.push((frame_type, ts, body));
         }
         pos = body_start + size + 4; // + PreviousTagSize
+        if pos > data.len() {
+            return Err(format!("truncated PreviousTagSize at offset {}", pos - 4));
+        }
     }
     Ok(tags)
 }
@@ -81,7 +86,7 @@ fn main() -> ExitCode {
         // Pace to the tag's timestamp so the server sees a live stream.
         let due = Duration::from_millis(u64::from(*ts));
         while start.elapsed() < due {
-            let wait = (due - start.elapsed()).as_millis().clamp(1, 20) as i32;
+            let wait = due.saturating_sub(start.elapsed()).as_millis().clamp(1, 20) as i32;
             if let Err(e) = client.poll(wait) {
                 eprintln!("poll failed: {e:?}");
                 return ExitCode::FAILURE;
@@ -96,8 +101,9 @@ fn main() -> ExitCode {
     // Let the last frames drain before disconnecting.
     let drain_until = Instant::now() + Duration::from_millis(500);
     while Instant::now() < drain_until {
-        if client.poll(20).is_err() {
-            break;
+        if let Err(e) = client.poll(20) {
+            eprintln!("poll failed while draining: {e:?}");
+            return ExitCode::FAILURE;
         }
     }
     println!(

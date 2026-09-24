@@ -98,12 +98,17 @@ impl MediaHeaderTracker {
                     && prev.timestamp <= timestamp
                     && timestamp < EXTENDED_TIMESTAMP_MARKER =>
             {
-                let fmt =
-                    if prev.msg_length == current.msg_length && prev.msg_type_id == msg_type_id {
-                        2
-                    } else {
-                        1
-                    };
+                // A zero length can't be inherited: readers (this library's
+                // included) treat a zero prior length as "no prior header"
+                // and reject fmt=2/3 after it.
+                let fmt = if prev.msg_length == current.msg_length
+                    && prev.msg_length != 0
+                    && prev.msg_type_id == msg_type_id
+                {
+                    2
+                } else {
+                    1
+                };
                 (fmt, timestamp - prev.timestamp)
             }
             _ => (0, timestamp),
