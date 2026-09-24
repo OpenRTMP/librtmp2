@@ -75,6 +75,18 @@
  */
 #define MAX_CLIENT_FRAME_BYTES (size_t)DEFAULT_MAX_MSG_LENGTH
 
+/**
+ * Default [`Client::publish_chunk_size`], matching what ffmpeg and OBS
+ * announce.
+ */
+#define DEFAULT_PUBLISH_CHUNK_SIZE 4096
+
+/**
+ * Largest chunk size [`Client::publish_chunk_size`] may request (the RTMP
+ * spec caps it at 0x7FFFFFFF; servers commonly accept up to 64 KiB).
+ */
+#define MAX_OUTBOUND_CHUNK_SIZE 65536
+
 #define ERTMP_AUDIO_PACKET_TYPE_MULTITRACK 5
 
 #define ERTMP_VIDEO_PACKET_TYPE_MULTITRACK 6
@@ -197,6 +209,18 @@
  * value through [`Server::max_relay_sends_per_poll`].
  */
 #define DEFAULT_MAX_RELAY_SENDS_PER_POLL 4096
+
+/**
+ * Default [`Server::player_send_buffer_soft_limit`]: 4 MiB of unflushed
+ * outbound bytes (a few seconds of a typical 1080p stream) before a player
+ * starts skipping frames until it can resync on a keyframe.
+ */
+#define DEFAULT_PLAYER_SEND_BUFFER_SOFT_LIMIT ((4 * 1024) * 1024)
+
+/**
+ * Default [`Server::player_send_buffer_hard_limit`].
+ */
+#define DEFAULT_PLAYER_SEND_BUFFER_HARD_LIMIT ((32 * 1024) * 1024)
 
 #define MAX_STREAMS_PER_CONN 16
 
