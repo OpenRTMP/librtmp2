@@ -346,7 +346,8 @@ pub struct Server {
     /// The first eligible frame in a pass is always relayed even when its fan-out
     /// exceeds this value, which guarantees forward progress instead of
     /// perpetually re-queueing an oversized frame. Later frames are deferred once
-    /// the accumulated send count would exceed the configured budget.
+    /// the accumulated send count would exceed the configured budget. Frames
+    /// that per-player flow control skips for a congested player don't count.
     pub max_relay_sends_per_poll: usize,
     /// Outbound backlog (bytes queued for a player but not yet accepted by
     /// its socket) above which live relay stops queueing audio/video for
@@ -1852,6 +1853,10 @@ impl Server {
             let audio_waits_for_video =
                 delivery == RelayDelivery::Droppable && frame.frame_type == FrameType::Audio;
             let mut body_chunk_size = None;
+            // Only actual deliveries count against the send budget: a
+            // congested player skipping this frame costs no socket work, and
+            // charging it would defer frames for healthy players.
+            let mut delivered = 0usize;
             for &i in &players {
                 let conn = &mut self.connections[i];
                 let backlog = conn.send_buffer.available();
@@ -1876,6 +1881,7 @@ impl Server {
                         continue;
                     }
                 }
+                delivered += 1;
                 let chunk_size = conn.media_chunk_size();
                 if body_chunk_size != Some(chunk_size) {
                     body.drain(body.available());
@@ -1909,7 +1915,7 @@ impl Server {
                     closed.push(i);
                 }
             }
-            relay_sends += player_count;
+            relay_sends += delivered;
             relay_processed += 1;
         }
         // Export only frames that completed this poll (not requeued). Injected
@@ -3346,6 +3352,41 @@ mod tests {
             );
         }
         assert!(relay_one(&mut server, relay_frame(FrameType::Video, AVC_KEY.to_vec())) > 0);
+    }
+
+    #[test]
+    fn skipped_players_do_not_use_up_the_relay_send_budget() {
+        let mut server = test_server();
+        server.player_send_buffer_soft_limit = 100;
+        server.max_relay_sends_per_poll = 2;
+        let (a, _peer_a) = flow_test_player(2);
+        let (b, _peer_b) = flow_test_player(3);
+        server.connections = vec![a, b];
+        server.stream_cache.insert(
+            ("live".to_string(), "stream".to_string()),
+            StreamCache {
+                avc_header: Some(AVC_SEQ.to_vec()),
+                ..empty_stream_cache()
+            },
+        );
+        for conn in &mut server.connections {
+            conn.send_buffer.write(&[0u8; 150]).unwrap();
+        }
+        // Both players are congested and skip both frames, so no socket
+        // work happens and the second frame must not be deferred.
+        let mut closed = Vec::new();
+        server.send_and_export_relay_frames(
+            vec![
+                relay_frame(FrameType::Video, AVC_INTER.to_vec()),
+                relay_frame(FrameType::Video, AVC_INTER.to_vec()),
+            ],
+            &HashSet::new(),
+            &mut closed,
+        );
+        assert!(closed.is_empty());
+        for conn in &server.connections {
+            assert_eq!(conn.relay_frames_dropped, 2);
+        }
     }
 
     #[test]
