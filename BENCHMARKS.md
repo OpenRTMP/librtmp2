@@ -34,8 +34,8 @@ Criterion writes full HTML reports to `target/criterion/report/index.html`.
 - RAM: 15 GiB
 - Kernel: Linux 6.18 x86_64
 - rustc 1.95.0, `cargo build --release` (`tls` feature enabled, default)
-- librtmp2 0.9.1
-- Date: 2026-09-23
+- librtmp2 0.10.0
+- Date: 2026-09-24
 
 ## `protocol` benchmarks (`benches/protocol.rs`)
 
@@ -44,12 +44,12 @@ first iteration.
 
 | Benchmark | Time | Throughput |
 |---|---|---|
-| `chunk/write_read_roundtrip` (4096-byte payload, chunk size 128) | 5.34 µs | ~732 MiB/s |
-| `amf0_build_connect` | 392 ns | — |
-| `flv/video_tag_h264` (parse) | 1.91 ns | — |
-| `flv/audio_tag_aac` (parse) | 1.61 ns | — |
-| `fourcc_to_video_codec_avc1` | 3.03 ns | — |
-| `server_read_c1` (handshake C1 parse + S0/S1/S2 build) | 1.41 µs | — |
+| `chunk/write_read_roundtrip` (4096-byte payload, chunk size 128) | 5.33 µs | ~733 MiB/s |
+| `amf0_build_connect` | 318 ns | — |
+| `flv/video_tag_h264` (parse) | 1.97 ns | — |
+| `flv/audio_tag_aac` (parse) | 1.59 ns | — |
+| `fourcc_to_video_codec_avc1` | 3.77 ns | — |
+| `server_read_c1` (handshake C1 parse + S0/S1/S2 build) | 1.45 µs | — |
 
 ## `relay` benchmark (`benches/relay.rs`)
 
@@ -65,13 +65,22 @@ same idea against a real server.
 
 | Benchmark | Time | Throughput |
 |---|---|---|
-| `relay/publish_to_player/100` (100 frames) | 98.6 ms | ~1014 elem/s |
-| `relay/publish_to_player/500` (500 frames) | 99.8 ms | ~5013 elem/s |
+| `relay/publish_to_player/100` (100 frames) | 98.8 ms | ~1013 elem/s |
+| `relay/publish_to_player/500` (500 frames) | 100.0 ms | ~5002 elem/s |
 
 Both sizes land at roughly the same wall-clock time regardless of frame
 count, which is the harness's own fixed polling-interval overhead
 dominating (see above), not a per-frame cost — the throughput column is
 the number worth comparing across frame counts here, not the time column.
+
+Because of that harness overhead this benchmark does not show the 0.10.0
+relay changes (frames chunked once per fan-out, compact chunk headers,
+4096-byte client publish chunks, per-player flow control). Their effect on
+real servers is measured with `bench_relay`/`bench_handshake` in
+[`librtmp2-server`'s `BENCHMARKS.md`](https://github.com/OpenRTMP/librtmp2-server/blob/main/BENCHMARKS.md):
+100 concurrent viewers join in 11.9 ms on average (p95 23.2 ms), ahead of
+MediaMTX (14.5 / 26.1 ms) and LiveForge (24.8 / 43.4 ms) on the same box,
+with every viewer receiving the full frame rate.
 
 ## `examples/bench_handshake.rs` and `examples/bench_relay.rs`
 

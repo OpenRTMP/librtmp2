@@ -1,3 +1,18 @@
+librtmp2 (0.10.0-1) UNRELEASED; urgency=medium
+
+  * Add per-player outbound flow control to the server relay: slow players
+    skip live media and resync on the next keyframe once their backlog
+    exceeds a soft limit (4 MiB), and are disconnected at a hard limit
+    (32 MiB) or after 15 s without drain progress.
+  * Chunk each relayed frame once and share the encoded chunk body across
+    all players; use compact fmt=1/2 media chunk headers.
+  * Client announces a 4096-byte publish chunk size instead of sending media
+    in 128-byte chunks.
+  * Keep draining slow players alive instead of timing them out on the
+    keepalive ping.
+
+ -- OpenRTMP <info@openrtmp.org>  Thu, 24 Sep 2026 21:00:00 +0000
+
 librtmp2 (0.9.3-1) UNRELEASED; urgency=medium
 
   * Reject malformed or out-of-range SetChunkSize control messages instead
