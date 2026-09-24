@@ -1,12 +1,12 @@
 # Bug scan progress
 
-Last scanned: handshake (2026-09-19)
+Last scanned: chunk (2026-09-24)
 
 ## Modules
 
 - [x] core — Memory, logging, errors, buffer
 - [x] handshake — C0/C1/C2 ↔ S0/S1/S2
-- [ ] chunk — Chunk reader/writer/state
+- [x] chunk — Chunk reader/writer/state
 - [ ] message — Message reassembly, control, commands
 - [ ] amf — AMF0 + AMF3
 - [ ] flv — Audio/video/script tags
@@ -14,6 +14,23 @@ Last scanned: handshake (2026-09-19)
 - [ ] session — State machine, publish/play flows
 - [ ] server — Server listener
 - [ ] client — Outbound client
+
+## Findings (2026-09-24 chunk pass)
+
+- Reviewed `src/chunk/mod.rs`, `reader.rs`, `writer.rs`, and `state.rs` in full.
+  Traced production callers (`session/conn.rs` `read_messages` →
+  `chunk_read_owned`, `client/mod.rs` `drain_ready_messages`, `message/message.rs`
+  reference dispatcher) plus SetChunkSize/Abort handling in `handle_control`.
+  Verified peek-first consume (partial input leaves cursor unchanged on `Ok(0)`),
+  fmt=2/3 guards when `type0_msg_length==0` with no in-flight reassembly,
+  per-connection `max_msg_length` / `max_reassembly_bytes` / `max_active_csids`
+  caps, fmt=1/2/3 timestamp delta and fmt=3 new-message `last_delta` behavior,
+  reassembly byte accounting (`release_stream_reassembly`, `note_reassembly_growth`,
+  `Buffer::take` on complete), `chunk_read_owned` ownership transfer, stateless
+  writer fmt=0-only rule, and error propagation (`ErrorCode::Chunk` → connection
+  teardown on server/client). Chunk-layer fmt=3 header reuse remains intentional;
+  session must validate command semantics. No new critical or high-severity issue
+  found.
 
 ## Findings (2026-09-19 handshake pass)
 
