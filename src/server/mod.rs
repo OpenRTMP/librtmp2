@@ -4160,6 +4160,11 @@ mod tests {
         stream
             .set_read_timeout(Some(std::time::Duration::from_secs(2)))
             .unwrap();
+        // `write_all` returning doesn't mean the peer side can read all of
+        // it yet (macOS loopback can still be delivering the tail), and the
+        // single poll below only answers a complete C0+C1. Wait for it to
+        // land so the test checks poll_ready, not delivery timing.
+        std::thread::sleep(std::time::Duration::from_millis(100));
 
         // Not yet accepted server-side, so this connection's conn_id cannot
         // possibly be in a readiness set computed beforehand -- an empty set
