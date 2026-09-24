@@ -196,10 +196,8 @@ pub fn decode_aggregate(
 pub fn decode(conn: &mut dyn Connection, chunk: &ChunkMessage, payload: &[u8]) -> Result<()> {
     match chunk.msg_type_id {
         RTMP_MSG_SET_CHUNK_SIZE => {
-            if payload.len() >= 4 {
-                let cs = control::read_set_chunk_size(payload)?;
-                conn.set_all_chunk_size(cs);
-            }
+            let cs = control::read_set_chunk_size(payload)?;
+            conn.set_all_chunk_size(cs);
         }
         RTMP_MSG_ABORT_MESSAGE => {
             if payload.len() >= 4 {

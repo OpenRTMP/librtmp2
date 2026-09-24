@@ -268,8 +268,6 @@ impl ChunkRegistry {
             if self.streams[idx].in_use && self.streams[idx].csid == csid {
                 self.release_stream_reassembly(idx);
                 self.streams[idx].reset(self.default_chunk_size);
-                self.streams[idx].in_use = false;
-                self.csid_index.remove(&csid);
             }
         }
     }
@@ -309,21 +307,27 @@ mod tests {
     }
 
     #[test]
-    fn aborted_csids_release_slots_for_reuse() {
+    fn abort_resets_message_state_but_keeps_csid_registered() {
         let mut reg = ChunkRegistry::new();
         reg.max_active_csids = 2;
 
         assert!(reg.get_or_create(1).is_ok());
-        assert!(reg.get_or_create(2).is_ok());
-        assert!(matches!(reg.get_or_create(3), Err(ErrorCode::Chunk)));
-
-        reg.reset_stream(1);
-        assert!(reg.get_or_create(3).is_ok());
-        assert!(matches!(reg.get_or_create(4), Err(ErrorCode::Chunk)));
+        {
+            let cs = reg.get_or_create(2).unwrap();
+            cs.type0_msg_length = 4096;
+            cs.type0_timestamp = 1234;
+            cs.reassembly_bytes_read = 512;
+        }
 
         reg.reset_stream(2);
-        reg.reset_stream(3);
-        assert!(reg.get_or_create(4).is_ok());
+
+        let cs = reg.get(2).expect("CSID stays registered after abort");
+        assert_eq!(cs.type0_msg_length, 0);
+        assert_eq!(cs.type0_timestamp, 0);
+        assert_eq!(cs.reassembly_bytes_read, 0);
+
+        assert!(matches!(reg.get_or_create(3), Err(ErrorCode::Chunk)));
+        assert!(reg.get_or_create(1).is_ok());
     }
 
     #[test]

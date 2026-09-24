@@ -1693,10 +1693,8 @@ impl Conn {
     fn handle_control(&mut self, msg_type_id: u8, payload: &[u8]) -> Result<()> {
         match msg_type_id {
             msg_dispatch::RTMP_MSG_SET_CHUNK_SIZE => {
-                if payload.len() >= 4 {
-                    let cs = control::read_set_chunk_size(payload)?;
-                    self.chunk_reg.set_all_chunk_size(cs);
-                }
+                let cs = control::read_set_chunk_size(payload)?;
+                self.chunk_reg.set_all_chunk_size(cs);
             }
             msg_dispatch::RTMP_MSG_ABORT_MESSAGE => {
                 if payload.len() >= 4 {
