@@ -48,74 +48,153 @@ pub fn chunk_write(
         return Err(ErrorCode::Internal);
     }
 
-    let csid = msg.csid;
-    let fmt = msg.fmt;
-    let ts = msg.timestamp;
-    let ext_ts = ts >= 0xFFFFFF;
+    let ext_ts = msg.timestamp >= EXTENDED_TIMESTAMP_MARKER;
+    out.reserve(
+        first_header_len(msg.csid, 0, msg.timestamp)
+            + chunk_body_len(msg.csid, payload_len, chunk_size, ext_ts),
+    )
+    .map_err(|_| ErrorCode::Internal)?;
+    write_first_header(
+        out,
+        msg.csid,
+        0,
+        msg.timestamp,
+        msg.msg_length,
+        msg.msg_type_id,
+        msg.msg_stream_id,
+    )?;
+    write_chunk_body(
+        out,
+        msg.csid,
+        &payload[..payload_len],
+        chunk_size,
+        ext_ts.then_some(msg.timestamp),
+    )
+}
 
-    // Reserve the whole encoded message up front: one capacity check instead
-    // of one per header field and per chunk, and a message that cannot fit
-    // is rejected before any of it lands in `out`.
-    let (first_hdr, first_hdr_len) = basic_header(csid, fmt);
-    let (cont_hdr, cont_hdr_len) = basic_header(csid, 3);
-    let ext_len = if ext_ts { 4 } else { 0 };
-    let continuation_chunks = payload_len.saturating_sub(1) / chunk_size;
-    let total =
-        first_hdr_len + 11 + ext_len + payload_len + continuation_chunks * (cont_hdr_len + ext_len);
-    out.reserve(total).map_err(|_| ErrorCode::Internal)?;
+/// 24-bit timestamp field value that signals a trailing 4-byte extended
+/// timestamp.
+pub(crate) const EXTENDED_TIMESTAMP_MARKER: u32 = 0xFFFFFF;
 
-    // --- First chunk: basic header + fmt=0 message header ---
-    // fmt=0 header: timestamp(3) + length(3) + type(1) + stream id(4 LE),
-    // then a 4-byte extended timestamp when the 24-bit field is saturated.
-    // The internally generated continuation chunks below carry the same
-    // extended field, so the reader (which inherits `type0_ext_ts` for the
-    // CSID) stays in sync.
+/// Encoded size of a first-chunk header written by [`write_first_header`].
+pub fn first_header_len(csid: u32, fmt: u8, ts_field: u32) -> usize {
+    let (_, basic_len) = basic_header(csid, fmt);
+    let msg_hdr = match fmt {
+        0 => 11,
+        1 => 7,
+        2 => 3,
+        _ => 0,
+    };
+    let ext = if fmt < 3 && ts_field >= EXTENDED_TIMESTAMP_MARKER {
+        4
+    } else {
+        0
+    };
+    basic_len + msg_hdr + ext
+}
+
+/// Write the first chunk's basic + message header for a new message.
+///
+/// `fmt` is 0, 1 or 2 (RTMP spec 5.3.1.2). For fmt=0 `ts_field` is the
+/// absolute timestamp; for fmt=1/2 it is the delta from the previous message
+/// on this chunk stream, which the caller must track. fmt=1 omits the stream
+/// id; fmt=2 also omits length and type, so the caller must only pick them
+/// when those match the previous message on `csid`.
+pub fn write_first_header(
+    out: &mut Buffer,
+    csid: u32,
+    fmt: u8,
+    ts_field: u32,
+    msg_length: u32,
+    msg_type_id: u8,
+    msg_stream_id: u32,
+) -> Result<()> {
+    if fmt > 2 {
+        return Err(ErrorCode::Internal);
+    }
+    let ext_ts = ts_field >= EXTENDED_TIMESTAMP_MARKER;
     let mut hdr = [0u8; 3 + 11 + 4];
-    let mut n = 0;
-    hdr[..first_hdr_len].copy_from_slice(&first_hdr[..first_hdr_len]);
-    n += first_hdr_len;
-    let mut ts_buf = [0u8; 3];
-    hton24(&mut ts_buf, if ext_ts { 0xFFFFFF } else { ts });
-    hdr[n..n + 3].copy_from_slice(&ts_buf);
+    let (basic, basic_len) = basic_header(csid, fmt);
+    hdr[..basic_len].copy_from_slice(&basic[..basic_len]);
+    let mut n = basic_len;
+    let mut field = [0u8; 3];
+    hton24(
+        &mut field,
+        if ext_ts {
+            EXTENDED_TIMESTAMP_MARKER
+        } else {
+            ts_field
+        },
+    );
+    hdr[n..n + 3].copy_from_slice(&field);
     n += 3;
-    let mut len_buf = [0u8; 3];
-    hton24(&mut len_buf, msg.msg_length);
-    hdr[n..n + 3].copy_from_slice(&len_buf);
-    n += 3;
-    hdr[n] = msg.msg_type_id;
-    n += 1;
-    hdr[n..n + 4].copy_from_slice(&msg.msg_stream_id.to_le_bytes());
-    n += 4;
+    if fmt <= 1 {
+        hton24(&mut field, msg_length);
+        hdr[n..n + 3].copy_from_slice(&field);
+        n += 3;
+        hdr[n] = msg_type_id;
+        n += 1;
+    }
+    if fmt == 0 {
+        hdr[n..n + 4].copy_from_slice(&msg_stream_id.to_le_bytes());
+        n += 4;
+    }
     if ext_ts {
-        hdr[n..n + 4].copy_from_slice(&ts.to_be_bytes());
+        hdr[n..n + 4].copy_from_slice(&ts_field.to_be_bytes());
         n += 4;
     }
     out.write(&hdr[..n]).map_err(|_| ErrorCode::Internal)?;
+    Ok(())
+}
 
-    // Continuation chunk header (fmt=3, no message header), plus the
-    // extended timestamp when the first chunk carried one.
+/// Encoded size of [`write_chunk_body`]'s output.
+pub fn chunk_body_len(csid: u32, payload_len: usize, chunk_size: usize, ext_ts: bool) -> usize {
+    let chunk_size = if chunk_size == 0 { 128 } else { chunk_size };
+    let (_, cont_len) = basic_header(csid, 3);
+    let continuation_chunks = payload_len.saturating_sub(1) / chunk_size;
+    payload_len + continuation_chunks * (cont_len + if ext_ts { 4 } else { 0 })
+}
+
+/// Write a message payload after its first-chunk header, split into chunks
+/// of at most `chunk_size` bytes with fmt=3 continuation headers in between.
+///
+/// `ext_ts` must be `Some(field)` exactly when the first header carried an
+/// extended timestamp, with the same 4-byte value: continuation chunks
+/// repeat it so the reader (which inherits `type0_ext_ts` for the CSID)
+/// stays in sync. The output depends only on `csid`, `chunk_size`, `ext_ts`
+/// and the payload, not on the first header's fmt, so a relay can encode it
+/// once and reuse it behind a different first header per receiver.
+pub fn write_chunk_body(
+    out: &mut Buffer,
+    csid: u32,
+    payload: &[u8],
+    chunk_size: usize,
+    ext_ts: Option<u32>,
+) -> Result<()> {
+    let chunk_size = if chunk_size == 0 { 128 } else { chunk_size };
+    out.reserve(chunk_body_len(
+        csid,
+        payload.len(),
+        chunk_size,
+        ext_ts.is_some(),
+    ))
+    .map_err(|_| ErrorCode::Internal)?;
     let mut chdr = [0u8; 3 + 4];
-    chdr[..cont_hdr_len].copy_from_slice(&cont_hdr[..cont_hdr_len]);
-    let mut chdr_len = cont_hdr_len;
-    if ext_ts {
+    let (cont, cont_len) = basic_header(csid, 3);
+    chdr[..cont_len].copy_from_slice(&cont[..cont_len]);
+    let mut chdr_len = cont_len;
+    if let Some(ts) = ext_ts {
         chdr[chdr_len..chdr_len + 4].copy_from_slice(&ts.to_be_bytes());
         chdr_len += 4;
     }
-
-    // --- Payload: fragment across multiple chunks ---
-    let mut offset = 0;
-    while offset < payload_len {
-        let to_write = (payload_len - offset).min(chunk_size);
-        out.write(&payload[offset..offset + to_write])
-            .map_err(|_| ErrorCode::Internal)?;
-        offset += to_write;
-
-        if offset < payload_len {
+    let mut chunks = payload.chunks(chunk_size).peekable();
+    while let Some(chunk) = chunks.next() {
+        out.write(chunk).map_err(|_| ErrorCode::Internal)?;
+        if chunks.peek().is_some() {
             out.write(&chdr[..chdr_len])
                 .map_err(|_| ErrorCode::Internal)?;
         }
     }
-
     Ok(())
 }
 

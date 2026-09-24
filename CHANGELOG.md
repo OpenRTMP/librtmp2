@@ -13,6 +13,40 @@ begin at `1.0.0`.
 
 ## [Unreleased]
 
+### Added
+- Per-player outbound flow control on the server relay. A player whose unsent
+  backlog exceeds `Server::player_send_buffer_soft_limit` (default 4 MiB)
+  skips live audio/video until it has drained to half that and a video
+  keyframe arrives (any audio frame on an audio-only route), so slow viewers
+  jump ahead cleanly instead of accumulating latency and memory. Codec headers
+  and metadata are always delivered. Players are disconnected at
+  `player_send_buffer_hard_limit` (default 32 MiB, previously the 64 MiB
+  buffer cap) or after `player_congestion_timeout` (default 15 s) without any
+  drain progress. Skipped frames are counted in `Conn::relay_frames_dropped`.
+- `Client::publish_chunk_size` (default 4096, like ffmpeg and OBS): the client
+  announces it with `SetChunkSize` when publishing starts instead of sending
+  all media in 128-byte chunks.
+- Compact media chunk headers: server connections and the client use fmt=1/2
+  first-chunk headers when the previous message on the same chunk stream
+  allows it (`Server::compact_media_headers`, `Client::compact_media_headers`,
+  on by default); extended timestamps always use fmt=0.
+- `examples/flv_publish.rs` and `tests/interop/publish_interop.sh`: publish
+  interop test of the client against MediaMTX and nginx-rtmp.
+
+### Changed
+- Relay fan-out chunks each frame's payload once per chunk size and copies it
+  to every player behind that player's own first header, instead of
+  re-chunking it per player; receiving players are collected in one scan.
+- `Buffer::write` only compacts when the tail lacks space instead of moving
+  the whole unread backlog on every write; new `Buffer::reserve`.
+- `chunk_write` reserves the whole message up front, so a message that does
+  not fit leaves no partial bytes behind.
+
+### Fixed
+- A player on a slow link is no longer disconnected by the keepalive ping
+  timeout while media is still visibly draining to it: its pong was merely
+  queued behind the backlog. Idle or stalled peers still time out.
+
 ## [0.9.3] — 2026-09-24
 
 ### Fixed

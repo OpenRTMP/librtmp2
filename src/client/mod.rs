@@ -9,6 +9,7 @@ use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use crate::buffer::Buffer;
+use crate::chunk::media_out::{MediaHeaderTracker, write_media_message};
 use crate::chunk::reader::{ChunkMessage, chunk_read_owned};
 use crate::chunk::state::{ChunkRegistry, DEFAULT_MAX_MSG_LENGTH};
 use crate::chunk::writer::chunk_write;
@@ -272,7 +273,29 @@ pub struct Client {
     inbound_ping_responses: usize,
     /// E-RTMP capabilities negotiated during `connect` (used for ModEx unwrap).
     negotiated_caps: NegotiatedCaps,
+    /// Chunk size this client announces with `SetChunkSize` when it starts
+    /// publishing, and then uses for media. Larger chunks mean fewer chunk
+    /// headers and fewer reassembly steps on the server for every frame.
+    /// Defaults to [`DEFAULT_PUBLISH_CHUNK_SIZE`]; values outside
+    /// `128..=MAX_OUTBOUND_CHUNK_SIZE` are clamped when publishing starts.
+    pub publish_chunk_size: u32,
+    /// Use fmt=1/2 (delta) first-chunk headers for media where possible.
+    pub compact_media_headers: bool,
+    /// Chunk size currently in effect for outbound messages.
+    out_chunk_size: usize,
+    media_out_headers: MediaHeaderTracker,
 }
+
+/// Default [`Client::publish_chunk_size`], matching what ffmpeg and OBS
+/// announce.
+pub const DEFAULT_PUBLISH_CHUNK_SIZE: u32 = 4096;
+
+/// Largest chunk size [`Client::publish_chunk_size`] may request (the RTMP
+/// spec caps it at 0x7FFFFFFF; servers commonly accept up to 64 KiB).
+pub const MAX_OUTBOUND_CHUNK_SIZE: u32 = 65536;
+
+/// RTMP chunk size in effect before either side sends `SetChunkSize`.
+const RTMP_DEFAULT_CHUNK_SIZE: usize = 128;
 
 impl Client {
     /// Create a new client.
@@ -296,6 +319,10 @@ impl Client {
             connect_timeout: None,
             inbound_ping_window_start: None,
             inbound_ping_responses: 0,
+            publish_chunk_size: DEFAULT_PUBLISH_CHUNK_SIZE,
+            compact_media_headers: true,
+            out_chunk_size: RTMP_DEFAULT_CHUNK_SIZE,
+            media_out_headers: MediaHeaderTracker::default(),
             negotiated_caps: NegotiatedCaps::default(),
         }
     }
@@ -428,6 +455,37 @@ impl Client {
             }
         }
         self.state = ClientState::Publishing;
+        self.queue_publish_chunk_size()?;
+        Ok(())
+    }
+
+    /// Announce [`Self::publish_chunk_size`] ahead of the first media
+    /// message. It is queued (and flushed with the first frame) in order
+    /// with everything sent after it, so the server applies it before any
+    /// chunk that relies on it.
+    fn queue_publish_chunk_size(&mut self) -> Result<()> {
+        let chunk_size = self
+            .publish_chunk_size
+            .clamp(RTMP_DEFAULT_CHUNK_SIZE as u32, MAX_OUTBOUND_CHUNK_SIZE);
+        if chunk_size as usize == self.out_chunk_size {
+            return Ok(());
+        }
+        let mut payload = Buffer::with_capacity(4);
+        control::write_set_chunk_size(&mut payload, chunk_size)?;
+        let mut cmsg = ChunkMessage::default();
+        cmsg.csid = 2;
+        cmsg.fmt = 0;
+        cmsg.msg_length = 4;
+        cmsg.msg_type_id = msg_dispatch::RTMP_MSG_SET_CHUNK_SIZE;
+        cmsg.msg_stream_id = 0;
+        chunk_write(
+            &mut self.send_buffer,
+            &cmsg,
+            payload.as_slice(),
+            4,
+            self.out_chunk_size,
+        )?;
+        self.out_chunk_size = chunk_size as usize;
         Ok(())
     }
 
@@ -534,28 +592,16 @@ impl Client {
             return Err(ErrorCode::Protocol);
         }
 
-        let mut cmsg = ChunkMessage::default();
-        cmsg.timestamp = timestamp;
-        cmsg.msg_length = payload.len() as u32;
-        cmsg.msg_stream_id = self.stream_id;
-
-        match frame_type {
-            FrameType::Audio => {
-                cmsg.csid = 4;
-                cmsg.msg_type_id = 0x08; // AUDIO
-            }
-            FrameType::Video => {
-                cmsg.csid = 6;
-                cmsg.msg_type_id = 0x09; // VIDEO
-            }
-            FrameType::Script | FrameType::Metadata => {
-                cmsg.csid = 5;
-                cmsg.msg_type_id = 0x12; // AMF0 data
-            }
-        }
-        cmsg.fmt = 0;
-
-        chunk_write(&mut self.send_buffer, &cmsg, payload, payload.len(), 128)?;
+        write_media_message(
+            &mut self.send_buffer,
+            &mut self.media_out_headers,
+            self.compact_media_headers,
+            frame_type,
+            self.stream_id,
+            timestamp,
+            payload,
+            self.out_chunk_size,
+        )?;
 
         // Non-blocking flush: a malicious server that stops reading must not
         // stall the embedder's thread for up to 10s per frame via blocking send.
@@ -983,7 +1029,13 @@ impl Client {
         cmsg.msg_length = payload.len() as u32;
         cmsg.msg_type_id = msg_dispatch::RTMP_MSG_USER_CONTROL;
         cmsg.msg_stream_id = 0;
-        chunk_write(&mut self.send_buffer, &cmsg, payload, payload.len(), 128)?;
+        chunk_write(
+            &mut self.send_buffer,
+            &cmsg,
+            payload,
+            payload.len(),
+            self.out_chunk_size,
+        )?;
         Ok(())
     }
 
@@ -1165,6 +1217,8 @@ impl Client {
         self.inbound_ping_window_start = None;
         self.inbound_ping_responses = 0;
         self.negotiated_caps = NegotiatedCaps::default();
+        self.out_chunk_size = RTMP_DEFAULT_CHUNK_SIZE;
+        self.media_out_headers = MediaHeaderTracker::default();
     }
 
     /// Drive the legacy C0/C1/C2 client handshake to completion over `transport`.
@@ -1205,7 +1259,13 @@ impl Client {
         cmsg.msg_length = amf_data.len() as u32;
         cmsg.msg_type_id = 0x14; // AMF0_COMMAND
         cmsg.msg_stream_id = msg_stream_id;
-        chunk_write(&mut self.send_buffer, &cmsg, amf_data, amf_data.len(), 128)?;
+        chunk_write(
+            &mut self.send_buffer,
+            &cmsg,
+            amf_data,
+            amf_data.len(),
+            self.out_chunk_size,
+        )?;
 
         let data = self.send_buffer.peek().to_vec();
         if let Some(ref mut transport) = self.transport {
