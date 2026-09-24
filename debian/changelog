@@ -1,3 +1,13 @@
+librtmp2 (0.9.3-1) UNRELEASED; urgency=medium
+
+  * Reject malformed or out-of-range SetChunkSize control messages instead
+    of silently ignoring or clamping them, and clamp configured outbound
+    chunk sizes to the supported RTMP range.
+  * Add regression coverage confirming AbortMessage clears message reassembly
+    state while preserving the registered chunk stream (CSID).
+
+ -- OpenRTMP <info@openrtmp.org>  Thu, 24 Sep 2026 14:20:00 +0000
+
 librtmp2 (0.9.2-1) UNRELEASED; urgency=low
 
   * Refactor the RTMP poll loop's per-tick driver into focused phase
