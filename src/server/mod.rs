@@ -19,7 +19,7 @@ use crate::media::{
 use crate::message::control::MAX_INBOUND_CHUNK_SIZE;
 use crate::message::shared_object::SharedObjectMessage;
 use crate::net;
-use crate::session::conn::{Conn, MAX_PENDING_RELAY_FRAMES, RelayFrame};
+use crate::session::conn::{Conn, MAX_PENDING_RELAY_FRAMES, RelayFrame, encode_media_message};
 use crate::session::publish_route::PublishRouteRegistry;
 #[cfg(feature = "tls")]
 use crate::transport::{PendingTlsAccept, TlsAcceptOutcome};
@@ -809,8 +809,9 @@ impl Server {
         } else {
             socket2::Domain::IPV4
         };
-        let sock = socket2::Socket::new(domain, socket2::Type::STREAM, Some(socket2::Protocol::TCP))
-            .map_err(|_| ErrorCode::Io)?;
+        let sock =
+            socket2::Socket::new(domain, socket2::Type::STREAM, Some(socket2::Protocol::TCP))
+                .map_err(|_| ErrorCode::Io)?;
         sock.set_reuse_address(true).map_err(|_| ErrorCode::Io)?;
         sock.set_reuse_port(true).map_err(|_| ErrorCode::Io)?;
         sock.set_nonblocking(true).map_err(|_| ErrorCode::Io)?;
@@ -1156,8 +1157,7 @@ impl Server {
         // Outbound chunk size only: peers start sending at the RTMP
         // default (128) until SetChunkSize is negotiated.
         conn.chunk_size = if self.config.chunk_size > 0 {
-            (self.config.chunk_size as u32)
-                .clamp(DEFAULT_CHUNK_SIZE, MAX_INBOUND_CHUNK_SIZE)
+            (self.config.chunk_size as u32).clamp(DEFAULT_CHUNK_SIZE, MAX_INBOUND_CHUNK_SIZE)
         } else {
             DEFAULT_CHUNK_SIZE
         };
@@ -1376,7 +1376,11 @@ impl Server {
     /// of `readable`, since those aren't contingent on new bytes having
     /// arrived. Indices of connections that closed this tick are pushed onto
     /// `closed`.
-    fn recv_and_reap_connections(&mut self, readable: Option<&HashSet<u64>>, closed: &mut Vec<usize>) {
+    fn recv_and_reap_connections(
+        &mut self,
+        readable: Option<&HashSet<u64>>,
+        closed: &mut Vec<usize>,
+    ) {
         let mut buf = [0u8; 65536];
         // Cloned so a closed connection's publish route can be released
         // immediately (below) without conflicting with the mutable borrow
@@ -1632,7 +1636,8 @@ impl Server {
     fn replay_cached_video_headers(conn: &mut Conn, cache: &StreamCache) -> bool {
         let mut send_failed = false;
         if let Some(ref hdr) = cache.avc_header.clone() {
-            if !Self::cached_payload_is_multitrack(FrameType::Video, hdr) || conn.accepts_multitrack()
+            if !Self::cached_payload_is_multitrack(FrameType::Video, hdr)
+                || conn.accepts_multitrack()
             {
                 send_failed |= conn.send_frame(FrameType::Video, 0, hdr).is_err();
             }
@@ -1648,7 +1653,8 @@ impl Server {
     fn replay_cached_audio_headers(conn: &mut Conn, cache: &StreamCache) -> bool {
         let mut send_failed = false;
         if let Some(ref hdr) = cache.aac_header.clone() {
-            if !Self::cached_payload_is_multitrack(FrameType::Audio, hdr) || conn.accepts_multitrack()
+            if !Self::cached_payload_is_multitrack(FrameType::Audio, hdr)
+                || conn.accepts_multitrack()
             {
                 send_failed |= conn.send_frame(FrameType::Audio, 0, hdr).is_err();
             }
@@ -1684,8 +1690,23 @@ impl Server {
     ) {
         let mut relay_sends = 0usize;
         let mut relay_processed = 0usize;
+        // Reused across frames: indices of this frame's receiving players,
+        // and the frame chunked once for the most recent (stream id, chunk
+        // size) seen. Players almost always share both, so fan-out costs one
+        // chunk encode per frame plus one memcpy per player instead of
+        // re-chunking the payload for every player.
+        let mut players: Vec<usize> = Vec::new();
+        let mut wire = crate::buffer::Buffer::new();
         for frame in &relay_frames {
-            let player_count = self.count_relay_players(frame);
+            players.clear();
+            players.extend(
+                self.connections
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, conn)| Self::conn_will_receive_relay_frame(conn, frame))
+                    .map(|(i, _)| i),
+            );
+            let player_count = players.len();
             if player_count > 0
                 && relay_sends > 0
                 && relay_sends.saturating_add(player_count) > self.max_relay_sends_per_poll
@@ -1702,32 +1723,44 @@ impl Server {
                 // Orphaned local frames must not recreate stream-cache ownership
                 // for a publisher already removed from `connections`. External
                 // inject ids have no socket row and still cache.
-                let local_publisher_gone = !is_external_publisher_id(frame.publisher_conn_id)
-                    && !self
-                        .connections
-                        .iter()
-                        .any(|c| c.conn_id == frame.publisher_conn_id);
+                //
                 // A budget-deferred frame can cross into a later poll where
                 // `abandoned_this_batch` is empty; re-check the publisher's
                 // persisted abandoned-route set so an old-route frame cannot
                 // recreate the cache entry its rename/teardown evicted.
-                let route_abandoned = self.connections.iter().any(|c| {
-                    c.conn_id == frame.publisher_conn_id
-                        && c.relay_route_abandoned(&frame.app, &frame.stream_name)
-                });
+                let publisher = self
+                    .connections
+                    .iter()
+                    .find(|c| c.conn_id == frame.publisher_conn_id);
+                let local_publisher_gone =
+                    !is_external_publisher_id(frame.publisher_conn_id) && publisher.is_none();
+                let route_abandoned = publisher
+                    .is_some_and(|c| c.relay_route_abandoned(&frame.app, &frame.stream_name));
                 if !local_publisher_gone && !route_abandoned {
                     self.cache_relay_frame(frame);
                 }
             }
-            for (i, conn) in self.connections.iter_mut().enumerate() {
-                if !Self::conn_will_receive_relay_frame(conn, frame) {
-                    continue;
+            let mut wire_params = None;
+            for &i in &players {
+                let conn = &mut self.connections[i];
+                let params = conn.media_wire_params();
+                if wire_params != Some(params) {
+                    wire.drain(wire.available());
+                    wire_params = encode_media_message(
+                        &mut wire,
+                        frame.frame_type,
+                        frame.timestamp,
+                        &frame.payload,
+                        params.0,
+                        params.1,
+                    )
+                    .ok()
+                    .map(|()| params);
                 }
-                let send_result = match frame.frame_type {
-                    FrameType::Script | FrameType::Metadata => {
-                        conn.send_data_message(frame.timestamp, &frame.payload)
-                    }
-                    _ => conn.send_frame(frame.frame_type, frame.timestamp, &frame.payload),
+                let send_result = if wire_params.is_some() {
+                    conn.send_encoded_media(wire.peek(), frame.payload.len())
+                } else {
+                    Err(ErrorCode::Internal)
                 };
                 if send_result.is_err() {
                     // Player stopped reading; outbound send_buffer is full.
@@ -2718,7 +2751,9 @@ mod tests {
         conn.conn_id = 7;
         conn.transport = Some(Transport::new_plain(server_end.into_raw_fd()));
         // Force the session-setup timeout regardless of the real clock.
-        conn.set_session_setup_started_for_test(Instant::now() - std::time::Duration::from_secs(3600));
+        conn.set_session_setup_started_for_test(
+            Instant::now() - std::time::Duration::from_secs(3600),
+        );
 
         let mut server = test_server();
         server.connections = vec![conn];
@@ -3618,7 +3653,9 @@ mod tests {
         let mut c0c1 = vec![0x03u8];
         c0c1.extend(std::iter::repeat_n(0u8, 1536));
         stream.write_all(&c0c1).unwrap();
-        stream.set_read_timeout(Some(std::time::Duration::from_secs(2))).unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
 
         // Not yet accepted server-side, so this connection's conn_id cannot
         // possibly be in a readiness set computed beforehand -- an empty set
@@ -3626,7 +3663,11 @@ mod tests {
         // its first recv pass in this same call, exactly like poll(0) does.
         server.poll_ready(0, &HashSet::new()).unwrap();
 
-        assert_eq!(server.connections.len(), 1, "the new TCP connection must be accepted");
+        assert_eq!(
+            server.connections.len(),
+            1,
+            "the new TCP connection must be accepted"
+        );
         // The server only sends S0+S1+S2 after processing a client's C0+C1,
         // so bytes arriving here prove the handshake was actually handled
         // in this same poll_ready() call rather than deferred a tick.
