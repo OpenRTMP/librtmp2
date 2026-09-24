@@ -35,7 +35,7 @@ Criterion writes full HTML reports to `target/criterion/report/index.html`.
 - Kernel: Linux 6.18 x86_64
 - rustc 1.95.0, `cargo build --release` (`tls` feature enabled, default)
 - librtmp2 0.10.0
-- Date: 2026-09-24
+- Date: 2026-09-25
 
 ## `protocol` benchmarks (`benches/protocol.rs`)
 

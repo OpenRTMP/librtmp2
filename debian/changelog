@@ -11,7 +11,7 @@ librtmp2 (0.10.0-1) UNRELEASED; urgency=medium
   * Keep draining slow players alive instead of timing them out on the
     keepalive ping.
 
- -- OpenRTMP <info@openrtmp.org>  Thu, 24 Sep 2026 21:00:00 +0000
+ -- OpenRTMP <info@openrtmp.org>  Fri, 25 Sep 2026 00:00:00 +0000
 
 librtmp2 (0.9.3-1) UNRELEASED; urgency=medium
 
