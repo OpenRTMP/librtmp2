@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use crate::buffer::Buffer;
 use crate::chunk::media_out::{
-    MediaHeaderTracker, write_media_message, write_media_message_with_body,
+    MediaHeaderTracker, MediaMessageInfo, write_media_message, write_media_message_with_body,
 };
 use crate::chunk::reader::{ChunkMessage, chunk_read_owned};
 use crate::chunk::state::{
@@ -2721,9 +2721,11 @@ impl Conn {
             &mut self.send_buffer,
             &mut self.media_out_headers,
             self.compact_media_headers,
-            frame_type,
-            msg_stream_id,
-            timestamp,
+            MediaMessageInfo {
+                frame_type,
+                msg_stream_id,
+                timestamp,
+            },
             payload,
             chunk_size,
         )?;
@@ -2764,9 +2766,11 @@ impl Conn {
             &mut self.send_buffer,
             &mut self.media_out_headers,
             self.compact_media_headers,
-            frame_type,
-            msg_stream_id,
-            timestamp,
+            MediaMessageInfo {
+                frame_type,
+                msg_stream_id,
+                timestamp,
+            },
             payload_len,
             body,
         )?;

@@ -9,7 +9,7 @@ use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use crate::buffer::Buffer;
-use crate::chunk::media_out::{MediaHeaderTracker, write_media_message};
+use crate::chunk::media_out::{MediaHeaderTracker, MediaMessageInfo, write_media_message};
 use crate::chunk::reader::{ChunkMessage, chunk_read_owned};
 use crate::chunk::state::{ChunkRegistry, DEFAULT_MAX_MSG_LENGTH};
 use crate::chunk::writer::chunk_write;
@@ -596,9 +596,11 @@ impl Client {
             &mut self.send_buffer,
             &mut self.media_out_headers,
             self.compact_media_headers,
-            frame_type,
-            self.stream_id,
-            timestamp,
+            MediaMessageInfo {
+                frame_type,
+                msg_stream_id: self.stream_id,
+                timestamp,
+            },
             payload,
             self.out_chunk_size,
         )?;

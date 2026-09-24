@@ -144,6 +144,15 @@ pub(crate) fn encode_media_body(
     write_chunk_body(out, csid, payload, chunk_size, ext_ts)
 }
 
+/// Where and when a media message goes: its frame type (which picks the
+/// chunk stream and message type), message stream id and timestamp.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct MediaMessageInfo {
+    pub frame_type: FrameType,
+    pub msg_stream_id: u32,
+    pub timestamp: u32,
+}
+
 /// Queue a complete media message (first header + chunk body) on `out`,
 /// using and updating `tracker` for header compression. Nothing is written
 /// if the message does not fit.
@@ -151,12 +160,15 @@ pub(crate) fn write_media_message(
     out: &mut Buffer,
     tracker: &mut MediaHeaderTracker,
     compact: bool,
-    frame_type: FrameType,
-    msg_stream_id: u32,
-    timestamp: u32,
+    msg: MediaMessageInfo,
     payload: &[u8],
     chunk_size: usize,
 ) -> Result<()> {
+    let MediaMessageInfo {
+        frame_type,
+        msg_stream_id,
+        timestamp,
+    } = msg;
     let header = tracker.choose(compact, frame_type, msg_stream_id, timestamp, payload.len())?;
     let (csid, _, _) = media_chunk_stream(frame_type);
     let ext = timestamp >= EXTENDED_TIMESTAMP_MARKER;
@@ -173,13 +185,17 @@ pub(crate) fn write_media_message_with_body(
     out: &mut Buffer,
     tracker: &mut MediaHeaderTracker,
     compact: bool,
-    frame_type: FrameType,
-    msg_stream_id: u32,
-    timestamp: u32,
+    msg: MediaMessageInfo,
     payload_len: usize,
     body: &[u8],
 ) -> Result<()> {
-    let header = tracker.choose(compact, frame_type, msg_stream_id, timestamp, payload_len)?;
+    let header = tracker.choose(
+        compact,
+        msg.frame_type,
+        msg.msg_stream_id,
+        msg.timestamp,
+        payload_len,
+    )?;
     out.reserve(header.encoded_len() + body.len())?;
     header.write(out)?;
     out.write(body)?;
