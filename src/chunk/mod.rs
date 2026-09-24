@@ -2,6 +2,7 @@
 //!
 //! Mirrors `src/chunk/` directory.
 
+pub(crate) mod media_out;
 pub mod reader;
 pub mod state;
 pub mod writer;

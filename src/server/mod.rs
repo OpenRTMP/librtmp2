@@ -6,9 +6,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::TcpListener;
 use std::os::unix::io::{AsRawFd, IntoRawFd};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
-#[cfg(feature = "tls")]
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::chunk::state::{DEFAULT_CHUNK_SIZE, DEFAULT_MAX_MSG_LENGTH, RTMP_WIRE_MAX_MSG_LENGTH};
 use crate::ertmp::multitrack_media::{foreach_track, is_multitrack_container};
@@ -19,7 +17,9 @@ use crate::media::{
 use crate::message::control::MAX_INBOUND_CHUNK_SIZE;
 use crate::message::shared_object::SharedObjectMessage;
 use crate::net;
-use crate::session::conn::{Conn, MAX_PENDING_RELAY_FRAMES, RelayFrame, encode_media_message};
+use crate::session::conn::{
+    Conn, MAX_PENDING_RELAY_FRAMES, RelayCongestion, RelayFrame, encode_media_body,
+};
 use crate::session::publish_route::PublishRouteRegistry;
 #[cfg(feature = "tls")]
 use crate::transport::{PendingTlsAccept, TlsAcceptOutcome};
@@ -161,6 +161,17 @@ const MAX_BUDGET_DRAIN_PASSES_PER_CONN_PER_POLL: usize = 3;
 /// value through [`Server::max_relay_sends_per_poll`].
 pub const DEFAULT_MAX_RELAY_SENDS_PER_POLL: usize = 4096;
 
+/// Default [`Server::player_send_buffer_soft_limit`]: 4 MiB of unflushed
+/// outbound bytes (a few seconds of a typical 1080p stream) before a player
+/// starts skipping frames until it can resync on a keyframe.
+pub const DEFAULT_PLAYER_SEND_BUFFER_SOFT_LIMIT: usize = 4 * 1024 * 1024;
+
+/// Default [`Server::player_send_buffer_hard_limit`].
+pub const DEFAULT_PLAYER_SEND_BUFFER_HARD_LIMIT: usize = 32 * 1024 * 1024;
+
+/// Default [`Server::player_congestion_timeout`].
+pub const DEFAULT_PLAYER_CONGESTION_TIMEOUT: Duration = Duration::from_secs(15);
+
 /// Cached codec headers and last keyframe for a (app, stream_name) pair.
 /// Replayed to players that join after the publisher has already sent headers.
 struct StreamCache {
@@ -191,6 +202,56 @@ pub struct StreamInitSnapshot {
     pub audio_track_headers: Vec<(u8, Vec<u8>)>,
     /// Most recent cached video keyframe as `(timestamp, payload)`.
     pub last_keyframe: Option<(u32, Vec<u8>)>,
+}
+
+/// How a live relay frame may be treated by per-player flow control.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RelayDelivery {
+    /// Codec headers and script/metadata: always delivered, even to a
+    /// congested player, since everything after depends on them.
+    Always,
+    /// A point a congested player can resume from without decode errors: a
+    /// video keyframe, or any audio frame on a route without video.
+    ResyncPoint,
+    /// Everything else: skipped while a player is congested.
+    Droppable,
+}
+
+impl RelayDelivery {
+    fn classify(frame: &RelayFrame, route_has_video: bool) -> Self {
+        match frame.frame_type {
+            FrameType::Script | FrameType::Metadata => return Self::Always,
+            FrameType::Audio | FrameType::Video => {}
+        }
+        match classify_cache_frame(frame.frame_type, frame.cache_payload()) {
+            CacheFrameKind::VideoSequenceHeader | CacheFrameKind::AudioSequenceHeader => {
+                Self::Always
+            }
+            CacheFrameKind::VideoKeyframe => Self::ResyncPoint,
+            CacheFrameKind::LiveOnly
+                if frame.frame_type == FrameType::Audio && !route_has_video =>
+            {
+                Self::ResyncPoint
+            }
+            CacheFrameKind::LiveOnly => Self::Droppable,
+        }
+    }
+}
+
+/// Snapshot of the [`Server`] flow-control settings for one fan-out pass.
+#[derive(Debug, Clone, Copy)]
+struct PlayerFlowLimits {
+    soft: usize,
+    hard: usize,
+    congestion_timeout: Duration,
+}
+
+/// Outcome of [`Server::player_flow_decision`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlayerFlow {
+    Send,
+    Skip,
+    Disconnect,
 }
 
 /// Bounded ring of cloned publisher [`RelayFrame`]s for integrator export.
@@ -287,6 +348,27 @@ pub struct Server {
     /// perpetually re-queueing an oversized frame. Later frames are deferred once
     /// the accumulated send count would exceed the configured budget.
     pub max_relay_sends_per_poll: usize,
+    /// Outbound backlog (bytes queued for a player but not yet accepted by
+    /// its socket) above which live relay stops queueing audio/video for
+    /// that player. It then skips frames until the backlog has drained to
+    /// half this value *and* a video keyframe arrives (any audio frame for
+    /// an audio-only route), so a viewer on a slow link degrades to
+    /// skipping ahead cleanly instead of building unbounded latency and
+    /// memory. Codec headers and metadata are always delivered. `0`
+    /// disables frame skipping.
+    pub player_send_buffer_soft_limit: usize,
+    /// Outbound backlog at which a player is disconnected outright.
+    pub player_send_buffer_hard_limit: usize,
+    /// A player that is skipping frames (see
+    /// [`Self::player_send_buffer_soft_limit`]) and whose backlog has not
+    /// shrunk at all for this long is disconnected, so a peer that stopped
+    /// reading entirely doesn't hold a connection slot and its backlog
+    /// forever. A player that is still draining, however slowly, stays.
+    pub player_congestion_timeout: Duration,
+    /// Use fmt=1/2 (delta) first-chunk headers for outbound media where
+    /// possible instead of the full fmt=0 header on every message. Applied
+    /// to connections accepted after it is changed.
+    pub compact_media_headers: bool,
     pub running: bool,
     /// Identifies *one* bound listener (whichever was bound first) for
     /// diagnostics/backward compatibility. When more than one listener is
@@ -397,6 +479,10 @@ impl Server {
             config,
             resource_limits: ResourceLimits::default(),
             max_relay_sends_per_poll: DEFAULT_MAX_RELAY_SENDS_PER_POLL,
+            player_send_buffer_soft_limit: DEFAULT_PLAYER_SEND_BUFFER_SOFT_LIMIT,
+            player_send_buffer_hard_limit: DEFAULT_PLAYER_SEND_BUFFER_HARD_LIMIT,
+            player_congestion_timeout: DEFAULT_PLAYER_CONGESTION_TIMEOUT,
+            compact_media_headers: true,
             running: false,
             server_fd: -1,
             connections: Vec::new(),
@@ -1165,6 +1251,7 @@ impl Server {
         conn.conn_id = conn_id;
         conn.remote_addr = remote_addr;
         conn.defer_media_relay = self.defer_media_relay;
+        conn.compact_media_headers = self.compact_media_headers;
         conn.transport = Some(transport);
         conn.on_frame_cb = self.on_frame_cb;
         conn.on_media_cb = self.on_media_cb;
@@ -1691,12 +1778,19 @@ impl Server {
         let mut relay_sends = 0usize;
         let mut relay_processed = 0usize;
         // Reused across frames: indices of this frame's receiving players,
-        // and the frame chunked once for the most recent (stream id, chunk
-        // size) seen. Players almost always share both, so fan-out costs one
-        // chunk encode per frame plus one memcpy per player instead of
-        // re-chunking the payload for every player.
+        // and the frame's chunk body (payload plus continuation headers)
+        // encoded once for the most recent chunk size seen. Players almost
+        // always share a chunk size, so fan-out costs one chunk encode per
+        // frame plus a small per-player first header and one memcpy per
+        // player, instead of re-chunking the payload for every player.
         let mut players: Vec<usize> = Vec::new();
-        let mut wire = crate::buffer::Buffer::new();
+        let mut body = crate::buffer::Buffer::new();
+        let now = Instant::now();
+        let flow_limits = PlayerFlowLimits {
+            soft: self.player_send_buffer_soft_limit,
+            hard: self.player_send_buffer_hard_limit,
+            congestion_timeout: self.player_congestion_timeout,
+        };
         for frame in &relay_frames {
             players.clear();
             players.extend(
@@ -1740,25 +1834,51 @@ impl Server {
                     self.cache_relay_frame(frame);
                 }
             }
-            let mut wire_params = None;
+            // Only classified when some player can actually be congested:
+            // it parses the payload header and looks up the route's cache.
+            let delivery = if players.is_empty() || flow_limits.soft == 0 {
+                RelayDelivery::Always
+            } else {
+                RelayDelivery::classify(frame, self.route_has_video(frame))
+            };
+            let mut body_chunk_size = None;
             for &i in &players {
                 let conn = &mut self.connections[i];
-                let params = conn.media_wire_params();
-                if wire_params != Some(params) {
-                    wire.drain(wire.available());
-                    wire_params = encode_media_message(
-                        &mut wire,
+                let backlog = conn.send_buffer.available();
+                match Self::player_flow_decision(flow_limits, conn, delivery, backlog, now) {
+                    PlayerFlow::Send => {}
+                    PlayerFlow::Skip => {
+                        conn.relay_frames_dropped = conn.relay_frames_dropped.saturating_add(1);
+                        continue;
+                    }
+                    PlayerFlow::Disconnect => {
+                        conn.relay_enabled = false;
+                        conn.needs_init_frames = false;
+                        conn.disconnect_transport();
+                        closed.push(i);
+                        continue;
+                    }
+                }
+                let chunk_size = conn.media_chunk_size();
+                if body_chunk_size != Some(chunk_size) {
+                    body.drain(body.available());
+                    body_chunk_size = encode_media_body(
+                        &mut body,
                         frame.frame_type,
                         frame.timestamp,
                         &frame.payload,
-                        params.0,
-                        params.1,
+                        chunk_size,
                     )
                     .ok()
-                    .map(|()| params);
+                    .map(|()| chunk_size);
                 }
-                let send_result = if wire_params.is_some() {
-                    conn.send_encoded_media(wire.peek(), frame.payload.len())
+                let send_result = if body_chunk_size.is_some() {
+                    conn.send_encoded_media_body(
+                        frame.frame_type,
+                        frame.timestamp,
+                        frame.payload.len(),
+                        body.peek(),
+                    )
                 } else {
                     Err(ErrorCode::Internal)
                 };
@@ -1786,6 +1906,64 @@ impl Server {
         }
         for frame in relay_frames.drain(relay_processed..) {
             self.requeue_relay_frame(frame);
+        }
+    }
+
+    /// Whether `frame`'s route has carried video (a cached video sequence
+    /// header or keyframe). Congested players on an audio-only route resync
+    /// on audio, since no keyframe will ever arrive.
+    fn route_has_video(&self, frame: &RelayFrame) -> bool {
+        self.stream_cache
+            .get(&(frame.app.clone(), frame.stream_name.clone()))
+            .is_some_and(|cache| {
+                cache.avc_header.is_some()
+                    || cache.last_keyframe.is_some()
+                    || !cache.video_track_headers.is_empty()
+            })
+    }
+
+    /// Per-player flow control for one live relay frame: send it, skip it
+    /// because the player is too far behind, or drop the player.
+    fn player_flow_decision(
+        limits: PlayerFlowLimits,
+        conn: &mut Conn,
+        delivery: RelayDelivery,
+        backlog: usize,
+        now: Instant,
+    ) -> PlayerFlow {
+        if backlog >= limits.hard {
+            return PlayerFlow::Disconnect;
+        }
+        let soft = limits.soft;
+        if soft == 0 || delivery == RelayDelivery::Always {
+            return PlayerFlow::Send;
+        }
+        match conn.relay_congestion {
+            None if backlog <= soft => PlayerFlow::Send,
+            None => {
+                conn.relay_congestion = Some(RelayCongestion {
+                    min_backlog: backlog,
+                    last_progress: now,
+                });
+                PlayerFlow::Skip
+            }
+            Some(ref mut congestion) => {
+                if delivery == RelayDelivery::ResyncPoint && backlog <= soft / 2 {
+                    conn.relay_congestion = None;
+                    return PlayerFlow::Send;
+                }
+                if backlog < congestion.min_backlog {
+                    // Still draining, just slowly: not stalled.
+                    congestion.min_backlog = backlog;
+                    congestion.last_progress = now;
+                    PlayerFlow::Skip
+                } else if now.duration_since(congestion.last_progress) >= limits.congestion_timeout
+                {
+                    PlayerFlow::Disconnect
+                } else {
+                    PlayerFlow::Skip
+                }
+            }
         }
     }
 
@@ -2937,6 +3115,186 @@ mod tests {
 
     fn relay_frame(frame_type: FrameType, payload: Vec<u8>) -> crate::session::conn::RelayFrame {
         relay_frame_for_publisher(1, "stream", frame_type, payload)
+    }
+
+    fn flow_test_player(conn_id: u64) -> (Conn, std::os::unix::net::UnixStream) {
+        use crate::session::stream::Stream;
+        use crate::transport::Transport;
+        use std::os::unix::io::IntoRawFd;
+        use std::os::unix::net::UnixStream;
+
+        let (server_end, peer_end) = UnixStream::pair().unwrap();
+        server_end.set_nonblocking(true).unwrap();
+        let mut conn = Conn::new();
+        conn.conn_id = conn_id;
+        conn.app = "live".to_string();
+        conn.relay_enabled = true;
+        conn.transport = Some(Transport::new_plain(server_end.into_raw_fd()));
+        conn.current_stream = Some(Box::new(Stream {
+            stream_id: 1,
+            name: "stream".to_string(),
+            is_publishing: false,
+            is_playing: true,
+            paused: false,
+            receive_audio: true,
+            receive_video: true,
+        }));
+        (conn, peer_end)
+    }
+
+    /// Relay `frame` through the fan-out and report how many bytes it
+    /// queued for player 0 (0 when skipped).
+    fn relay_one(server: &mut Server, frame: crate::session::conn::RelayFrame) -> usize {
+        let before = server.connections[0].send_buffer.available();
+        let mut closed = Vec::new();
+        server.send_and_export_relay_frames(vec![frame], &HashSet::new(), &mut closed);
+        assert!(closed.is_empty(), "player must not be disconnected");
+        server.connections[0].send_buffer.available() - before
+    }
+
+    const AVC_SEQ: [u8; 5] = [0x17, 0x00, 0, 0, 0];
+    const AVC_KEY: [u8; 5] = [0x17, 0x01, 0, 0, 0];
+    const AVC_INTER: [u8; 5] = [0x27, 0x01, 0, 0, 0];
+    const AAC_RAW: [u8; 3] = [0xAF, 0x01, 0x21];
+
+    #[test]
+    fn congested_player_skips_until_it_drains_and_gets_a_keyframe() {
+        let mut server = test_server();
+        server.player_send_buffer_soft_limit = 100;
+        let (player, _peer) = flow_test_player(2);
+        server.connections = vec![player];
+        server.stream_cache.insert(
+            ("live".to_string(), "stream".to_string()),
+            StreamCache {
+                avc_header: Some(AVC_SEQ.to_vec()),
+                ..empty_stream_cache()
+            },
+        );
+
+        assert!(
+            relay_one(
+                &mut server,
+                relay_frame(FrameType::Video, AVC_INTER.to_vec())
+            ) > 0
+        );
+
+        // Backlog above the soft limit: live media is skipped...
+        server.connections[0]
+            .send_buffer
+            .write(&[0u8; 150])
+            .unwrap();
+        assert_eq!(
+            relay_one(
+                &mut server,
+                relay_frame(FrameType::Video, AVC_INTER.to_vec())
+            ),
+            0
+        );
+        assert_eq!(
+            relay_one(&mut server, relay_frame(FrameType::Audio, AAC_RAW.to_vec())),
+            0
+        );
+        // ...including a keyframe while still above half the soft limit...
+        assert_eq!(
+            relay_one(&mut server, relay_frame(FrameType::Video, AVC_KEY.to_vec())),
+            0
+        );
+        // ...but codec headers always go through.
+        assert!(relay_one(&mut server, relay_frame(FrameType::Video, AVC_SEQ.to_vec())) > 0);
+        assert_eq!(server.connections[0].relay_frames_dropped, 3);
+
+        // Drained, but still mid-GOP: keep skipping until a keyframe.
+        let queued = server.connections[0].send_buffer.available();
+        server.connections[0].send_buffer.drain(queued);
+        assert_eq!(
+            relay_one(
+                &mut server,
+                relay_frame(FrameType::Video, AVC_INTER.to_vec())
+            ),
+            0
+        );
+        assert!(relay_one(&mut server, relay_frame(FrameType::Video, AVC_KEY.to_vec())) > 0);
+        assert!(server.connections[0].relay_congestion.is_none());
+        assert!(
+            relay_one(
+                &mut server,
+                relay_frame(FrameType::Video, AVC_INTER.to_vec())
+            ) > 0
+        );
+        assert!(relay_one(&mut server, relay_frame(FrameType::Audio, AAC_RAW.to_vec())) > 0);
+    }
+
+    #[test]
+    fn congested_player_on_audio_only_route_resyncs_on_audio() {
+        let mut server = test_server();
+        server.player_send_buffer_soft_limit = 100;
+        let (player, _peer) = flow_test_player(2);
+        server.connections = vec![player];
+        server.connections[0]
+            .send_buffer
+            .write(&[0u8; 150])
+            .unwrap();
+        assert_eq!(
+            relay_one(&mut server, relay_frame(FrameType::Audio, AAC_RAW.to_vec())),
+            0
+        );
+        let queued = server.connections[0].send_buffer.available();
+        server.connections[0].send_buffer.drain(queued);
+        assert!(relay_one(&mut server, relay_frame(FrameType::Audio, AAC_RAW.to_vec())) > 0);
+    }
+
+    #[test]
+    fn player_is_dropped_past_hard_limit_or_congestion_timeout() {
+        let mut server = test_server();
+        server.player_send_buffer_soft_limit = 100;
+        server.player_send_buffer_hard_limit = 1000;
+        let (player, _peer) = flow_test_player(2);
+        server.connections = vec![player];
+        server.connections[0]
+            .send_buffer
+            .write(&[0u8; 1000])
+            .unwrap();
+        let mut closed = Vec::new();
+        server.send_and_export_relay_frames(
+            vec![relay_frame(FrameType::Video, AVC_SEQ.to_vec())],
+            &HashSet::new(),
+            &mut closed,
+        );
+        assert_eq!(closed, vec![0], "hard limit drops even for codec headers");
+
+        let mut server = test_server();
+        server.player_send_buffer_soft_limit = 100;
+        server.player_congestion_timeout = Duration::ZERO;
+        let (player, _peer) = flow_test_player(2);
+        server.connections = vec![player];
+        server.connections[0]
+            .send_buffer
+            .write(&[0u8; 150])
+            .unwrap();
+        assert_eq!(
+            relay_one(
+                &mut server,
+                relay_frame(FrameType::Video, AVC_INTER.to_vec())
+            ),
+            0
+        );
+        // Still draining (however slowly): stays connected.
+        server.connections[0].send_buffer.drain(10);
+        assert_eq!(
+            relay_one(
+                &mut server,
+                relay_frame(FrameType::Video, AVC_INTER.to_vec())
+            ),
+            0
+        );
+        // No progress since: dropped.
+        let mut closed = Vec::new();
+        server.send_and_export_relay_frames(
+            vec![relay_frame(FrameType::Video, AVC_INTER.to_vec())],
+            &HashSet::new(),
+            &mut closed,
+        );
+        assert_eq!(closed, vec![0], "a player that stopped reading is dropped");
     }
 
     #[test]

@@ -3,6 +3,9 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use crate::buffer::Buffer;
+use crate::chunk::media_out::{
+    MediaHeaderTracker, write_media_message, write_media_message_with_body,
+};
 use crate::chunk::reader::{ChunkMessage, chunk_read_owned};
 use crate::chunk::state::{
     ChunkRegistry, DEFAULT_CHUNK_SIZE, DEFAULT_MAX_MSG_LENGTH, RTMP_WIRE_MAX_MSG_LENGTH,
@@ -58,6 +61,11 @@ const PEER_BANDWIDTH_DYNAMIC: u8 = 2;
 const PING_INTERVAL: Duration = Duration::from_secs(5);
 const PING_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_PENDING_PINGS: usize = 4;
+/// Outbound bytes the peer must accept before that counts as proof it is
+/// alive and reading (see [`Conn::peer_is_draining`]). Well above what
+/// pings, acks and other control traffic add up to, so an idle dead peer
+/// whose kernel still accepts those few bytes isn't mistaken for a live one.
+const SEND_PROGRESS_BYTES: usize = 4096;
 
 #[derive(Debug, Clone)]
 struct QueuedPing {
@@ -121,6 +129,15 @@ pub struct RelayFrame {
     /// external id ([`crate::server::is_external_publisher_id`]); the sentinel
     /// [`crate::server::EXTERNAL_RELAY_PUBLISHER_ID`] remains `u64::MAX`.
     pub publisher_conn_id: u64,
+}
+
+/// Progress tracking for a player that is skipping frames to catch up.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct RelayCongestion {
+    /// Smallest outbound backlog seen since congestion began.
+    pub(crate) min_backlog: usize,
+    /// Last time `min_backlog` went down (or congestion began).
+    pub(crate) last_progress: Instant,
 }
 
 /// A publish or play request whose authorization callback returned
@@ -201,6 +218,21 @@ pub struct Conn {
     pub send_mutex: Mutex<()>,
     pub pending_relay: Vec<RelayFrame>,
     pub needs_init_frames: bool,
+    /// Emit fmt=1/2 first-chunk headers for media messages whose chunk
+    /// stream already carried a message on the same stream id, instead of
+    /// the full 12-byte fmt=0 header every time. Defaults to on; the
+    /// server copies [`crate::server::Server::compact_media_headers`] here.
+    pub compact_media_headers: bool,
+    /// Last media header sent on the audio (csid 4), data (csid 5) and
+    /// video (csid 6) chunk streams, for fmt=1/2 delta encoding.
+    media_out_headers: MediaHeaderTracker,
+    /// Relay frames skipped for this player because its outbound backlog
+    /// exceeded the server's soft limit (see
+    /// [`crate::server::Server::player_send_buffer_soft_limit`]).
+    pub relay_frames_dropped: u64,
+    /// Set while this player is skipping live frames because its outbound
+    /// backlog crossed the server's soft limit; cleared when it resyncs.
+    pub(crate) relay_congestion: Option<RelayCongestion>,
     /// Last play-route change that requested cached init frames.
     last_init_replay_request: Option<Instant>,
     pub detected_video_codec: Option<String>,
@@ -282,6 +314,10 @@ pub struct Conn {
     /// Last measured client↔server RTT in milliseconds (RTMP UserControl ping).
     pub rtt_ms: f64,
     pending_pings: HashMap<u32, Instant>,
+    /// Bytes flushed since `last_send_progress` was last advanced.
+    send_progress_bytes: usize,
+    /// Last time at least [`SEND_PROGRESS_BYTES`] reached the peer.
+    last_send_progress: Option<Instant>,
     /// Ping queued in `send_buffer` but not yet fully flushed.
     queued_ping: Option<QueuedPing>,
     last_ping_sent: Option<Instant>,
@@ -344,6 +380,10 @@ impl Conn {
             send_mutex: Mutex::new(()),
             pending_relay: Vec::new(),
             needs_init_frames: false,
+            compact_media_headers: true,
+            media_out_headers: MediaHeaderTracker::default(),
+            relay_frames_dropped: 0,
+            relay_congestion: None,
             last_init_replay_request: None,
             detected_video_codec: None,
             detected_audio_codec: None,
@@ -374,6 +414,8 @@ impl Conn {
             abandoned_relay_routes: std::collections::HashSet::new(),
             rtt_ms: 0.0,
             pending_pings: HashMap::new(),
+            send_progress_bytes: 0,
+            last_send_progress: None,
             queued_ping: None,
             last_ping_sent: None,
             next_ping_token: 1,
@@ -1802,19 +1844,33 @@ impl Conn {
         {
             return Ok(());
         }
+        // A player on a slow link can have seconds of media queued ahead of a
+        // ping, so its pong comes back late even though it is reading. Media
+        // visibly flowing to the peer proves liveness on its own; judge
+        // pings by it only once that stops (e.g. a dead host whose socket
+        // buffer has filled).
+        let draining = self.peer_is_draining(now);
         if let Some(queued) = &self.queued_ping {
-            if now.duration_since(queued.queued_at) >= PING_TIMEOUT {
+            if !draining && now.duration_since(queued.queued_at) >= PING_TIMEOUT {
                 return Err(ErrorCode::Protocol);
             }
             return Ok(());
         }
+        if draining && !self.pending_pings.is_empty() {
+            // Don't pile more pings behind the backlog while one is still
+            // in flight.
+            return Ok(());
+        }
 
-        let had_stale_ping = self
-            .pending_pings
-            .values()
-            .any(|sent| now.duration_since(*sent) >= PING_TIMEOUT);
-        self.pending_pings
-            .retain(|_, sent| now.duration_since(*sent) < PING_TIMEOUT);
+        let had_stale_ping = !draining
+            && self
+                .pending_pings
+                .values()
+                .any(|sent| now.duration_since(*sent) >= PING_TIMEOUT);
+        if !draining {
+            self.pending_pings
+                .retain(|_, sent| now.duration_since(*sent) < PING_TIMEOUT);
+        }
         if had_stale_ping {
             return Err(ErrorCode::Protocol);
         }
@@ -1831,6 +1887,13 @@ impl Conn {
             bytes_until_flushed: self.send_buffer.available(),
         });
         Ok(())
+    }
+
+    /// Whether a meaningful amount of data (not just pings and control
+    /// messages) reached the peer within the last [`PING_TIMEOUT`].
+    fn peer_is_draining(&self, now: Instant) -> bool {
+        self.last_send_progress
+            .is_some_and(|t| now.duration_since(t) < PING_TIMEOUT)
     }
 
     /// True when any configured callback implies publish/play must be explicitly
@@ -2602,6 +2665,11 @@ impl Conn {
                 break;
             }
             self.send_buffer.drain(n);
+            self.send_progress_bytes = self.send_progress_bytes.saturating_add(n);
+            if self.send_progress_bytes >= SEND_PROGRESS_BYTES {
+                self.send_progress_bytes = 0;
+                self.last_send_progress = Some(Instant::now());
+            }
             if let Some(ref mut queued) = self.queued_ping {
                 queued.bytes_until_flushed = queued.bytes_until_flushed.saturating_sub(n);
             }
@@ -2635,13 +2703,16 @@ impl Conn {
         timestamp: u32,
         payload: &[u8],
     ) -> Result<()> {
-        let (stream_id, chunk_size) = self.media_wire_params();
-        encode_media_message(
+        let chunk_size = self.media_chunk_size();
+        let msg_stream_id = self.media_stream_id();
+        write_media_message(
             &mut self.send_buffer,
+            &mut self.media_out_headers,
+            self.compact_media_headers,
             frame_type,
+            msg_stream_id,
             timestamp,
             payload,
-            stream_id,
             chunk_size,
         )?;
         self.media_bytes_sent = self.media_bytes_sent.saturating_add(payload.len() as u64);
@@ -2653,26 +2724,49 @@ impl Conn {
         self.send_frame(FrameType::Script, timestamp, payload)
     }
 
-    /// The per-connection inputs to [`encode_media_message`]: message stream
-    /// id and outbound chunk size. Two connections that agree on these get
-    /// byte-identical wire output for the same relayed frame, which lets the
-    /// relay fan-out chunk a frame once and copy it to every such player.
-    pub(crate) fn media_wire_params(&self) -> (u32, u32) {
-        let stream_id = self
-            .current_stream
-            .as_ref()
-            .map(|s| s.stream_id)
-            .unwrap_or(1);
-        (stream_id, self.active_chunk_size)
+    /// Outbound chunk size used for media on this connection. Together with
+    /// the frame's chunk stream and timestamp it fully determines the chunk
+    /// body [`encode_media_body`] produces, so the relay fan-out can chunk a
+    /// frame once and share the body among every player on the same chunk
+    /// size; only the (per-player, delta-compressed) first header differs.
+    pub(crate) fn media_chunk_size(&self) -> usize {
+        match self.active_chunk_size {
+            0 => 128,
+            n => n as usize,
+        }
     }
 
-    /// Queue a media message already chunked by [`encode_media_message`]
-    /// with this connection's [`media_wire_params`](Self::media_wire_params).
-    /// `payload_len` is the unchunked payload size, for byte accounting.
-    pub(crate) fn send_encoded_media(&mut self, wire: &[u8], payload_len: usize) -> Result<()> {
-        self.send_buffer.write(wire)?;
+    /// Queue a media message whose chunk body was already produced by
+    /// [`encode_media_body`] for this connection's
+    /// [`media_chunk_size`](Self::media_chunk_size). Writes this
+    /// connection's own first-chunk header in front of it.
+    pub(crate) fn send_encoded_media_body(
+        &mut self,
+        frame_type: FrameType,
+        timestamp: u32,
+        payload_len: usize,
+        body: &[u8],
+    ) -> Result<()> {
+        let msg_stream_id = self.media_stream_id();
+        write_media_message_with_body(
+            &mut self.send_buffer,
+            &mut self.media_out_headers,
+            self.compact_media_headers,
+            frame_type,
+            msg_stream_id,
+            timestamp,
+            payload_len,
+            body,
+        )?;
         self.media_bytes_sent = self.media_bytes_sent.saturating_add(payload_len as u64);
         Ok(())
+    }
+
+    fn media_stream_id(&self) -> u32 {
+        self.current_stream
+            .as_ref()
+            .map(|s| s.stream_id)
+            .unwrap_or(1)
     }
 
     fn send_control(&mut self, ty: u8, data: &[u8]) -> Result<()> {
@@ -2895,72 +2989,124 @@ fn detect_audio_codec(payload: &[u8]) -> Option<String> {
     }
 }
 
-/// Chunk one audio/video/data message onto `out` exactly as
-/// [`Conn::send_frame`] would for a connection whose
-/// [`Conn::media_wire_params`] are `(stream_id, chunk_size)`.
-pub(crate) fn encode_media_message(
-    out: &mut Buffer,
-    frame_type: FrameType,
-    timestamp: u32,
-    payload: &[u8],
-    stream_id: u32,
-    chunk_size: u32,
-) -> Result<()> {
-    let mut cmsg = ChunkMessage::default();
-    cmsg.timestamp = timestamp;
-    cmsg.msg_length = payload.len() as u32;
-    cmsg.msg_stream_id = stream_id;
-    cmsg.fmt = 0;
-    match frame_type {
-        FrameType::Audio => {
-            cmsg.csid = 4;
-            cmsg.msg_type_id = 0x08;
-        }
-        FrameType::Video => {
-            cmsg.csid = 6;
-            cmsg.msg_type_id = 0x09;
-        }
-        FrameType::Script | FrameType::Metadata => {
-            cmsg.csid = 5;
-            cmsg.msg_type_id = msg_dispatch::RTMP_MSG_AMF0_DATA;
-        }
-    }
-    chunk_write(out, &cmsg, payload, payload.len(), chunk_size as usize)
-}
+pub(crate) use crate::chunk::media_out::encode_media_body;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn pre_encoded_relay_media_matches_send_frame_wire_output() {
-        // The relay fan-out chunks a frame once via `encode_media_message`
-        // and copies it to every player sharing `media_wire_params`; that
-        // must be byte-identical to each player chunking it itself.
-        let payload: Vec<u8> = (0..1000u32).map(|i| i as u8).collect();
-        for (frame_type, ts) in [
-            (FrameType::Video, 40u32),
-            (FrameType::Audio, 0x0100_0000),
-            (FrameType::Script, 0),
-        ] {
-            let mut direct = Conn::new();
-            direct.send_frame(frame_type, ts, &payload).unwrap();
-
-            let mut copied = Conn::new();
-            let (stream_id, chunk_size) = copied.media_wire_params();
-            let mut wire = Buffer::new();
-            encode_media_message(&mut wire, frame_type, ts, &payload, stream_id, chunk_size)
-                .unwrap();
-            copied
-                .send_encoded_media(wire.peek(), payload.len())
-                .unwrap();
-
-            assert_eq!(direct.send_buffer.peek(), copied.send_buffer.peek());
-            assert_eq!(direct.media_bytes_sent, copied.media_bytes_sent);
-        }
-    }
     use crate::amf::amf0;
     use crate::session::stream::Stream;
+
+    /// Decode every complete message in `wire` with the library's own
+    /// chunk reader, as (type id, stream id, timestamp, payload).
+    fn decode_wire(wire: &mut Buffer) -> Vec<(u8, u32, u32, Vec<u8>)> {
+        let mut reg = ChunkRegistry::new();
+        let mut out = Vec::new();
+        while wire.available() > 0 {
+            let mut msg = ChunkMessage::default();
+            let (status, payload) = chunk_read_owned(wire, &mut reg, &mut msg).unwrap();
+            if status == 1 && msg.is_complete {
+                out.push((msg.msg_type_id, msg.msg_stream_id, msg.timestamp, payload));
+            } else if status == 0 && wire.available() == 0 {
+                break;
+            }
+        }
+        out
+    }
+
+    fn media_sequence() -> Vec<(FrameType, u32, Vec<u8>)> {
+        let big: Vec<u8> = (0..1000u32).map(|i| i as u8).collect();
+        vec![
+            (FrameType::Video, 0, big.clone()),
+            (FrameType::Audio, 0, vec![0xAF, 1, 2, 3]),
+            (FrameType::Video, 33, big.clone()), // fmt=2: same length/type
+            (FrameType::Audio, 23, vec![0xAF, 1, 4, 5]),
+            (FrameType::Audio, 46, vec![0xAF, 1, 4, 5, 6]), // fmt=1: new length
+            (FrameType::Video, 66, big[..300].to_vec()),
+            (FrameType::Script, 70, vec![2, 0, 1, b'x']),
+            (FrameType::Video, 50, big[..10].to_vec()), // backwards -> fmt=0
+            (FrameType::Video, 0x00FF_FFF0, big.clone()),
+            (FrameType::Video, 0x0100_0000, big.clone()), // extended -> fmt=0
+            (FrameType::Video, 0x0100_0021, big[..5].to_vec()),
+            (FrameType::Video, 20, big[..200].to_vec()),
+        ]
+    }
+
+    #[test]
+    fn compact_media_headers_round_trip_through_chunk_reader() {
+        for compact in [true, false] {
+            let mut conn = Conn::new();
+            conn.compact_media_headers = compact;
+            let frames = media_sequence();
+            for (ft, ts, payload) in &frames {
+                conn.send_frame(*ft, *ts, payload).unwrap();
+            }
+            let wire_len = conn.send_buffer.available();
+            let decoded = decode_wire(&mut conn.send_buffer);
+            assert_eq!(decoded.len(), frames.len(), "compact={compact}");
+            for ((ft, ts, payload), (type_id, stream_id, dts, dpayload)) in
+                frames.iter().zip(&decoded)
+            {
+                let expected_type = match ft {
+                    FrameType::Audio => 0x08,
+                    FrameType::Video => 0x09,
+                    _ => 0x12,
+                };
+                assert_eq!(*type_id, expected_type);
+                assert_eq!(*stream_id, 1);
+                assert_eq!(dts, ts, "compact={compact}");
+                assert_eq!(dpayload, payload);
+            }
+            if compact {
+                let mut full = Conn::new();
+                full.compact_media_headers = false;
+                for (ft, ts, payload) in &frames {
+                    full.send_frame(*ft, *ts, payload).unwrap();
+                }
+                assert!(wire_len < full.send_buffer.available());
+            }
+        }
+    }
+
+    #[test]
+    fn stream_id_change_falls_back_to_full_header() {
+        let mut conn = Conn::new();
+        conn.send_frame(FrameType::Video, 10, &[0x17, 1]).unwrap();
+        conn.current_stream = Some(Box::new(Stream {
+            stream_id: 7,
+            name: "s".into(),
+            is_publishing: false,
+            is_playing: true,
+            paused: false,
+            receive_audio: true,
+            receive_video: true,
+        }));
+        conn.send_frame(FrameType::Video, 20, &[0x27, 1]).unwrap();
+        let decoded = decode_wire(&mut conn.send_buffer);
+        assert_eq!(decoded[0].1, 1);
+        assert_eq!(decoded[1].1, 7);
+        assert_eq!(decoded[1].2, 20);
+    }
+
+    #[test]
+    fn shared_relay_body_matches_send_frame_wire_output() {
+        // The relay fan-out chunks a frame's body once via
+        // `encode_media_body` and hands it to every player on the same chunk
+        // size, each writing its own first header; that must be
+        // byte-identical to each player sending the frame itself.
+        let mut direct = Conn::new();
+        let mut shared = Conn::new();
+        for (ft, ts, payload) in media_sequence() {
+            direct.send_frame(ft, ts, &payload).unwrap();
+            let mut body = Buffer::new();
+            encode_media_body(&mut body, ft, ts, &payload, shared.media_chunk_size()).unwrap();
+            shared
+                .send_encoded_media_body(ft, ts, payload.len(), body.peek())
+                .unwrap();
+        }
+        assert_eq!(direct.send_buffer.peek(), shared.send_buffer.peek());
+        assert_eq!(direct.media_bytes_sent, shared.media_bytes_sent);
+    }
 
     #[test]
     fn relay_budget_counts_actual_retained_bytes() {
@@ -4276,6 +4422,49 @@ mod tests {
             matches!(conn.maybe_send_ping(), Err(ErrorCode::Protocol)),
             "stale unanswered pings must fail the connection"
         );
+    }
+
+    #[test]
+    fn late_pong_is_tolerated_while_media_is_draining_to_the_peer() {
+        let mut conn = Conn::new();
+        conn.client_fd = 0;
+        conn.transport = None;
+        conn.state = ConnState::AppConnected;
+        let stale = Instant::now() - PING_TIMEOUT - Duration::from_secs(1);
+        conn.last_ping_sent = Some(stale);
+        conn.pending_pings.insert(42, stale);
+        // A slow viewer is still accepting media: its pong is merely stuck
+        // behind the backlog, not missing.
+        conn.last_send_progress = Some(Instant::now());
+        conn.maybe_send_ping().unwrap();
+        assert_eq!(
+            conn.pending_pings.len(),
+            1,
+            "no extra pings piled up behind the backlog"
+        );
+        assert!(conn.queued_ping.is_none());
+
+        // Once media stops flowing, the stale ping counts again.
+        conn.last_send_progress = Some(stale);
+        assert!(matches!(conn.maybe_send_ping(), Err(ErrorCode::Protocol)));
+    }
+
+    #[test]
+    fn control_sized_flushes_do_not_count_as_send_progress() {
+        use std::os::unix::io::IntoRawFd;
+        use std::os::unix::net::UnixStream;
+
+        let (end, _peer) = UnixStream::pair().unwrap();
+        end.set_nonblocking(true).unwrap();
+        let mut conn = Conn::new();
+        conn.client_fd = 0;
+        conn.transport = Some(Transport::new_plain(end.into_raw_fd()));
+        conn.send_buffer.write(&[0u8; 64]).unwrap();
+        conn.flush().unwrap();
+        assert!(conn.last_send_progress.is_none());
+        conn.send_buffer.write(&[0u8; SEND_PROGRESS_BYTES]).unwrap();
+        conn.flush().unwrap();
+        assert!(conn.last_send_progress.is_some());
     }
 
     #[test]
