@@ -15,7 +15,9 @@ const FLV_HEADER_LEN: usize = 9;
 const FLV_TAG_HEADER_LEN: usize = 11;
 
 /// One FLV tag: (frame type, timestamp in ms, payload).
-fn flv_tags(data: &[u8]) -> Result<Vec<(FrameType, u32, &[u8])>, String> {
+type FlvTag<'a> = (FrameType, u32, &'a [u8]);
+
+fn flv_tags(data: &[u8]) -> Result<Vec<FlvTag<'_>>, String> {
     if data.len() < FLV_HEADER_LEN + 4 || &data[..3] != b"FLV" {
         return Err("not an FLV file".into());
     }

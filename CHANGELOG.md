@@ -13,6 +13,8 @@ begin at `1.0.0`.
 
 ## [Unreleased]
 
+## [0.10.0] — 2026-09-24
+
 ### Added
 - Per-player outbound flow control on the server relay. A player whose unsent
   backlog exceeds `Server::player_send_buffer_soft_limit` (default 4 MiB)
@@ -34,6 +36,8 @@ begin at `1.0.0`.
   interop test of the client against MediaMTX and nginx-rtmp.
 
 ### Changed
+- Package version `0.9.3` → `0.10.0` (new public server/client API
+  above; the per-player hard limit default drops from 64 MiB to 32 MiB).
 - Relay fan-out chunks each frame's payload once per chunk size and copies it
   to every player behind that player's own first header, instead of
   re-chunking it per player; receiving players are collected in one scan.
@@ -809,7 +813,8 @@ and others.
 - Protocol mapping documents for legacy, E-RTMP v1, and E-RTMP v2
 - `CONTRIBUTING.md` guidelines
 
-[Unreleased]: https://github.com/OpenRTMP/librtmp2/compare/v0.9.3...HEAD
+[Unreleased]: https://github.com/OpenRTMP/librtmp2/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/OpenRTMP/librtmp2/compare/v0.9.3...v0.10.0
 [0.9.3]: https://github.com/OpenRTMP/librtmp2/compare/v0.9.2...v0.9.3
 [0.9.2]: https://github.com/OpenRTMP/librtmp2/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/OpenRTMP/librtmp2/compare/v0.9.0...v0.9.1
