@@ -2635,36 +2635,14 @@ impl Conn {
         timestamp: u32,
         payload: &[u8],
     ) -> Result<()> {
-        let stream_id = self
-            .current_stream
-            .as_ref()
-            .map(|s| s.stream_id)
-            .unwrap_or(1);
-        let mut cmsg = ChunkMessage::default();
-        cmsg.timestamp = timestamp;
-        cmsg.msg_length = payload.len() as u32;
-        cmsg.msg_stream_id = stream_id;
-        cmsg.fmt = 0;
-        match frame_type {
-            FrameType::Audio => {
-                cmsg.csid = 4;
-                cmsg.msg_type_id = 0x08;
-            }
-            FrameType::Video => {
-                cmsg.csid = 6;
-                cmsg.msg_type_id = 0x09;
-            }
-            FrameType::Script | FrameType::Metadata => {
-                cmsg.csid = 5;
-                cmsg.msg_type_id = 0x12;
-            }
-        }
-        chunk_write(
+        let (stream_id, chunk_size) = self.media_wire_params();
+        encode_media_message(
             &mut self.send_buffer,
-            &cmsg,
+            frame_type,
+            timestamp,
             payload,
-            payload.len(),
-            self.active_chunk_size as usize,
+            stream_id,
+            chunk_size,
         )?;
         self.media_bytes_sent = self.media_bytes_sent.saturating_add(payload.len() as u64);
         Ok(())
@@ -2672,26 +2650,28 @@ impl Conn {
 
     /// Send an AMF0 data message (e.g. onMetaData) on the current stream.
     pub fn send_data_message(&mut self, timestamp: u32, payload: &[u8]) -> Result<()> {
+        self.send_frame(FrameType::Script, timestamp, payload)
+    }
+
+    /// The per-connection inputs to [`encode_media_message`]: message stream
+    /// id and outbound chunk size. Two connections that agree on these get
+    /// byte-identical wire output for the same relayed frame, which lets the
+    /// relay fan-out chunk a frame once and copy it to every such player.
+    pub(crate) fn media_wire_params(&self) -> (u32, u32) {
         let stream_id = self
             .current_stream
             .as_ref()
             .map(|s| s.stream_id)
             .unwrap_or(1);
-        let mut cmsg = ChunkMessage::default();
-        cmsg.timestamp = timestamp;
-        cmsg.msg_length = payload.len() as u32;
-        cmsg.msg_stream_id = stream_id;
-        cmsg.fmt = 0;
-        cmsg.csid = 5;
-        cmsg.msg_type_id = msg_dispatch::RTMP_MSG_AMF0_DATA;
-        chunk_write(
-            &mut self.send_buffer,
-            &cmsg,
-            payload,
-            payload.len(),
-            self.active_chunk_size as usize,
-        )?;
-        self.media_bytes_sent = self.media_bytes_sent.saturating_add(payload.len() as u64);
+        (stream_id, self.active_chunk_size)
+    }
+
+    /// Queue a media message already chunked by [`encode_media_message`]
+    /// with this connection's [`media_wire_params`](Self::media_wire_params).
+    /// `payload_len` is the unchunked payload size, for byte accounting.
+    pub(crate) fn send_encoded_media(&mut self, wire: &[u8], payload_len: usize) -> Result<()> {
+        self.send_buffer.write(wire)?;
+        self.media_bytes_sent = self.media_bytes_sent.saturating_add(payload_len as u64);
         Ok(())
     }
 
@@ -2915,9 +2895,70 @@ fn detect_audio_codec(payload: &[u8]) -> Option<String> {
     }
 }
 
+/// Chunk one audio/video/data message onto `out` exactly as
+/// [`Conn::send_frame`] would for a connection whose
+/// [`Conn::media_wire_params`] are `(stream_id, chunk_size)`.
+pub(crate) fn encode_media_message(
+    out: &mut Buffer,
+    frame_type: FrameType,
+    timestamp: u32,
+    payload: &[u8],
+    stream_id: u32,
+    chunk_size: u32,
+) -> Result<()> {
+    let mut cmsg = ChunkMessage::default();
+    cmsg.timestamp = timestamp;
+    cmsg.msg_length = payload.len() as u32;
+    cmsg.msg_stream_id = stream_id;
+    cmsg.fmt = 0;
+    match frame_type {
+        FrameType::Audio => {
+            cmsg.csid = 4;
+            cmsg.msg_type_id = 0x08;
+        }
+        FrameType::Video => {
+            cmsg.csid = 6;
+            cmsg.msg_type_id = 0x09;
+        }
+        FrameType::Script | FrameType::Metadata => {
+            cmsg.csid = 5;
+            cmsg.msg_type_id = msg_dispatch::RTMP_MSG_AMF0_DATA;
+        }
+    }
+    chunk_write(out, &cmsg, payload, payload.len(), chunk_size as usize)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pre_encoded_relay_media_matches_send_frame_wire_output() {
+        // The relay fan-out chunks a frame once via `encode_media_message`
+        // and copies it to every player sharing `media_wire_params`; that
+        // must be byte-identical to each player chunking it itself.
+        let payload: Vec<u8> = (0..1000u32).map(|i| i as u8).collect();
+        for (frame_type, ts) in [
+            (FrameType::Video, 40u32),
+            (FrameType::Audio, 0x0100_0000),
+            (FrameType::Script, 0),
+        ] {
+            let mut direct = Conn::new();
+            direct.send_frame(frame_type, ts, &payload).unwrap();
+
+            let mut copied = Conn::new();
+            let (stream_id, chunk_size) = copied.media_wire_params();
+            let mut wire = Buffer::new();
+            encode_media_message(&mut wire, frame_type, ts, &payload, stream_id, chunk_size)
+                .unwrap();
+            copied
+                .send_encoded_media(wire.peek(), payload.len())
+                .unwrap();
+
+            assert_eq!(direct.send_buffer.peek(), copied.send_buffer.peek());
+            assert_eq!(direct.media_bytes_sent, copied.media_bytes_sent);
+        }
+    }
     use crate::amf::amf0;
     use crate::session::stream::Stream;
 

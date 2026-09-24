@@ -91,18 +91,18 @@ impl Buffer {
             return Ok(0);
         }
 
-        self.compact();
-
-        if data.len() > BUFFER_MAX_SIZE || self.size > BUFFER_MAX_SIZE - data.len() {
-            return Err(ErrorCode::Internal);
-        }
-
-        let needed = self.size + data.len();
-        self.ensure_capacity(needed)?;
+        self.make_room(data.len())?;
 
         self.data[self.size..self.size + data.len()].copy_from_slice(data);
         self.size += data.len();
         Ok(data.len())
+    }
+
+    /// Ensure at least `additional` bytes can be written without another
+    /// reallocation or compaction, so a multi-part write (e.g. a chunked
+    /// RTMP message) either fits entirely or fails before writing anything.
+    pub fn reserve(&mut self, additional: usize) -> Result<()> {
+        self.make_room(additional)
     }
 
     /// Read data from the buffer.
@@ -196,6 +196,30 @@ impl Buffer {
         self.read_pos = pos.min(self.size);
     }
 
+    /// Make room for `additional` more bytes after the write cursor.
+    ///
+    /// Unread data is only moved to the front when the tail lacks space.
+    /// Compacting unconditionally on every `write()` cost a `memmove` of the
+    /// entire unread backlog per call -- on a relay's per-player send buffer
+    /// that is partially flushed every tick (a slow viewer, or any keyframe
+    /// larger than the socket send buffer), that meant copying the whole
+    /// backlog once per relayed message, per player. A fully drained buffer
+    /// still rewinds for free.
+    fn make_room(&mut self, additional: usize) -> Result<()> {
+        if self.read_pos > 0 && self.read_pos >= self.size {
+            self.size = 0;
+            self.read_pos = 0;
+        }
+        if additional <= self.space() {
+            return Ok(());
+        }
+        self.compact();
+        if additional > BUFFER_MAX_SIZE || self.size > BUFFER_MAX_SIZE - additional {
+            return Err(ErrorCode::Internal);
+        }
+        self.ensure_capacity(self.size + additional)
+    }
+
     /// Compact: move unread data to the front.
     fn compact(&mut self) {
         if self.read_pos == 0 {
@@ -261,6 +285,33 @@ mod tests {
         assert_eq!(&out, b"hello");
         assert_eq!(buf.available(), 6);
         assert_eq!(buf.peek(), b" world");
+    }
+
+    #[test]
+    fn write_after_partial_drain_keeps_unread_bytes_in_order() {
+        let mut buf = Buffer::with_capacity(8);
+        buf.write(b"abcdef").unwrap();
+        buf.drain(4);
+        // Fits in the tail: no compaction needed.
+        buf.write(b"gh").unwrap();
+        assert_eq!(buf.peek(), b"efgh");
+        // Does not fit in the tail: compacts first, then fits without growing.
+        buf.write(b"ijkl").unwrap();
+        assert_eq!(buf.peek(), b"efghijkl");
+        assert_eq!(buf.capacity(), 8);
+        // Needs growth beyond compaction.
+        buf.write(b"mn").unwrap();
+        assert_eq!(buf.peek(), b"efghijklmn");
+    }
+
+    #[test]
+    fn write_after_full_drain_rewinds_without_growing() {
+        let mut buf = Buffer::with_capacity(8);
+        buf.write(b"abcdefgh").unwrap();
+        buf.drain(8);
+        buf.write(b"12345678").unwrap();
+        assert_eq!(buf.peek(), b"12345678");
+        assert_eq!(buf.capacity(), 8);
     }
 
     #[test]
