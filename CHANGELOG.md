@@ -13,6 +13,19 @@ begin at `1.0.0`.
 
 ## [Unreleased]
 
+## [0.9.3] — 2026-09-24
+
+### Fixed
+- Reject malformed `SetChunkSize` control messages with payloads shorter than
+  four bytes or chunk sizes outside the supported RTMP range instead of
+  silently ignoring or clamping them; client and server receive paths now
+  propagate the protocol error consistently.
+- Clamp the configured server outbound chunk size to the supported RTMP range
+  before advertising it to peers.
+
+### Changed
+- Crate version `0.9.2` → `0.9.3`.
+
 ## [0.9.2] — 2026-09-23
 
 ### Changed
