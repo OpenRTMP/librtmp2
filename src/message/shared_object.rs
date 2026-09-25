@@ -102,11 +102,9 @@ pub struct SharedObjectEvent {
 pub struct SharedObjectMessage {
     pub name: String,
     pub version: u32,
-    /// Persistence/type flags, passed through unmodified. [`is_persistent`]
-    /// reads bit 0; that specific bit position has not been independently
-    /// verified against a real encoder (see "Known Limitations" in
-    /// `docs/protocol-mapping-ertmp-v1.md`) -- callers that need the exact
-    /// semantics should also inspect the raw value themselves.
+    /// Persistence/type flags, passed through unmodified. The de-facto wire
+    /// convention (Red5 `RTMPProtocolEncoder`/`RTMPProtocolDecoder`) is 2 for
+    /// persistent shared objects and 0 otherwise; [`is_persistent`] follows it.
     ///
     /// [`is_persistent`]: SharedObjectMessage::is_persistent
     pub flags: u32,
@@ -115,7 +113,7 @@ pub struct SharedObjectMessage {
 
 impl SharedObjectMessage {
     pub fn is_persistent(&self) -> bool {
-        self.flags & 0x01 != 0
+        self.flags == 2
     }
 }
 
@@ -225,7 +223,7 @@ mod tests {
         let msg = SharedObjectMessage {
             name: "chat".to_string(),
             version: 1,
-            flags: 0x01,
+            flags: 2,
             events: Vec::new(),
         };
         let mut buf = Buffer::new();

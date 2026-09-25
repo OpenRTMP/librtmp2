@@ -6107,7 +6107,7 @@ mod tests {
         let so = SharedObjectMessage {
             name: "scoreboard".to_string(),
             version: 2,
-            flags: 0x01,
+            flags: 2,
             events: vec![SharedObjectEvent {
                 event_type: SharedObjectEventType::Change,
                 data: vec![1, 2, 3],
