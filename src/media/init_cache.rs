@@ -83,7 +83,10 @@ fn classify_audio(payload: &[u8]) -> CacheFrameKind {
         } else {
             CacheFrameKind::LiveOnly
         }
-    } else if hdr.audio_codec == AudioCodec::Aac && hdr.aac_packet_type == 0 {
+    } else if hdr.audio_codec == AudioCodec::Aac
+        && hdr.aac_packet_type == 0
+        && payload.len() >= 2
+    {
         CacheFrameKind::AudioSequenceHeader
     } else {
         CacheFrameKind::LiveOnly
@@ -162,10 +165,10 @@ fn populate_video_frame(frame: &mut Frame, payload: &[u8]) {
 /// Per the Enhanced RTMP v1 spec, a Metadata packet's body is an AMF0-encoded
 /// value, not a raw byte tuple: a `colorInfo` object containing a nested
 /// `colorConfig` object with numeric `colorPrimaries` / `transferCharacteristics`
-/// / `matrixCoefficients` fields. Both a top-level `colorConfig` object and one
-/// nested under `colorInfo` are accepted, since the exact wrapping has not been
-/// verified against a real encoder (see "Known Limitations" in
-/// `docs/protocol-mapping-ertmp-v1.md`).
+/// / `matrixCoefficients` fields. Both the reference wire form (a leading AMF0
+/// String `"colorInfo"` followed by the object, as written by FFmpeg `flvenc`)
+/// and a bare top-level object are accepted; a top-level `colorConfig` object
+/// and one nested under `colorInfo` are both recognized.
 pub fn parse_video_metadata_hdr(payload: &[u8]) -> Option<crate::types::HdrInfo> {
     let mut hdr = VideoHeader::default();
     exvideo::exvideo_parse(payload, &mut hdr).ok()?;
@@ -185,7 +188,28 @@ fn parse_color_info_amf(data: &[u8]) -> Option<crate::types::HdrInfo> {
     use crate::amf::amf0::{self, Amf0Type};
 
     let mut buf = crate::buffer::Buffer::from_slice(data);
-    if amf0::read_type(&mut buf).ok()? != Amf0Type::Object {
+    let ty = amf0::read_type(&mut buf).ok()?;
+    if ty == Amf0Type::String {
+        // Reference encoders (FFmpeg `flvenc`) write the metadata name as a
+        // leading AMF0 String ("colorInfo") followed by the value object, and
+        // FFmpeg's decoder requires that exact leading string.
+        let mut len_bytes = [0u8; 2];
+        buf.read(&mut len_bytes).ok()?;
+        let name_len = u16::from_be_bytes(len_bytes) as usize;
+        if name_len != 9 {
+            return None;
+        }
+        let mut name = [0u8; 9];
+        buf.read(&mut name).ok()?;
+        if &name != b"colorInfo" {
+            return None;
+        }
+        if amf0::read_type(&mut buf).ok()? != Amf0Type::Object {
+            return None;
+        }
+        return scan_object_for_color_info(&mut buf, 2);
+    }
+    if ty != Amf0Type::Object {
         return None;
     }
     scan_object_for_color_info(&mut buf, 2)
