@@ -112,6 +112,8 @@ pub struct SharedObjectMessage {
 }
 
 impl SharedObjectMessage {
+    /// Whether this shared object is persistent per the wire convention
+    /// (the persistence word is `2` for persistent, `0` otherwise).
     pub fn is_persistent(&self) -> bool {
         self.flags == 2
     }

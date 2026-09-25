@@ -67,6 +67,8 @@ fn classify_video(payload: &[u8]) -> CacheFrameKind {
     CacheFrameKind::LiveOnly
 }
 
+/// Classify an audio payload as a cacheable sequence header or live-only.
+/// Truncated legacy AAC payloads are never treated as sequence headers.
 fn classify_audio(payload: &[u8]) -> CacheFrameKind {
     if is_multitrack_container(FrameType::Audio, payload)
         && multitrack_has_sequence_start(FrameType::Audio, payload)
