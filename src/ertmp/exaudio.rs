@@ -16,15 +16,11 @@ pub fn exaudio_parse(data: &[u8], hdr: &mut AudioHeader) -> Result<()> {
     let b0 = data[0];
 
     // E-RTMP v2 signals FourCC audio mode with SoundFormat == 9 (`ExHeader`).
-    // Bit 7 alone is not sufficient: legacy SoundFormat 8 (G.711U), 10 (AAC),
-    // 11 (Speex) and 14 (MP3-8k) also have bit 7 set, so a legacy payload whose
-    // bytes 1..5 happen to spell a registered audio FourCC would otherwise be
-    // misclassified as enhanced (spoofing the codec label). Requiring the
-    // reserved ExHeader nibble 9 removes that ambiguity while still accepting
-    // every genuine enhanced tag (first byte 0x9X).
-    let is_ex = (b0 >> 4) & 0x0F == 9
-        && data.len() >= 5
-        && fourcc::fourcc_to_audio_codec(&data[1..5]).is_ok();
+    // The reserved ExHeader nibble 9 is the discriminator: legacy SoundFormat 8
+    // (G.711U), 10 (AAC), 11 (Speex) and 14 (MP3-8k) never use nibble 9, so
+    // every genuine enhanced tag (first byte 0x9X) is accepted even when its
+    // FourCC is not (yet) present in the registry.
+    let is_ex = (b0 >> 4) & 0x0F == 9 && data.len() >= 5;
 
     hdr.is_ex_header = if is_ex { 1 } else { 0 };
 
