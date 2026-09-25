@@ -1,12 +1,12 @@
 # Bug scan progress
 
-Last scanned: handshake (2026-09-19)
+Last scanned: chunk (2026-09-25)
 
 ## Modules
 
 - [x] core — Memory, logging, errors, buffer
 - [x] handshake — C0/C1/C2 ↔ S0/S1/S2
-- [ ] chunk — Chunk reader/writer/state
+- [x] chunk — Chunk reader/writer/state
 - [ ] message — Message reassembly, control, commands
 - [ ] amf — AMF0 + AMF3
 - [ ] flv — Audio/video/script tags
