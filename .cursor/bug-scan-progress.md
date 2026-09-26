@@ -1,12 +1,12 @@
 # Bug scan progress
 
-Last scanned: handshake (2026-09-19)
+Last scanned: chunk (2026-09-26)
 
 ## Modules
 
 - [x] core — Memory, logging, errors, buffer
 - [x] handshake — C0/C1/C2 ↔ S0/S1/S2
-- [ ] chunk — Chunk reader/writer/state
+- [x] chunk — Chunk reader/writer/state
 - [ ] message — Message reassembly, control, commands
 - [ ] amf — AMF0 + AMF3
 - [ ] flv — Audio/video/script tags
@@ -14,6 +14,22 @@ Last scanned: handshake (2026-09-19)
 - [ ] session — State machine, publish/play flows
 - [ ] server — Server listener
 - [ ] client — Outbound client
+
+## Findings (2026-09-26 chunk pass)
+
+- Reviewed all five files under `src/chunk/` (`reader.rs`, `writer.rs`,
+  `state.rs`, `media_out.rs`, `mod.rs`) and traced integration in
+  `session/conn.rs` (`read_messages`, `handle_control` SetChunkSize/Abort),
+  `client/mod.rs` (`chunk_read_owned`, `reset_session_state`/`chunk_reg.destroy`),
+  `message/message.rs` (`decode` control dispatch), and `fuzz/fuzz_targets/chunk_read.rs`.
+  Checked peek-before-consume invariants on `Ok(0)`, fmt=0/1 reassembly restart
+  and `release_stream_reassembly` accounting, fmt=2/3 vs zero `type0_msg_length`,
+  `max_msg_length` / `max_reassembly_bytes` / `max_active_csids` caps, inbound
+  `set_all_chunk_size` bounds (via `read_set_chunk_size`), extended-timestamp
+  continuation sync in `write_chunk_body`, `MediaHeaderTracker` delta/fmt
+  selection (including zero-length prior message), `chunk_read_owned` payload
+  release, and abort via `reset_stream`. No new critical or high-severity issue
+  found.
 
 ## Findings (2026-09-19 handshake pass)
 
