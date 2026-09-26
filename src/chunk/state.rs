@@ -49,6 +49,8 @@ pub struct ChunkStream {
     /// Last completed payload on this CSID. Copied before reassembly_buf is
     /// reset/shrunk so callers can read via the returned pointer safely.
     pub last_payload: Vec<u8>,
+    /// A message is currently being reassembled on this CSID.
+    pub reassembling: bool,
     pub in_use: bool,
 }
 
@@ -67,6 +69,7 @@ impl Default for ChunkStream {
             reassembly_buf: Buffer::new(),
             chunk_read_scratch: Vec::new(),
             last_payload: Vec::new(),
+            reassembling: false,
             in_use: false,
         }
     }
@@ -87,6 +90,7 @@ impl ChunkStream {
         self.chunk_read_scratch.shrink_to_fit();
         self.last_payload.clear();
         self.last_payload.shrink_to_fit();
+        self.reassembling = false;
         self.chunk_size = default_chunk_size;
     }
 }
@@ -153,7 +157,10 @@ impl ChunkRegistry {
             }
         }
 
-        let active = self.streams.iter().filter(|s| s.in_use).count();
+        // Dormant CSIDs (registered, but with no message in flight) must not
+        // count against the cap: `in_use` is never cleared, so counting it
+        // would turn `max_active_csids` into a lifetime cap.
+        let active = self.streams.iter().filter(|s| s.reassembling).count();
         if active >= self.max_active_csids {
             return Err(ErrorCode::Chunk);
         }
@@ -298,12 +305,70 @@ mod tests {
 
     #[test]
     fn rejects_opening_too_many_active_csids() {
+        use crate::chunk::reader::{ChunkMessage, chunk_read};
+        use crate::chunk::writer::chunk_write;
+
+        let payload = vec![0xAB_u8; 4096];
         let mut reg = ChunkRegistry::new();
         reg.max_active_csids = 2;
 
-        assert!(reg.get_or_create(1).is_ok());
-        assert!(reg.get_or_create(2).is_ok());
+        for csid in 1..=2u32 {
+            let msg = ChunkMessage {
+                csid,
+                fmt: 0,
+                timestamp: 0,
+                msg_length: payload.len() as u32,
+                msg_type_id: 0x09,
+                msg_stream_id: 1,
+                is_complete: false,
+            };
+            let mut wire = Buffer::new();
+            chunk_write(&mut wire, &msg, &payload, payload.len(), 128).unwrap();
+
+            let mut out_msg = ChunkMessage::default();
+            let mut ptr = std::ptr::null();
+            let mut len = 0;
+            let rc =
+                chunk_read(&mut wire, &mut reg, None, &mut out_msg, &mut ptr, &mut len).unwrap();
+            assert_eq!(rc, 0, "first chunk must leave csid {csid} incomplete");
+        }
+
         assert!(matches!(reg.get_or_create(3), Err(ErrorCode::Chunk)));
+
+        reg.reset_stream(1);
+        assert!(reg.get_or_create(3).is_ok());
+    }
+
+    #[test]
+    fn sequential_completed_csids_do_not_exhaust_active_csid_cap() {
+        use crate::chunk::reader::{ChunkMessage, chunk_read};
+        use crate::chunk::writer::chunk_write;
+
+        let payload = b"ok";
+        let mut reg = ChunkRegistry::new();
+        assert_eq!(reg.max_active_csids, DEFAULT_MAX_ACTIVE_CSIDS);
+
+        for csid in 3..(3 + DEFAULT_MAX_ACTIVE_CSIDS as u32 + 1) {
+            let msg = ChunkMessage {
+                csid,
+                fmt: 0,
+                timestamp: 0,
+                msg_length: payload.len() as u32,
+                msg_type_id: 0x09,
+                msg_stream_id: 1,
+                is_complete: false,
+            };
+            let mut wire = Buffer::new();
+            chunk_write(&mut wire, &msg, payload, payload.len(), 128).unwrap();
+
+            let mut out_msg = ChunkMessage::default();
+            let mut ptr = std::ptr::null();
+            let mut len = 0;
+            let rc =
+                chunk_read(&mut wire, &mut reg, None, &mut out_msg, &mut ptr, &mut len).unwrap();
+            assert_eq!(rc, 1, "csid {csid} must complete");
+            assert!(out_msg.is_complete);
+        }
     }
 
     #[test]
@@ -325,8 +390,10 @@ mod tests {
         assert_eq!(cs.type0_msg_length, 0);
         assert_eq!(cs.type0_timestamp, 0);
         assert_eq!(cs.reassembly_bytes_read, 0);
+        assert!(!cs.reassembling);
 
-        assert!(matches!(reg.get_or_create(3), Err(ErrorCode::Chunk)));
+        // The aborted CSID is dormant, so it no longer counts against the cap.
+        assert!(reg.get_or_create(3).is_ok());
         assert!(reg.get_or_create(1).is_ok());
     }
 
