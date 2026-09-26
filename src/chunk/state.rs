@@ -312,7 +312,10 @@ mod tests {
         let mut reg = ChunkRegistry::new();
         reg.max_active_csids = 2;
 
-        for csid in 1..=2u32 {
+        // CSIDs 0 and 1 are reserved by the RTMP basic-header encoding (the
+        // reader treats low-bits 1 as the 3-byte form), so wire messages must
+        // use user CSIDs (>= 3).
+        for csid in 3..=4u32 {
             let msg = ChunkMessage {
                 csid,
                 fmt: 0,
@@ -333,10 +336,10 @@ mod tests {
             assert_eq!(rc, 0, "first chunk must leave csid {csid} incomplete");
         }
 
-        assert!(matches!(reg.get_or_create(3), Err(ErrorCode::Chunk)));
+        assert!(matches!(reg.get_or_create(5), Err(ErrorCode::Chunk)));
 
-        reg.reset_stream(1);
-        assert!(reg.get_or_create(3).is_ok());
+        reg.reset_stream(3);
+        assert!(reg.get_or_create(5).is_ok());
     }
 
     #[test]
