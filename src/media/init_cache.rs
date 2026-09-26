@@ -147,11 +147,13 @@ fn populate_video_frame(frame: &mut Frame, payload: &[u8]) {
     frame.composition_time = hdr.composition_time;
     frame.video_frame_type = hdr.frame_type;
     frame.video_fourcc = FourCc { cc: hdr.fourcc };
-    frame.video_codec = if hdr.is_ex_header != 0 {
-        fourcc::fourcc_to_video_codec(&hdr.fourcc).unwrap_or(VideoCodec::H264)
+    if hdr.is_ex_header != 0 {
+        if let Ok(codec) = fourcc::fourcc_to_video_codec(&hdr.fourcc) {
+            frame.video_codec = codec;
+        }
     } else {
-        legacy_video_codec(payload[0] & 0x0F)
-    };
+        frame.video_codec = legacy_video_codec(payload[0] & 0x0F);
+    }
 
     if hdr.is_ex_header != 0 && hdr.packet_type == ERTMP_PACKET_TYPE_METADATA {
         frame.is_metadata = 1;
