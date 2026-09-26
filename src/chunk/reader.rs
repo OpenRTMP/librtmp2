@@ -361,7 +361,9 @@ pub fn chunk_read(
         if stream.chunk_read_scratch.capacity() > crate::buffer::BUFFER_RESET_CAPACITY {
             stream.chunk_read_scratch.shrink_to_fit();
         }
-        stream.reassembly_bytes_read >= effective_length
+        let message_complete = stream.reassembly_bytes_read >= effective_length;
+        stream.reassembling = !message_complete;
+        message_complete
     };
 
     if message_complete {
