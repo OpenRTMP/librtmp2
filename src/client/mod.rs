@@ -273,6 +273,14 @@ pub struct Client {
     inbound_ping_responses: usize,
     /// E-RTMP capabilities negotiated during `connect` (used for ModEx unwrap).
     negotiated_caps: NegotiatedCaps,
+    /// Peer's WindowAckSize (`0` = disabled). Once this many inbound bytes
+    /// arrive without an Acknowledgement, one is sent with the running count.
+    window_ack_size: u32,
+    /// Total socket bytes received on this connection. Kept as `u64` so the
+    /// `u32` acknowledgement sequence number wrapping is expected, not a
+    /// counter reset.
+    bytes_received: u64,
+    bytes_at_last_ack: u64,
     /// Chunk size this client announces with `SetChunkSize` when it starts
     /// publishing, and then uses for media. Larger chunks mean fewer chunk
     /// headers and fewer reassembly steps on the server for every frame.
@@ -324,6 +332,9 @@ impl Client {
             out_chunk_size: RTMP_DEFAULT_CHUNK_SIZE,
             media_out_headers: MediaHeaderTracker::default(),
             negotiated_caps: NegotiatedCaps::default(),
+            window_ack_size: 0,
+            bytes_received: 0,
+            bytes_at_last_ack: 0,
         }
     }
 
@@ -698,6 +709,7 @@ impl Client {
                 if self.recv_buffer.available().saturating_add(chunk_len) > MAX_RECV_BUFFER_BYTES {
                     return Err(ErrorCode::Protocol);
                 }
+                self.bytes_received = self.bytes_received.saturating_add(chunk_len as u64);
                 self.recv_buffer
                     .write(&buf[..chunk_len])
                     .map_err(|_| ErrorCode::Internal)?;
@@ -725,6 +737,7 @@ impl Client {
 
         self.drain_ready_messages(&mut messages_processed)?;
 
+        self.maybe_send_window_ack()?;
         self.try_flush_send_buffer()?;
         Ok(())
     }
@@ -752,6 +765,10 @@ impl Client {
                         if msg.msg_type_id == msg_dispatch::RTMP_MSG_SET_CHUNK_SIZE {
                             let cs = control::read_set_chunk_size(&payload)?;
                             self.chunk_reg.set_all_chunk_size(cs);
+                        } else if msg.msg_type_id == msg_dispatch::RTMP_MSG_WINDOW_ACK_SIZE {
+                            if let Ok(win) = control::read_window_ack_size(&payload) {
+                                self.window_ack_size = win;
+                            }
                         } else if msg.msg_type_id == msg_dispatch::RTMP_MSG_USER_CONTROL {
                             self.handle_user_control(&payload)?;
                         } else if msg.msg_type_id == msg_dispatch::RTMP_MSG_AUDIO
@@ -1024,12 +1041,12 @@ impl Client {
         cb(&frame);
     }
 
-    fn queue_user_control_message(&mut self, payload: &[u8]) -> Result<()> {
+    fn queue_control_message(&mut self, msg_type_id: u8, payload: &[u8]) -> Result<()> {
         let mut cmsg = ChunkMessage::default();
         cmsg.csid = 2;
         cmsg.fmt = 0;
         cmsg.msg_length = payload.len() as u32;
-        cmsg.msg_type_id = msg_dispatch::RTMP_MSG_USER_CONTROL;
+        cmsg.msg_type_id = msg_type_id;
         cmsg.msg_stream_id = 0;
         chunk_write(
             &mut self.send_buffer,
@@ -1038,6 +1055,26 @@ impl Client {
             payload.len(),
             self.out_chunk_size,
         )?;
+        Ok(())
+    }
+
+    fn queue_user_control_message(&mut self, payload: &[u8]) -> Result<()> {
+        self.queue_control_message(msg_dispatch::RTMP_MSG_USER_CONTROL, payload)
+    }
+
+    /// Queue an Acknowledgement once `window_ack_size` inbound bytes have
+    /// arrived since the last one. The `u64` counters let the on-wire `u32`
+    /// sequence number wrap without resetting the byte accounting.
+    fn maybe_send_window_ack(&mut self) -> Result<()> {
+        if self.window_ack_size > 0
+            && self.bytes_received.saturating_sub(self.bytes_at_last_ack)
+                >= self.window_ack_size as u64
+        {
+            let mut payload = Buffer::with_capacity(4);
+            control::write_acknowledgement(&mut payload, self.bytes_received as u32)?;
+            self.queue_control_message(msg_dispatch::RTMP_MSG_ACKNOWLEDGEMENT, payload.as_slice())?;
+            self.bytes_at_last_ack = self.bytes_received;
+        }
         Ok(())
     }
 
@@ -1172,6 +1209,7 @@ impl Client {
                 if self.recv_buffer.available().saturating_add(chunk_len) > MAX_RECV_BUFFER_BYTES {
                     return Err(ErrorCode::Protocol);
                 }
+                self.bytes_received = self.bytes_received.saturating_add(chunk_len as u64);
                 self.recv_buffer
                     .write(&buf[..chunk_len])
                     .map_err(|_| ErrorCode::Internal)?;
@@ -1185,6 +1223,7 @@ impl Client {
                 break;
             }
         }
+        self.maybe_send_window_ack()?;
         Ok(())
     }
 
@@ -1219,6 +1258,9 @@ impl Client {
         self.inbound_ping_window_start = None;
         self.inbound_ping_responses = 0;
         self.negotiated_caps = NegotiatedCaps::default();
+        self.window_ack_size = 0;
+        self.bytes_received = 0;
+        self.bytes_at_last_ack = 0;
         self.out_chunk_size = RTMP_DEFAULT_CHUNK_SIZE;
         self.media_out_headers = MediaHeaderTracker::default();
     }
@@ -1344,6 +1386,12 @@ impl Client {
                         self.chunk_reg.set_all_chunk_size(cs);
                         continue;
                     }
+                    if msg.msg_type_id == msg_dispatch::RTMP_MSG_WINDOW_ACK_SIZE {
+                        if let Ok(win) = control::read_window_ack_size(&payload) {
+                            self.window_ack_size = win;
+                        }
+                        continue;
+                    }
                     if msg.msg_type_id == msg_dispatch::RTMP_MSG_USER_CONTROL {
                         self.handle_user_control(&payload)?;
                         continue;
@@ -1380,9 +1428,11 @@ impl Client {
                     return Err(ErrorCode::Protocol);
                 }
                 *recv_budget -= chunk_len;
+                self.bytes_received = self.bytes_received.saturating_add(chunk_len as u64);
                 self.recv_buffer
                     .write(&tmp[..chunk_len])
                     .map_err(|_| ErrorCode::Internal)?;
+                self.maybe_send_window_ack()?;
             } else if n == 0 {
                 return Err(ErrorCode::Io);
             } else if again != 0 {
@@ -2408,6 +2458,44 @@ mod tests {
         assert!(
             out[..n].windows(2).any(|w| w == ping_response),
             "peer should receive a UserControl ping response"
+        );
+    }
+
+    #[test]
+    fn window_ack_size_message_stores_peer_window() {
+        let mut payload = Buffer::new();
+        control::write_window_ack_size(&mut payload, 2_500_000).unwrap();
+        let mut wire = Buffer::new();
+        let mut cmsg = ChunkMessage::default();
+        cmsg.csid = 2;
+        cmsg.fmt = 0;
+        cmsg.msg_length = 4;
+        cmsg.msg_type_id = msg_dispatch::RTMP_MSG_WINDOW_ACK_SIZE;
+        cmsg.msg_stream_id = 0;
+        chunk_write(&mut wire, &cmsg, payload.as_slice(), 4, 128).unwrap();
+
+        let mut client = Client::new();
+        client.recv_buffer.write(wire.peek()).unwrap();
+        let mut messages_processed = 0;
+        client
+            .drain_ready_messages(&mut messages_processed)
+            .unwrap();
+        assert_eq!(client.window_ack_size, 2_500_000);
+    }
+
+    #[test]
+    fn bytes_received_ack_uses_u64_after_u32_wrap() {
+        let mut client = Client::new();
+        client.window_ack_size = 1024;
+        client.bytes_received = u32::MAX as u64;
+        client.bytes_at_last_ack = u32::MAX as u64;
+        client.bytes_received = client.bytes_received.saturating_add(2048);
+        client.maybe_send_window_ack().unwrap();
+        assert_eq!(client.bytes_received, u32::MAX as u64 + 2048);
+        assert_eq!(client.bytes_at_last_ack, client.bytes_received);
+        assert!(
+            client.send_buffer.available() > 0,
+            "an acknowledgement must be queued once the window is exceeded"
         );
     }
 
