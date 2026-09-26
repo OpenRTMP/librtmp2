@@ -206,8 +206,17 @@ fn parse_color_info_amf(data: &[u8]) -> Option<crate::types::HdrInfo> {
         if &name != b"colorInfo" {
             return None;
         }
-        if amf0::read_type(&mut buf).ok()? != Amf0Type::Object {
+        let value_ty = amf0::read_type(&mut buf).ok()?;
+        if value_ty == Amf0Type::Undefined {
+            // An explicit undefined `colorInfo` resets HDR metadata.
+            return Some(reset_hdr_info());
+        }
+        if value_ty != Amf0Type::Object {
             return None;
+        }
+        if amf0::is_object_end(&mut buf) {
+            // An empty `colorInfo` object also resets HDR metadata.
+            return Some(reset_hdr_info());
         }
         return scan_object_for_color_info(&mut buf, 2);
     }
@@ -215,6 +224,13 @@ fn parse_color_info_amf(data: &[u8]) -> Option<crate::types::HdrInfo> {
         return None;
     }
     scan_object_for_color_info(&mut buf, 2)
+}
+
+/// HDR info populated with the spec defaults used for a colorInfo reset.
+fn reset_hdr_info() -> crate::types::HdrInfo {
+    let mut hdr = crate::types::HdrInfo::default();
+    crate::ertmp::metadata::hdr_init(&mut hdr);
+    hdr
 }
 
 /// Reads an AMF0 object body (marker already consumed). Returns `Some` when
