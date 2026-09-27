@@ -1387,13 +1387,22 @@ impl Conn {
                 Ok((1, payload_owned)) => {
                     if msg.is_complete {
                         processed += 1;
+                        let init_replay_was_pending = self.needs_init_frames;
                         if let Err(e) = self.handle_message(&msg, &payload_owned, messages_budget) {
                             return match e {
                                 ErrorCode::Auth => -8,
                                 _ => -3,
                             };
                         }
-                        let _ = self.flush();
+                        // A play that was just accepted queued
+                        // NetStream.Play.Start and requested the init-frame
+                        // replay: leave both for the server to send in one
+                        // write once it has appended the cached frames, so
+                        // the player gets its first frame together with the
+                        // status instead of in a later read.
+                        if init_replay_was_pending || !self.needs_init_frames {
+                            let _ = self.flush();
+                        }
                     }
                 }
                 Ok(_) => {
@@ -2666,28 +2675,36 @@ impl Conn {
             self.commit_flushed_ping();
             return Ok(());
         }
-        let Some(ref mut transport) = self.transport else {
-            self.commit_flushed_ping();
-            return Ok(());
-        };
         while self.send_buffer.available() > 0 {
-            let pending = self.send_buffer.peek();
-            let n = transport.try_send(pending, &mut 0i32)?;
+            let Some(transport) = self.transport.as_mut() else {
+                break;
+            };
+            let n = transport.try_send(self.send_buffer.peek(), &mut 0i32)?;
             if n == 0 {
                 break;
             }
             self.send_buffer.drain(n);
-            self.send_progress_bytes = self.send_progress_bytes.saturating_add(n);
-            if self.send_progress_bytes >= SEND_PROGRESS_BYTES {
-                self.send_progress_bytes = 0;
-                self.last_send_progress = Some(Instant::now());
-            }
-            if let Some(ref mut queued) = self.queued_ping {
-                queued.bytes_until_flushed = queued.bytes_until_flushed.saturating_sub(n);
-            }
+            self.note_bytes_sent(n);
+        }
+        if self.send_buffer.available() == 0 {
+            // Fully flushed: release capacity a keyframe burst grew the
+            // buffer to, instead of pinning it for the life of the player.
+            self.send_buffer.reset();
         }
         self.commit_flushed_ping();
         Ok(())
+    }
+
+    /// Account `n` bytes that reached the socket, in queue order.
+    fn note_bytes_sent(&mut self, n: usize) {
+        self.send_progress_bytes = self.send_progress_bytes.saturating_add(n);
+        if self.send_progress_bytes >= SEND_PROGRESS_BYTES {
+            self.send_progress_bytes = 0;
+            self.last_send_progress = Some(Instant::now());
+        }
+        if let Some(ref mut queued) = self.queued_ping {
+            queued.bytes_until_flushed = queued.bytes_until_flushed.saturating_sub(n);
+        }
     }
 
     /// Drop the transport and clear the embedder-visible fd copy.
@@ -2762,19 +2779,74 @@ impl Conn {
         body: &[u8],
     ) -> Result<()> {
         let msg_stream_id = self.media_stream_id();
-        write_media_message_with_body(
-            &mut self.send_buffer,
-            &mut self.media_out_headers,
-            self.compact_media_headers,
-            MediaMessageInfo {
-                frame_type,
-                msg_stream_id,
-                timestamp,
-            },
-            payload_len,
-            body,
-        )?;
+        let msg = MediaMessageInfo {
+            frame_type,
+            msg_stream_id,
+            timestamp,
+        };
+        if self.send_buffer.available() == 0 && self.client_fd >= 0 && self.transport.is_some() {
+            self.send_media_body_direct(msg, payload_len, body)?;
+        } else {
+            write_media_message_with_body(
+                &mut self.send_buffer,
+                &mut self.media_out_headers,
+                self.compact_media_headers,
+                msg,
+                payload_len,
+                body,
+            )?;
+        }
         self.media_bytes_sent = self.media_bytes_sent.saturating_add(payload_len as u64);
+        Ok(())
+    }
+
+    /// Nothing is queued ahead of this message, so send it straight to the
+    /// socket, header from the (empty) send buffer and the shared body in
+    /// place, and queue only what the socket did not take. A player that
+    /// keeps up then never holds a copy of the frame: no per-player copy of
+    /// every frame, no send buffer grown to keyframe size, and the frame
+    /// leaves now instead of at the end of the poll.
+    fn send_media_body_direct(
+        &mut self,
+        msg: MediaMessageInfo,
+        payload_len: usize,
+        body: &[u8],
+    ) -> Result<()> {
+        let header = self.media_out_headers.choose(
+            self.compact_media_headers,
+            msg.frame_type,
+            msg.msg_stream_id,
+            msg.timestamp,
+            payload_len,
+        )?;
+        let head_len = header.encoded_len();
+        self.send_buffer.reserve(head_len)?;
+        header.write(&mut self.send_buffer)?;
+        let sent = match self.transport.as_mut() {
+            Some(transport) => {
+                match transport.try_send_pair(self.send_buffer.peek(), body, &mut 0i32) {
+                    Ok(n) => n,
+                    Err(e) => {
+                        self.send_buffer.reset();
+                        return Err(e);
+                    }
+                }
+            }
+            None => 0,
+        };
+        self.media_out_headers.commit(header);
+        let head_sent = sent.min(head_len);
+        self.send_buffer.drain(head_sent);
+        let body_sent = sent - head_sent;
+        if body_sent < body.len() {
+            // The buffer was empty, so this is the same room check the
+            // buffered path makes for the whole message; if it still fails
+            // the caller drops the player.
+            self.send_buffer.write(&body[body_sent..])?;
+        } else {
+            self.send_buffer.reset();
+        }
+        self.note_bytes_sent(sent);
         Ok(())
     }
 
@@ -4486,6 +4558,59 @@ mod tests {
         conn.send_buffer.write(&[0u8; SEND_PROGRESS_BYTES]).unwrap();
         conn.flush().unwrap();
         assert!(conn.last_send_progress.is_some());
+    }
+
+    /// Media sent straight to the socket must produce exactly the bytes the
+    /// buffered path queues, and whatever the socket does not take must be
+    /// queued in order behind what it did.
+    #[test]
+    fn direct_media_send_matches_buffered_bytes() {
+        use crate::chunk::media_out::encode_media_body;
+        use std::io::Read;
+        use std::os::unix::io::IntoRawFd;
+        use std::os::unix::net::UnixStream;
+
+        let (end, mut peer) = UnixStream::pair().unwrap();
+        end.set_nonblocking(true).unwrap();
+        let mut direct = Conn::new();
+        direct.client_fd = 0;
+        direct.transport = Some(Transport::new_plain(end.into_raw_fd()));
+        let mut buffered = Conn::new();
+
+        // A small frame the socket takes whole, then one larger than the
+        // socket buffer so part of it has to be queued.
+        let frames = [vec![0x17u8; 300], vec![0x27u8; 4 << 20]];
+        let mut received = Vec::new();
+        for (n, payload) in frames.iter().enumerate() {
+            let mut body = Buffer::new();
+            encode_media_body(&mut body, FrameType::Video, n as u32 * 33, payload, 128).unwrap();
+            for conn in [&mut direct, &mut buffered] {
+                conn.send_encoded_media_body(
+                    FrameType::Video,
+                    n as u32 * 33,
+                    payload.len(),
+                    body.as_slice(),
+                )
+                .unwrap();
+            }
+            if n == 0 {
+                assert_eq!(direct.send_buffer.available(), 0, "small frame sent whole");
+            }
+        }
+        assert!(direct.send_buffer.available() > 0, "remainder queued");
+        let expected = buffered.send_buffer.peek().to_vec();
+        peer.set_nonblocking(true).unwrap();
+        let mut chunk = vec![0u8; 1 << 16];
+        while received.len() < expected.len() {
+            direct.flush().unwrap();
+            match peer.read(&mut chunk) {
+                Ok(n) => received.extend_from_slice(&chunk[..n]),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(e) => panic!("{e}"),
+            }
+        }
+        assert_eq!(received, expected);
+        assert_eq!(direct.send_buffer.available(), 0);
     }
 
     #[test]

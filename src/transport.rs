@@ -454,6 +454,53 @@ impl Transport {
         }
     }
 
+    /// Non-blocking send of `head` followed by `tail` in one system call on
+    /// a plaintext socket, so a caller can send a message whose parts live
+    /// in different buffers without first copying them together. Returns
+    /// the number of bytes written across both parts, or 0 when the socket
+    /// is not ready (see [`Self::try_send`] for `again`). TLS transports
+    /// always return `Ok(0)` without writing: the caller buffers instead.
+    pub(crate) fn try_send_pair(
+        &mut self,
+        head: &[u8],
+        tail: &[u8],
+        again: &mut i32,
+    ) -> Result<usize> {
+        let fd = match &self.inner {
+            TransportInner::Plain(fd) => *fd,
+            #[cfg(feature = "tls")]
+            TransportInner::Tls { .. } => return Ok(0),
+        };
+        if head.is_empty() && tail.is_empty() {
+            return Ok(0);
+        }
+        let mut iov = [
+            libc::iovec {
+                iov_base: head.as_ptr() as *mut libc::c_void,
+                iov_len: head.len(),
+            },
+            libc::iovec {
+                iov_base: tail.as_ptr() as *mut libc::c_void,
+                iov_len: tail.len(),
+            },
+        ];
+        // SAFETY: an all-zero msghdr is valid; the iovecs point into `head`
+        // and `tail`, which outlive the call, and are only read by sendmsg.
+        let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+        msg.msg_iov = iov.as_mut_ptr();
+        msg.msg_iovlen = iov.len() as _;
+        let n = unsafe { libc::sendmsg(fd, &msg, libc::MSG_DONTWAIT | libc::MSG_NOSIGNAL) };
+        if n < 0 {
+            let err = last_errno();
+            if err == libc::EINTR || err == libc::EAGAIN || err == libc::EWOULDBLOCK {
+                *again = 2;
+                return Ok(0);
+            }
+            return Err(ErrorCode::Io);
+        }
+        Ok(n as usize)
+    }
+
     /// Blocking send of the whole buffer (client-side synchronous I/O).
     ///
     /// Uses a 10-second poll timeout rather than an infinite wait so a peer
