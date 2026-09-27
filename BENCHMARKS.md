@@ -28,14 +28,14 @@ Criterion writes full HTML reports to `target/criterion/report/index.html`.
 
 ## Environment for the numbers below
 
-- CPU: Intel Xeon @ 2.80GHz, 4 vCPUs (a shared VM, not bare metal — treat
+- CPU: Intel Xeon @ 2.10GHz, 4 vCPUs (a shared VM, not bare metal — treat
   absolute numbers as illustrative and re-run on your own target hardware
   for capacity planning)
 - RAM: 15 GiB
 - Kernel: Linux 6.18 x86_64
 - rustc 1.95.0, `cargo build --release` (`tls` feature enabled, default)
-- librtmp2 0.10.0
-- Date: 2026-09-25
+- librtmp2 0.10.1
+- Date: 2026-09-27
 
 ## `protocol` benchmarks (`benches/protocol.rs`)
 
@@ -44,12 +44,12 @@ first iteration.
 
 | Benchmark | Time | Throughput |
 |---|---|---|
-| `chunk/write_read_roundtrip` (4096-byte payload, chunk size 128) | 5.33 µs | ~733 MiB/s |
-| `amf0_build_connect` | 318 ns | — |
-| `flv/video_tag_h264` (parse) | 1.97 ns | — |
-| `flv/audio_tag_aac` (parse) | 1.59 ns | — |
-| `fourcc_to_video_codec_avc1` | 3.77 ns | — |
-| `server_read_c1` (handshake C1 parse + S0/S1/S2 build) | 1.45 µs | — |
+| `chunk/write_read_roundtrip` (4096-byte payload, chunk size 128) | 3.91 µs | ~1000 MiB/s |
+| `amf0_build_connect` | 227 ns | — |
+| `flv/video_tag_h264` (parse) | 1.11 ns | — |
+| `flv/audio_tag_aac` (parse) | 1.13 ns | — |
+| `fourcc_to_video_codec_avc1` | 2.03 ns | — |
+| `server_read_c1` (handshake C1 parse + S0/S1/S2 build) | 1.11 µs | — |
 
 ## `relay` benchmark (`benches/relay.rs`)
 
@@ -65,8 +65,8 @@ same idea against a real server.
 
 | Benchmark | Time | Throughput |
 |---|---|---|
-| `relay/publish_to_player/100` (100 frames) | 98.8 ms | ~1013 elem/s |
-| `relay/publish_to_player/500` (500 frames) | 100.0 ms | ~5002 elem/s |
+| `relay/publish_to_player/100` (100 frames) | 98.5 ms | ~1015 elem/s |
+| `relay/publish_to_player/500` (500 frames) | 99.3 ms | ~5035 elem/s |
 
 Both sizes land at roughly the same wall-clock time regardless of frame
 count, which is the harness's own fixed polling-interval overhead
