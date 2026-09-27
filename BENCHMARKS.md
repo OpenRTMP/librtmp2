@@ -13,9 +13,12 @@ This document covers two things:
    uses to compare `librtmp2-server` against nginx-rtmp, MediaMTX, SRS and
    LiveForge on equal terms (same client, same wire protocol, same load).
 
-All numbers below are from one run on one machine and are meant to be
-**reproduced**, not quoted as guarantees — see "Environment" for the exact
-hardware/software and rerun the commands yourself before relying on them.
+The microbenchmark numbers below are from one run on one machine and are
+meant to be **reproduced**, not quoted as guarantees — see "Environment" for
+the exact hardware/software and rerun the commands yourself before relying on
+them. The cross-server figures quoted near the end come from
+`librtmp2-server`'s `BENCHMARKS.md`, which documents its own methodology
+(interleaved rounds and full sweeps) separately.
 
 ## Reproducing the microbenchmarks
 
