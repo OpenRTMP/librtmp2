@@ -1381,19 +1381,7 @@ impl Client {
             let mut msg = ChunkMessage::default();
             match chunk_read_owned(&mut self.recv_buffer, &mut self.chunk_reg, &mut msg) {
                 Ok((1, payload)) if msg.is_complete => {
-                    if msg.msg_type_id == msg_dispatch::RTMP_MSG_SET_CHUNK_SIZE {
-                        let cs = control::read_set_chunk_size(&payload)?;
-                        self.chunk_reg.set_all_chunk_size(cs);
-                        continue;
-                    }
-                    if msg.msg_type_id == msg_dispatch::RTMP_MSG_WINDOW_ACK_SIZE {
-                        if let Ok(win) = control::read_window_ack_size(&payload) {
-                            self.window_ack_size = win;
-                        }
-                        continue;
-                    }
-                    if msg.msg_type_id == msg_dispatch::RTMP_MSG_USER_CONTROL {
-                        self.handle_user_control(&payload)?;
+                    if self.consume_protocol_control_message(&msg, &payload)? {
                         continue;
                     }
                     return Ok((msg, payload));
@@ -1443,6 +1431,37 @@ impl Client {
             } else {
                 return Err(ErrorCode::Io);
             }
+        }
+    }
+
+    /// Applies a fully-reassembled protocol-control message the client handles
+    /// internally (`SetChunkSize`, `WindowAckSize`, `UserControl`).
+    ///
+    /// Returns `true` when the message was consumed and the caller must keep
+    /// waiting instead of delivering it, `false` for messages that belong to
+    /// the caller.
+    fn consume_protocol_control_message(
+        &mut self,
+        msg: &ChunkMessage,
+        payload: &[u8],
+    ) -> Result<bool> {
+        match msg.msg_type_id {
+            msg_dispatch::RTMP_MSG_SET_CHUNK_SIZE => {
+                let cs = control::read_set_chunk_size(payload)?;
+                self.chunk_reg.set_all_chunk_size(cs);
+                Ok(true)
+            }
+            msg_dispatch::RTMP_MSG_WINDOW_ACK_SIZE => {
+                if let Ok(win) = control::read_window_ack_size(payload) {
+                    self.window_ack_size = win;
+                }
+                Ok(true)
+            }
+            msg_dispatch::RTMP_MSG_USER_CONTROL => {
+                self.handle_user_control(payload)?;
+                Ok(true)
+            }
+            _ => Ok(false),
         }
     }
 }
