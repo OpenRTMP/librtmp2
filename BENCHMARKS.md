@@ -10,8 +10,8 @@ This document covers two things:
    plain RTMP over the wire, so they work against *any* RTMP server, not
    just this crate's own. They're what
    [`librtmp2-server`'s `BENCHMARKS.md`](https://github.com/OpenRTMP/librtmp2-server/blob/main/BENCHMARKS.md)
-   uses to compare `librtmp2-server` against nginx-rtmp and MediaMTX on
-   equal terms (same client, same wire protocol, same load).
+   uses to compare `librtmp2-server` against nginx-rtmp, MediaMTX, SRS and
+   LiveForge on equal terms (same client, same wire protocol, same load).
 
 All numbers below are from one run on one machine and are meant to be
 **reproduced**, not quoted as guarantees — see "Environment" for the exact
@@ -77,12 +77,12 @@ Because of that harness overhead this benchmark does not show the 0.10.0
 relay changes (frames chunked once per fan-out, compact chunk headers,
 4096-byte client publish chunks, per-player flow control). For end-to-end
 numbers see the cross-server comparison in `librtmp2-server`'s
-`BENCHMARKS.md` as of
-[OpenRTMP/librtmp2-server#243](https://github.com/OpenRTMP/librtmp2-server/pull/243)
-(its `main` still has older numbers): with `librtmp2-server` 0.5.0 built on
-librtmp2 0.10.0, 100 concurrent viewers joined in 11.9 ms on average (p95
-23.2 ms), ahead of MediaMTX (14.5 / 26.1 ms) and LiveForge (24.8 /
-43.4 ms) on the same box, with every viewer receiving the full frame rate.
+`BENCHMARKS.md`: with `librtmp2-server` 0.5.0 built on librtmp2 0.10.0,
+averaged over three interleaved rounds on one 4-vCPU box, 100 concurrent
+viewers joined in 8.6 ms on average (p95 11.9 ms), next to MediaMTX
+(6.5 / 10.4 ms) and ahead of LiveForge (21.7 / 42.1 ms), with every viewer
+receiving the full frame rate; SRS 8.0 and nginx-rtmp took 70 and 89 ms
+on average for the same join in the full five-server sweeps.
 That is a whole-system result: it includes that server's own changes
 (multi-core sharding, auth wake-ups) and does not isolate the effect of
 any single library change; the full-frame-rate run also never congests a
