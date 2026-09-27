@@ -153,6 +153,13 @@ impl ChunkRegistry {
         if let Some(&idx) = self.csid_index.get(&csid) {
             let stream = &self.streams[idx];
             if stream.in_use && stream.csid == csid {
+                // Reactivating a dormant CSID with a new message counts
+                // against the concurrent cap exactly like opening a new one;
+                // otherwise a peer could register many CSIDs with completed
+                // messages and then start an incomplete message on each.
+                if !stream.reassembling && self.active_reassembling() >= self.max_active_csids {
+                    return Err(ErrorCode::Chunk);
+                }
                 return Ok(idx);
             }
         }
@@ -160,7 +167,7 @@ impl ChunkRegistry {
         // Dormant CSIDs (registered, but with no message in flight) must not
         // count against the cap: `in_use` is never cleared, so counting it
         // would turn `max_active_csids` into a lifetime cap.
-        let active = self.streams.iter().filter(|s| s.reassembling).count();
+        let active = self.active_reassembling();
         if active >= self.max_active_csids {
             return Err(ErrorCode::Chunk);
         }
@@ -218,6 +225,11 @@ impl ChunkRegistry {
     /// Total reassembly bytes currently buffered across all active CSIDs.
     pub(crate) fn reassembly_bytes_in_use(&self) -> usize {
         self.reassembly_bytes_in_use
+    }
+
+    /// Number of CSIDs currently reassembling an incomplete message.
+    fn active_reassembling(&self) -> usize {
+        self.streams.iter().filter(|s| s.reassembling).count()
     }
 
     /// Release a stream's reassembly buffer from the running total.
@@ -340,6 +352,82 @@ mod tests {
 
         reg.reset_stream(3);
         assert!(reg.get_or_create(5).is_ok());
+    }
+
+    #[test]
+    fn reactivating_dormant_csids_respects_the_active_cap() {
+        use crate::chunk::reader::{ChunkMessage, chunk_read};
+        use crate::chunk::writer::chunk_write;
+
+        let mut reg = ChunkRegistry::new();
+        reg.max_active_csids = 2;
+
+        // Complete a message on each CSID so all three stay registered but
+        // dormant (no message in flight).
+        for csid in 3..=5u32 {
+            let msg = ChunkMessage {
+                csid,
+                fmt: 0,
+                timestamp: 0,
+                msg_length: 2,
+                msg_type_id: 0x09,
+                msg_stream_id: 1,
+                is_complete: false,
+            };
+            let mut wire = Buffer::new();
+            chunk_write(&mut wire, &msg, b"ok", 2, 128).unwrap();
+
+            let mut out_msg = ChunkMessage::default();
+            let mut ptr = std::ptr::null();
+            let mut len = 0;
+            let rc =
+                chunk_read(&mut wire, &mut reg, None, &mut out_msg, &mut ptr, &mut len).unwrap();
+            assert_eq!(rc, 1, "csid {csid} must complete and stay dormant");
+        }
+
+        // Restarting an incomplete message on two dormant CSIDs fills the cap.
+        let payload = vec![0xAB_u8; 4096];
+        for csid in 3..=4u32 {
+            let msg = ChunkMessage {
+                csid,
+                fmt: 0,
+                timestamp: 0,
+                msg_length: payload.len() as u32,
+                msg_type_id: 0x09,
+                msg_stream_id: 1,
+                is_complete: false,
+            };
+            let mut wire = Buffer::new();
+            chunk_write(&mut wire, &msg, &payload, payload.len(), 128).unwrap();
+
+            let mut out_msg = ChunkMessage::default();
+            let mut ptr = std::ptr::null();
+            let mut len = 0;
+            let rc =
+                chunk_read(&mut wire, &mut reg, None, &mut out_msg, &mut ptr, &mut len).unwrap();
+            assert_eq!(rc, 0, "csid {csid} must be left incomplete");
+        }
+
+        // A third already-registered CSID must not slip past the cap.
+        let msg = ChunkMessage {
+            csid: 5,
+            fmt: 0,
+            timestamp: 0,
+            msg_length: payload.len() as u32,
+            msg_type_id: 0x09,
+            msg_stream_id: 1,
+            is_complete: false,
+        };
+        let mut wire = Buffer::new();
+        chunk_write(&mut wire, &msg, &payload, payload.len(), 128).unwrap();
+
+        let mut out_msg = ChunkMessage::default();
+        let mut ptr = std::ptr::null();
+        let mut len = 0;
+        assert!(matches!(
+            chunk_read(&mut wire, &mut reg, None, &mut out_msg, &mut ptr, &mut len),
+            Err(ErrorCode::Chunk)
+        ));
     }
 
     #[test]
