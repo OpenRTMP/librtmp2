@@ -101,6 +101,64 @@ fn parse_args() -> Option<Args> {
     })
 }
 
+/// URL for attempt `n`: prefix mode appends `-<n>` for publishes and reuses
+/// the prefix as-is for plays; list mode round-robins over the list.
+fn attempt_url(source: &UrlSource, n: u64, play: bool) -> String {
+    match source {
+        UrlSource::Prefix(prefix) if play => prefix.clone(),
+        UrlSource::Prefix(prefix) => format!("{prefix}-{n}"),
+        UrlSource::List(list) => list[n as usize % list.len()].clone(),
+    }
+}
+
+/// One connect + publish (or play) handshake; returns its latency in ms, or
+/// `None` if any step failed.
+fn attempt(url: &str, play: bool) -> Option<f64> {
+    let start = Instant::now();
+    let mut client = Client::new();
+    client.set_connect_timeout(Duration::from_secs(10));
+    client.connect(url).ok()?;
+    if play {
+        client.play().ok()?;
+    } else {
+        client.publish().ok()?;
+    }
+    Some(start.elapsed().as_secs_f64() * 1000.0)
+}
+
+/// Simple worker pool: `concurrency` threads pull from a shared counter
+/// until `count` handshakes have been attempted. Returns the successful
+/// latencies (unsorted) and the number of failures.
+fn run_handshakes(args: &Args) -> (Vec<f64>, u64) {
+    let next_seq = AtomicU64::new(0);
+    let latencies_ms: Mutex<Vec<f64>> = Mutex::new(Vec::with_capacity(args.count));
+    let failures = AtomicU64::new(0);
+
+    thread::scope(|scope| {
+        for _ in 0..args.concurrency {
+            scope.spawn(|| {
+                loop {
+                    let n = next_seq.fetch_add(1, Ordering::Relaxed);
+                    if n >= args.count as u64 {
+                        break;
+                    }
+                    match attempt(&attempt_url(&args.source, n, args.play), args.play) {
+                        Some(ms) => latencies_ms.lock().unwrap().push(ms),
+                        None => {
+                            failures.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                }
+            });
+        }
+    });
+
+    (
+        latencies_ms.into_inner().unwrap(),
+        failures.load(Ordering::Relaxed),
+    )
+}
+
 fn main() -> ExitCode {
     let args = match parse_args() {
         Some(a) => a,
@@ -119,59 +177,11 @@ fn main() -> ExitCode {
         UrlSource::Prefix(p) => format!("{p}-*"),
         UrlSource::List(urls) => format!("--url-list ({} urls)", urls.len()),
     };
-    let urls = &args.source;
-
-    let next_seq = AtomicU64::new(0);
-    let latencies_ms: Mutex<Vec<f64>> = Mutex::new(Vec::with_capacity(args.count));
-    let failures = AtomicU64::new(0);
-
     let wall_start = Instant::now();
-
-    // Simple worker-pool: `concurrency` threads pull from a shared counter
-    // until `count` handshakes have been attempted.
-    thread::scope(|scope| {
-        for _ in 0..args.concurrency {
-            let next_seq = &next_seq;
-            let latencies_ms = &latencies_ms;
-            let failures = &failures;
-            let urls = &urls;
-            let count = args.count;
-            scope.spawn(move || {
-                loop {
-                    let n = next_seq.fetch_add(1, Ordering::Relaxed);
-                    if n >= count as u64 {
-                        break;
-                    }
-                    let url = match urls {
-                        UrlSource::Prefix(prefix) if play => prefix.clone(),
-                        UrlSource::Prefix(prefix) => format!("{prefix}-{n}"),
-                        UrlSource::List(list) => list[n as usize % list.len()].clone(),
-                    };
-                    let start = Instant::now();
-                    let mut client = Client::new();
-                    client.set_connect_timeout(Duration::from_secs(10));
-                    let ok = client.connect(&url).is_ok()
-                        && if play {
-                            client.play().is_ok()
-                        } else {
-                            client.publish().is_ok()
-                        };
-                    if ok {
-                        let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
-                        latencies_ms.lock().unwrap().push(elapsed_ms);
-                    } else {
-                        failures.fetch_add(1, Ordering::Relaxed);
-                    }
-                }
-            });
-        }
-    });
-
+    let (mut latencies, fail_count) = run_handshakes(&args);
     let wall_elapsed = wall_start.elapsed().as_secs_f64();
-    let mut latencies = latencies_ms.into_inner().unwrap();
     latencies.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let ok_count = latencies.len();
-    let fail_count = failures.load(Ordering::Relaxed);
     let avg = if ok_count > 0 {
         latencies.iter().sum::<f64>() / ok_count as f64
     } else {
