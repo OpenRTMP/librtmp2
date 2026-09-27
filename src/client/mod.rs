@@ -281,6 +281,10 @@ pub struct Client {
     /// counter reset.
     bytes_received: u64,
     bytes_at_last_ack: u64,
+    /// An Acknowledgement is already queued in `send_buffer` and not yet
+    /// flushed; further window crossings coalesce into it instead of
+    /// appending acknowledgements a stalled peer could make accumulate.
+    ack_pending: bool,
     /// Chunk size this client announces with `SetChunkSize` when it starts
     /// publishing, and then uses for media. Larger chunks mean fewer chunk
     /// headers and fewer reassembly steps on the server for every frame.
@@ -335,6 +339,7 @@ impl Client {
             window_ack_size: 0,
             bytes_received: 0,
             bytes_at_last_ack: 0,
+            ack_pending: false,
         }
     }
 
@@ -1065,7 +1070,15 @@ impl Client {
     /// Queue an Acknowledgement once `window_ack_size` inbound bytes have
     /// arrived since the last one. The `u64` counters let the on-wire `u32`
     /// sequence number wrap without resetting the byte accounting.
+    ///
+    /// At most one acknowledgement is queued at a time: while one is still
+    /// waiting to be flushed, further crossings are coalesced into it, so a
+    /// peer that streams without reading its socket direction cannot grow
+    /// `send_buffer` by driving acknowledgement after acknowledgement.
     fn maybe_send_window_ack(&mut self) -> Result<()> {
+        if self.ack_pending {
+            return Ok(());
+        }
         if self.window_ack_size > 0
             && self.bytes_received.saturating_sub(self.bytes_at_last_ack)
                 >= self.window_ack_size as u64
@@ -1074,7 +1087,29 @@ impl Client {
             control::write_acknowledgement(&mut payload, self.bytes_received as u32)?;
             self.queue_control_message(msg_dispatch::RTMP_MSG_ACKNOWLEDGEMENT, payload.as_slice())?;
             self.bytes_at_last_ack = self.bytes_received;
+            self.ack_pending = true;
         }
+        Ok(())
+    }
+
+    /// Flush queued outbound control bytes (e.g. a due Acknowledgement)
+    /// before the caller blocks on more inbound data. A peer enforcing its
+    /// advertised window stops sending until the acknowledgement arrives, so
+    /// leaving it merely queued would stall the exchange until the caller's
+    /// deadline. Bounded by `deadline` when one is supplied.
+    fn flush_pending_outbound(&mut self, deadline: Option<Instant>) -> Result<()> {
+        if self.send_buffer.available() == 0 {
+            return Ok(());
+        }
+        let data = self.send_buffer.peek().to_vec();
+        if let Some(ref mut transport) = self.transport {
+            match deadline {
+                Some(deadline) => send_bounded(transport, &data, deadline)?,
+                None => transport.send(&data)?,
+            }
+        }
+        self.send_buffer.reset();
+        self.ack_pending = false;
         Ok(())
     }
 
@@ -1106,6 +1141,7 @@ impl Client {
             // frame (e.g. a multi-megabyte keyframe) back down instead of
             // pinning that allocation for the rest of the connection.
             self.send_buffer.reset();
+            self.ack_pending = false;
             Ok(None)
         }
     }
@@ -1117,6 +1153,7 @@ impl Client {
             transport.send(&data)?;
         }
         self.send_buffer.reset();
+        self.ack_pending = false;
         Ok(())
     }
 
@@ -1261,6 +1298,7 @@ impl Client {
         self.window_ack_size = 0;
         self.bytes_received = 0;
         self.bytes_at_last_ack = 0;
+        self.ack_pending = false;
         self.out_chunk_size = RTMP_DEFAULT_CHUNK_SIZE;
         self.media_out_headers = MediaHeaderTracker::default();
     }
@@ -1319,6 +1357,7 @@ impl Client {
             }
         }
         self.send_buffer.reset();
+        self.ack_pending = false;
         Ok(())
     }
 
@@ -1382,6 +1421,7 @@ impl Client {
             match chunk_read_owned(&mut self.recv_buffer, &mut self.chunk_reg, &mut msg) {
                 Ok((1, payload)) if msg.is_complete => {
                     if self.consume_protocol_control_message(&msg, &payload)? {
+                        self.flush_pending_outbound(deadline)?;
                         continue;
                     }
                     return Ok((msg, payload));
@@ -1421,6 +1461,7 @@ impl Client {
                     .write(&tmp[..chunk_len])
                     .map_err(|_| ErrorCode::Internal)?;
                 self.maybe_send_window_ack()?;
+                self.flush_pending_outbound(deadline)?;
             } else if n == 0 {
                 return Err(ErrorCode::Io);
             } else if again != 0 {
@@ -1454,6 +1495,9 @@ impl Client {
             msg_dispatch::RTMP_MSG_WINDOW_ACK_SIZE => {
                 if let Ok(win) = control::read_window_ack_size(payload) {
                     self.window_ack_size = win;
+                    // Bytes counted before the window was learned may already
+                    // have crossed it; re-evaluate now that it is active.
+                    self.maybe_send_window_ack()?;
                 }
                 Ok(true)
             }
@@ -2515,6 +2559,57 @@ mod tests {
         assert!(
             client.send_buffer.available() > 0,
             "an acknowledgement must be queued once the window is exceeded"
+        );
+    }
+
+    #[test]
+    fn learning_window_ack_size_rechecks_accumulated_bytes() {
+        let mut client = Client::new();
+        client.bytes_received = 5000;
+
+        let mut msg = ChunkMessage::default();
+        msg.msg_type_id = msg_dispatch::RTMP_MSG_WINDOW_ACK_SIZE;
+        let mut payload = Buffer::new();
+        control::write_window_ack_size(&mut payload, 1024).unwrap();
+
+        assert!(
+            client
+                .consume_protocol_control_message(&msg, payload.as_slice())
+                .unwrap()
+        );
+        assert_eq!(client.window_ack_size, 1024);
+        assert!(
+            client.send_buffer.available() > 0,
+            "bytes received before the window was learned must trigger the acknowledgement"
+        );
+        assert!(client.ack_pending);
+    }
+
+    #[test]
+    fn pending_acknowledgement_coalesces_until_flushed() {
+        let mut client = Client::new();
+        client.window_ack_size = 1024;
+        client.bytes_received = 2048;
+        client.maybe_send_window_ack().unwrap();
+        let queued = client.send_buffer.available();
+        assert!(queued > 0);
+
+        client.bytes_received = 10_000;
+        client.maybe_send_window_ack().unwrap();
+        assert_eq!(
+            client.send_buffer.available(),
+            queued,
+            "a pending acknowledgement must not append more messages"
+        );
+
+        client.flush_pending_outbound(None).unwrap();
+        assert!(!client.ack_pending);
+        assert_eq!(client.send_buffer.available(), 0);
+
+        client.maybe_send_window_ack().unwrap();
+        assert!(
+            client.send_buffer.available() > 0,
+            "the next window crossing after a flush must queue again"
         );
     }
 
