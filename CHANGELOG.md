@@ -13,6 +13,26 @@ begin at `1.0.0`.
 
 ## [Unreleased]
 
+## [0.10.2] — 2026-09-27
+
+### Changed
+- The server relay sends each frame straight to a player's socket when
+  nothing is queued ahead of it, together with that player's chunk header
+  in one `sendmsg`, and buffers only what the socket does not take.
+  Players that keep up no longer hold a per-player copy of every frame,
+  their send buffers no longer grow to keyframe size, and frames leave
+  during the fan-out instead of at the end of the poll. With 1000 viewers
+  on one 2.6 Mbps stream the server's memory drops from about 59 MiB to
+  32 MiB. TLS players keep the buffered path.
+- A newly accepted player receives the cached init frames (metadata,
+  sequence headers, last keyframe) in the same write as
+  `NetStream.Play.Start`, instead of after every other connection in the
+  same poll has been read.
+
+### Added
+- `examples/bench_handshake.rs` takes `--play` to measure connect + play
+  latency (up to `NetStream.Play.Start`) against a live stream.
+
 ## [0.10.1] — 2026-09-27
 
 ### Fixed
@@ -846,7 +866,8 @@ and others.
 - Protocol mapping documents for legacy, E-RTMP v1, and E-RTMP v2
 - `CONTRIBUTING.md` guidelines
 
-[Unreleased]: https://github.com/OpenRTMP/librtmp2/compare/v0.10.1...HEAD
+[Unreleased]: https://github.com/OpenRTMP/librtmp2/compare/v0.10.2...HEAD
+[0.10.2]: https://github.com/OpenRTMP/librtmp2/compare/v0.10.1...v0.10.2
 [0.10.1]: https://github.com/OpenRTMP/librtmp2/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/OpenRTMP/librtmp2/compare/v0.9.3...v0.10.0
 [0.9.3]: https://github.com/OpenRTMP/librtmp2/compare/v0.9.2...v0.9.3
