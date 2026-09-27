@@ -77,10 +77,10 @@ Because of that harness overhead this benchmark does not show the 0.10.0
 relay changes (frames chunked once per fan-out, compact chunk headers,
 4096-byte client publish chunks, per-player flow control). For end-to-end
 numbers see the cross-server comparison in `librtmp2-server`'s
-`BENCHMARKS.md`: with `librtmp2-server` 0.5.0 built on librtmp2 0.10.0,
-100 concurrent viewers joined in 3.6 ms on average (p95 7.3 ms), ahead of MediaMTX
-(8.1 / 13.0 ms) and LiveForge (15.5 / 31.3 ms), with every viewer
-receiving the full frame rate; SRS 8.0 and nginx-rtmp took 73 and 91 ms
+`BENCHMARKS.md`: with `librtmp2-server` 0.6.0 built on librtmp2 0.10.1,
+100 concurrent viewers joined in 4.4 ms on average (p95 7.7 ms), ahead of MediaMTX
+(5.5 / 9.8 ms) and LiveForge (16.7 / 32.3 ms), with every viewer
+receiving the full frame rate; SRS 8.0 and nginx-rtmp took 72 and 90 ms
 on average for the same join.
 That is a whole-system result: it includes that server's own changes
 (multi-core sharding, auth wake-ups, publishes and plays answered from an
