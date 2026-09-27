@@ -1,28 +1,35 @@
-//! Benchmark helper: RTMP connect + publish handshake latency.
+//! Benchmark helper: RTMP connect + publish (or connect + play) handshake
+//! latency.
 //!
 //! Measures wall-clock time from `connect()` through a successful `publish()`
 //! (i.e. up to `NetStream.Publish.Start`) against any RTMP server -- this
 //! server, or a third-party one (nginx-rtmp, MediaMTX, ...) -- since the
-//! handshake is pure RTMP protocol and carries no media payload.
+//! handshake is pure RTMP protocol and carries no media payload. With
+//! `--play` it measures `connect()` through `play()` (up to
+//! `NetStream.Play.Start`) instead; point it at a stream that is already
+//! live, since some servers refuse to play a stream nobody publishes.
 //!
-//! Runs `--concurrency` publishers at a time, `--count` total, and reports
+//! Runs `--concurrency` clients at a time, `--count` total, and reports
 //! success rate plus latency percentiles.
 //!
 //! Two ways to supply the per-attempt URLs:
 //!   - `<rtmp_url_prefix> --count N`: each attempt appends `-<n>` to the
 //!     prefix (`<prefix>-0`, `<prefix>-1`, ...) so it needs an app that
-//!     accepts arbitrary stream names (e.g. nginx-rtmp, MediaMTX).
+//!     accepts arbitrary stream names (e.g. nginx-rtmp, MediaMTX). With
+//!     `--play` every attempt uses the URL as given, so all players join
+//!     the same live stream.
 //!   - `--url-list <path> --count N`: reads one full RTMP URL per line and
 //!     round-robins the pool over them -- for servers (like librtmp2-server)
 //!     that validate the stream key against a pre-provisioned list, generate
 //!     the file from that server's own API first.
 //!
 //! Usage:
-//!   bench_handshake <rtmp_url_prefix> [--count N] [--concurrency C]
-//!   bench_handshake --url-list urls.txt [--count N] [--concurrency C]
+//!   bench_handshake <rtmp_url_prefix> [--count N] [--concurrency C] [--play]
+//!   bench_handshake --url-list urls.txt [--count N] [--concurrency C] [--play]
 //!
 //! Example:
 //!   bench_handshake rtmp://127.0.0.1:1936/live/bench --count 200 --concurrency 50
+//!   bench_handshake rtmp://127.0.0.1:1936/live/source --count 200 --concurrency 50 --play
 
 #[path = "bench_common/mod.rs"]
 mod bench_common;
@@ -45,6 +52,7 @@ struct Args {
     source: UrlSource,
     count: usize,
     concurrency: usize,
+    play: bool,
 }
 
 fn parse_args() -> Option<Args> {
@@ -53,6 +61,7 @@ fn parse_args() -> Option<Args> {
     let mut url_list_path = None;
     let mut count = 200usize;
     let mut concurrency = 50usize;
+    let mut play = false;
     let mut i = 0;
     while i < raw.len() {
         match raw[i].as_str() {
@@ -63,6 +72,10 @@ fn parse_args() -> Option<Args> {
             "--concurrency" => {
                 concurrency = raw.get(i + 1)?.parse().ok()?;
                 i += 2;
+            }
+            "--play" => {
+                play = true;
+                i += 1;
             }
             "--url-list" => {
                 url_list_path = Some(raw.get(i + 1)?.clone());
@@ -84,6 +97,7 @@ fn parse_args() -> Option<Args> {
         source,
         count,
         concurrency,
+        play,
     })
 }
 
@@ -92,14 +106,16 @@ fn main() -> ExitCode {
         Some(a) => a,
         None => {
             eprintln!(
-                "usage: bench_handshake <rtmp_url_prefix> [--count N] [--concurrency C]\n   \
-                    or: bench_handshake --url-list <path> [--count N] [--concurrency C]"
+                "usage: bench_handshake <rtmp_url_prefix> [--count N] [--concurrency C] [--play]\n   \
+                    or: bench_handshake --url-list <path> [--count N] [--concurrency C] [--play]"
             );
             return ExitCode::from(1);
         }
     };
 
+    let play = args.play;
     let label = match &args.source {
+        UrlSource::Prefix(p) if play => p.clone(),
         UrlSource::Prefix(p) => format!("{p}-*"),
         UrlSource::List(urls) => format!("--url-list ({} urls)", urls.len()),
     };
@@ -127,13 +143,19 @@ fn main() -> ExitCode {
                         break;
                     }
                     let url = match urls {
+                        UrlSource::Prefix(prefix) if play => prefix.clone(),
                         UrlSource::Prefix(prefix) => format!("{prefix}-{n}"),
                         UrlSource::List(list) => list[n as usize % list.len()].clone(),
                     };
                     let start = Instant::now();
                     let mut client = Client::new();
                     client.set_connect_timeout(Duration::from_secs(10));
-                    let ok = client.connect(&url).is_ok() && client.publish().is_ok();
+                    let ok = client.connect(&url).is_ok()
+                        && if play {
+                            client.play().is_ok()
+                        } else {
+                            client.publish().is_ok()
+                        };
                     if ok {
                         let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
                         latencies_ms.lock().unwrap().push(elapsed_ms);
@@ -157,8 +179,10 @@ fn main() -> ExitCode {
     };
 
     println!(
-        "url={label} count={} concurrency={}",
-        args.count, args.concurrency
+        "url={label} count={} concurrency={} mode={}",
+        args.count,
+        args.concurrency,
+        if play { "play" } else { "publish" }
     );
     println!(
         "ok={ok_count} failed={fail_count} success_rate={:.1}% wall_time_s={:.2} handshakes_per_s={:.1}",
@@ -167,7 +191,8 @@ fn main() -> ExitCode {
         ok_count as f64 / wall_elapsed.max(1e-9),
     );
     println!(
-        "connect+publish latency ms: avg={:.2} p50={:.2} p95={:.2} p99={:.2} max={:.2}",
+        "connect+{} latency ms: avg={:.2} p50={:.2} p95={:.2} p99={:.2} max={:.2}",
+        if play { "play" } else { "publish" },
         avg,
         bench_common::percentile(&latencies, 0.50),
         bench_common::percentile(&latencies, 0.95),
