@@ -79,13 +79,13 @@ relay changes (frames chunked once per fan-out, compact chunk headers,
 numbers see the cross-server comparison in `librtmp2-server`'s
 `BENCHMARKS.md`: with `librtmp2-server` 0.5.0 built on librtmp2 0.10.0,
 averaged over three interleaved rounds on one 4-vCPU box, 100 concurrent
-viewers joined in 3.6 ms on average (p95 7.6 ms), ahead of MediaMTX
-(7.2 / 10.8 ms) and LiveForge (12.4 / 24.7 ms), with every viewer
-receiving the full frame rate; SRS 8.0 and nginx-rtmp took 69 and 90 ms
+viewers joined in 3.6 ms on average (p95 7.3 ms), ahead of MediaMTX
+(8.1 / 13.0 ms) and LiveForge (15.5 / 31.3 ms), with every viewer
+receiving the full frame rate; SRS 8.0 and nginx-rtmp took 73 and 91 ms
 on average for the same join in the full five-server sweeps.
 That is a whole-system result: it includes that server's own changes
-(multi-core sharding, auth wake-ups, plays answered from an in-memory key
-cache) and does not isolate the effect of
+(multi-core sharding, auth wake-ups, publishes and plays answered from an
+in-memory key cache) and does not isolate the effect of
 any single library change; the full-frame-rate run also never congests a
 player, so it does not exercise flow control.
 
