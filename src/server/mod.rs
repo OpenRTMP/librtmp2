@@ -1163,7 +1163,14 @@ impl Server {
             return Ok(());
         };
         conn.complete_play_authorization(allow)?;
-        let _ = conn.flush();
+        // Send the init frames in the same write as NetStream.Play.Start. A
+        // completion arrives between poll ticks, when no cache eviction is
+        // pending, so the cache holds no abandoned route's frames here.
+        // A replay that fills the send buffer disconnected the player; the
+        // next tick reaps it.
+        if !Self::replay_init_frames_for_conn(conn, &self.stream_cache) {
+            let _ = conn.flush();
+        }
         Ok(())
     }
 
@@ -1551,6 +1558,7 @@ impl Server {
         // immediately (below) without conflicting with the mutable borrow
         // of `self.connections` this loop holds via `iter_mut()`.
         let active_publish_routes = Arc::clone(&self.active_publish_routes);
+        let mut evictions_queued = false;
         for (i, conn) in self.connections.iter_mut().enumerate() {
             let mut conn_closed_this_iteration = false;
             if conn.session_setup_timed_out() {
@@ -1589,6 +1597,23 @@ impl Server {
             if !conn_closed_this_iteration && Self::drain_buffered_messages(conn) {
                 closed.push(i);
                 conn_closed_this_iteration = true;
+            }
+            // A player whose play was just accepted has already been sent
+            // NetStream.Play.Start (commands are flushed as they are
+            // handled). Send its init frames now as well instead of after
+            // every other connection's recv, so the gap between the two
+            // doesn't grow with the number of connections this tick. Only
+            // while no route was abandoned earlier in this loop: those
+            // cache evictions are applied after it, and until then the
+            // cache may still hold the abandoned route's frames.
+            evictions_queued |= !conn.pending_cache_evictions.is_empty();
+            if !conn_closed_this_iteration && !evictions_queued && conn.needs_init_frames {
+                let failed = Self::replay_init_frames_for_conn(conn, &self.stream_cache)
+                    || (!conn.needs_init_frames && conn.flush().is_err());
+                if failed {
+                    closed.push(i);
+                    conn_closed_this_iteration = true;
+                }
             }
             // Release this connection's claimed publish route(s) right away
             // rather than deferring to the end-of-batch cleanup below: a
@@ -1730,41 +1755,47 @@ impl Server {
     /// frames from the current batch.
     fn replay_init_frames_for_new_players(&mut self, closed: &mut Vec<usize>) {
         for (i, conn) in self.connections.iter_mut().enumerate() {
-            if conn.transport.is_none() || !conn.needs_init_frames {
-                continue;
-            }
-            let Some(ref stream) = conn.current_stream else {
-                continue;
-            };
-            if !stream.is_playing || !conn.relay_enabled || conn.has_pending_authorization() {
-                continue;
-            }
-            conn.needs_init_frames = false;
-            let key = (conn.app.clone(), conn.relay_route_key());
-            let receive_audio = conn
-                .current_stream
-                .as_ref()
-                .map(|s| s.receive_audio)
-                .unwrap_or(true);
-            let receive_video = conn
-                .current_stream
-                .as_ref()
-                .map(|s| s.receive_video)
-                .unwrap_or(true);
-            let Some(cache) = self.stream_cache.get(&key) else {
-                continue;
-            };
-            let send_failed =
-                Self::replay_cached_headers_to_conn(conn, cache, receive_audio, receive_video);
-            if send_failed {
-                // Cached init-frame replay filled the send buffer for a
-                // slow player. Close immediately just like live relay sends.
-                conn.relay_enabled = false;
-                conn.needs_init_frames = false;
-                conn.disconnect_transport();
+            if Self::replay_init_frames_for_conn(conn, &self.stream_cache) {
                 closed.push(i);
             }
         }
+    }
+
+    /// Replays the cached init frames to `conn` if it is a player waiting for
+    /// them and its route has a cache entry. Returns whether the replay
+    /// filled the send buffer, in which case the connection has been
+    /// disconnected like a slow player on a live relay send and the caller
+    /// must reap it.
+    fn replay_init_frames_for_conn(
+        conn: &mut Conn,
+        stream_cache: &HashMap<(String, String), StreamCache>,
+    ) -> bool {
+        if conn.transport.is_none() || !conn.needs_init_frames {
+            return false;
+        }
+        let Some(ref stream) = conn.current_stream else {
+            return false;
+        };
+        if !stream.is_playing || !conn.relay_enabled || conn.has_pending_authorization() {
+            return false;
+        }
+        let receive_audio = stream.receive_audio;
+        let receive_video = stream.receive_video;
+        conn.needs_init_frames = false;
+        let key = (conn.app.clone(), conn.relay_route_key());
+        let Some(cache) = stream_cache.get(&key) else {
+            return false;
+        };
+        let send_failed =
+            Self::replay_cached_headers_to_conn(conn, cache, receive_audio, receive_video);
+        if send_failed {
+            // Cached init-frame replay filled the send buffer for a
+            // slow player. Close immediately just like live relay sends.
+            conn.relay_enabled = false;
+            conn.needs_init_frames = false;
+            conn.disconnect_transport();
+        }
+        send_failed
     }
 
     /// Sends `conn` the cached metadata, codec headers, and last keyframe
