@@ -82,6 +82,10 @@ numbers see the cross-server comparison in `librtmp2-server`'s
 (5.5 / 9.8 ms) and LiveForge (16.7 / 32.3 ms), with every viewer
 receiving the full frame rate; SRS 8.0 and nginx-rtmp took 72 and 90 ms
 on average for the same join.
+Players connect faster too (connect + play in 2.0 ms on average, against
+3.0 ms for MediaMTX and LiveForge), and 1000 concurrent viewers of one
+stream all received the full frame rate while the server used 64% of one
+core and 59 MiB of memory.
 That is a whole-system result: it includes that server's own changes
 (multi-core sharding, auth wake-ups, publishes and plays answered from an
 in-memory key cache) and does not isolate the effect of
@@ -97,7 +101,9 @@ network-facing behavior:
 
 - **`bench_handshake`** — connect + publish handshake latency (time to
   `NetStream.Publish.Start`) under configurable concurrency. Pure protocol,
-  no media, so it's directly comparable across implementations.
+  no media, so it's directly comparable across implementations. With
+  `--play` it measures connect + play instead (time to
+  `NetStream.Play.Start`) against a stream that is already live.
 - **`bench_relay`** — points N concurrent `play()` clients at one already-
   live stream and reports join latency (connect → first frame) and
   steady-state relay throughput/frame rate per player.
@@ -110,6 +116,9 @@ cargo build --release --example bench_handshake --example bench_relay
 
 # Same, against a server that validates stream keys from a fixed list:
 ./target/release/examples/bench_handshake --url-list urls.txt --count 200 --concurrency 50
+
+# Connect + play handshake latency (stream must already be publishing):
+./target/release/examples/bench_handshake rtmp://127.0.0.1:1935/live/bench --count 200 --concurrency 50 --play
 
 # Concurrent-viewer relay throughput (stream must already be publishing):
 ./target/release/examples/bench_relay rtmp://127.0.0.1:1935/live/bench --players 100 --run-secs 20
