@@ -1,3 +1,17 @@
+librtmp2 (0.10.1-1) UNRELEASED; urgency=medium
+
+  * Count only chunk streams with a message in flight against the
+    concurrent-CSID cap, so it no longer acts as a lifetime limit.
+  * Outbound client acknowledges the peer's WindowAckSize.
+  * E-RTMP parsing fixes: unknown video FourCCs no longer labelled H.264,
+    vp08/vvc1 no longer advertised, nibble-9 audio tags always treated as
+    enhanced, FFmpeg's colorInfo layout accepted and colorInfo resets
+    honored.
+  * Reject truncated AAC sequence headers.
+  * Shared-object persistence follows the 2/0 wire convention.
+
+ -- OpenRTMP <info@openrtmp.org>  Sun, 27 Sep 2026 18:50:00 +0000
+
 librtmp2 (0.10.0-1) UNRELEASED; urgency=medium
 
   * Add per-player outbound flow control to the server relay: slow players

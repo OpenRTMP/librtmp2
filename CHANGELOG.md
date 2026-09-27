@@ -13,6 +13,36 @@ begin at `1.0.0`.
 
 ## [Unreleased]
 
+## [0.10.1] — 2026-09-27
+
+### Fixed
+- The chunk reader's cap on concurrently reassembling chunk stream IDs now
+  counts only CSIDs with a message in flight. CSIDs that finished their last
+  message no longer count against it, so the cap no longer acts as a
+  lifetime limit on a long-lived connection. Restarting a message on such a
+  dormant CSID counts like opening a new one, so a peer still cannot open
+  more incomplete messages than the cap allows.
+- The outbound client now acknowledges the server's `WindowAckSize`: once
+  that many bytes have arrived it sends an Acknowledgement with the running
+  byte count (wrapping at `u32` as the protocol expects). At most one
+  Acknowledgement is queued at a time, and queued control bytes are flushed
+  even while the client is only receiving, so servers that stop sending
+  until they are acknowledged no longer stall playback.
+- An enhanced (E-RTMP) video frame with a FourCC the library doesn't know
+  keeps its codec unset instead of being labelled H.264.
+- `vp08` and `vvc1` are no longer advertised as supported video FourCCs.
+- An enhanced audio tag (ExHeader nibble 9) is recognized as enhanced even
+  when its FourCC is not in the registry, instead of being parsed as a
+  legacy tag.
+- HDR `colorInfo` metadata is accepted in the reference layout written by
+  FFmpeg (a leading `"colorInfo"` string before the object) as well as a
+  bare object. An undefined or empty `colorInfo` resets the HDR metadata.
+- A truncated AAC sequence header (shorter than 2 bytes) is rejected
+  instead of being passed on as a codec configuration.
+- `SharedObjectMessage::is_persistent` follows the de-facto wire
+  convention (flags `2` for persistent, `0` otherwise) instead of reading
+  bit 0.
+
 ## [0.10.0] — 2026-09-25
 
 ### Added
@@ -816,7 +846,8 @@ and others.
 - Protocol mapping documents for legacy, E-RTMP v1, and E-RTMP v2
 - `CONTRIBUTING.md` guidelines
 
-[Unreleased]: https://github.com/OpenRTMP/librtmp2/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/OpenRTMP/librtmp2/compare/v0.10.1...HEAD
+[0.10.1]: https://github.com/OpenRTMP/librtmp2/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/OpenRTMP/librtmp2/compare/v0.9.3...v0.10.0
 [0.9.3]: https://github.com/OpenRTMP/librtmp2/compare/v0.9.2...v0.9.3
 [0.9.2]: https://github.com/OpenRTMP/librtmp2/compare/v0.9.1...v0.9.2
