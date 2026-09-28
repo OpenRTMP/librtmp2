@@ -28,7 +28,7 @@ use crate::message::shared_object::{self, SharedObjectMessage};
 use crate::session::publish_route::PublishRouteRegistry;
 use crate::session::state_machine;
 use crate::session::stream::Stream;
-use crate::transport::Transport;
+use crate::transport::{MAX_SEND_PARTS, Transport};
 use crate::types::*;
 
 pub const MAX_STREAMS_PER_CONN: u32 = 16;
@@ -316,6 +316,8 @@ pub struct Conn {
     pending_pings: HashMap<u32, Instant>,
     /// Bytes flushed since `last_send_progress` was last advanced.
     send_progress_bytes: usize,
+    /// Relayed media staged for [`Conn::send_staged_media`] this poll.
+    staged_media_bytes: usize,
     /// Last time at least [`SEND_PROGRESS_BYTES`] reached the peer.
     last_send_progress: Option<Instant>,
     /// Ping queued in `send_buffer` but not yet fully flushed.
@@ -415,6 +417,7 @@ impl Conn {
             rtt_ms: 0.0,
             pending_pings: HashMap::new(),
             send_progress_bytes: 0,
+            staged_media_bytes: 0,
             last_send_progress: None,
             queued_ping: None,
             last_ping_sent: None,
@@ -2784,69 +2787,107 @@ impl Conn {
             msg_stream_id,
             timestamp,
         };
-        if self.send_buffer.available() == 0 && self.client_fd >= 0 && self.transport.is_some() {
-            self.send_media_body_direct(msg, payload_len, body)?;
-        } else {
-            write_media_message_with_body(
-                &mut self.send_buffer,
-                &mut self.media_out_headers,
-                self.compact_media_headers,
-                msg,
-                payload_len,
-                body,
-            )?;
-        }
+        write_media_message_with_body(
+            &mut self.send_buffer,
+            &mut self.media_out_headers,
+            self.compact_media_headers,
+            msg,
+            payload_len,
+            body,
+        )?;
         self.media_bytes_sent = self.media_bytes_sent.saturating_add(payload_len as u64);
         Ok(())
     }
 
-    /// Nothing is queued ahead of this message, so send it straight to the
-    /// socket, header from the (empty) send buffer and the shared body in
-    /// place, and queue only what the socket did not take. A player that
-    /// keeps up then never holds a copy of the frame: no per-player copy of
-    /// every frame, no send buffer grown to keyframe size, and the frame
-    /// leaves now instead of at the end of the poll.
-    fn send_media_body_direct(
+    /// Whether relayed media can be staged for [`Self::send_staged_media`]
+    /// instead of copied into the send buffer: nothing is queued ahead of
+    /// it and the socket takes a vectored write (plaintext).
+    pub(crate) fn can_stage_media(&self) -> bool {
+        self.send_buffer.available() == 0
+            && self.client_fd >= 0
+            && self.transport.as_ref().is_some_and(|t| !t.is_tls())
+    }
+
+    /// Stage a media message whose chunk body [`encode_media_body`]
+    /// already produced for this connection's chunk size: choose and
+    /// commit this connection's first-chunk header and append it to
+    /// `headers`, returning its length. The caller must hand the header
+    /// and body, in order with every other message it stages for this
+    /// connection, to [`Self::send_staged_media`] before anything else is
+    /// queued on it.
+    pub(crate) fn stage_encoded_media_body(
         &mut self,
-        msg: MediaMessageInfo,
+        frame_type: FrameType,
+        timestamp: u32,
         payload_len: usize,
-        body: &[u8],
-    ) -> Result<()> {
+        body_len: usize,
+        headers: &mut Buffer,
+    ) -> Result<usize> {
         let header = self.media_out_headers.choose(
             self.compact_media_headers,
-            msg.frame_type,
-            msg.msg_stream_id,
-            msg.timestamp,
+            frame_type,
+            self.media_stream_id(),
+            timestamp,
             payload_len,
         )?;
         let head_len = header.encoded_len();
-        self.send_buffer.reserve(head_len)?;
-        header.write(&mut self.send_buffer)?;
-        let sent = match self.transport.as_mut() {
-            Some(transport) => {
-                match transport.try_send_pair(self.send_buffer.peek(), body, &mut 0i32) {
-                    Ok(n) => n,
-                    Err(e) => {
-                        self.send_buffer.reset();
-                        return Err(e);
-                    }
+        headers.reserve(head_len)?;
+        header.write(headers)?;
+        self.media_out_headers.commit(header);
+        self.media_bytes_sent = self.media_bytes_sent.saturating_add(payload_len as u64);
+        self.staged_media_bytes = self.staged_media_bytes.saturating_add(head_len + body_len);
+        Ok(head_len)
+    }
+
+    /// Bytes staged by [`Self::stage_encoded_media_body`] and not yet sent.
+    pub(crate) fn staged_media_bytes(&self) -> usize {
+        self.staged_media_bytes
+    }
+
+    /// Send the staged messages' `parts` (headers and bodies, in order)
+    /// straight to the socket in as few `sendmsg` calls as the socket
+    /// takes, and queue only what it does not take. A player that keeps
+    /// up then never holds a copy of a relayed frame, and its send buffer
+    /// never grows to keyframe size.
+    pub(crate) fn send_staged_media(&mut self, parts: &[&[u8]]) -> Result<()> {
+        self.staged_media_bytes = 0;
+        let mut next = 0;
+        let mut offset = 0;
+        while next < parts.len() {
+            let Some(transport) = self.transport.as_mut() else {
+                break;
+            };
+            let mut window: Vec<&[u8]> =
+                Vec::with_capacity((parts.len() - next).min(MAX_SEND_PARTS));
+            window.push(&parts[next][offset..]);
+            window.extend(parts[next + 1..].iter().take(MAX_SEND_PARTS - 1));
+            let mut sent = transport.try_send_vectored(&window, &mut 0i32)?;
+            if sent == 0 {
+                break;
+            }
+            self.note_bytes_sent(sent);
+            // Advance past what went out.
+            while sent > 0 {
+                let left = parts[next].len() - offset;
+                if sent < left {
+                    offset += sent;
+                    sent = 0;
+                } else {
+                    sent -= left;
+                    next += 1;
+                    offset = 0;
                 }
             }
-            None => 0,
-        };
-        self.media_out_headers.commit(header);
-        let head_sent = sent.min(head_len);
-        self.send_buffer.drain(head_sent);
-        let body_sent = sent - head_sent;
-        if body_sent < body.len() {
-            // The buffer was empty, so this is the same room check the
-            // buffered path makes for the whole message; if it still fails
-            // the caller drops the player.
-            self.send_buffer.write(&body[body_sent..])?;
-        } else {
-            self.send_buffer.reset();
         }
-        self.note_bytes_sent(sent);
+        if next < parts.len() {
+            let rest = parts[next].len() - offset
+                + parts[next + 1..].iter().map(|p| p.len()).sum::<usize>();
+            self.send_buffer.reserve(rest)?;
+            self.send_buffer.write(&parts[next][offset..])?;
+            for part in &parts[next + 1..] {
+                self.send_buffer.write(part)?;
+            }
+        }
         Ok(())
     }
 
@@ -4560,11 +4601,11 @@ mod tests {
         assert!(conn.last_send_progress.is_some());
     }
 
-    /// Media sent straight to the socket must produce exactly the bytes the
-    /// buffered path queues, and whatever the socket does not take must be
-    /// queued in order behind what it did.
+    /// Staged media sent straight to the socket must produce exactly the
+    /// bytes the buffered path queues, and whatever the socket does not take
+    /// must be queued in order behind what it did.
     #[test]
-    fn direct_media_send_matches_buffered_bytes() {
+    fn staged_media_send_matches_buffered_bytes() {
         use crate::chunk::media_out::encode_media_body;
         use std::io::Read;
         use std::os::unix::io::IntoRawFd;
@@ -4577,29 +4618,54 @@ mod tests {
         direct.transport = Some(Transport::new_plain(end.into_raw_fd()));
         let mut buffered = Conn::new();
 
-        // A small frame the socket takes whole, then one larger than the
-        // socket buffer so part of it has to be queued.
-        let frames = [vec![0x17u8; 300], vec![0x27u8; 4 << 20]];
-        let mut received = Vec::new();
-        for (n, payload) in frames.iter().enumerate() {
-            let mut body = Buffer::new();
-            encode_media_body(&mut body, FrameType::Video, n as u32 * 33, payload, 128).unwrap();
-            for conn in [&mut direct, &mut buffered] {
-                conn.send_encoded_media_body(
-                    FrameType::Video,
-                    n as u32 * 33,
-                    payload.len(),
-                    body.as_slice(),
-                )
-                .unwrap();
+        // Small frames the socket takes whole, then one larger than the
+        // socket buffer so part of the batch has to be queued.
+        let batches = [
+            vec![vec![0x17u8; 300], vec![0xafu8; 40]],
+            vec![vec![0x27u8; 4 << 20], vec![0xafu8; 40]],
+        ];
+        let mut ts = 0;
+        for (n, batch) in batches.iter().enumerate() {
+            assert!(direct.can_stage_media());
+            let mut headers = Buffer::new();
+            let mut bodies = Vec::new();
+            for payload in batch {
+                let mut body = Buffer::new();
+                encode_media_body(&mut body, FrameType::Video, ts, payload, 128).unwrap();
+                let head_len = direct
+                    .stage_encoded_media_body(
+                        FrameType::Video,
+                        ts,
+                        payload.len(),
+                        body.available(),
+                        &mut headers,
+                    )
+                    .unwrap();
+                buffered
+                    .send_encoded_media_body(FrameType::Video, ts, payload.len(), body.peek())
+                    .unwrap();
+                bodies.push((head_len, body));
+                ts += 33;
             }
+            assert!(direct.staged_media_bytes() > 0);
+            let mut parts: Vec<&[u8]> = Vec::new();
+            let mut offset = 0;
+            for (head_len, body) in &bodies {
+                parts.push(&headers.peek()[offset..offset + head_len]);
+                parts.push(body.peek());
+                offset += head_len;
+            }
+            direct.send_staged_media(&parts).unwrap();
+            assert_eq!(direct.staged_media_bytes(), 0);
             if n == 0 {
-                assert_eq!(direct.send_buffer.available(), 0, "small frame sent whole");
+                assert_eq!(direct.send_buffer.available(), 0, "small batch sent whole");
             }
         }
         assert!(direct.send_buffer.available() > 0, "remainder queued");
+        assert_eq!(direct.media_bytes_sent, buffered.media_bytes_sent);
         let expected = buffered.send_buffer.peek().to_vec();
         peer.set_nonblocking(true).unwrap();
+        let mut received = Vec::new();
         let mut chunk = vec![0u8; 1 << 16];
         while received.len() < expected.len() {
             direct.flush().unwrap();
