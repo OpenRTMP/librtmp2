@@ -295,39 +295,88 @@ enum PlayerOutcome {
     Dropped,
 }
 
-/// One frame's chunk body (payload plus continuation headers), encoded once
-/// for the most recent chunk size seen and shared by every player on it.
-/// Players almost always share a chunk size, so fan-out costs one chunk
-/// encode per frame plus a small per-player first header and one memcpy per
-/// player, instead of re-chunking the payload for every player.
+/// Media staged during one relay fan-out for zero-copy sending: each
+/// frame's chunk body, encoded once per chunk size and shared by every
+/// player on that size, plus every player's own first-chunk headers.
+/// After the fan-out each player's staged messages go to its socket in one
+/// vectored write (see [`Conn::send_staged_media`]), so a player that keeps
+/// up gets all of a poll's frames in one system call and never holds a
+/// copy of them.
 #[derive(Default)]
-struct SharedMediaBody {
-    buf: crate::buffer::Buffer,
-    chunk_size: Option<usize>,
+struct StagedRelayMedia {
+    /// Encoded chunk bodies, by `(frame index in the batch, chunk size)`.
+    bodies: Vec<((usize, usize), crate::buffer::Buffer)>,
+    /// First-chunk headers of every staged message, back to back.
+    headers: crate::buffer::Buffer,
+    /// Staged messages in fan-out order.
+    messages: Vec<StagedRelayMessage>,
 }
 
-impl SharedMediaBody {
-    /// Forget the encoded body; call before each new frame.
-    fn invalidate(&mut self) {
-        self.chunk_size = None;
+struct StagedRelayMessage {
+    conn: usize,
+    header: std::ops::Range<usize>,
+    body: usize,
+}
+
+impl StagedRelayMedia {
+    /// Index of `frame`'s body for `chunk_size`, encoding it if needed;
+    /// `None` if encoding failed.
+    fn body_for(
+        &mut self,
+        frame_index: usize,
+        frame: &RelayFrame,
+        chunk_size: usize,
+    ) -> Option<usize> {
+        let key = (frame_index, chunk_size);
+        if let Some(i) = self.bodies.iter().rposition(|(k, _)| *k == key) {
+            return Some(i);
+        }
+        let mut body = crate::buffer::Buffer::new();
+        encode_media_body(
+            &mut body,
+            frame.frame_type,
+            frame.timestamp,
+            &frame.payload,
+            chunk_size,
+        )
+        .ok()?;
+        self.bodies.push((key, body));
+        Some(self.bodies.len() - 1)
     }
 
-    /// The body of `frame` for `chunk_size`, encoding it if needed; `None`
-    /// if encoding failed.
-    fn for_chunk_size(&mut self, frame: &RelayFrame, chunk_size: usize) -> Option<&[u8]> {
-        if self.chunk_size != Some(chunk_size) {
-            self.buf.drain(self.buf.available());
-            self.chunk_size = encode_media_body(
-                &mut self.buf,
-                frame.frame_type,
-                frame.timestamp,
-                &frame.payload,
-                chunk_size,
-            )
-            .ok()
-            .map(|()| chunk_size);
+    /// Hand every player its staged messages. A player whose socket fails
+    /// is disconnected and pushed to `closed`.
+    fn send(&self, connections: &mut [Conn], closed: &mut Vec<usize>) {
+        let mut order: Vec<usize> = (0..self.messages.len()).collect();
+        // Stable: keeps each player's messages in fan-out order.
+        order.sort_by_key(|&m| self.messages[m].conn);
+        let headers = self.headers.peek();
+        let mut parts: Vec<&[u8]> = Vec::new();
+        let mut start = 0;
+        while start < order.len() {
+            let conn_index = self.messages[order[start]].conn;
+            let end = start
+                + order[start..]
+                    .iter()
+                    .take_while(|&&m| self.messages[m].conn == conn_index)
+                    .count();
+            parts.clear();
+            for &m in &order[start..end] {
+                let msg = &self.messages[m];
+                parts.push(&headers[msg.header.clone()]);
+                parts.push(self.bodies[msg.body].1.peek());
+            }
+            start = end;
+            let conn = &mut connections[conn_index];
+            if conn.transport.is_none() {
+                // Dropped later in the same fan-out; already reaped.
+                continue;
+            }
+            if conn.send_staged_media(&parts).is_err() {
+                Server::stop_relay_player(conn);
+                closed.push(conn_index);
+            }
         }
-        self.chunk_size.map(|_| self.buf.peek())
     }
 }
 
@@ -1886,17 +1935,16 @@ impl Server {
     ) {
         let mut relay_sends = 0usize;
         let mut relay_processed = 0usize;
-        // Reused across frames: indices of this frame's receiving players,
-        // and its chunk body shared by every player (see SharedMediaBody).
+        // Reused across frames: indices of this frame's receiving players.
         let mut players: Vec<usize> = Vec::new();
-        let mut body = SharedMediaBody::default();
+        let mut staged = StagedRelayMedia::default();
         let now = Instant::now();
         let flow_limits = PlayerFlowLimits {
             soft: self.player_send_buffer_soft_limit,
             hard: self.player_send_buffer_hard_limit,
             congestion_timeout: self.player_congestion_timeout,
         };
-        for frame in &relay_frames {
+        for (frame_index, frame) in relay_frames.iter().enumerate() {
             players.clear();
             players.extend(
                 self.connections
@@ -1925,16 +1973,15 @@ impl Server {
             // congested player skipping this frame costs no socket work, and
             // charging it would defer frames for healthy players.
             let mut delivered = 0usize;
-            body.invalidate();
             for &i in &players {
                 let conn = &mut self.connections[i];
                 match Self::relay_frame_to_player(
-                    conn,
-                    frame,
+                    (i, conn),
+                    (frame_index, frame),
                     &delivery,
                     flow_limits,
                     now,
-                    &mut body,
+                    &mut staged,
                 ) {
                     PlayerOutcome::Skipped => {}
                     PlayerOutcome::Delivered => delivered += 1,
@@ -1948,6 +1995,7 @@ impl Server {
             relay_sends += delivered;
             relay_processed += 1;
         }
+        staged.send(&mut self.connections, closed);
         // Export only frames that completed this poll (not requeued). Injected
         // frames stay off the export path to avoid remote→local echo loops.
         if let Some(export) = self.relay_export.as_mut() {
@@ -2016,14 +2064,14 @@ impl Server {
 
     /// Apply flow control to one player for `frame` and queue it if allowed.
     fn relay_frame_to_player(
-        conn: &mut Conn,
-        frame: &RelayFrame,
+        (conn_index, conn): (usize, &mut Conn),
+        (frame_index, frame): (usize, &RelayFrame),
         delivery: &FrameDelivery,
         limits: PlayerFlowLimits,
         now: Instant,
-        body: &mut SharedMediaBody,
+        staged: &mut StagedRelayMedia,
     ) -> PlayerOutcome {
-        let backlog = conn.send_buffer.available();
+        let backlog = conn.send_buffer.available() + conn.staged_media_bytes();
         let delivery = delivery.for_player(conn);
         match Self::player_flow_decision(limits, conn, delivery, backlog, now) {
             PlayerFlow::Send => {}
@@ -2036,12 +2084,33 @@ impl Server {
                 return PlayerOutcome::Dropped;
             }
         }
-        let send_result = match body.for_chunk_size(frame, conn.media_chunk_size()) {
-            Some(encoded) => conn.send_encoded_media_body(
+        let send_result = match staged.body_for(frame_index, frame, conn.media_chunk_size()) {
+            // Staging goes on as long as the send buffer stays empty,
+            // which it does for the rest of the fan-out once this player
+            // has a staged message.
+            Some(body) if conn.can_stage_media() => {
+                let body_len = staged.bodies[body].1.available();
+                let header_start = staged.headers.available();
+                conn.stage_encoded_media_body(
+                    frame.frame_type,
+                    frame.timestamp,
+                    frame.payload.len(),
+                    body_len,
+                    &mut staged.headers,
+                )
+                .map(|header_len| {
+                    staged.messages.push(StagedRelayMessage {
+                        conn: conn_index,
+                        header: header_start..header_start + header_len,
+                        body,
+                    });
+                })
+            }
+            Some(body) => conn.send_encoded_media_body(
                 frame.frame_type,
                 frame.timestamp,
                 frame.payload.len(),
-                encoded,
+                staged.bodies[body].1.peek(),
             ),
             None => Err(ErrorCode::Internal),
         };

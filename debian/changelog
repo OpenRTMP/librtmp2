@@ -1,13 +1,13 @@
 librtmp2 (0.10.2-1) UNRELEASED; urgency=medium
 
-  * Relay sends frames straight to a player's socket when nothing is
-    queued ahead, buffering only the unsent remainder: less memory per
-    viewer and no end-of-poll delay.
+  * Relay sends each player its frames in one vectored write without
+    copying them into its send buffer, buffering only the unsent
+    remainder: much less memory per viewer.
   * New players get their cached init frames in the same write as
     NetStream.Play.Start.
   * bench_handshake: --play measures connect + play latency.
 
- -- OpenRTMP <info@openrtmp.org>  Sun, 27 Sep 2026 22:00:00 +0000
+ -- OpenRTMP <info@openrtmp.org>  Mon, 28 Sep 2026 00:30:00 +0000
 
 librtmp2 (0.10.1-1) UNRELEASED; urgency=medium
 

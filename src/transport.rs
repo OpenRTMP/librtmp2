@@ -24,6 +24,10 @@ use std::time::{Duration, Instant};
 #[cfg(feature = "tls")]
 const TLS_ACCEPT_TIMEOUT_SECS: u64 = 10;
 
+/// Most buffers [`Transport::try_send_vectored`] passes to one `sendmsg`
+/// (well under the kernel's `UIO_MAXIOV` of 1024).
+pub(crate) const MAX_SEND_PARTS: usize = 512;
+
 enum TransportInner {
     Plain(i32),
     #[cfg(feature = "tls")]
@@ -454,38 +458,33 @@ impl Transport {
         }
     }
 
-    /// Non-blocking send of `head` followed by `tail` in one system call on
-    /// a plaintext socket, so a caller can send a message whose parts live
-    /// in different buffers without first copying them together. Returns
-    /// the number of bytes written across both parts, or 0 when the socket
-    /// is not ready (see [`Self::try_send`] for `again`). TLS transports
-    /// always return `Ok(0)` without writing: the caller buffers instead.
-    pub(crate) fn try_send_pair(
-        &mut self,
-        head: &[u8],
-        tail: &[u8],
-        again: &mut i32,
-    ) -> Result<usize> {
+    /// Non-blocking send of `parts`, in order, in one system call on a
+    /// plaintext socket, so a caller can send data spread over several
+    /// buffers without first copying it together. Returns the number of
+    /// bytes written across all parts, or 0 when the socket is not ready
+    /// (see [`Self::try_send`] for `again`). At most [`MAX_SEND_PARTS`]
+    /// parts go out per call. TLS transports always return `Ok(0)` without
+    /// writing: the caller buffers instead.
+    pub(crate) fn try_send_vectored(&mut self, parts: &[&[u8]], again: &mut i32) -> Result<usize> {
         let fd = match &self.inner {
             TransportInner::Plain(fd) => *fd,
             #[cfg(feature = "tls")]
             TransportInner::Tls { .. } => return Ok(0),
         };
-        if head.is_empty() && tail.is_empty() {
+        let mut iov: Vec<libc::iovec> = parts
+            .iter()
+            .take(MAX_SEND_PARTS)
+            .filter(|part| !part.is_empty())
+            .map(|part| libc::iovec {
+                iov_base: part.as_ptr() as *mut libc::c_void,
+                iov_len: part.len(),
+            })
+            .collect();
+        if iov.is_empty() {
             return Ok(0);
         }
-        let mut iov = [
-            libc::iovec {
-                iov_base: head.as_ptr() as *mut libc::c_void,
-                iov_len: head.len(),
-            },
-            libc::iovec {
-                iov_base: tail.as_ptr() as *mut libc::c_void,
-                iov_len: tail.len(),
-            },
-        ];
-        // SAFETY: an all-zero msghdr is valid; the iovecs point into `head`
-        // and `tail`, which outlive the call, and are only read by sendmsg.
+        // SAFETY: an all-zero msghdr is valid; the iovecs point into
+        // `parts`, which outlive the call, and are only read by sendmsg.
         let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
         msg.msg_iov = iov.as_mut_ptr();
         msg.msg_iovlen = iov.len() as _;
