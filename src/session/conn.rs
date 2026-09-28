@@ -1390,7 +1390,6 @@ impl Conn {
                 Ok((1, payload_owned)) => {
                     if msg.is_complete {
                         processed += 1;
-                        let init_replay_was_pending = self.needs_init_frames;
                         if let Err(e) = self.handle_message(&msg, &payload_owned, messages_budget) {
                             return match e {
                                 ErrorCode::Auth => -8,
@@ -1402,8 +1401,11 @@ impl Conn {
                         // replay: leave both for the server to send in one
                         // write once it has appended the cached frames, so
                         // the player gets its first frame together with the
-                        // status instead of in a later read.
-                        if init_replay_was_pending || !self.needs_init_frames {
+                        // status instead of in a later read. This holds for
+                        // replies to messages pipelined after the play too;
+                        // the server flushes every connection at the end of
+                        // the poll either way.
+                        if !self.needs_init_frames {
                             let _ = self.flush();
                         }
                     }
