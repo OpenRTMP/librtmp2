@@ -1,12 +1,12 @@
 # Bug scan progress
 
-Last scanned: handshake (2026-09-19)
+Last scanned: chunk (2026-09-28)
 
 ## Modules
 
 - [x] core — Memory, logging, errors, buffer
 - [x] handshake — C0/C1/C2 ↔ S0/S1/S2
-- [ ] chunk — Chunk reader/writer/state
+- [x] chunk — Chunk reader/writer/state
 - [ ] message — Message reassembly, control, commands
 - [ ] amf — AMF0 + AMF3
 - [ ] flv — Audio/video/script tags
@@ -14,6 +14,23 @@ Last scanned: handshake (2026-09-19)
 - [ ] session — State machine, publish/play flows
 - [ ] server — Server listener
 - [ ] client — Outbound client
+
+## Findings (2026-09-28 chunk pass)
+
+- Reviewed all five files under `src/chunk/` (`reader.rs`, `writer.rs`,
+  `state.rs`, `media_out.rs`, `mod.rs`) and traced integration in
+  `session/conn.rs` (`read_messages`, `handle_control` SetChunkSize/Abort),
+  `client/mod.rs` (`drain_ready_messages`, SetChunkSize), `server/mod.rs`
+  (`max_reassembly_bytes`), and `message/control.rs` (`read_set_chunk_size`
+  bounds). Checked peek-before-consume invariants, fmt=0/1 restart vs fmt=2/3
+  inherited-header rules (including post-complete fmt=2/3 new messages),
+  extended-timestamp handling for fmt=3 continuations, per-connection
+  `max_msg_length` / `max_reassembly_bytes` / `max_active_csids` accounting
+  (`release_stream_reassembly`, `note_reassembly_growth`, `Buffer::take`),
+  partial-message `to_read` vs wire remainder, CSID registry caps and dormant
+  reactivation, `MediaHeaderTracker` fmt=1/2 delta selection (zero-length
+  guard), and writer rejection of stateless fmt≠0. No new critical or
+  high-severity issue found.
 
 ## Findings (2026-09-19 handshake pass)
 
