@@ -304,8 +304,11 @@ enum PlayerOutcome {
 /// copy of them.
 #[derive(Default)]
 struct StagedRelayMedia {
-    /// Encoded chunk bodies, by `(frame index in the batch, chunk size)`.
-    bodies: Vec<((usize, usize), crate::buffer::Buffer)>,
+    /// Encoded chunk bodies, by `(frame index in the batch, chunk size)`,
+    /// and whether a staged message refers to them.
+    bodies: Vec<((usize, usize), crate::buffer::Buffer, bool)>,
+    /// A body no staged message needed, kept for the next frame.
+    spare: Option<crate::buffer::Buffer>,
     /// First-chunk headers of every staged message, back to back.
     headers: crate::buffer::Buffer,
     /// Staged messages in fan-out order.
@@ -328,10 +331,10 @@ impl StagedRelayMedia {
         chunk_size: usize,
     ) -> Option<usize> {
         let key = (frame_index, chunk_size);
-        if let Some(i) = self.bodies.iter().rposition(|(k, _)| *k == key) {
+        if let Some(i) = self.bodies.iter().rposition(|(k, _, _)| *k == key) {
             return Some(i);
         }
-        let mut body = crate::buffer::Buffer::new();
+        let mut body = self.spare.take().unwrap_or_default();
         encode_media_body(
             &mut body,
             frame.frame_type,
@@ -340,8 +343,20 @@ impl StagedRelayMedia {
             chunk_size,
         )
         .ok()?;
-        self.bodies.push((key, body));
+        self.bodies.push((key, body, false));
         Some(self.bodies.len() - 1)
+    }
+
+    /// Drop the bodies at the end of the arena that only went to buffered
+    /// players (TLS, or output already queued), so a fan-out without
+    /// stageable players keeps one body around instead of one per frame.
+    fn release_unstaged_bodies(&mut self) {
+        while self.bodies.last().is_some_and(|(_, _, staged)| !staged) {
+            if let Some((_, mut body, _)) = self.bodies.pop() {
+                body.reset();
+                self.spare = Some(body);
+            }
+        }
     }
 
     /// Hand every player its staged messages. A player whose socket fails
@@ -1992,6 +2007,7 @@ impl Server {
                     PlayerOutcome::Dropped => closed.push(i),
                 }
             }
+            staged.release_unstaged_bodies();
             relay_sends += delivered;
             relay_processed += 1;
         }
@@ -2099,6 +2115,7 @@ impl Server {
                     &mut staged.headers,
                 )
                 .map(|header_len| {
+                    staged.bodies[body].2 = true;
                     staged.messages.push(StagedRelayMessage {
                         conn: conn_index,
                         header: header_start..header_start + header_len,
@@ -3353,6 +3370,39 @@ mod tests {
 
     fn relay_frame(frame_type: FrameType, payload: Vec<u8>) -> crate::session::conn::RelayFrame {
         relay_frame_for_publisher(1, "stream", frame_type, payload)
+    }
+
+    #[test]
+    fn staged_relay_media_keeps_only_bodies_with_staged_messages() {
+        let mut staged = StagedRelayMedia::default();
+        let frames: Vec<_> = (0..3)
+            .map(|i| relay_frame(FrameType::Video, vec![i as u8; 300]))
+            .collect();
+
+        // Buffered-only frames leave nothing behind but one spare body.
+        for (i, frame) in frames.iter().enumerate().take(2) {
+            staged.body_for(i, frame, 128).unwrap();
+            staged.release_unstaged_bodies();
+            assert!(staged.bodies.is_empty());
+        }
+        assert!(staged.spare.is_some());
+
+        // A body a staged message refers to stays, and reuses the spare.
+        let body = staged.body_for(2, &frames[2], 128).unwrap();
+        assert!(staged.spare.is_none());
+        staged.bodies[body].2 = true;
+        staged.release_unstaged_bodies();
+        assert_eq!(staged.bodies.len(), 1);
+        let mut expected = crate::buffer::Buffer::new();
+        encode_media_body(
+            &mut expected,
+            FrameType::Video,
+            frames[2].timestamp,
+            &frames[2].payload,
+            128,
+        )
+        .unwrap();
+        assert_eq!(staged.bodies[0].1.peek(), expected.peek());
     }
 
     fn flow_test_player(conn_id: u64) -> (Conn, std::os::unix::net::UnixStream) {
