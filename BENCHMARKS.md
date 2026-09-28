@@ -34,8 +34,8 @@ Criterion writes full HTML reports to `target/criterion/report/index.html`.
 - RAM: 15 GiB
 - Kernel: Linux 6.18 x86_64
 - rustc 1.95.0, `cargo build --release` (`tls` feature enabled, default)
-- librtmp2 0.10.1
-- Date: 2026-09-27
+- librtmp2 0.10.2
+- Date: 2026-09-28
 
 ## `protocol` benchmarks (`benches/protocol.rs`)
 
@@ -44,12 +44,12 @@ first iteration.
 
 | Benchmark | Time | Throughput |
 |---|---|---|
-| `chunk/write_read_roundtrip` (4096-byte payload, chunk size 128) | 3.91 µs | ~1000 MiB/s |
-| `amf0_build_connect` | 227 ns | — |
-| `flv/video_tag_h264` (parse) | 1.11 ns | — |
-| `flv/audio_tag_aac` (parse) | 1.13 ns | — |
-| `fourcc_to_video_codec_avc1` | 2.03 ns | — |
-| `server_read_c1` (handshake C1 parse + S0/S1/S2 build) | 1.11 µs | — |
+| `chunk/write_read_roundtrip` (4096-byte payload, chunk size 128) | 3.76 µs | ~1040 MiB/s |
+| `amf0_build_connect` | 229 ns | — |
+| `flv/video_tag_h264` (parse) | 1.10 ns | — |
+| `flv/audio_tag_aac` (parse) | 1.15 ns | — |
+| `fourcc_to_video_codec_avc1` | 2.21 ns | — |
+| `server_read_c1` (handshake C1 parse + S0/S1/S2 build) | 1.08 µs | — |
 
 ## `relay` benchmark (`benches/relay.rs`)
 
@@ -65,27 +65,28 @@ same idea against a real server.
 
 | Benchmark | Time | Throughput |
 |---|---|---|
-| `relay/publish_to_player/100` (100 frames) | 98.5 ms | ~1015 elem/s |
-| `relay/publish_to_player/500` (500 frames) | 99.3 ms | ~5035 elem/s |
+| `relay/publish_to_player/100` (100 frames) | 99.0 ms | ~1010 elem/s |
+| `relay/publish_to_player/500` (500 frames) | 101.0 ms | ~4950 elem/s |
 
 Both sizes land at roughly the same wall-clock time regardless of frame
 count, which is the harness's own fixed polling-interval overhead
 dominating (see above), not a per-frame cost — the throughput column is
 the number worth comparing across frame counts here, not the time column.
 
-Because of that harness overhead this benchmark does not show the 0.10.0
-relay changes (frames chunked once per fan-out, compact chunk headers,
-4096-byte client publish chunks, per-player flow control). For end-to-end
-numbers see the cross-server comparison in `librtmp2-server`'s
-`BENCHMARKS.md`: with `librtmp2-server` 0.6.0 built on librtmp2 0.10.1,
-100 concurrent viewers joined in 4.4 ms on average (p95 7.7 ms), ahead of MediaMTX
-(5.5 / 9.8 ms) and LiveForge (16.7 / 32.3 ms), with every viewer
-receiving the full frame rate; SRS 8.0 and nginx-rtmp took 72 and 90 ms
-on average for the same join.
-Players connect faster too (connect + play in 2.0 ms on average, against
-3.0 ms for MediaMTX and LiveForge), and 1000 concurrent viewers of one
-stream all received the full frame rate while the server used 64% of one
-core and 59 MiB of memory.
+Because of that harness overhead this benchmark does not show the relay
+changes since 0.10.0 (frames chunked once per fan-out and sent to every
+player without a per-player copy, compact chunk headers, 4096-byte client
+publish chunks, per-player flow control). For end-to-end numbers see the
+cross-server comparison in `librtmp2-server`'s `BENCHMARKS.md`: with
+`librtmp2-server` 0.6.0 built on librtmp2 0.10.2, 100 concurrent viewers
+joined in 2.9 ms on average (p95 6.5 ms), ahead of MediaMTX (5.5 /
+10.9 ms) and LiveForge (13.0 / 26.2 ms), with every viewer receiving the
+full frame rate; SRS 8.0 and nginx-rtmp took 73 and 90 ms on average for
+the same join.
+Players connect faster too (connect + play in 1.95 ms on average, against
+3.0 ms for LiveForge and 4.6 ms for MediaMTX), and 1000 concurrent viewers
+of one stream all received the full frame rate while the server used 60%
+of one core and 32 MiB of memory.
 That is a whole-system result: it includes that server's own changes
 (multi-core sharding, auth wake-ups, publishes and plays answered from an
 in-memory key cache) and does not isolate the effect of
