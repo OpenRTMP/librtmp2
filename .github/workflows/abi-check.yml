@@ -26,7 +26,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       - name: Install cargo-semver-checks
-        uses: taiki-e/install-action@7f9bb981e91fc46d9751247d25c368bf4717848b # cargo-semver-checks
+        uses: taiki-e/install-action@dd808d7cda80e5ddaddbd71d094f2c5969709687 # cargo-semver-checks
 
       - name: Determine baseline ref
         id: baseline
