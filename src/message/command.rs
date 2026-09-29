@@ -396,12 +396,22 @@ pub fn read_connect(buf: &mut Buffer, info: &mut ConnectInfo) -> Result<()> {
 /// Read a createStream command. `transaction_id` is set as soon as the
 /// transaction id itself has been parsed, so a caller can echo it back when a
 /// later argument turns out to be malformed.
-pub fn read_create_stream(buf: &mut Buffer, transaction_id: &mut Option<f64>) -> Result<()> {
+pub(crate) fn read_create_stream_partial(
+    buf: &mut Buffer,
+    transaction_id: &mut Option<f64>,
+) -> Result<()> {
     let mut name = [0u8; 64];
     amf0::read_string(buf, &mut name)?;
     *transaction_id = Some(read_number_value(buf)?);
     amf0::skip_value(buf)?;
     Ok(())
+}
+
+/// Read a createStream command.
+pub fn read_create_stream(buf: &mut Buffer) -> Result<f64> {
+    let mut transaction_id = None;
+    read_create_stream_partial(buf, &mut transaction_id)?;
+    Ok(transaction_id.unwrap_or_default())
 }
 
 /// Read a publish command.
