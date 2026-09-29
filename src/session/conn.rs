@@ -2248,7 +2248,17 @@ impl Conn {
                         "connect required before createStream",
                     );
                 }
-                let txn = command::read_create_stream(&mut buf)?;
+                let txn = match command::read_create_stream(&mut buf) {
+                    Ok(txn) => txn,
+                    Err(_) => {
+                        return self.send_onstatus(
+                            0,
+                            "error",
+                            "NetStream.Failed",
+                            "Invalid createStream",
+                        );
+                    }
+                };
                 // Cap *concurrent* streams, not the lifetime id counter: a
                 // fresh createStream replaces current_stream (net zero), so a
                 // long-lived connection that repeatedly creates streams must
@@ -2295,7 +2305,14 @@ impl Conn {
             "publish" => {
                 let mut stream_name = [0u8; 256];
                 let mut publish_type = [0u8; 64];
-                command::read_publish(&mut buf, &mut stream_name, &mut publish_type)?;
+                if command::read_publish(&mut buf, &mut stream_name, &mut publish_type).is_err() {
+                    return self.send_onstatus(
+                        0,
+                        "error",
+                        "NetStream.Publish.BadName",
+                        "Invalid stream name",
+                    );
+                }
                 let name_str = match command::decode_route_amf_string(&stream_name) {
                     Ok(name) => name,
                     Err(_) => {
@@ -2359,7 +2376,14 @@ impl Conn {
             }
             "play" => {
                 let mut stream_name = [0u8; 256];
-                command::read_play(&mut buf, &mut stream_name)?;
+                if command::read_play(&mut buf, &mut stream_name).is_err() {
+                    return self.send_onstatus(
+                        0,
+                        "error",
+                        "NetStream.Play.Failed",
+                        "Invalid stream name",
+                    );
+                }
                 let name_str = match command::decode_route_amf_string(&stream_name) {
                     Ok(name) => name,
                     Err(_) => {
