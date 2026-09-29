@@ -417,7 +417,11 @@ typedef struct FourCc {
 } FourCc;
 
 /**
- * A parsed frame delivered via the `on_frame` callback.
+ * A parsed frame.
+ *
+ * Input to the send path (`lrtmp2_client_send_frame`). The Rust client and
+ * server deliver parsed frames through an `on_frame` callback, which the
+ * C ABI does not yet expose.
  */
 typedef struct lrtmp2_frame_t {
   enum FrameType frame_type;

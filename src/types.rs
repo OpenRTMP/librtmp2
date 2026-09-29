@@ -210,7 +210,11 @@ pub struct FourCc {
 
 /* ── Parsed frame ── */
 
-/// A parsed frame delivered via the `on_frame` callback.
+/// A parsed frame.
+///
+/// Input to the send path (`lrtmp2_client_send_frame`). The Rust client and
+/// server deliver parsed frames through an `on_frame` callback, which the
+/// C ABI does not yet expose.
 #[derive(Debug, Clone)]
 #[repr(C)]
 pub struct Frame {
