@@ -1994,9 +1994,11 @@ impl Conn {
         // by this connection must not refresh the timer.
         if !was_publishing || renaming_route {
             self.session_setup_started = Instant::now();
-            // Injected activity from a prior publish/idle epoch must not
-            // exempt a new empty publish from the media deadline.
+            // Injected and socket-received activity from a prior publish/idle
+            // epoch must not exempt a new empty publish from the media
+            // deadline.
             self.injected_media_bytes = 0;
+            self.media_bytes_received = 0;
         }
         if renaming_route && !claim_queued_prev_eviction {
             if self
