@@ -2268,7 +2268,7 @@ impl Conn {
                     );
                 }
                 let mut txn = None;
-                let parsed = command::read_create_stream(&mut buf, &mut txn);
+                let parsed = command::read_create_stream_partial(&mut buf, &mut txn);
                 let Some(txn) = txn else {
                     // No transaction id to match an `_error` against.
                     return self.send_onstatus(
