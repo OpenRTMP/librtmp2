@@ -736,6 +736,12 @@ impl Conn {
         }
         let relay_metadata = is_on_metadata_payload(payload)
             && self.relay_enabled
+            // Same invariant as `is_active_publisher_stream`: while a rename /
+            // republish decision is Pending the connection still holds the old
+            // route, and every audio/video frame on it is dropped. Relaying
+            // `onMetaData` to the old route's players during that window would
+            // keep re-announcing a stream whose media has already stopped.
+            && !self.has_pending_authorization()
             && self
                 .current_stream
                 .as_ref()
@@ -7144,6 +7150,50 @@ mod tests {
         conn.handle_media_frame(1, FrameType::Video, 0, &[0x17, 0, 0, 0, 0], None)
             .unwrap();
         assert_eq!(conn.pending_relay.len(), 1);
+    }
+
+    #[test]
+    fn metadata_stops_relaying_while_a_republish_is_pending() {
+        fn on_metadata() -> Vec<u8> {
+            let mut buf = crate::buffer::Buffer::new();
+            crate::amf::amf0::write_string(&mut buf, "onMetaData").unwrap();
+            buf.as_slice().to_vec()
+        }
+
+        let mut conn = app_conn();
+        conn.on_publish_auth_cb = Some(|_, _, _| AuthorizationResult::Allow);
+        conn.handle_command(publish_buf("first").as_slice())
+            .unwrap();
+
+        let payload = on_metadata();
+        conn.handle_publisher_data_message(1, 0, &payload).unwrap();
+        assert_eq!(
+            conn.pending_relay.len(),
+            1,
+            "baseline: onMetaData relays on the authorized route"
+        );
+
+        conn.on_publish_auth_cb = Some(|_, _, _| AuthorizationResult::Pending);
+        conn.handle_command(publish_buf("second").as_slice())
+            .unwrap();
+        assert!(conn.has_pending_authorization());
+
+        let before = conn.pending_relay.len();
+        conn.handle_publisher_data_message(1, 0, &payload).unwrap();
+        assert_eq!(
+            conn.pending_relay.len(),
+            before,
+            "onMetaData must not relay under the old route while a rename is pending -- \
+             every audio/video frame on that route is already dropped"
+        );
+
+        conn.complete_publish_authorization(true).unwrap();
+        conn.handle_publisher_data_message(1, 0, &payload).unwrap();
+        assert_eq!(
+            conn.pending_relay.len(),
+            before + 1,
+            "relaying resumes once the new decision resolves"
+        );
     }
 
     #[test]
