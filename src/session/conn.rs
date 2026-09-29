@@ -446,6 +446,16 @@ impl Conn {
         self.media_bytes_received > self.media_bytes_at_epoch_start
     }
 
+    /// True when no socket media and no trusted inject has arrived since the
+    /// current publish/idle epoch armed, and [`PUBLISH_MEDIA_REQUIRED_TIMEOUT`]
+    /// has since elapsed: the publish-media squat timer applies, rather than
+    /// the longer setup timeout.
+    fn publish_media_squat_expired(&self) -> bool {
+        !self.received_media_in_current_epoch()
+            && self.injected_media_bytes == 0
+            && self.session_setup_started.elapsed() >= PUBLISH_MEDIA_REQUIRED_TIMEOUT
+    }
+
     /// True when an inbound peer has held a connection slot without being an
     /// active publisher or player for longer than
     /// [`RTMP_SESSION_SETUP_TIMEOUT`]. Covers incomplete handshakes, post-
@@ -474,10 +484,7 @@ impl Conn {
             // inject path). Sustain while media has flowed; otherwise apply the
             // publish-media squat timer instead of the longer setup timeout.
             if self.claimed_publish_route.is_some() {
-                if self.injected_media_bytes > 0 || self.received_media_in_current_epoch() {
-                    return false;
-                }
-                return self.session_setup_started.elapsed() >= PUBLISH_MEDIA_REQUIRED_TIMEOUT;
+                return self.publish_media_squat_expired();
             }
             return self.session_setup_started.elapsed() >= RTMP_SESSION_SETUP_TIMEOUT;
         };
@@ -490,18 +497,12 @@ impl Conn {
             // otherwise squat the route indefinitely by keeping TCP alive.
             // Trusted injects count toward liveness without polluting socket
             // receive telemetry (`media_bytes_received`).
-            if !self.received_media_in_current_epoch() && self.injected_media_bytes == 0 {
-                return self.session_setup_started.elapsed() >= PUBLISH_MEDIA_REQUIRED_TIMEOUT;
-            }
-            return false;
+            return self.publish_media_squat_expired();
         }
         // Inject-only squatters (no publish role) must not hold a route
         // longer than a real publisher would without sending media.
-        if self.claimed_publish_route.is_some()
-            && !self.received_media_in_current_epoch()
-            && self.injected_media_bytes == 0
-        {
-            return self.session_setup_started.elapsed() >= PUBLISH_MEDIA_REQUIRED_TIMEOUT;
+        if self.claimed_publish_route.is_some() && self.publish_media_squat_expired() {
+            return true;
         }
         if self.session_setup_started.elapsed() < RTMP_SESSION_SETUP_TIMEOUT {
             return false;
@@ -2332,38 +2333,16 @@ impl Conn {
                 }
             }
             "publish" => {
-                let mut stream_name = [0u8; 256];
                 let mut publish_type = [0u8; 64];
-                if command::read_publish(&mut buf, &mut stream_name, &mut publish_type).is_err() {
-                    return self.send_invalid_stream_name("NetStream.Publish.BadName");
-                }
-                let name_str = match command::decode_route_amf_string(&stream_name) {
-                    Ok(name) => name,
-                    Err(_) => {
-                        return self.send_onstatus(
-                            0,
-                            "error",
-                            "NetStream.Publish.BadName",
-                            "Invalid stream name",
-                        );
-                    }
+                let Some(name_str) = self.read_stream_name(
+                    &mut buf,
+                    Some(publish_type.as_mut()),
+                    "NetStream.Publish.BadName",
+                    "NetStream.Publish.BadConnection",
+                )?
+                else {
+                    return Ok(());
                 };
-                if name_str.is_empty() {
-                    return self.send_onstatus(
-                        0,
-                        "error",
-                        "NetStream.Publish.BadName",
-                        "Empty stream name",
-                    );
-                }
-                if self.current_stream.is_none() {
-                    return self.send_onstatus(
-                        0,
-                        "error",
-                        "NetStream.Publish.BadConnection",
-                        "No stream created",
-                    );
-                }
                 // A decision is already in flight for this connection -- never
                 // overwrite `pending_publish_auth` with a second request, or
                 // the completion that eventually arrives (looked up purely by
@@ -2399,37 +2378,15 @@ impl Conn {
                 self.complete_publish_authorized(name_str)?;
             }
             "play" => {
-                let mut stream_name = [0u8; 256];
-                if command::read_play(&mut buf, &mut stream_name).is_err() {
-                    return self.send_invalid_stream_name("NetStream.Play.Failed");
-                }
-                let name_str = match command::decode_route_amf_string(&stream_name) {
-                    Ok(name) => name,
-                    Err(_) => {
-                        return self.send_onstatus(
-                            0,
-                            "error",
-                            "NetStream.Play.Failed",
-                            "Invalid stream name",
-                        );
-                    }
+                let Some(name_str) = self.read_stream_name(
+                    &mut buf,
+                    None,
+                    "NetStream.Play.Failed",
+                    "NetStream.Play.BadConnection",
+                )?
+                else {
+                    return Ok(());
                 };
-                if name_str.is_empty() {
-                    return self.send_onstatus(
-                        0,
-                        "error",
-                        "NetStream.Play.Failed",
-                        "Empty stream name",
-                    );
-                }
-                if self.current_stream.is_none() {
-                    return self.send_onstatus(
-                        0,
-                        "error",
-                        "NetStream.Play.BadConnection",
-                        "No stream created",
-                    );
-                }
                 // See the matching guard in the "publish" arm above: never let
                 // a second request overwrite an in-flight `pending_play_auth`.
                 if self.pending_play_auth.is_some() {
@@ -2703,11 +2660,49 @@ impl Conn {
         self.send_command(stream_id, amf_buf.as_slice())
     }
 
-    /// Answer a `publish`/`play` request whose stream name the command
-    /// decoder rejected. Both arms report on stream 0 at level `error` and
-    /// differ only in the `NetStream` code the client matches on.
-    fn send_invalid_stream_name(&mut self, code: &str) -> Result<()> {
-        self.send_onstatus(0, "error", code, "Invalid stream name")
+    /// Answer a `publish`/`play` request this connection cannot honor and
+    /// report no stream name for it. Both arms report on stream 0 at level
+    /// `error` and differ only in the `NetStream` code the client matches on;
+    /// `desc` names the fault.
+    fn refuse_stream_request(&mut self, code: &str, desc: &str) -> Result<Option<String>> {
+        self.send_onstatus(0, "error", code, desc)?;
+        Ok(None)
+    }
+
+    /// Read the stream name a `publish`/`play` body carried and check that a
+    /// stream exists to put it on. A name the command or its AMF string
+    /// decoder rejected, an empty name, and a missing stream are all answered
+    /// with the calling arm's `NetStream` codes -- the client sees the same
+    /// onStatus it saw when each arm spelled this out. `Ok(None)` means the
+    /// client was already answered, so the caller must stop handling the
+    /// command. `publish_type` is `Some` for a `publish` body, which carries a
+    /// publish-type argument after the name; a `play` body has none.
+    fn read_stream_name(
+        &mut self,
+        buf: &mut Buffer,
+        publish_type: Option<&mut [u8]>,
+        code: &str,
+        no_stream_code: &str,
+    ) -> Result<Option<String>> {
+        let mut stream_name = [0u8; 256];
+        let read = match publish_type {
+            Some(publish_type) => command::read_publish(buf, &mut stream_name, publish_type),
+            None => command::read_play(buf, &mut stream_name),
+        };
+        if read.is_err() {
+            return self.refuse_stream_request(code, "Invalid stream name");
+        }
+        let name = match command::decode_route_amf_string(&stream_name) {
+            Ok(name) => name,
+            Err(_) => return self.refuse_stream_request(code, "Invalid stream name"),
+        };
+        if name.is_empty() {
+            return self.refuse_stream_request(code, "Empty stream name");
+        }
+        if self.current_stream.is_none() {
+            return self.refuse_stream_request(no_stream_code, "No stream created");
+        }
+        Ok(Some(name))
     }
 
     /// Ask the client to reconnect, per the E-RTMP v2 reconnect mechanism:
