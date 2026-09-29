@@ -190,6 +190,11 @@ pub struct Conn {
     /// injects toward publisher liveness and deferred-relay drain so route
     /// squatters still time out and metadata is not stuck while relay is deferred.
     pub injected_media_bytes: u64,
+    /// Snapshot of `media_bytes_received` taken when the current publish/idle
+    /// epoch armed its media deadline. That counter is lifetime socket
+    /// telemetry, so the deadline compares against this baseline (mirroring
+    /// `pause_grace_media_bytes_sent`) instead of expecting it to be cleared.
+    media_bytes_at_epoch_start: u64,
     /// Audio/video payload bytes sent to this peer.
     pub media_bytes_sent: u64,
     /// Snapshot of `media_bytes_sent` consumed by the last pause-grace reset.
@@ -367,6 +372,7 @@ impl Conn {
             bytes_at_last_ack: 0,
             media_bytes_received: 0,
             injected_media_bytes: 0,
+            media_bytes_at_epoch_start: 0,
             media_bytes_sent: 0,
             pause_grace_media_bytes_sent: 0,
             client_fd: -1,
@@ -432,6 +438,14 @@ impl Conn {
         }
     }
 
+    /// True when socket media arrived since the current publish/idle epoch
+    /// started. `media_bytes_received` is lifetime telemetry (embedders derive
+    /// per-session totals from it), so the media deadline asks "since the epoch
+    /// armed" rather than testing the counter against zero.
+    fn received_media_in_current_epoch(&self) -> bool {
+        self.media_bytes_received > self.media_bytes_at_epoch_start
+    }
+
     /// True when an inbound peer has held a connection slot without being an
     /// active publisher or player for longer than
     /// [`RTMP_SESSION_SETUP_TIMEOUT`]. Covers incomplete handshakes, post-
@@ -460,7 +474,7 @@ impl Conn {
             // inject path). Sustain while media has flowed; otherwise apply the
             // publish-media squat timer instead of the longer setup timeout.
             if self.claimed_publish_route.is_some() {
-                if self.injected_media_bytes > 0 || self.media_bytes_received > 0 {
+                if self.injected_media_bytes > 0 || self.received_media_in_current_epoch() {
                     return false;
                 }
                 return self.session_setup_started.elapsed() >= PUBLISH_MEDIA_REQUIRED_TIMEOUT;
@@ -476,7 +490,7 @@ impl Conn {
             // otherwise squat the route indefinitely by keeping TCP alive.
             // Trusted injects count toward liveness without polluting socket
             // receive telemetry (`media_bytes_received`).
-            if self.media_bytes_received == 0 && self.injected_media_bytes == 0 {
+            if !self.received_media_in_current_epoch() && self.injected_media_bytes == 0 {
                 return self.session_setup_started.elapsed() >= PUBLISH_MEDIA_REQUIRED_TIMEOUT;
             }
             return false;
@@ -484,7 +498,7 @@ impl Conn {
         // Inject-only squatters (no publish role) must not hold a route
         // longer than a real publisher would without sending media.
         if self.claimed_publish_route.is_some()
-            && self.media_bytes_received == 0
+            && !self.received_media_in_current_epoch()
             && self.injected_media_bytes == 0
         {
             return self.session_setup_started.elapsed() >= PUBLISH_MEDIA_REQUIRED_TIMEOUT;
@@ -1989,17 +2003,6 @@ impl Conn {
             .pending_cache_evictions
             .get(eviction_len_before_claim..)
             .is_some_and(|queued| queued.iter().any(|(_, route)| route == &prev_route_key));
-        // Start a publish-media deadline only for a genuinely new publish
-        // session or route. Repeating `publish` for the route already owned
-        // by this connection must not refresh the timer.
-        if !was_publishing || renaming_route {
-            self.session_setup_started = Instant::now();
-            // Injected and socket-received activity from a prior publish/idle
-            // epoch must not exempt a new empty publish from the media
-            // deadline.
-            self.injected_media_bytes = 0;
-            self.media_bytes_received = 0;
-        }
         if renaming_route && !claim_queued_prev_eviction {
             if self
                 .push_pending_cache_eviction(self.app.clone(), prev_route_key.clone())
@@ -2017,6 +2020,22 @@ impl Conn {
                     "Publish not authorized",
                 );
             }
+        }
+        // Start a publish-media deadline only for a genuinely new publish
+        // session or route. Repeating `publish` for the route already owned
+        // by this connection must not refresh the timer. Armed after the
+        // eviction enqueue above, which can still reject the rename: that
+        // rollback leaves the previous stream publishing, so resetting the
+        // deadline first would hand the still-live publisher a fresh media
+        // clock it never asked for.
+        if !was_publishing || renaming_route {
+            self.session_setup_started = Instant::now();
+            // Injected and socket-received activity from a prior publish/idle
+            // epoch must not exempt a new empty publish from the media
+            // deadline. `media_bytes_received` stays cumulative lifetime
+            // telemetry, so rebase the epoch on a snapshot of it.
+            self.injected_media_bytes = 0;
+            self.media_bytes_at_epoch_start = self.media_bytes_received;
         }
         if self.defer_media_relay {
             // Reset only when leaving a prior play role or switching the
