@@ -432,6 +432,28 @@ pub fn read_play(buf: &mut Buffer, stream_name: &mut [u8]) -> Result<()> {
     Ok(())
 }
 
+/// Publish vs play when decoding the route stream name from a command body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RouteCommand {
+    Publish,
+    Play,
+}
+
+/// Read a publish or play command and return the decoded UTF-8 stream name.
+pub fn read_route_stream_name(buf: &mut Buffer, command: RouteCommand) -> Result<String> {
+    let mut stream_name = [0u8; 256];
+    match command {
+        RouteCommand::Publish => {
+            let mut publish_type = [0u8; 64];
+            read_publish(buf, &mut stream_name, &mut publish_type)?;
+        }
+        RouteCommand::Play => {
+            read_play(buf, &mut stream_name)?;
+        }
+    }
+    decode_route_amf_string(&stream_name)
+}
+
 /// Read a `releaseStream` command. Returns the target stream name.
 pub fn read_release_stream(buf: &mut Buffer, stream_name: &mut [u8]) -> Result<()> {
     let mut name = [0u8; 64];
@@ -819,6 +841,23 @@ mod tests {
         let mut buf = [0u8; 16];
         buf[..5].copy_from_slice(b"live\0");
         assert_eq!(decode_route_amf_string(&buf).unwrap(), "live");
+    }
+
+    #[test]
+    fn read_route_stream_name_decodes_publish_and_play() {
+        let mut publish_buf = Buffer::with_capacity(128);
+        build_publish(&mut publish_buf, "cam1", "live").unwrap();
+        assert_eq!(
+            read_route_stream_name(&mut publish_buf, RouteCommand::Publish).unwrap(),
+            "cam1"
+        );
+
+        let mut play_buf = Buffer::with_capacity(128);
+        build_play(&mut play_buf, "cam1").unwrap();
+        assert_eq!(
+            read_route_stream_name(&mut play_buf, RouteCommand::Play).unwrap(),
+            "cam1"
+        );
     }
 
     #[test]

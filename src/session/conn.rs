@@ -446,6 +446,26 @@ impl Conn {
         self.media_bytes_received > self.media_bytes_at_epoch_start
     }
 
+    /// Parse a publish/play route name or emit the matching `onStatus` error.
+    fn load_route_stream_name(
+        &mut self,
+        buf: &mut Buffer,
+        command: command::RouteCommand,
+        bad_name_code: &'static str,
+    ) -> Result<Option<String>> {
+        match command::read_route_stream_name(buf, command) {
+            Ok(name) if name.is_empty() => {
+                self.send_onstatus(0, "error", bad_name_code, "Empty stream name")?;
+                Ok(None)
+            }
+            Ok(name) => Ok(Some(name)),
+            Err(_) => {
+                self.send_onstatus(0, "error", bad_name_code, "Invalid stream name")?;
+                Ok(None)
+            }
+        }
+    }
+
     /// True when an inbound peer has held a connection slot without being an
     /// active publisher or player for longer than
     /// [`RTMP_SESSION_SETUP_TIMEOUT`]. Covers incomplete handshakes, post-
@@ -2322,35 +2342,14 @@ impl Conn {
                 }
             }
             "publish" => {
-                let mut stream_name = [0u8; 256];
-                let mut publish_type = [0u8; 64];
-                if command::read_publish(&mut buf, &mut stream_name, &mut publish_type).is_err() {
-                    return self.send_onstatus(
-                        0,
-                        "error",
-                        "NetStream.Publish.BadName",
-                        "Invalid stream name",
-                    );
-                }
-                let name_str = match command::decode_route_amf_string(&stream_name) {
-                    Ok(name) => name,
-                    Err(_) => {
-                        return self.send_onstatus(
-                            0,
-                            "error",
-                            "NetStream.Publish.BadName",
-                            "Invalid stream name",
-                        );
-                    }
+                let name_str = match self.load_route_stream_name(
+                    &mut buf,
+                    command::RouteCommand::Publish,
+                    "NetStream.Publish.BadName",
+                )? {
+                    Some(name) => name,
+                    None => return Ok(()),
                 };
-                if name_str.is_empty() {
-                    return self.send_onstatus(
-                        0,
-                        "error",
-                        "NetStream.Publish.BadName",
-                        "Empty stream name",
-                    );
-                }
                 if self.current_stream.is_none() {
                     return self.send_onstatus(
                         0,
@@ -2394,34 +2393,14 @@ impl Conn {
                 self.complete_publish_authorized(name_str)?;
             }
             "play" => {
-                let mut stream_name = [0u8; 256];
-                if command::read_play(&mut buf, &mut stream_name).is_err() {
-                    return self.send_onstatus(
-                        0,
-                        "error",
-                        "NetStream.Play.Failed",
-                        "Invalid stream name",
-                    );
-                }
-                let name_str = match command::decode_route_amf_string(&stream_name) {
-                    Ok(name) => name,
-                    Err(_) => {
-                        return self.send_onstatus(
-                            0,
-                            "error",
-                            "NetStream.Play.Failed",
-                            "Invalid stream name",
-                        );
-                    }
+                let name_str = match self.load_route_stream_name(
+                    &mut buf,
+                    command::RouteCommand::Play,
+                    "NetStream.Play.Failed",
+                )? {
+                    Some(name) => name,
+                    None => return Ok(()),
                 };
-                if name_str.is_empty() {
-                    return self.send_onstatus(
-                        0,
-                        "error",
-                        "NetStream.Play.Failed",
-                        "Empty stream name",
-                    );
-                }
                 if self.current_stream.is_none() {
                     return self.send_onstatus(
                         0,
