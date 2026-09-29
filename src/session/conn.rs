@@ -2335,12 +2335,7 @@ impl Conn {
                 let mut stream_name = [0u8; 256];
                 let mut publish_type = [0u8; 64];
                 if command::read_publish(&mut buf, &mut stream_name, &mut publish_type).is_err() {
-                    return self.send_onstatus(
-                        0,
-                        "error",
-                        "NetStream.Publish.BadName",
-                        "Invalid stream name",
-                    );
+                    return self.send_invalid_stream_name("NetStream.Publish.BadName");
                 }
                 let name_str = match command::decode_route_amf_string(&stream_name) {
                     Ok(name) => name,
@@ -2406,12 +2401,7 @@ impl Conn {
             "play" => {
                 let mut stream_name = [0u8; 256];
                 if command::read_play(&mut buf, &mut stream_name).is_err() {
-                    return self.send_onstatus(
-                        0,
-                        "error",
-                        "NetStream.Play.Failed",
-                        "Invalid stream name",
-                    );
+                    return self.send_invalid_stream_name("NetStream.Play.Failed");
                 }
                 let name_str = match command::decode_route_amf_string(&stream_name) {
                     Ok(name) => name,
@@ -2711,6 +2701,13 @@ impl Conn {
         let mut amf_buf = Buffer::with_capacity(512);
         command::build_onstatus(&mut amf_buf, level, code, description)?;
         self.send_command(stream_id, amf_buf.as_slice())
+    }
+
+    /// Answer a `publish`/`play` request whose stream name the command
+    /// decoder rejected. Both arms report on stream 0 at level `error` and
+    /// differ only in the `NetStream` code the client matches on.
+    fn send_invalid_stream_name(&mut self, code: &str) -> Result<()> {
+        self.send_onstatus(0, "error", code, "Invalid stream name")
     }
 
     /// Ask the client to reconnect, per the E-RTMP v2 reconnect mechanism:
