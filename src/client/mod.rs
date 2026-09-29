@@ -1412,11 +1412,11 @@ impl Client {
         deadline: Option<Instant>,
     ) -> Result<(ChunkMessage, Vec<u8>)> {
         loop {
-            if let Some(deadline) = deadline {
-                if Instant::now() >= deadline {
-                    return Err(ErrorCode::Timeout);
-                }
-            }
+            // Parse whatever a prior iteration already staged in recv_buffer
+            // before consulting the deadline: a reply that arrived in full
+            // before the budget ran out must be delivered rather than
+            // abandoned in favour of Timeout. Mirrors poll()'s
+            // drain-staged-first ordering.
             let mut msg = ChunkMessage::default();
             match chunk_read_owned(&mut self.recv_buffer, &mut self.chunk_reg, &mut msg) {
                 Ok((1, payload)) if msg.is_complete => {
@@ -1428,6 +1428,12 @@ impl Client {
                 }
                 Ok(_) => {}
                 Err(_) => return Err(ErrorCode::Chunk),
+            }
+
+            if let Some(deadline) = deadline {
+                if Instant::now() >= deadline {
+                    return Err(ErrorCode::Timeout);
+                }
             }
 
             if *recv_budget == 0 {
