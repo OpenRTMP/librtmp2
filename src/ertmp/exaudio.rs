@@ -20,7 +20,14 @@ pub fn exaudio_parse(data: &[u8], hdr: &mut AudioHeader) -> Result<()> {
     // (G.711U), 10 (AAC), 11 (Speex) and 14 (MP3-8k) never use nibble 9, so
     // every genuine enhanced tag (first byte 0x9X) is accepted even when its
     // FourCC is not (yet) present in the registry.
-    let is_ex = (b0 >> 4) & 0x0F == 9 && data.len() >= 5;
+    let is_ex = (b0 >> 4) & 0x0F == 9;
+    // A truncated enhanced tag is rejected rather than falling through to the
+    // legacy layout, where nibble 9 is unlisted and would be reported as AAC.
+    // `exvideo_parse` fails the same way; here the fallback would let
+    // `classify_audio` cache the junk bytes as a real AAC sequence header.
+    if is_ex && data.len() < 5 {
+        return Err(ErrorCode::Io);
+    }
 
     hdr.is_ex_header = if is_ex { 1 } else { 0 };
 
@@ -150,6 +157,22 @@ mod tests {
         assert!(exaudio_parse(&[], &mut hdr).is_err());
         assert_eq!(hdr.aac_packet_type, 0);
         assert_eq!(hdr.is_ex_header, 0);
+    }
+
+    #[test]
+    fn parse_rejects_truncated_enhanced_header() {
+        // Nibble 9 with no FourCC must not fall through to the legacy layout,
+        // where the unlisted nibble reports AAC and `classify_audio` would then
+        // cache the junk bytes as a real AAC sequence header.
+        for len in 1..5usize {
+            let mut data = [0x90u8; 4];
+            let mut hdr = AudioHeader::default();
+            assert!(
+                exaudio_parse(&data[..len], &mut hdr).is_err(),
+                "a {len}-byte ExHeader tag must be rejected"
+            );
+            assert_eq!(hdr.is_ex_header, 0);
+        }
     }
 
     #[test]
