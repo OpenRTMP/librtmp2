@@ -71,24 +71,7 @@ fn deliver_audio_frame(conn: &mut dyn Connection, timestamp: u32, payload: &[u8]
         track_id: u8::MAX,
     };
 
-    if !payload.is_empty() {
-        let tag = payload[0];
-        frame.audio_codec = match (tag >> 4) & 0x0F {
-            0 => AudioCodec::Pcm,
-            1 => AudioCodec::Adpcm,
-            2 => AudioCodec::Mp3,
-            3 => AudioCodec::PcmLe,
-            4 => AudioCodec::Nelly16k,
-            5 => AudioCodec::Nelly8k,
-            6 => AudioCodec::Nelly,
-            7 => AudioCodec::G711A,
-            8 => AudioCodec::G711U,
-            10 => AudioCodec::Aac,
-            11 => AudioCodec::Speex,
-            14 => AudioCodec::Opus,
-            _ => AudioCodec::Aac,
-        };
-    }
+    crate::media::populate_av_frame(&mut frame, payload);
 
     if let Some(cb) = conn.get_frame_callback() {
         cb(&frame);
@@ -115,22 +98,7 @@ fn deliver_video_frame(conn: &mut dyn Connection, timestamp: u32, payload: &[u8]
         track_id: u8::MAX,
     };
 
-    if !payload.is_empty() {
-        let tag = payload[0];
-        frame.video_frame_type = (tag >> 4) & 0x0F;
-        frame.video_codec = match tag & 0x0F {
-            1 => VideoCodec::Jpeg,
-            2 => VideoCodec::Sorenson,
-            3 => VideoCodec::Screen,
-            4 => VideoCodec::Vp6,
-            5 => VideoCodec::Vp6a,
-            6 => VideoCodec::Screen2,
-            7 => VideoCodec::H264,
-            12 => VideoCodec::H265,
-            13 => VideoCodec::Av1,
-            _ => VideoCodec::H264,
-        };
-    }
+    crate::media::populate_av_frame(&mut frame, payload);
 
     if let Some(cb) = conn.get_frame_callback() {
         cb(&frame);

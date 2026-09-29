@@ -40,7 +40,7 @@ The registry (`src/ertmp/fourcc.rs`) provides forward (`fourcc_to_video_codec()`
 |--------------|----------------|
 | `IsExHeader` detection (reserved SoundFormat nibble 9 + len ≥ 5; the FourCC is parsed but need not be registered — legacy SoundFormat 8–15 use different nibbles) | `exaudio_parse()` in `src/ertmp/exaudio.rs` |
 | Audio FourCC (`Opus`, `mp4a`, `mp3 `, `ec-3`) | `exaudio_parse()` in `src/ertmp/exaudio.rs` + `src/ertmp/fourcc.rs` |
-| Wiring into the audio frame path | `src/message/message.rs` (calls `exaudio::exaudio_parse()` for legacy + enhanced) |
+| Wiring into the audio frame path | `populate_audio_frame()` in `src/media/init_cache.rs` (calls `exaudio::exaudio_parse()` for legacy + enhanced), reached from `src/session/conn.rs`; the reference dispatcher in `src/message/message.rs` routes through the same helper |
 
 The enhanced audio FourCC is surfaced on `Frame::audio_fourcc` (`src/types.rs`).
 
