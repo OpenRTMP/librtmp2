@@ -2267,17 +2267,27 @@ impl Conn {
                         "connect required before createStream",
                     );
                 }
-                let txn = match command::read_create_stream(&mut buf) {
-                    Ok(txn) => txn,
-                    Err(_) => {
-                        return self.send_onstatus(
-                            0,
-                            "error",
-                            "NetStream.Failed",
-                            "Invalid createStream",
-                        );
-                    }
+                let mut txn = None;
+                let parsed = command::read_create_stream(&mut buf, &mut txn);
+                let Some(txn) = txn else {
+                    // No transaction id to match an `_error` against.
+                    return self.send_onstatus(
+                        0,
+                        "error",
+                        "NetStream.Failed",
+                        "Invalid createStream",
+                    );
                 };
+                if parsed.is_err() {
+                    // Echo the request's transaction id: a createStream refused
+                    // without one leaves the client unable to resolve the
+                    // request it is still waiting on.
+                    return self.send_command_error(
+                        txn,
+                        "NetStream.Failed",
+                        "Invalid createStream",
+                    );
+                }
                 // Cap *concurrent* streams, not the lifetime id counter: a
                 // fresh createStream replaces current_stream (net zero), so a
                 // long-lived connection that repeatedly creates streams must
@@ -2290,7 +2300,7 @@ impl Conn {
                     self.active_stream_count.saturating_add(1)
                 };
                 if projected_stream_count > MAX_STREAMS_PER_CONN {
-                    self.send_onstatus(0, "error", "NetStream.Failed", "Too many streams")?;
+                    self.send_command_error(txn, "NetStream.Failed", "Too many streams")?;
                 } else {
                     // A fresh createStream replaces current_stream outright;
                     // if the stream it's replacing was actively publishing,
