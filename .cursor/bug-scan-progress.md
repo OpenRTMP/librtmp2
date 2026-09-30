@@ -1,12 +1,12 @@
 # Bug scan progress
 
-Last scanned: handshake (2026-09-19)
+Last scanned: chunk (2026-09-30)
 
 ## Modules
 
 - [x] core — Memory, logging, errors, buffer
 - [x] handshake — C0/C1/C2 ↔ S0/S1/S2
-- [ ] chunk — Chunk reader/writer/state
+- [x] chunk — Chunk reader/writer/state
 - [ ] message — Message reassembly, control, commands
 - [ ] amf — AMF0 + AMF3
 - [ ] flv — Audio/video/script tags
@@ -14,6 +14,21 @@ Last scanned: handshake (2026-09-19)
 - [ ] session — State machine, publish/play flows
 - [ ] server — Server listener
 - [ ] client — Outbound client
+
+## Findings (2026-09-30 chunk pass)
+
+- Reviewed all five files under `src/chunk/` (`reader.rs`, `writer.rs`,
+  `state.rs`, `media_out.rs`, `mod.rs`) and traced server/client integration
+  (`session/conn.rs` `read_messages`/`handle_control`, `client/mod.rs` recv
+  loop, `message/message.rs` SetChunkSize dispatch). Checked peek-before-consume
+  invariants on `Ok(0)`, fmt=0/1 restart vs fmt=2/3 continuation and
+  `type0_msg_length==0` rejection, fmt=1/2 delta and fmt=3 new-message
+  `last_delta` handling, `max_msg_length` / `max_reassembly_bytes` /
+  `max_active_csids` caps, reassembly accounting
+  (`note_reassembly_growth`/`release_stream_reassembly`/`Buffer::take`),
+  SetChunkSize bounds via `MAX_INBOUND_CHUNK_SIZE`, Abort → `reset_stream`,
+  stateless writer fmt≠0 rejection, and `MediaHeaderTracker` zero-length fmt=2
+  guard. No new critical or high-severity issue found.
 
 ## Findings (2026-09-19 handshake pass)
 
