@@ -43,7 +43,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
-          toolchain: "1.98"
+          toolchain: "1.99"
 
       - name: Cache cbindgen
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -103,7 +103,7 @@ jobs:
         if: env.SKIP != '1'
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
-          toolchain: "1.98"
+          toolchain: "1.99"
 
       - name: Cache cbindgen
         if: env.SKIP != '1'
