@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use crate::chunk::state::{DEFAULT_CHUNK_SIZE, DEFAULT_MAX_MSG_LENGTH, RTMP_WIRE_MAX_MSG_LENGTH};
 use crate::ertmp::multitrack_media::{foreach_track, is_multitrack_container};
 use crate::media::{
-    CacheFrameKind, classify_cache_frame, is_on_metadata_payload,
+    CacheFrameKind, DeliveryHint, classify_cache_frame, is_on_metadata_payload,
     normalize_modex_payload_with_frame_type,
 };
 use crate::message::control::MAX_INBOUND_CHUNK_SIZE;
@@ -204,40 +204,6 @@ pub struct StreamInitSnapshot {
     pub last_keyframe: Option<(u32, Vec<u8>)>,
 }
 
-/// How a live relay frame may be treated by per-player flow control.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RelayDelivery {
-    /// Codec headers and script/metadata: always delivered, even to a
-    /// congested player, since everything after depends on them.
-    Always,
-    /// A point a congested player can resume from without decode errors: a
-    /// video keyframe, or any audio frame on a route without video.
-    ResyncPoint,
-    /// Everything else: skipped while a player is congested.
-    Droppable,
-}
-
-impl RelayDelivery {
-    fn classify(frame: &RelayFrame, route_has_video: bool) -> Self {
-        match frame.frame_type {
-            FrameType::Script | FrameType::Metadata => return Self::Always,
-            FrameType::Audio | FrameType::Video => {}
-        }
-        match classify_cache_frame(frame.frame_type, frame.cache_payload()) {
-            CacheFrameKind::VideoSequenceHeader | CacheFrameKind::AudioSequenceHeader => {
-                Self::Always
-            }
-            CacheFrameKind::VideoKeyframe => Self::ResyncPoint,
-            CacheFrameKind::LiveOnly
-                if frame.frame_type == FrameType::Audio && !route_has_video =>
-            {
-                Self::ResyncPoint
-            }
-            CacheFrameKind::LiveOnly => Self::Droppable,
-        }
-    }
-}
-
 /// Snapshot of the [`Server`] flow-control settings for one fan-out pass.
 #[derive(Debug, Clone, Copy)]
 struct PlayerFlowLimits {
@@ -257,7 +223,7 @@ enum PlayerFlow {
 /// A relay frame's flow-control class for one fan-out pass (see
 /// [`Server::frame_delivery`]); [`Self::for_player`] adjusts it per player.
 struct FrameDelivery {
-    delivery: RelayDelivery,
+    delivery: DeliveryHint,
     /// Live audio on a route with video: droppable only for players that
     /// receive the route's video keyframes.
     audio_waits_for_video: bool,
@@ -268,17 +234,17 @@ struct FrameDelivery {
 impl FrameDelivery {
     fn always() -> Self {
         Self {
-            delivery: RelayDelivery::Always,
+            delivery: DeliveryHint::Critical,
             audio_waits_for_video: false,
             route_video_multitrack: None,
         }
     }
 
-    fn for_player(&self, conn: &Conn) -> RelayDelivery {
+    fn for_player(&self, conn: &Conn) -> DeliveryHint {
         if self.audio_waits_for_video
             && !Server::conn_receives_route_video(conn, self.route_video_multitrack)
         {
-            RelayDelivery::ResyncPoint
+            DeliveryHint::ResyncPoint
         } else {
             self.delivery
         }
@@ -435,7 +401,7 @@ impl StagedRelayMedia {
 /// On overflow the oldest frames are dropped so the buffer stays within
 /// `max_frames` / `max_bytes`.
 struct RelayExportBuffer {
-    frames: VecDeque<RelayFrame>,
+    frames: VecDeque<(RelayFrame, DeliveryHint)>,
     max_frames: usize,
     max_bytes: usize,
     bytes: usize,
@@ -451,7 +417,7 @@ impl RelayExportBuffer {
         }
     }
 
-    fn push_clone(&mut self, frame: &RelayFrame) {
+    fn push_clone(&mut self, frame: &RelayFrame, hint: DeliveryHint) {
         if self.max_frames == 0 {
             return;
         }
@@ -468,7 +434,7 @@ impl RelayExportBuffer {
             && (self.frames.len() >= self.max_frames
                 || self.bytes.saturating_add(frame_bytes) > self.max_bytes)
         {
-            if let Some(old) = self.frames.pop_front() {
+            if let Some((old, _)) = self.frames.pop_front() {
                 self.bytes = self.bytes.saturating_sub(old.retained_bytes());
             }
         }
@@ -478,10 +444,10 @@ impl RelayExportBuffer {
             return;
         }
         self.bytes = self.bytes.saturating_add(frame_bytes);
-        self.frames.push_back(frame.clone());
+        self.frames.push_back((frame.clone(), hint));
     }
 
-    fn drain(&mut self) -> Vec<RelayFrame> {
+    fn drain(&mut self) -> Vec<(RelayFrame, DeliveryHint)> {
         self.bytes = 0;
         self.frames.drain(..).collect()
     }
@@ -752,6 +718,17 @@ impl Server {
     /// Drain and return all currently buffered export frames (empty when
     /// export is disabled).
     pub fn drain_exported_relay_frames(&mut self) -> Vec<RelayFrame> {
+        self.drain_exported_relay_frames_with_hints()
+            .into_iter()
+            .map(|(frame, _)| frame)
+            .collect()
+    }
+
+    /// Like [`Self::drain_exported_relay_frames`], with each frame's
+    /// codec-neutral [`DeliveryHint`], classified where librtmp2 already
+    /// parses media for its init cache so an exporting relay never has to
+    /// look at the payload itself.
+    pub fn drain_exported_relay_frames_with_hints(&mut self) -> Vec<(RelayFrame, DeliveryHint)> {
         match self.relay_export.as_mut() {
             Some(buf) => buf.drain(),
             None => Vec::new(),
@@ -1989,6 +1966,10 @@ impl Server {
         // Reused across frames: indices of this frame's receiving players.
         let mut players: Vec<usize> = Vec::new();
         let mut staged = StagedRelayMedia::default();
+        // Export hints, classified per frame right after it updated the
+        // route cache, so audio ahead of the route's first video still
+        // counts as audio-only (only collected when export is enabled).
+        let mut export_hints: Vec<DeliveryHint> = Vec::new();
         let now = Instant::now();
         let flow_limits = PlayerFlowLimits {
             soft: self.player_send_buffer_soft_limit,
@@ -2013,6 +1994,9 @@ impl Server {
             }
 
             self.cache_relay_frame_unless_orphaned(frame, abandoned_this_batch);
+            if self.relay_export.is_some() {
+                export_hints.push(self.export_hint(frame));
+            }
             // Only classified when some player can actually be congested:
             // it parses the payload header and looks up the route's cache.
             let delivery = if players.is_empty() || flow_limits.soft == 0 {
@@ -2051,9 +2035,9 @@ impl Server {
         // Export only frames that completed this poll (not requeued). Injected
         // frames stay off the export path to avoid remote→local echo loops.
         if let Some(export) = self.relay_export.as_mut() {
-            for frame in &relay_frames[..relay_processed] {
+            for (frame, &hint) in relay_frames[..relay_processed].iter().zip(&export_hints) {
                 if !is_external_publisher_id(frame.publisher_conn_id) {
-                    export.push_clone(frame);
+                    export.push_clone(frame, hint);
                 }
             }
         }
@@ -2101,14 +2085,14 @@ impl Server {
     /// Flow-control classification of `frame` for this fan-out pass.
     fn frame_delivery(&self, frame: &RelayFrame) -> FrameDelivery {
         let route_video = self.route_video(frame);
-        let delivery = RelayDelivery::classify(frame, route_video.is_some());
+        let delivery = frame.delivery_hint(route_video.is_some());
         FrameDelivery {
             delivery,
             // Live audio on a route with video is only droppable for a
             // player that will get that video's keyframes to resync on; one
             // that can't (`receiveVideo(false)`, or multitrack video it
             // didn't negotiate) resyncs on audio like on an audio-only route.
-            audio_waits_for_video: delivery == RelayDelivery::Droppable
+            audio_waits_for_video: delivery == DeliveryHint::Droppable
                 && frame.frame_type == FrameType::Audio,
             route_video_multitrack: route_video,
         }
@@ -2213,7 +2197,7 @@ impl Server {
     fn player_flow_decision(
         limits: PlayerFlowLimits,
         conn: &mut Conn,
-        delivery: RelayDelivery,
+        delivery: DeliveryHint,
         backlog: usize,
         now: Instant,
     ) -> PlayerFlow {
@@ -2221,7 +2205,7 @@ impl Server {
             return PlayerFlow::Disconnect;
         }
         let soft = limits.soft;
-        if soft == 0 || delivery == RelayDelivery::Always {
+        if soft == 0 || delivery == DeliveryHint::Critical {
             return PlayerFlow::Send;
         }
         match conn.relay_congestion {
@@ -2234,7 +2218,7 @@ impl Server {
                 PlayerFlow::Skip
             }
             Some(ref mut congestion) => {
-                if delivery == RelayDelivery::ResyncPoint && backlog <= soft / 2 {
+                if delivery == DeliveryHint::ResyncPoint && backlog <= soft / 2 {
                     conn.relay_congestion = None;
                     return PlayerFlow::Send;
                 }
@@ -2413,9 +2397,16 @@ impl Server {
         if is_external_publisher_id(frame.publisher_conn_id) {
             return;
         }
+        let hint = self.export_hint(frame);
         if let Some(export) = self.relay_export.as_mut() {
-            export.push_clone(frame);
+            export.push_clone(frame, hint);
         }
+    }
+
+    /// Delivery hint exported with `frame`: its class on this server's view
+    /// of the route (audio next to video is droppable, audio alone is not).
+    fn export_hint(&self, frame: &RelayFrame) -> DeliveryHint {
+        frame.delivery_hint(self.route_video(frame).is_some())
     }
 
     /// Bytes retained by a single stream_cache entry, including HashMap key
@@ -5253,6 +5244,47 @@ mod tests {
         assert!(
             server.drain_exported_relay_frames().is_empty(),
             "second drain must be empty"
+        );
+    }
+
+    #[test]
+    fn relay_export_carries_codec_neutral_delivery_hints() {
+        let mut server = test_server();
+        server.enable_relay_export(64, 1024 * 1024);
+        let mut publisher = Conn::new();
+        publisher.conn_id = 1;
+        publisher.app = "live".to_string();
+        let mut metadata = vec![0x02, 0x00, 0x0A];
+        metadata.extend_from_slice(b"onMetaData");
+        metadata.push(crate::amf::amf0::Amf0Type::Object as u8);
+        metadata.extend_from_slice(&[0x00, 0x00, 0x09]);
+        publisher.pending_relay.extend([
+            // Audio before any video: the route looks audio-only so far.
+            relay_frame(FrameType::Audio, vec![0xAF, 0x01, 0x21]),
+            relay_frame(FrameType::Script, metadata),
+            relay_frame(FrameType::Video, vec![0x17, 0x00, 0x01, 0x02]),
+            relay_frame(FrameType::Video, vec![0x17, 0x01, 0xDE, 0xAD]),
+            relay_frame(FrameType::Video, vec![0x27, 0x01, 0xDE, 0xAD]),
+            relay_frame(FrameType::Audio, vec![0xAF, 0x01, 0x21]),
+        ]);
+        server.connections = vec![publisher];
+        server.process_connections().unwrap();
+
+        let hints: Vec<_> = server
+            .drain_exported_relay_frames_with_hints()
+            .into_iter()
+            .map(|(_, hint)| hint)
+            .collect();
+        assert_eq!(
+            hints,
+            vec![
+                DeliveryHint::ResyncPoint, // audio-only so far
+                DeliveryHint::Critical,    // script / metadata
+                DeliveryHint::Critical,    // AVC sequence header
+                DeliveryHint::ResyncPoint, // IDR
+                DeliveryHint::Droppable,   // inter frame
+                DeliveryHint::Droppable,   // audio on a route with video
+            ]
         );
     }
 
