@@ -280,6 +280,17 @@ fn main() -> ExitCode {
         sum_frames_steady as f64 / avg_steady_window.max(1e-9) / received_any.max(1) as f64,
     );
 
+    // Additive machine-readable line (the lines above keep their meaning);
+    // scripts/run_rtmp_benchmarks.sh in librtmp2-server parses it.
+    println!(
+        "delivered: viewers={} aggregate_gbps={:.4} steady_frames_per_viewer={:.1} \
+         steady_window_secs={:.2}",
+        received_any,
+        (sum_bytes_steady as f64 * 8.0) / avg_steady_window.max(1e-9) / 1e9,
+        sum_frames_steady as f64 / received_any.max(1) as f64,
+        avg_steady_window,
+    );
+
     if received_any == 0 {
         ExitCode::from(2)
     } else {
