@@ -64,7 +64,7 @@ fn deliver_audio_frame(conn: &mut dyn Connection, timestamp: u32, payload: &[u8]
         audio_channels: 0,
         audio_bit_depth: 0,
         audio_fourcc: crate::types::FourCc { cc: [0; 5] },
-        video_codec: VideoCodec::H264,
+        video_codec: VideoCodec::default(),
         video_fourcc: crate::types::FourCc { cc: [0; 5] },
         video_frame_type: 0,
         is_metadata: 0,
@@ -91,7 +91,7 @@ fn deliver_video_frame(conn: &mut dyn Connection, timestamp: u32, payload: &[u8]
         audio_channels: 0,
         audio_bit_depth: 0,
         audio_fourcc: crate::types::FourCc { cc: [0; 5] },
-        video_codec: VideoCodec::H264,
+        video_codec: VideoCodec::default(),
         video_fourcc: crate::types::FourCc { cc: [0; 5] },
         video_frame_type: 0,
         is_metadata: 0,
@@ -313,6 +313,60 @@ mod tests {
         payload.extend_from_slice(b"invoke-payload");
         decode(&mut conn, &chunk, &payload).unwrap();
         assert_eq!(conn.handled_commands, vec![b"invoke-payload".to_vec()]);
+    }
+
+    struct PublishingStream;
+
+    impl Stream for PublishingStream {
+        fn is_publishing(&self) -> bool {
+            true
+        }
+    }
+
+    struct FrameCapturingConn {
+        stream: PublishingStream,
+    }
+
+    static CAPTURED_VIDEO_IS_H264: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(true);
+
+    fn capture_video_codec(frame: &Frame) {
+        CAPTURED_VIDEO_IS_H264.store(
+            frame.video_codec == VideoCodec::H264,
+            std::sync::atomic::Ordering::SeqCst,
+        );
+    }
+
+    impl Connection for FrameCapturingConn {
+        fn get_frame_callback(&self) -> Option<fn(&Frame)> {
+            Some(capture_video_codec)
+        }
+        fn get_current_stream(&self) -> Option<&dyn Stream> {
+            Some(&self.stream)
+        }
+        fn handle_command(&mut self, _payload: &[u8]) -> Result<()> {
+            Ok(())
+        }
+        fn set_window_ack_size(&mut self, _size: u32) {}
+        fn reset_chunk_stream(&mut self, _csid: u32) {}
+        fn set_all_chunk_size(&mut self, _chunk_size: u32) {}
+    }
+
+    #[test]
+    fn unregistered_enhanced_fourcc_is_not_reported_as_h264() {
+        let mut conn = FrameCapturingConn {
+            stream: PublishingStream,
+        };
+        CAPTURED_VIDEO_IS_H264.store(true, std::sync::atomic::Ordering::SeqCst);
+        let chunk = chunk_msg(RTMP_MSG_VIDEO);
+        // Enhanced video (0x91) with the unregistered VVC FourCC "vvc1": the
+        // frame must keep the default codec, not be mislabeled H264.
+        let payload = [0x91u8, b'v', b'v', b'c', b'1', 0x00];
+        decode(&mut conn, &chunk, &payload).unwrap();
+        assert!(
+            !CAPTURED_VIDEO_IS_H264.load(std::sync::atomic::Ordering::SeqCst),
+            "an unregistered enhanced FourCC must not be labeled H264"
+        );
     }
 
     #[test]
