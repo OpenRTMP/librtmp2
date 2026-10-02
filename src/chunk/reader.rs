@@ -708,7 +708,8 @@ mod tests {
     #[test]
     fn reassembly_cap_rejected_before_consuming_header() {
         let mut reg = ChunkRegistry::new();
-        reg.max_reassembly_bytes = 200;
+        // 128 bytes already reassembling on csid 3; the 8-byte message on csid 4 must exceed this cap.
+        reg.max_reassembly_bytes = 135;
 
         let big = vec![0xAB_u8; 150];
         let msg_big = ChunkMessage {
