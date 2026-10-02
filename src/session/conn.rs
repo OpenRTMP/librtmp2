@@ -939,18 +939,23 @@ impl Conn {
         self.needs_init_frames = true;
     }
 
-    fn is_active_publisher_stream(&self, msg_stream_id: u32) -> bool {
-        // A republish on an already-publishing connection (e.g. a stream
-        // rename) leaves `stream.is_publishing` set while the new decision
-        // is `Pending` -- without this check inbound media would keep being
-        // relayed under the still-active old authorization instead of
-        // stopping until the new one resolves.
-        self.relay_enabled
-            && !self.has_pending_authorization()
+    /// Whether `msg_stream_id` is this connection's own active publish stream,
+    /// ignoring whether relay delivery is currently enabled. Pending
+    /// authorizations are excluded: a republish on an already-publishing
+    /// connection (e.g. a stream rename) leaves `stream.is_publishing` set
+    /// while the new decision is `Pending` -- without this check inbound media
+    /// would keep being relayed under the still-active old authorization
+    /// instead of stopping until the new one resolves.
+    fn is_publisher_stream(&self, msg_stream_id: u32) -> bool {
+        !self.has_pending_authorization()
             && self
                 .current_stream
                 .as_ref()
                 .is_some_and(|stream| stream.is_publishing && stream.stream_id == msg_stream_id)
+    }
+
+    fn is_active_publisher_stream(&self, msg_stream_id: u32) -> bool {
+        self.relay_enabled && self.is_publisher_stream(msg_stream_id)
     }
 
     /// True when an active->idle transition carried meaningful media flow and
@@ -1107,6 +1112,17 @@ impl Conn {
         mut messages_budget: Option<&mut usize>,
     ) -> Result<()> {
         if !self.is_active_publisher_stream(msg_stream_id) {
+            // A publisher whose relay is still deferred (`relay_enabled` is
+            // false until the integrator's post-auth bookkeeping completes)
+            // must not look like a silent route squatter: count socket media
+            // from this connection's own publishing stream even while relay
+            // delivery stays gated, so `publish_media_squat_expired` sees the
+            // publisher is alive. Pending authorizations are excluded above.
+            if self.is_publisher_stream(msg_stream_id) {
+                self.media_bytes_received = self
+                    .media_bytes_received
+                    .saturating_add(payload.len() as u64);
+            }
             return Ok(());
         }
 
@@ -7008,6 +7024,31 @@ mod tests {
         conn.handle_media_frame(1, FrameType::Video, 0, &[0x17, 0, 0, 0, 0], None)
             .unwrap();
         assert_eq!(conn.pending_relay.len(), 1);
+    }
+
+    #[test]
+    fn deferred_relay_publisher_media_counts_for_squat_deadline() {
+        use std::time::{Duration, Instant};
+
+        let mut conn = app_conn();
+        conn.defer_media_relay = true;
+        conn.handle_command(publish_buf("s").as_slice()).unwrap();
+        assert!(conn.current_stream.as_ref().unwrap().is_publishing);
+        assert!(!conn.relay_enabled, "defer_media_relay must leave relay off");
+
+        // Media is not relayed while relay is deferred, but it must still
+        // count toward the publish-media squat deadline.
+        let payload = [0xAF, 0x00];
+        conn.handle_media_frame(1, FrameType::Audio, 0, &payload, None)
+            .unwrap();
+        assert!(conn.pending_relay.is_empty());
+        assert_eq!(conn.media_bytes_received, payload.len() as u64);
+
+        conn.set_session_setup_started_for_test(Instant::now() - Duration::from_secs(3));
+        assert!(
+            !conn.session_setup_timed_out(),
+            "an actively-streaming deferred-relay publisher must not be reaped as a squatter"
+        );
     }
 
     #[test]
