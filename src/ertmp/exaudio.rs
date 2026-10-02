@@ -46,7 +46,10 @@ pub fn exaudio_parse(data: &[u8], hdr: &mut AudioHeader) -> Result<()> {
             10 => crate::types::AudioCodec::Aac,
             11 => crate::types::AudioCodec::Speex,
             14 => crate::types::AudioCodec::Opus,
-            _ => crate::types::AudioCodec::Aac,
+            // SoundFormat 9 is E-RTMP's ExHeader (handled above) and
+            // 12/13/15 are reserved; reject rather than silently mapping to
+            // AAC, matching `flv::audio_tag::parse`.
+            _ => return Err(ErrorCode::Unsupported),
         };
         hdr.sample_rate = (b0 >> 2) & 0x03;
         hdr.sample_size = (b0 >> 1) & 0x01;
@@ -172,6 +175,21 @@ mod tests {
                 "a {len}-byte ExHeader tag must be rejected"
             );
             assert_eq!(hdr.is_ex_header, 0);
+        }
+    }
+
+    #[test]
+    fn parse_rejects_reserved_legacy_sound_format_nibbles() {
+        // SoundFormat 12/13/15 are reserved; they must not fall through to
+        // AAC (the sibling `flv::audio_tag::parse` rejects them too).
+        for b0 in [0xC0u8, 0xD0, 0xF0] {
+            let data = [b0, 0x00];
+            let mut hdr = AudioHeader::default();
+            assert!(
+                exaudio_parse(&data, &mut hdr).is_err(),
+                "reserved SoundFormat nibble {:#X} must be rejected",
+                b0 >> 4
+            );
         }
     }
 
