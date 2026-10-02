@@ -799,7 +799,7 @@ impl Client {
                         {
                             let data_payload: &[u8] = if msg.msg_type_id
                                 == msg_dispatch::RTMP_MSG_AMF3_DATA
-                                && payload.len() > 1
+                                && !payload.is_empty()
                                 && payload[0] == 0x00
                             {
                                 &payload[1..]
@@ -2034,6 +2034,37 @@ mod tests {
         // just for the duration of the call itself -- matching the
         // server-side Conn::frame_cb_scratch contract.
         assert_eq!(client.frame_cb_scratch.as_slice(), &video_payload[..]);
+    }
+
+    #[test]
+    fn amf3_data_single_marker_byte_is_stripped() {
+        use std::sync::{LazyLock, Mutex};
+
+        static SIZES: LazyLock<Mutex<Vec<u32>>> = LazyLock::new(|| Mutex::new(Vec::new()));
+
+        let mut client = Client::new();
+        SIZES.lock().unwrap().clear();
+
+        let payload = [0x00u8];
+        let mut wire = Buffer::new();
+        let mut cmsg = ChunkMessage::default();
+        cmsg.csid = 6;
+        cmsg.fmt = 0;
+        cmsg.msg_length = payload.len() as u32;
+        cmsg.msg_type_id = msg_dispatch::RTMP_MSG_AMF3_DATA;
+        cmsg.msg_stream_id = 1;
+        chunk_write(&mut wire, &cmsg, &payload, payload.len(), 128).unwrap();
+        client.recv_buffer.write(wire.peek()).unwrap();
+
+        client.on_frame_cb = Some(|frame| SIZES.lock().unwrap().push(frame.size));
+        let mut messages_processed = 0;
+        client
+            .drain_ready_messages(&mut messages_processed)
+            .unwrap();
+
+        // The AMF0-in-AMF3 marker must be stripped even when it is the whole
+        // body, matching the AMF3_COMMAND arm.
+        assert_eq!(*SIZES.lock().unwrap(), vec![0]);
     }
 
     #[test]
