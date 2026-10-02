@@ -155,6 +155,24 @@ pub fn chunk_read(
     let remaining = (eff_len_for_avail as usize).saturating_sub(reassembly_read_for_avail);
     let to_read = remaining.min(chunk_sz_for_avail);
 
+    // Reject before consuming any header bytes: failing this check after
+    // phase 2 would leave payload bytes in the buffer while the chunk
+    // header was already drained, desynchronizing the stream.
+    if to_read > 0 {
+        let replaced = if fmt <= 1 {
+            reg.get(csid)
+                .map(|s| s.reassembly_buf.available())
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        if reg.reassembly_bytes_in_use().saturating_sub(replaced) + to_read
+            > reg.max_reassembly_bytes
+        {
+            return Err(ErrorCode::Chunk);
+        }
+    }
+
     if available < total_header_needed + to_read {
         return Ok(0);
     }
@@ -684,6 +702,57 @@ mod tests {
         assert!(
             iterations_small > iterations_default * 10,
             "chunk_size=1 took {iterations_small} iterations vs {iterations_default} at 128"
+        );
+    }
+
+    #[test]
+    fn reassembly_cap_rejected_before_consuming_header() {
+        let mut reg = ChunkRegistry::new();
+        reg.max_reassembly_bytes = 200;
+
+        let big = vec![0xAB_u8; 150];
+        let msg_big = ChunkMessage {
+            csid: 3,
+            fmt: 0,
+            timestamp: 0,
+            msg_length: big.len() as u32,
+            msg_type_id: 0x09,
+            msg_stream_id: 1,
+            is_complete: false,
+        };
+        let mut wire = Buffer::new();
+        chunk_write(&mut wire, &msg_big, &big, big.len(), 128).unwrap();
+
+        let mut out_msg = ChunkMessage::default();
+        let mut ptr = std::ptr::null();
+        let mut len = 0;
+        assert_eq!(
+            chunk_read(&mut wire, &mut reg, None, &mut out_msg, &mut ptr, &mut len).unwrap(),
+            0,
+            "first 128-byte chunk must be incomplete"
+        );
+        assert_eq!(reg.reassembly_bytes_in_use(), 128);
+
+        let small = b"overflow";
+        let msg_small = ChunkMessage {
+            csid: 4,
+            fmt: 0,
+            timestamp: 0,
+            msg_length: small.len() as u32,
+            msg_type_id: 0x09,
+            msg_stream_id: 1,
+            is_complete: false,
+        };
+        let mut next = Buffer::new();
+        chunk_write(&mut next, &msg_small, small, small.len(), 128).unwrap();
+        let before = next.available();
+
+        let result = chunk_read(&mut next, &mut reg, None, &mut out_msg, &mut ptr, &mut len);
+        assert!(matches!(result, Err(ErrorCode::Chunk)));
+        assert_eq!(
+            next.available(),
+            before,
+            "cap rejection must not consume the next chunk's header"
         );
     }
 
