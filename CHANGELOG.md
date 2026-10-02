@@ -13,6 +13,27 @@ begin at `1.0.0`.
 
 ## [Unreleased]
 
+### Added
+- `DeliveryHint` (`Critical` / `ResyncPoint` / `Droppable`): the codec-neutral
+  congestion class the relay already used per player, now public.
+  `RelayFrame::delivery_hint()` classifies a frame from the existing init-cache
+  classification, and `Server::drain_exported_relay_frames_with_hints()` returns
+  each exported frame with its hint so a cluster relay can apply live-media
+  backpressure without parsing codecs. `drain_exported_relay_frames()` is
+  unchanged.
+- `examples/bench_relay` prints an additional machine-readable `delivered:` line
+  (aggregate Gbit/s and frames per viewer); existing output is unchanged.
+
+### Changed
+- Fan-out sends no longer allocate per player and `sendmsg`: the iovec array
+  lives on the stack (`Transport::try_send_vectored` takes the remaining parts
+  plus an offset), and `Conn::send_staged_media` no longer builds a window
+  `Vec` per call.
+- `StagedRelayMedia` groups each player's messages while staging (a linked list
+  per connection in one arena) instead of sorting all `frames × players`
+  messages by connection after the fan-out; the send order per player is
+  unchanged.
+
 ## [0.10.2] — 2026-09-28
 
 ### Changed
