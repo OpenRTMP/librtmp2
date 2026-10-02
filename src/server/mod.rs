@@ -2176,6 +2176,10 @@ impl Server {
             || !cache.video_track_headers.is_empty();
         has_video.then(|| {
             !cache.video_track_headers.is_empty()
+                || cache
+                    .avc_header
+                    .as_ref()
+                    .is_some_and(|header| Self::cached_payload_is_multitrack(FrameType::Video, header))
                 || cache.last_keyframe.as_ref().is_some_and(|(_, keyframe)| {
                     Self::cached_payload_is_multitrack(FrameType::Video, keyframe)
                 })
@@ -3947,6 +3951,32 @@ mod tests {
 
         let key = ("live".to_string(), "stream".to_string());
         assert!(server.stream_cache.get(&key).unwrap().avc_header.is_some());
+    }
+
+    #[test]
+    fn multitrack_avc_header_marks_route_video_as_multitrack() {
+        let mut server = test_server();
+        let payload = vec![
+            0x86, 0x10, b'a', b'v', b'c', b'1', 0x00, 0x00, 0x00, 0x01, 0xAA, 0x01, 0x00, 0x00,
+            0x01, 0xBB,
+        ];
+        server.cache_relay_frame(&relay_frame(FrameType::Video, payload));
+        let key = ("live".to_string(), "stream".to_string());
+        assert!(
+            server
+                .stream_cache
+                .get(&key)
+                .unwrap()
+                .last_keyframe
+                .is_none(),
+            "a combined multitrack sequence header must land in avc_header"
+        );
+
+        // A congested non-multitrack player must be able to resync on audio,
+        // so the route's video must be classified as multitrack even when the
+        // only cached video is the combined avc_header.
+        let frame = relay_frame_for_publisher(1, "stream", FrameType::Audio, vec![0xAF, 0x00]);
+        assert_eq!(server.route_video(&frame), Some(true));
     }
 
     #[test]
