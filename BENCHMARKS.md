@@ -33,23 +33,30 @@ Criterion writes full HTML reports to `target/criterion/report/index.html`.
   for capacity planning)
 - RAM: 15 GiB
 - Kernel: Linux 6.18 x86_64
-- rustc 1.95.0, `cargo build --release` (`tls` feature enabled, default)
-- librtmp2 0.10.2
-- Date: 2026-09-28
+- rustc 1.97.0, `cargo build --release` (`tls` feature enabled, default)
+- librtmp2 0.11.0
+- Date: 2026-10-02
 
 ## `protocol` benchmarks (`benches/protocol.rs`)
+
+Re-measured for 0.11.0 on the same shared VM. The 0.11.0 changes touch only
+the relay fan-out and add the `DeliveryHint` API; the codec paths below are
+unchanged, so differences from the 0.10.2 run (for example `chunk/write_read_roundtrip`
+3.76 → 4.55 µs) are run-to-run noise on this VM (Criterion reported
+intervals of roughly ±5 %, and a different rustc: 1.97.0 instead of 1.95.0),
+not a regression to chase.
 
 Pure in-memory codec work — no sockets, no allocator warm-up beyond the
 first iteration.
 
 | Benchmark | Time | Throughput |
 |---|---|---|
-| `chunk/write_read_roundtrip` (4096-byte payload, chunk size 128) | 3.76 µs | ~1040 MiB/s |
-| `amf0_build_connect` | 229 ns | — |
-| `flv/video_tag_h264` (parse) | 1.10 ns | — |
-| `flv/audio_tag_aac` (parse) | 1.15 ns | — |
-| `fourcc_to_video_codec_avc1` | 2.21 ns | — |
-| `server_read_c1` (handshake C1 parse + S0/S1/S2 build) | 1.08 µs | — |
+| `chunk/write_read_roundtrip` (4096-byte payload, chunk size 128) | 4.55 µs | ~858 MiB/s |
+| `amf0_build_connect` | 274 ns | — |
+| `flv/video_tag_h264` (parse) | 1.51 ns | — |
+| `flv/audio_tag_aac` (parse) | 1.24 ns | — |
+| `fourcc_to_video_codec_avc1` | 2.19 ns | — |
+| `server_read_c1` (handshake C1 parse + S0/S1/S2 build) | 1.21 µs | — |
 
 ## `relay` benchmark (`benches/relay.rs`)
 
@@ -65,8 +72,8 @@ same idea against a real server.
 
 | Benchmark | Time | Throughput |
 |---|---|---|
-| `relay/publish_to_player/100` (100 frames) | 99.0 ms | ~1010 elem/s |
-| `relay/publish_to_player/500` (500 frames) | 101.0 ms | ~4950 elem/s |
+| `relay/publish_to_player/100` (100 frames) | 99.1 ms | ~1010 elem/s |
+| `relay/publish_to_player/500` (500 frames) | 101.4 ms | ~4930 elem/s |
 
 Both sizes land at roughly the same wall-clock time regardless of frame
 count, which is the harness's own fixed polling-interval overhead
