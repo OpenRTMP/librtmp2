@@ -27,6 +27,7 @@ pub mod transport;
 pub mod types;
 
 // Re-exports for convenience
+pub use media::DeliveryHint;
 pub use session::RelayFrame;
 pub use types::*;
 

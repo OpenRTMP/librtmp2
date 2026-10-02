@@ -156,6 +156,13 @@ impl RelayFrame {
         self.cache_payload.as_deref().unwrap_or(&self.payload)
     }
 
+    /// Codec-neutral congestion hint for this frame (see
+    /// [`crate::DeliveryHint`]). `route_has_video` is whether the frame's
+    /// stream carries video.
+    pub fn delivery_hint(&self, route_has_video: bool) -> crate::DeliveryHint {
+        crate::DeliveryHint::classify(self.frame_type, self.cache_payload(), route_has_video)
+    }
+
     pub(crate) fn retained_bytes(&self) -> usize {
         self.payload
             .len()
