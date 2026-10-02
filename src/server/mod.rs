@@ -311,14 +311,23 @@ struct StagedRelayMedia {
     spare: Option<crate::buffer::Buffer>,
     /// First-chunk headers of every staged message, back to back.
     headers: crate::buffer::Buffer,
-    /// Staged messages in fan-out order.
+    /// Staged messages in fan-out order. Each connection's messages form a
+    /// singly linked list through [`StagedRelayMessage::next`], so they are
+    /// grouped per connection while staging and never need sorting.
     messages: Vec<StagedRelayMessage>,
+    /// `(head, tail)` message indices of each connection's list, by
+    /// connection index; grown on demand.
+    lists: Vec<Option<(usize, usize)>>,
+    /// Connections with at least one staged message, in the order each
+    /// was first staged.
+    staged_conns: Vec<usize>,
 }
 
 struct StagedRelayMessage {
-    conn: usize,
     header: std::ops::Range<usize>,
     body: usize,
+    /// The same connection's next staged message, if any.
+    next: Option<usize>,
 }
 
 impl StagedRelayMedia {
@@ -359,29 +368,56 @@ impl StagedRelayMedia {
         }
     }
 
+    /// Append a staged message for connection `conn`, after the ones it
+    /// already has.
+    fn push_message(&mut self, conn: usize, header: std::ops::Range<usize>, body: usize) {
+        let index = self.messages.len();
+        self.messages.push(StagedRelayMessage {
+            header,
+            body,
+            next: None,
+        });
+        if self.lists.len() <= conn {
+            self.lists.resize(conn + 1, None);
+        }
+        match &mut self.lists[conn] {
+            Some((_, tail)) => {
+                self.messages[*tail].next = Some(index);
+                *tail = index;
+            }
+            slot @ None => {
+                *slot = Some((index, index));
+                self.staged_conns.push(conn);
+            }
+        }
+    }
+
+    /// `conn`'s staged messages, in the order they were staged.
+    fn messages_of(&self, conn: usize) -> impl Iterator<Item = &StagedRelayMessage> {
+        let mut next = self
+            .lists
+            .get(conn)
+            .copied()
+            .flatten()
+            .map(|(head, _)| head);
+        std::iter::from_fn(move || {
+            let message = &self.messages[next?];
+            next = message.next;
+            Some(message)
+        })
+    }
+
     /// Hand every player its staged messages. A player whose socket fails
     /// is disconnected and pushed to `closed`.
     fn send(&self, connections: &mut [Conn], closed: &mut Vec<usize>) {
-        let mut order: Vec<usize> = (0..self.messages.len()).collect();
-        // Stable: keeps each player's messages in fan-out order.
-        order.sort_by_key(|&m| self.messages[m].conn);
         let headers = self.headers.peek();
         let mut parts: Vec<&[u8]> = Vec::new();
-        let mut start = 0;
-        while start < order.len() {
-            let conn_index = self.messages[order[start]].conn;
-            let end = start
-                + order[start..]
-                    .iter()
-                    .take_while(|&&m| self.messages[m].conn == conn_index)
-                    .count();
+        for &conn_index in &self.staged_conns {
             parts.clear();
-            for &m in &order[start..end] {
-                let msg = &self.messages[m];
+            for msg in self.messages_of(conn_index) {
                 parts.push(&headers[msg.header.clone()]);
                 parts.push(self.bodies[msg.body].1.peek());
             }
-            start = end;
             let conn = &mut connections[conn_index];
             if conn.transport.is_none() {
                 // Dropped later in the same fan-out; already reaped.
@@ -2116,11 +2152,7 @@ impl Server {
                 )
                 .map(|header_len| {
                     staged.bodies[body].2 = true;
-                    staged.messages.push(StagedRelayMessage {
-                        conn: conn_index,
-                        header: header_start..header_start + header_len,
-                        body,
-                    });
+                    staged.push_message(conn_index, header_start..header_start + header_len, body);
                 })
             }
             Some(body) => conn.send_encoded_media_body(
@@ -3403,6 +3435,89 @@ mod tests {
         )
         .unwrap();
         assert_eq!(staged.bodies[0].1.peek(), expected.peek());
+    }
+
+    #[test]
+    fn staged_messages_group_per_connection_in_staging_order() {
+        let mut staged = StagedRelayMedia::default();
+        // Frame-major staging, interleaved across connections 5, 0 and 3.
+        let order = [(5, 0), (0, 1), (3, 2), (5, 3), (0, 4), (5, 5), (3, 6)];
+        for (conn, id) in order {
+            staged.push_message(conn, id * 10..id * 10 + 5, id);
+        }
+        assert_eq!(staged.staged_conns, vec![5, 0, 3]);
+        let bodies_of = |conn| staged.messages_of(conn).map(|m| m.body).collect::<Vec<_>>();
+        assert_eq!(bodies_of(5), vec![0, 3, 5]);
+        assert_eq!(bodies_of(0), vec![1, 4]);
+        assert_eq!(bodies_of(3), vec![2, 6]);
+        assert!(bodies_of(1).is_empty(), "unstaged connection");
+        assert!(bodies_of(99).is_empty(), "connection past the lists");
+        let ranges: Vec<_> = staged.messages_of(5).map(|m| m.header.clone()).collect();
+        assert_eq!(ranges, vec![0..5, 30..35, 50..55]);
+    }
+
+    #[test]
+    fn fan_out_delivers_each_player_its_frames_in_publisher_order() {
+        use std::io::Read;
+        let mut server = test_server();
+        let mut peers = Vec::new();
+        server.connections.clear();
+        for id in 2..=4 {
+            let (mut player, peer) = flow_test_player(id);
+            // Players 2 and 4 stage; player 3 (no client fd) takes the
+            // buffered path the staged one must match byte for byte.
+            if id != 3 {
+                player.client_fd = player.transport.as_ref().unwrap().fd();
+            }
+            server.connections.push(player);
+            peers.push(peer);
+        }
+        // Eight frames, alternating video and audio, each led by a marker
+        // run that sits unbroken inside the first chunk.
+        let frames: Vec<_> = (0..8u8)
+            .map(|i| {
+                let (ty, mut payload) = if i % 2 == 0 {
+                    (FrameType::Video, AVC_INTER[..5].to_vec())
+                } else {
+                    (FrameType::Audio, AAC_RAW[..2].to_vec())
+                };
+                payload.extend(std::iter::repeat_n(0xA0 + i, 300));
+                relay_frame(ty, payload)
+            })
+            .collect();
+        let mut closed = Vec::new();
+        server.send_and_export_relay_frames(frames, &HashSet::new(), &mut closed);
+        assert!(closed.is_empty());
+
+        let mut streams = Vec::new();
+        for (i, peer) in peers.iter_mut().enumerate() {
+            peer.set_nonblocking(true).unwrap();
+            let mut got = Vec::new();
+            let mut buf = vec![0u8; 1 << 16];
+            while let Ok(n) = peer.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                got.extend_from_slice(&buf[..n]);
+            }
+            if i == 1 {
+                got = server.connections[1].send_buffer.peek().to_vec();
+            }
+            streams.push(got);
+        }
+        assert!(streams[0].len() > 8 * 300);
+        assert_eq!(streams[0], streams[1]);
+        assert_eq!(streams[0], streams[2]);
+        let mut last = 0;
+        for i in 0..8u8 {
+            let marker = [0xA0 + i; 16];
+            let at = streams[0]
+                .windows(marker.len())
+                .position(|w| w == marker)
+                .unwrap_or_else(|| panic!("frame {i} missing"));
+            assert!(at > last || i == 0, "frame {i} out of order");
+            last = at;
+        }
     }
 
     fn flow_test_player(conn_id: u64) -> (Conn, std::os::unix::net::UnixStream) {
