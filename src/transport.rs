@@ -13,7 +13,6 @@ use openssl::ssl::{
     HandshakeError, MidHandshakeSslStream, SslAcceptor, SslFiletype, SslMethod, SslStream,
     SslVerifyMode,
 };
-#[cfg(feature = "tls")]
 use std::mem::MaybeUninit;
 use std::net::TcpStream;
 #[cfg(feature = "tls")]
