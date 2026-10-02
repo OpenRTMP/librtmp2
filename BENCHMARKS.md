@@ -41,10 +41,11 @@ Criterion writes full HTML reports to `target/criterion/report/index.html`.
 
 Re-measured for 0.11.0 on the same shared VM. The 0.11.0 changes touch only
 the relay fan-out and add the `DeliveryHint` API; the codec paths below are
-unchanged, so differences from the 0.10.2 run (for example `chunk/write_read_roundtrip`
-3.76 → 4.55 µs) are run-to-run noise on this VM (Criterion reported
-intervals of roughly ±5 %, and a different rustc: 1.97.0 instead of 1.95.0),
-not a regression to chase.
+unchanged, so the differences from the 0.10.2 run (for example
+`chunk/write_read_roundtrip` 3.76 → 4.55 µs) are not caused by this release.
+The within-run Criterion intervals are only about ±5 %, so the cross-run gap
+is larger than that; likely causes are other load on the shared VM and the
+newer rustc (1.97.0 instead of 1.95.0), but this was not isolated.
 
 Pure in-memory codec work — no sockets, no allocator warm-up beyond the
 first iteration.
