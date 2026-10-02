@@ -13,6 +13,8 @@ begin at `1.0.0`.
 
 ## [Unreleased]
 
+## [0.11.0] — 2026-10-02
+
 ### Added
 - `DeliveryHint` (`Critical` / `ResyncPoint` / `Droppable`): the codec-neutral
   congestion class the relay already used per player, now public.
@@ -33,6 +35,21 @@ begin at `1.0.0`.
   per connection in one arena) instead of sorting all `frames × players`
   messages by connection after the fan-out; the send order per player is
   unchanged.
+
+### Tests
+- Vectored-send tests on a socketpair (full and partial writes, resume at an
+  offset, more than `MAX_SEND_PARTS` parts, `EAGAIN`, empty parts, closed
+  peer), per-connection ordering of staged relay messages (staged and buffered
+  players receive byte-identical streams), and `DeliveryHint` classification
+  (H.264, E-RTMP, audio-only, script/metadata, malformed payloads).
+
+### Notes
+- Measured with `librtmp2-server`'s load benchmark (500–2000 viewers) the
+  fan-out changes show no CPU regression and no gain beyond run-to-run noise:
+  the cost is dominated by the kernel TCP path. See `librtmp2-server`'s
+  `BENCHMARKS.md`.
+- Additive public API only (`DeliveryHint`, `RelayFrame::delivery_hint`,
+  `Server::drain_exported_relay_frames_with_hints`); no FFI change.
 
 ## [0.10.2] — 2026-09-28
 

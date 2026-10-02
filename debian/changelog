@@ -1,3 +1,14 @@
+librtmp2 (0.11.0-1) UNRELEASED; urgency=medium
+
+  * New public DeliveryHint (Critical/ResyncPoint/Droppable) and
+    Server::drain_exported_relay_frames_with_hints(), so a cluster relay can
+    drop stale frames under backpressure without parsing codecs.
+  * Relay fan-out: vectored sends use a stack iovec array and staged messages
+    are grouped per player instead of sorted (no per-send allocation).
+  * bench_relay prints an additional machine-readable "delivered:" line.
+
+ -- OpenRTMP <info@openrtmp.org>  Fri, 02 Oct 2026 12:00:00 +0000
+
 librtmp2 (0.10.2-1) UNRELEASED; urgency=medium
 
   * Relay sends each player its frames in one vectored write without
