@@ -13,10 +13,11 @@ use openssl::ssl::{
     HandshakeError, MidHandshakeSslStream, SslAcceptor, SslFiletype, SslMethod, SslStream,
     SslVerifyMode,
 };
+#[cfg(feature = "tls")]
+use std::mem::MaybeUninit;
 use std::net::TcpStream;
 #[cfg(feature = "tls")]
 use std::os::unix::io::{AsRawFd, FromRawFd};
-#[cfg(feature = "tls")]
 use std::sync::Arc;
 #[cfg(feature = "tls")]
 use std::time::{Duration, Instant};
@@ -27,6 +28,36 @@ const TLS_ACCEPT_TIMEOUT_SECS: u64 = 10;
 /// Most buffers [`Transport::try_send_vectored`] passes to one `sendmsg`
 /// (well under the kernel's `UIO_MAXIOV` of 1024).
 pub(crate) const MAX_SEND_PARTS: usize = 512;
+
+/// Fill `iov` with one entry per non-empty part (the first part minus its
+/// first `first_offset` bytes), up to `iov.len()` entries; returns how many
+/// were filled. Entries past the returned count stay uninitialised.
+fn fill_iovecs(
+    parts: &[&[u8]],
+    first_offset: usize,
+    iov: &mut [MaybeUninit<libc::iovec>],
+) -> usize {
+    let mut len = 0;
+    for (i, part) in parts.iter().enumerate() {
+        if len == iov.len() {
+            break;
+        }
+        let part = if i == 0 {
+            part.get(first_offset..).unwrap_or(&[])
+        } else {
+            part
+        };
+        if part.is_empty() {
+            continue;
+        }
+        iov[len].write(libc::iovec {
+            iov_base: part.as_ptr() as *mut libc::c_void,
+            iov_len: part.len(),
+        });
+        len += 1;
+    }
+    len
+}
 
 enum TransportInner {
     Plain(i32),
@@ -460,34 +491,38 @@ impl Transport {
 
     /// Non-blocking send of `parts`, in order, in one system call on a
     /// plaintext socket, so a caller can send data spread over several
-    /// buffers without first copying it together. Returns the number of
-    /// bytes written across all parts, or 0 when the socket is not ready
-    /// (see [`Self::try_send`] for `again`). At most [`MAX_SEND_PARTS`]
-    /// parts go out per call. TLS transports always return `Ok(0)` without
-    /// writing: the caller buffers instead.
-    pub(crate) fn try_send_vectored(&mut self, parts: &[&[u8]], again: &mut i32) -> Result<usize> {
+    /// buffers without first copying it together. The first
+    /// `first_offset` bytes of `parts[0]` are skipped, which lets a caller
+    /// resume after a partial write by passing the same slice again
+    /// (advanced to the first unfinished part) instead of building a new
+    /// window. Returns the number of bytes written across all parts, or 0
+    /// when the socket is not ready (see [`Self::try_send`] for `again`).
+    /// At most [`MAX_SEND_PARTS`] non-empty parts go out per call; the
+    /// iovec array lives on the stack, so a send never allocates. TLS
+    /// transports always return `Ok(0)` without writing: the caller
+    /// buffers instead.
+    pub(crate) fn try_send_vectored(
+        &mut self,
+        parts: &[&[u8]],
+        first_offset: usize,
+        again: &mut i32,
+    ) -> Result<usize> {
         let fd = match &self.inner {
             TransportInner::Plain(fd) => *fd,
             #[cfg(feature = "tls")]
             TransportInner::Tls { .. } => return Ok(0),
         };
-        let mut iov: Vec<libc::iovec> = parts
-            .iter()
-            .take(MAX_SEND_PARTS)
-            .filter(|part| !part.is_empty())
-            .map(|part| libc::iovec {
-                iov_base: part.as_ptr() as *mut libc::c_void,
-                iov_len: part.len(),
-            })
-            .collect();
-        if iov.is_empty() {
+        let mut iov = [MaybeUninit::<libc::iovec>::uninit(); MAX_SEND_PARTS];
+        let len = fill_iovecs(parts, first_offset, &mut iov);
+        if len == 0 {
             return Ok(0);
         }
-        // SAFETY: an all-zero msghdr is valid; the iovecs point into
-        // `parts`, which outlive the call, and are only read by sendmsg.
+        // SAFETY: an all-zero msghdr is valid; `iov[..len]` was initialised
+        // by `fill_iovecs` and points into `parts`, which outlives the call
+        // and is only read by sendmsg.
         let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
-        msg.msg_iov = iov.as_mut_ptr();
-        msg.msg_iovlen = iov.len() as _;
+        msg.msg_iov = iov.as_mut_ptr().cast::<libc::iovec>();
+        msg.msg_iovlen = len as _;
         let n = unsafe { libc::sendmsg(fd, &msg, libc::MSG_DONTWAIT | libc::MSG_NOSIGNAL) };
         if n < 0 {
             let err = last_errno();
@@ -901,5 +936,176 @@ mod client_tls_tests {
             "expected the ~200ms deadline to bound the handshake, took {:?}",
             elapsed
         );
+    }
+}
+
+#[cfg(test)]
+mod vectored_send_tests {
+    use super::*;
+    use std::io::Read;
+    use std::os::fd::IntoRawFd;
+    use std::os::unix::net::UnixStream;
+
+    /// A plaintext transport over one end of a socketpair.
+    fn pair() -> (Transport, UnixStream) {
+        let (a, b) = UnixStream::pair().unwrap();
+        a.set_nonblocking(true).unwrap();
+        (Transport::new_plain(a.into_raw_fd()), b)
+    }
+
+    fn read_exact_n(peer: &mut UnixStream, n: usize) -> Vec<u8> {
+        let mut out = vec![0u8; n];
+        peer.read_exact(&mut out).unwrap();
+        out
+    }
+
+    #[test]
+    fn full_vectored_write_keeps_byte_order() {
+        let (mut t, mut peer) = pair();
+        let parts: [&[u8]; 3] = [b"abc", b"defg", b"h"];
+        let mut again = 0;
+        assert_eq!(t.try_send_vectored(&parts, 0, &mut again), Ok(8));
+        assert_eq!(read_exact_n(&mut peer, 8), b"abcdefgh");
+    }
+
+    #[test]
+    fn offset_into_first_part_skips_that_prefix() {
+        let (mut t, mut peer) = pair();
+        let parts: [&[u8]; 2] = [b"abcdef", b"gh"];
+        assert_eq!(t.try_send_vectored(&parts, 4, &mut 0), Ok(4));
+        assert_eq!(read_exact_n(&mut peer, 4), b"efgh");
+    }
+
+    #[test]
+    fn offset_at_or_past_the_end_of_first_part_sends_the_rest_only() {
+        let (mut t, mut peer) = pair();
+        let parts: [&[u8]; 2] = [b"abc", b"de"];
+        assert_eq!(t.try_send_vectored(&parts, 3, &mut 0), Ok(2));
+        assert_eq!(t.try_send_vectored(&parts, 99, &mut 0), Ok(2));
+        assert_eq!(read_exact_n(&mut peer, 4), b"dede");
+    }
+
+    #[test]
+    fn empty_parts_are_skipped_and_all_empty_writes_nothing() {
+        let (mut t, mut peer) = pair();
+        let parts: [&[u8]; 4] = [b"", b"ab", b"", b"c"];
+        assert_eq!(t.try_send_vectored(&parts, 0, &mut 0), Ok(3));
+        assert_eq!(read_exact_n(&mut peer, 3), b"abc");
+        let empty: [&[u8]; 2] = [b"", b""];
+        assert_eq!(t.try_send_vectored(&empty, 0, &mut 0), Ok(0));
+        assert_eq!(t.try_send_vectored(&[], 0, &mut 0), Ok(0));
+    }
+
+    #[test]
+    fn more_than_max_parts_go_out_in_windows_with_exact_order() {
+        let (mut t, mut peer) = pair();
+        // 2 * MAX_SEND_PARTS + 7 one-byte parts, interleaved with empties
+        // that must not count against the window.
+        let total = 2 * MAX_SEND_PARTS + 7;
+        let bytes: Vec<u8> = (0..total).map(|i| (i % 251) as u8).collect();
+        let mut parts: Vec<&[u8]> = Vec::new();
+        for i in 0..total {
+            parts.push(&bytes[i..i + 1]);
+            parts.push(&[]);
+        }
+        let mut next = 0;
+        let mut offset = 0;
+        let mut calls = 0;
+        let mut received = Vec::new();
+        while next < parts.len() {
+            let sent = t.try_send_vectored(&parts[next..], offset, &mut 0).unwrap();
+            assert!(sent > 0 && sent <= MAX_SEND_PARTS);
+            calls += 1;
+            received.extend(read_exact_n(&mut peer, sent));
+            let mut left = sent;
+            while left > 0 || (next < parts.len() && parts[next].len() == offset) {
+                let rest = parts[next].len() - offset;
+                if left < rest {
+                    offset += left;
+                    break;
+                }
+                left -= rest;
+                next += 1;
+                offset = 0;
+            }
+        }
+        assert_eq!(calls, 3);
+        assert_eq!(received, bytes);
+    }
+
+    #[test]
+    fn partial_write_reports_short_count_and_resume_continues_exactly() {
+        let (mut t, mut peer) = pair();
+        // Far more than the socketpair buffer holds: sendmsg must write
+        // only part of it, and resuming from the byte count must lose
+        // nothing.
+        let big: Vec<u8> = (0..4 * 1024 * 1024).map(|i| (i % 253) as u8).collect();
+        let parts: [&[u8]; 2] = [&big[..1_000_000], &big[1_000_000..]];
+        let first = t.try_send_vectored(&parts, 0, &mut 0).unwrap();
+        assert!(first > 0 && first < big.len(), "expected a partial write");
+        let mut got = Vec::new();
+        peer.set_nonblocking(true).unwrap();
+        let mut buf = vec![0u8; 1 << 16];
+        let mut sent = first;
+        loop {
+            match peer.read(&mut buf) {
+                Ok(n) => got.extend_from_slice(&buf[..n]),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    if sent == big.len() && got.len() == big.len() {
+                        break;
+                    }
+                    if sent < big.len() {
+                        let (next, offset) = if sent < parts[0].len() {
+                            (0, sent)
+                        } else {
+                            (1, sent - parts[0].len())
+                        };
+                        sent += t.try_send_vectored(&parts[next..], offset, &mut 0).unwrap();
+                    }
+                }
+                Err(e) => panic!("{e}"),
+            }
+        }
+        assert_eq!(got, big);
+    }
+
+    #[test]
+    fn full_socket_reports_again_instead_of_an_error() {
+        let (mut t, _peer) = pair();
+        let chunk = vec![7u8; 1 << 20];
+        let parts: [&[u8]; 1] = [&chunk];
+        let mut again = 0;
+        let mut guard = 0;
+        // Fill the socket until the kernel refuses more.
+        loop {
+            let n = t.try_send_vectored(&parts, 0, &mut again).unwrap();
+            if n == 0 {
+                break;
+            }
+            guard += 1;
+            assert!(guard < 1000, "socket never filled");
+        }
+        assert_eq!(again, 2, "EAGAIN must ask for write readiness");
+    }
+
+    #[test]
+    fn closed_peer_is_an_io_error_without_sigpipe() {
+        let (mut t, peer) = pair();
+        drop(peer);
+        let parts: [&[u8]; 1] = [b"data"];
+        assert_eq!(t.try_send_vectored(&parts, 0, &mut 0), Err(ErrorCode::Io));
+    }
+
+    #[test]
+    fn fill_iovecs_caps_at_capacity_and_skips_empties() {
+        let data = [1u8; 4];
+        let parts: Vec<&[u8]> = vec![&data[..0], &data[..2], &data[..0], &data[2..], &data];
+        let mut iov = [MaybeUninit::<libc::iovec>::uninit(); 2];
+        assert_eq!(fill_iovecs(&parts, 0, &mut iov), 2);
+        // SAFETY: both entries were just filled.
+        let first = unsafe { iov[0].assume_init() };
+        assert_eq!(first.iov_len, 2);
+        let second = unsafe { iov[1].assume_init() };
+        assert_eq!(second.iov_len, 2);
     }
 }

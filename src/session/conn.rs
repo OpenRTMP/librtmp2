@@ -28,7 +28,7 @@ use crate::message::shared_object::{self, SharedObjectMessage};
 use crate::session::publish_route::PublishRouteRegistry;
 use crate::session::state_machine;
 use crate::session::stream::Stream;
-use crate::transport::{MAX_SEND_PARTS, Transport};
+use crate::transport::Transport;
 use crate::types::*;
 
 pub const MAX_STREAMS_PER_CONN: u32 = 16;
@@ -2912,11 +2912,7 @@ impl Conn {
             let Some(transport) = self.transport.as_mut() else {
                 break;
             };
-            let mut window: Vec<&[u8]> =
-                Vec::with_capacity((parts.len() - next).min(MAX_SEND_PARTS));
-            window.push(&parts[next][offset..]);
-            window.extend(parts[next + 1..].iter().take(MAX_SEND_PARTS - 1));
-            let mut sent = transport.try_send_vectored(&window, &mut 0i32)?;
+            let mut sent = transport.try_send_vectored(&parts[next..], offset, &mut 0i32)?;
             if sent == 0 {
                 break;
             }
