@@ -107,7 +107,11 @@ network-facing behavior:
   `NetStream.Play.Start`) against a stream that is already live.
 - **`bench_relay`** — points N concurrent `play()` clients at one already-
   live stream and reports join latency (connect → first frame) and
-  steady-state relay throughput/frame rate per player.
+  steady-state relay throughput/frame rate per player. Besides the
+  human-readable lines it prints one machine-readable
+  `delivered: viewers=.. aggregate_gbps=.. steady_frames_per_viewer=..` line
+  that `librtmp2-server`'s `scripts/run_rtmp_benchmarks.sh` uses to report
+  CPU per delivered Gbit/s.
 
 ```bash
 cargo build --release --example bench_handshake --example bench_relay
@@ -124,6 +128,13 @@ cargo build --release --example bench_handshake --example bench_relay
 # Concurrent-viewer relay throughput (stream must already be publishing):
 ./target/release/examples/bench_relay rtmp://127.0.0.1:1935/live/bench --players 100 --run-secs 20
 ```
+
+Each `bench_relay` viewer is a thread on the benchmark host, so very high
+viewer counts (thousands) compete with the server for CPU unless the viewers
+run on another machine. `librtmp2-server`'s `BENCHMARKS.md` has the measured
+effect of the 0.10.x fan-out allocation/sort changes (no regression, CPU
+within run-to-run noise: the cost is dominated by the kernel TCP path) and a
+`perf` profile.
 
 See `librtmp2-server`'s `BENCHMARKS.md` for full cross-server results
 produced with these two tools, including the exact server configs used and
