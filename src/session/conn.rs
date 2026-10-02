@@ -7034,7 +7034,10 @@ mod tests {
         conn.defer_media_relay = true;
         conn.handle_command(publish_buf("s").as_slice()).unwrap();
         assert!(conn.current_stream.as_ref().unwrap().is_publishing);
-        assert!(!conn.relay_enabled, "defer_media_relay must leave relay off");
+        assert!(
+            !conn.relay_enabled,
+            "defer_media_relay must leave relay off"
+        );
 
         // Media is not relayed while relay is deferred, but it must still
         // count toward the publish-media squat deadline.

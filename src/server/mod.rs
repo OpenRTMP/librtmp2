@@ -2176,10 +2176,9 @@ impl Server {
             || !cache.video_track_headers.is_empty();
         has_video.then(|| {
             !cache.video_track_headers.is_empty()
-                || cache
-                    .avc_header
-                    .as_ref()
-                    .is_some_and(|header| Self::cached_payload_is_multitrack(FrameType::Video, header))
+                || cache.avc_header.as_ref().is_some_and(|header| {
+                    Self::cached_payload_is_multitrack(FrameType::Video, header)
+                })
                 || cache.last_keyframe.as_ref().is_some_and(|(_, keyframe)| {
                     Self::cached_payload_is_multitrack(FrameType::Video, keyframe)
                 })
