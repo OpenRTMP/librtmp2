@@ -534,7 +534,7 @@ pub fn read_connect_result_with_caps(
     buf: &mut Buffer,
     caps: Option<&mut NegotiatedCaps>,
 ) -> Result<f64> {
-    if let Some(caps) = caps {
+    if let Some(ref mut caps) = caps {
         *caps = NegotiatedCaps::default();
     }
     let mut name = [0u8; 64];
