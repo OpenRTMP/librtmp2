@@ -289,6 +289,11 @@ pub fn peek_name(buf: &mut Buffer, out: &mut [u8]) -> Result<usize> {
 
 /// Read a connect command.
 pub fn read_connect(buf: &mut Buffer, info: &mut ConnectInfo) -> Result<()> {
+    // Caller-owned output: a second parse on the same `ConnectInfo` must not
+    // inherit optional fields (pageUrl, fourCcList, capsEx, …) omitted on the
+    // later wire object.
+    *info = ConnectInfo::default();
+
     // Read command name
     let mut name = [0u8; 64];
     let name_len = amf0::read_string(buf, &mut name)?;
@@ -529,6 +534,9 @@ pub fn read_connect_result_with_caps(
     buf: &mut Buffer,
     caps: Option<&mut NegotiatedCaps>,
 ) -> Result<f64> {
+    if let Some(caps) = caps {
+        *caps = NegotiatedCaps::default();
+    }
     let mut name = [0u8; 64];
     amf0::read_string(buf, &mut name)?;
     let txn = read_number_value(buf)?;
@@ -748,6 +756,62 @@ mod tests {
     fn cstr(buf: &[u8]) -> &str {
         let len = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
         std::str::from_utf8(&buf[..len]).unwrap()
+    }
+
+    #[test]
+    fn read_connect_clears_stale_optional_fields_on_reparse() {
+        let mut buf = Buffer::new();
+        amf0::write_string(&mut buf, "connect").unwrap();
+        amf0::write_number(&mut buf, 1.0).unwrap();
+        amf0::write_object_begin(&mut buf).unwrap();
+        amf0::write_object_key(&mut buf, "pageUrl").unwrap();
+        amf0::write_string(&mut buf, "http://first.example/").unwrap();
+        amf0::write_object_key(&mut buf, "app").unwrap();
+        amf0::write_string(&mut buf, "live").unwrap();
+        amf0::write_object_end(&mut buf).unwrap();
+
+        let mut info = ConnectInfo::default();
+        read_connect(&mut buf, &mut info).unwrap();
+        assert_eq!(cstr(&info.page_url), "http://first.example/");
+
+        let mut buf2 = Buffer::new();
+        amf0::write_string(&mut buf2, "connect").unwrap();
+        amf0::write_number(&mut buf2, 2.0).unwrap();
+        amf0::write_object_begin(&mut buf2).unwrap();
+        amf0::write_object_key(&mut buf2, "app").unwrap();
+        amf0::write_string(&mut buf2, "live").unwrap();
+        amf0::write_object_end(&mut buf2).unwrap();
+
+        read_connect(&mut buf2, &mut info).unwrap();
+        assert_eq!(cstr(&info.page_url), "");
+        assert_eq!(info.transaction_id, 2.0);
+    }
+
+    #[test]
+    fn read_connect_result_clears_stale_negotiated_caps() {
+        let mut buf = Buffer::new();
+        amf0::write_string(&mut buf, "_result").unwrap();
+        amf0::write_number(&mut buf, 1.0).unwrap();
+        amf0::write_null(&mut buf).unwrap();
+        amf0::write_object_begin(&mut buf).unwrap();
+        amf0::write_object_key(&mut buf, "fourCcList").unwrap();
+        buf.write(&[0x0A, 0x00, 0x00, 0x00, 0x01]).unwrap();
+        amf0::write_string(&mut buf, "av01").unwrap();
+        amf0::write_object_end(&mut buf).unwrap();
+
+        let mut caps = NegotiatedCaps::default();
+        read_connect_result_with_caps(&mut buf, Some(&mut caps)).unwrap();
+        assert!(caps.has_four_cc_list);
+
+        let mut buf2 = Buffer::new();
+        amf0::write_string(&mut buf2, "_result").unwrap();
+        amf0::write_number(&mut buf2, 2.0).unwrap();
+        amf0::write_null(&mut buf2).unwrap();
+        amf0::write_null(&mut buf2).unwrap();
+
+        read_connect_result_with_caps(&mut buf2, Some(&mut caps)).unwrap();
+        assert!(!caps.has_four_cc_list);
+        assert_eq!(caps.four_cc_list.count, 0);
     }
 
     #[test]
