@@ -770,6 +770,12 @@ impl Client {
                         if msg.msg_type_id == msg_dispatch::RTMP_MSG_SET_CHUNK_SIZE {
                             let cs = control::read_set_chunk_size(&payload)?;
                             self.chunk_reg.set_all_chunk_size(cs);
+                        } else if msg.msg_type_id == msg_dispatch::RTMP_MSG_ABORT_MESSAGE {
+                            // Discard any partial reassembly on the aborted
+                            // CSID so following bytes are not appended to it.
+                            if let Ok(csid) = control::read_abort_message(&payload) {
+                                self.chunk_reg.reset_stream(csid);
+                            }
                         } else if msg.msg_type_id == msg_dispatch::RTMP_MSG_WINDOW_ACK_SIZE {
                             if let Ok(win) = control::read_window_ack_size(&payload) {
                                 self.window_ack_size = win;
@@ -1482,7 +1488,7 @@ impl Client {
     }
 
     /// Applies a fully-reassembled protocol-control message the client handles
-    /// internally (`SetChunkSize`, `WindowAckSize`, `UserControl`).
+    /// internally (`SetChunkSize`, `Abort`, `WindowAckSize`, `UserControl`).
     ///
     /// Returns `true` when the message was consumed and the caller must keep
     /// waiting instead of delivering it, `false` for messages that belong to
@@ -1496,6 +1502,14 @@ impl Client {
             msg_dispatch::RTMP_MSG_SET_CHUNK_SIZE => {
                 let cs = control::read_set_chunk_size(payload)?;
                 self.chunk_reg.set_all_chunk_size(cs);
+                Ok(true)
+            }
+            msg_dispatch::RTMP_MSG_ABORT_MESSAGE => {
+                // Discard any partial reassembly on the aborted CSID so
+                // following bytes are not appended to it.
+                if let Ok(csid) = control::read_abort_message(payload) {
+                    self.chunk_reg.reset_stream(csid);
+                }
                 Ok(true)
             }
             msg_dispatch::RTMP_MSG_WINDOW_ACK_SIZE => {
@@ -2581,6 +2595,119 @@ mod tests {
             .drain_ready_messages(&mut messages_processed)
             .unwrap();
         assert_eq!(client.window_ack_size, 2_500_000);
+    }
+
+    #[test]
+    fn abort_message_discards_partial_reassembly_before_fmt3_chunk() {
+        let mut client = Client::new();
+
+        // fmt=0 chunk for a 200-byte message on csid 3, but only the first
+        // 128-byte chunk arrives: csid 3 is left reassembling.
+        let mut wire = Buffer::new();
+        wire.write(&[0x03, 0, 0, 0, 0, 0, 0xC8, 0x08, 1, 0, 0, 0])
+            .unwrap();
+        wire.write(&[0xAA; 128]).unwrap();
+
+        // AbortMessage (0x02) for csid 3 on the control chunk stream (csid 2).
+        let mut abort_payload = Buffer::new();
+        abort_payload.write(&3u32.to_be_bytes()).unwrap();
+        let mut abort_msg = ChunkMessage::default();
+        abort_msg.csid = 2;
+        abort_msg.fmt = 0;
+        abort_msg.msg_length = 4;
+        abort_msg.msg_type_id = msg_dispatch::RTMP_MSG_ABORT_MESSAGE;
+        abort_msg.msg_stream_id = 0;
+        let mut abort_wire = Buffer::new();
+        chunk_write(
+            &mut abort_wire,
+            &abort_msg,
+            abort_payload.as_slice(),
+            4,
+            128,
+        )
+        .unwrap();
+        wire.write(abort_wire.peek()).unwrap();
+
+        client.recv_buffer.write(wire.peek()).unwrap();
+        let mut messages_processed = 0;
+        client
+            .drain_ready_messages(&mut messages_processed)
+            .unwrap();
+
+        let stream = client.chunk_reg.get(3).expect("csid 3 stays registered");
+        assert_eq!(stream.reassembly_bytes_read, 0);
+        assert_eq!(stream.type0_msg_length, 0);
+        assert!(!stream.reassembling);
+
+        // A compressed fmt=3 chunk immediately after the abort must not be
+        // appended to the discarded message: with no inherited header context
+        // it is rejected instead of completing a corrupted payload.
+        let mut fmt3 = Buffer::new();
+        fmt3.write(&[0xC3]).unwrap();
+        fmt3.write(&[0xBB; 72]).unwrap();
+        let mut out = ChunkMessage::default();
+        assert!(matches!(
+            chunk_read_owned(&mut fmt3, &mut client.chunk_reg, &mut out),
+            Err(ErrorCode::Chunk)
+        ));
+
+        // The CSID stays usable: a fresh fmt=0 message re-establishes the
+        // header, and a following fmt=3 new message decodes with the
+        // inherited header and timestamp.
+        let payload = b"hello";
+        let mut reestablished = ChunkMessage {
+            csid: 3,
+            fmt: 0,
+            timestamp: 100,
+            msg_length: payload.len() as u32,
+            msg_type_id: 0x08,
+            msg_stream_id: 1,
+            is_complete: false,
+        };
+        let mut first = Buffer::new();
+        chunk_write(&mut first, &reestablished, payload, payload.len(), 128).unwrap();
+        assert_eq!(
+            chunk_read_owned(&mut first, &mut client.chunk_reg, &mut reestablished)
+                .unwrap()
+                .0,
+            1
+        );
+        let mut next = Buffer::new();
+        next.write(&[0xC3]).unwrap();
+        next.write(b"again").unwrap();
+        assert_eq!(
+            chunk_read_owned(&mut next, &mut client.chunk_reg, &mut reestablished)
+                .unwrap()
+                .0,
+            1
+        );
+        assert_eq!(reestablished.timestamp, 200);
+    }
+
+    #[test]
+    fn abort_message_resets_stream_in_blocking_consume_path() {
+        let mut client = Client::new();
+        {
+            let cs = client.chunk_reg.get_or_create(3).unwrap();
+            cs.type0_msg_length = 200;
+            cs.reassembly_bytes_read = 128;
+            cs.reassembling = true;
+        }
+
+        let mut msg = ChunkMessage::default();
+        msg.msg_type_id = msg_dispatch::RTMP_MSG_ABORT_MESSAGE;
+        let payload = 3u32.to_be_bytes();
+        assert!(
+            client
+                .consume_protocol_control_message(&msg, &payload)
+                .unwrap(),
+            "an AbortMessage must be consumed by the blocking path"
+        );
+
+        let cs = client.chunk_reg.get(3).expect("csid 3 stays registered");
+        assert_eq!(cs.type0_msg_length, 0);
+        assert_eq!(cs.reassembly_bytes_read, 0);
+        assert!(!cs.reassembling);
     }
 
     #[test]
