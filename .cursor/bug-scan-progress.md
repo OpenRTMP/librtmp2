@@ -1,19 +1,40 @@
 # Bug scan progress
 
-Last scanned: chunk (2026-10-02)
+Last scanned: message (2026-10-03)
 
 ## Modules
 
 - [x] core — Memory, logging, errors, buffer
 - [x] handshake — C0/C1/C2 ↔ S0/S1/S2
 - [x] chunk — Chunk reader/writer/state
-- [ ] message — Message reassembly, control, commands
+- [x] message — Message reassembly, control, commands
 - [ ] amf — AMF0 + AMF3
 - [ ] flv — Audio/video/script tags
 - [ ] ertmp — E-RTMP v1/v2 extensions
 - [ ] session — State machine, publish/play flows
 - [ ] server — Server listener
 - [ ] client — Outbound client
+
+## Findings (2026-10-03 message pass)
+
+- Reviewed all five files under `src/message/` (`command.rs`, `control.rs`,
+  `message.rs`, `shared_object.rs`, `mod.rs`) and traced production paths in
+  `session/conn.rs` (`handle_message`, `handle_control`, `handle_user_control`,
+  `handle_aggregate`, `handle_command`, `handle_amf3_shared_object`) and
+  `client/mod.rs` (control/aggregate/command handling). Checked control
+  decoders for short-input panics, SetChunkSize/WindowAckSize bounds, aggregate
+  sub-tag limits/zero-size rejection, shared-object envelope caps, AMF command
+  routing-key validation (NUL/UTF-8/length), and ping rate limiting.
+- **Bug (fixed):** `read_connect()` and `read_connect_result_with_caps()` reused
+  caller-owned `ConnectInfo` / `NegotiatedCaps` without resetting prior fields.
+  A second parse omitting optional keys (e.g. `pageUrl`, `fourCcList`) left
+  stale values from an earlier connect or `_result`, so embedders reusing these
+  structs could mis-attribute metadata or negotiate codecs from a prior peer.
+  Fixed by re-initializing at parse entry; regression tests in `command.rs`.
+- AMF0 shared-object messages (RTMP type `0x13`) are documented in
+  `shared_object.rs` but not dispatched in `Conn::handle_message` (only AMF3
+  `0x10` today) — interoperability gap, not treated as a security/crash issue
+  in this pass.
 
 ## Findings (2026-09-19 handshake pass)
 
