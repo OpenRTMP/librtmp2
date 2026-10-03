@@ -535,7 +535,7 @@ pub fn read_connect_result_with_caps(
     caps: Option<&mut NegotiatedCaps>,
 ) -> Result<f64> {
     if let Some(ref mut caps) = caps {
-        *caps = NegotiatedCaps::default();
+        **caps = NegotiatedCaps::default();
     }
     let mut name = [0u8; 64];
     amf0::read_string(buf, &mut name)?;
