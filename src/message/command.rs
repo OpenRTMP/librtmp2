@@ -532,7 +532,7 @@ pub fn read_connect_result(buf: &mut Buffer) -> Result<f64> {
 /// Read a connect `_result` and optionally capture negotiated E-RTMP caps.
 pub fn read_connect_result_with_caps(
     buf: &mut Buffer,
-    caps: Option<&mut NegotiatedCaps>,
+    mut caps: Option<&mut NegotiatedCaps>,
 ) -> Result<f64> {
     if let Some(ref mut caps) = caps {
         **caps = NegotiatedCaps::default();
