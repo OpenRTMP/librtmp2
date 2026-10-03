@@ -771,10 +771,11 @@ impl Client {
                             let cs = control::read_set_chunk_size(&payload)?;
                             self.chunk_reg.set_all_chunk_size(cs);
                         } else if msg.msg_type_id == msg_dispatch::RTMP_MSG_ABORT_MESSAGE {
-                            // Discard any partial reassembly on the aborted
-                            // CSID so following bytes are not appended to it.
+                            // Discard only the partial reassembly on the
+                            // aborted CSID; the header-compression context is
+                            // retained for a following fmt=1/2/3 chunk.
                             if let Ok(csid) = control::read_abort_message(&payload) {
-                                self.chunk_reg.reset_stream(csid);
+                                self.chunk_reg.abort_stream(csid);
                             }
                         } else if msg.msg_type_id == msg_dispatch::RTMP_MSG_WINDOW_ACK_SIZE {
                             if let Ok(win) = control::read_window_ack_size(&payload) {
@@ -1505,10 +1506,11 @@ impl Client {
                 Ok(true)
             }
             msg_dispatch::RTMP_MSG_ABORT_MESSAGE => {
-                // Discard any partial reassembly on the aborted CSID so
-                // following bytes are not appended to it.
+                // Discard only the partial reassembly on the aborted CSID;
+                // the header-compression context is retained for a following
+                // fmt=1/2/3 chunk.
                 if let Ok(csid) = control::read_abort_message(payload) {
-                    self.chunk_reg.reset_stream(csid);
+                    self.chunk_reg.abort_stream(csid);
                 }
                 Ok(true)
             }
@@ -2636,20 +2638,35 @@ mod tests {
 
         let stream = client.chunk_reg.get(3).expect("csid 3 stays registered");
         assert_eq!(stream.reassembly_bytes_read, 0);
-        assert_eq!(stream.type0_msg_length, 0);
+        assert_eq!(stream.type0_msg_length, 200);
         assert!(!stream.reassembling);
 
-        // A compressed fmt=3 chunk immediately after the abort must not be
-        // appended to the discarded message: with no inherited header context
-        // it is rejected instead of completing a corrupted payload.
+        // A compressed fmt=3 chunk immediately after the abort starts a new
+        // message that reuses the retained header context (length, type,
+        // stream id) instead of being appended to the discarded one.
         let mut fmt3 = Buffer::new();
         fmt3.write(&[0xC3]).unwrap();
-        fmt3.write(&[0xBB; 72]).unwrap();
+        fmt3.write(&[0xBB; 128]).unwrap();
         let mut out = ChunkMessage::default();
-        assert!(matches!(
-            chunk_read_owned(&mut fmt3, &mut client.chunk_reg, &mut out),
-            Err(ErrorCode::Chunk)
-        ));
+        assert_eq!(
+            chunk_read_owned(&mut fmt3, &mut client.chunk_reg, &mut out)
+                .unwrap()
+                .0,
+            0,
+            "the first fmt=3 chunk starts the inherited 200-byte message"
+        );
+        let mut fmt3_tail = Buffer::new();
+        fmt3_tail.write(&[0xC3]).unwrap();
+        fmt3_tail.write(&[0xBB; 72]).unwrap();
+        assert_eq!(
+            chunk_read_owned(&mut fmt3_tail, &mut client.chunk_reg, &mut out)
+                .unwrap()
+                .0,
+            1
+        );
+        assert_eq!(out.msg_length, 200);
+        assert_eq!(out.msg_type_id, 0x08);
+        assert_eq!(out.msg_stream_id, 1);
 
         // The CSID stays usable: a fresh fmt=0 message re-establishes the
         // header, and a following fmt=3 new message decodes with the
@@ -2705,7 +2722,9 @@ mod tests {
         );
 
         let cs = client.chunk_reg.get(3).expect("csid 3 stays registered");
-        assert_eq!(cs.type0_msg_length, 0);
+        // The header-compression context survives; only the partial
+        // reassembly is discarded.
+        assert_eq!(cs.type0_msg_length, 200);
         assert_eq!(cs.reassembly_bytes_read, 0);
         assert!(!cs.reassembling);
     }
