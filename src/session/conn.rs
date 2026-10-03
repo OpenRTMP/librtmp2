@@ -1799,7 +1799,7 @@ impl Conn {
             msg_dispatch::RTMP_MSG_ABORT_MESSAGE => {
                 if payload.len() >= 4 {
                     if let Ok(csid) = control::read_abort_message(payload) {
-                        self.chunk_reg.reset_stream(csid);
+                        self.chunk_reg.abort_stream(csid);
                     }
                 }
             }

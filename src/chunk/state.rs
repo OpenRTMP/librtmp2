@@ -40,7 +40,7 @@ pub struct ChunkStream {
     /// timestamp of the last fmt=0 message (which a following fmt=3 chunk
     /// repeats as its delta per RTMP spec 5.3.1.2.4). A new message that
     /// starts with fmt=3 (reusing the prior header entirely) implicitly
-    /// repeats this same value per RTMP spec 5.3.1.3.
+    /// repeats this same value per RTMP spec 5.3.1.2.4.
     pub last_delta: u32,
     /// bytes read so far for current message
     pub reassembly_bytes_read: u32,
@@ -293,6 +293,24 @@ impl ChunkRegistry {
         }
     }
 
+    /// Discard a partially reassembled message on `csid` (RTMP Abort Message,
+    /// spec 5.4.2) while retaining the chunk-stream header-compression context
+    /// (`type0_*` fields and `last_delta`): the next message on this CSID may
+    /// still start with a compressed fmt=1/2/3 header that references the most
+    /// recent header on the stream.
+    pub fn abort_stream(&mut self, csid: u32) {
+        if let Some(idx) = self.csid_index.get(&csid).copied() {
+            if self.streams[idx].in_use && self.streams[idx].csid == csid {
+                self.release_stream_reassembly(idx);
+                let stream = &mut self.streams[idx];
+                stream.reassembly_buf.reset();
+                stream.reassembly_bytes_read = 0;
+                stream.reassembling = false;
+                stream.chunk_read_scratch.clear();
+            }
+        }
+    }
+
     /// Destroy the registry.
     pub fn destroy(&mut self) {
         self.streams.clear();
@@ -465,7 +483,7 @@ mod tests {
     }
 
     #[test]
-    fn abort_resets_message_state_but_keeps_csid_registered() {
+    fn abort_stream_keeps_header_context_and_dormant_slot() {
         let mut reg = ChunkRegistry::new();
         reg.max_active_csids = 2;
 
@@ -474,16 +492,28 @@ mod tests {
             let cs = reg.get_or_create(2).unwrap();
             cs.type0_msg_length = 4096;
             cs.type0_timestamp = 1234;
+            cs.type0_msg_stream_id = 7;
+            cs.last_delta = 33;
             cs.reassembly_bytes_read = 512;
+            cs.reassembling = true;
+            cs.reassembly_buf.write(&[0xAA; 512]).unwrap();
         }
+        reg.reassembly_bytes_in_use = 512;
 
-        reg.reset_stream(2);
+        reg.abort_stream(2);
 
         let cs = reg.get(2).expect("CSID stays registered after abort");
-        assert_eq!(cs.type0_msg_length, 0);
-        assert_eq!(cs.type0_timestamp, 0);
+        // The header-compression context survives an Abort Message: the next
+        // message may still use a compressed fmt=1/2/3 header.
+        assert_eq!(cs.type0_msg_length, 4096);
+        assert_eq!(cs.type0_timestamp, 1234);
+        assert_eq!(cs.type0_msg_stream_id, 7);
+        assert_eq!(cs.last_delta, 33);
+        // The in-flight reassembly is discarded and its accounting released.
         assert_eq!(cs.reassembly_bytes_read, 0);
         assert!(!cs.reassembling);
+        assert_eq!(cs.reassembly_buf.available(), 0);
+        assert_eq!(reg.reassembly_bytes_in_use, 0);
 
         // The aborted CSID is dormant, so it no longer counts against the cap.
         assert!(reg.get_or_create(3).is_ok());
