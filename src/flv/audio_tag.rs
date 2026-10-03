@@ -24,7 +24,9 @@ pub fn parse(data: &[u8], tag: &mut AudioTag) -> Result<()> {
         8 => AudioCodec::G711U,
         10 => AudioCodec::Aac,
         11 => AudioCodec::Speex,
-        14 => AudioCodec::Opus,
+        // Legacy SoundFormat 14 is MP3 8 kHz; Opus is signaled via the
+        // ExHeader (nibble 9) with the 'Opus' FourCC.
+        14 => AudioCodec::Mp3,
         // SoundFormat 9 is E-RTMP's ExHeader and 12/13/15 are reserved; reject
         // rather than silently mapping to AAC. Enhanced audio must be parsed
         // via `ertmp::exaudio` (see the `flv` module docs). Legacy SoundFormat
@@ -64,6 +66,16 @@ mod tests {
         let mut tag = AudioTag::default();
         parse(&payload, &mut tag).unwrap();
         assert_eq!(tag.codec, AudioCodec::Mp3);
+    }
+
+    #[test]
+    fn parse_legacy_sound_format_14_is_mp3_8k() {
+        // Legacy nibble 14 is MP3 8 kHz; Opus is signaled via the ExHeader.
+        let payload = [0xE1];
+        let mut tag = AudioTag::default();
+        parse(&payload, &mut tag).unwrap();
+        assert_eq!(tag.codec, AudioCodec::Mp3);
+        assert_ne!(tag.codec, AudioCodec::Opus);
     }
 
     #[test]

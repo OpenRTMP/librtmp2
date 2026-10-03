@@ -45,7 +45,9 @@ pub fn exaudio_parse(data: &[u8], hdr: &mut AudioHeader) -> Result<()> {
             8 => crate::types::AudioCodec::G711U,
             10 => crate::types::AudioCodec::Aac,
             11 => crate::types::AudioCodec::Speex,
-            14 => crate::types::AudioCodec::Opus,
+            // Legacy SoundFormat 14 is MP3 8 kHz; Opus is only signaled via
+            // the ExHeader (nibble 9) with the 'Opus' FourCC.
+            14 => crate::types::AudioCodec::Mp3,
             // SoundFormat 9 is E-RTMP's ExHeader (handled above) and
             // 12/13/15 are reserved; reject rather than silently mapping to
             // AAC, matching `flv::audio_tag::parse`.
@@ -74,7 +76,8 @@ pub fn exaudio_parse(data: &[u8], hdr: &mut AudioHeader) -> Result<()> {
 }
 
 /// Write an Enhanced RTMP v1 audio tag header. Returns bytes written, or 0 if
-/// `buf` is too small. Mirrors [`exaudio_parse`] in reverse.
+/// `buf` is too small or the codec cannot be represented in this tag layout
+/// (legacy Opus). Mirrors [`exaudio_parse`] in reverse.
 pub fn exaudio_write(hdr: &AudioHeader, buf: &mut [u8]) -> usize {
     if hdr.is_ex_header == 0 {
         let codec_nibble = match hdr.audio_codec {
@@ -89,7 +92,9 @@ pub fn exaudio_write(hdr: &AudioHeader, buf: &mut [u8]) -> usize {
             crate::types::AudioCodec::G711U => 8,
             crate::types::AudioCodec::Aac => 10,
             crate::types::AudioCodec::Speex => 11,
-            crate::types::AudioCodec::Opus => 14,
+            // Legacy tags cannot carry Opus (nibble 14 is MP3 8 kHz); Opus
+            // must be written as an ExHeader with the 'Opus' FourCC.
+            crate::types::AudioCodec::Opus => return 0,
         };
         let b0 = (codec_nibble << 4)
             | ((hdr.sample_rate & 0x03) << 2)
@@ -194,6 +199,18 @@ mod tests {
     }
 
     #[test]
+    fn parse_legacy_sound_format_14_is_mp3_not_opus() {
+        // Legacy nibble 14 is MP3 8 kHz; Opus is only signaled via the
+        // ExHeader (nibble 9) with the 'Opus' FourCC.
+        let data = [0xE1, 0x21, 0x11];
+        let mut hdr = AudioHeader::default();
+        exaudio_parse(&data, &mut hdr).unwrap();
+        assert_eq!(hdr.is_ex_header, 0);
+        assert_eq!(hdr.audio_codec, AudioCodec::Mp3);
+        assert_ne!(hdr.audio_codec, AudioCodec::Opus);
+    }
+
+    #[test]
     fn write_round_trips_legacy_aac_header() {
         let hdr = AudioHeader {
             is_ex_header: 0,
@@ -234,6 +251,19 @@ mod tests {
         assert_eq!(parsed.audio_codec, AudioCodec::Mp3);
         assert_eq!(parsed.sample_rate, 2);
         assert_eq!(parsed.channels, 0);
+    }
+
+    #[test]
+    fn write_rejects_legacy_opus_header() {
+        // Opus cannot be represented in a legacy tag (nibble 14 is MP3
+        // 8 kHz); it must be written as an ExHeader with the 'Opus' FourCC.
+        let hdr = AudioHeader {
+            is_ex_header: 0,
+            audio_codec: AudioCodec::Opus,
+            ..Default::default()
+        };
+        let mut buf = [0u8; 5];
+        assert_eq!(exaudio_write(&hdr, &mut buf), 0);
     }
 
     #[test]
