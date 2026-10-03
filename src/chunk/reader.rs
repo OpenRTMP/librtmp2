@@ -305,7 +305,10 @@ pub fn chunk_read(
                 stream.type0_msg_type_id = msg_type_id;
                 stream.type0_msg_stream_id = msg_stream_id;
                 stream.type0_ext_ts = ext_ts;
-                stream.last_delta = 0;
+                // A fmt=3 chunk that immediately starts a new message repeats
+                // this type-0 absolute timestamp as its delta (RTMP spec
+                // 5.3.1.2.4), so it advances to 2x the type-0 timestamp.
+                stream.last_delta = final_timestamp;
             }
             1 => {
                 // fmt=1 carries a timestamp DELTA (RTMP spec 5.3.1.1), not an
@@ -488,6 +491,7 @@ mod tests {
             1
         );
         assert!(out_msg.is_complete);
+        assert_eq!(out_msg.timestamp, 1);
 
         let mut next = Buffer::new();
         next.write(&fmt3_wire(3, b"again")).expect("fmt3 wire");
@@ -498,6 +502,11 @@ mod tests {
         assert_eq!(out_msg.msg_type_id, 0x14);
         assert_eq!(out_msg.msg_stream_id, 1);
         assert_eq!(len, 5);
+        assert_eq!(
+            out_msg.timestamp, 2,
+            "a fmt=3 new message after fmt=0 must repeat the type-0 timestamp \
+             as its delta (RTMP spec 5.3.1.2.4)"
+        );
     }
 
     #[test]
