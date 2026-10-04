@@ -142,7 +142,7 @@ jobs:
           cargo vendor vendor > .cargo/config.toml
 
       - name: Verify the raw vendored tree builds offline
-        run: cargo build --release --offline --all-features --verbose
+        run: cargo build --locked --release --offline --all-features --verbose
 
       - name: Archive the vendored tree for the Debian source package
         # dpkg-source and debhelper intentionally filter many build-like file

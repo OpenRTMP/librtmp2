@@ -40,7 +40,7 @@ case "${1:-}" in
         BASELINE_REF="${2:-HEAD}"
         BASELINE_TAG=$(git -C "$PROJECT_DIR" describe --tags --abbrev=0 "$BASELINE_REF" 2>/dev/null || echo "")
 
-        if [ -z "$BASELINE_TAG" ]; then
+        if [[ -z "$BASELINE_TAG" ]]; then
             echo "No tag found for $BASELINE_REF, using HEAD"
             BASELINE_TAG="HEAD~1"
         fi
