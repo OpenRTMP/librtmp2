@@ -35,10 +35,10 @@ jobs:
         with:
           toolchain: ${{ steps.msrv.outputs.version }}
 
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Verify Cargo.lock is up to date
+        run: cargo metadata --locked --all-features --format-version 1 > /dev/null
 
-      - name: Generate lockfile for reproducible builds
-        run: cargo generate-lockfile
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       - name: Build (default features) at MSRV
         run: cargo build --locked --all-features --verbose
