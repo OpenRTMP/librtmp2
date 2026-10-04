@@ -18,8 +18,17 @@ fuzz_target!(|data: &[u8]| {
     let mut len = 0usize;
 
     for _ in 0..4096 {
+        let before = buf.available();
         match chunk_read(&mut buf, &mut reg, None, &mut msg, &mut ptr, &mut len) {
-            Ok(0) => break,
+            // `chunk_read` returns Ok(0) both for "needs more data" (no bytes
+            // consumed) and for a consumed non-final chunk; keep going only
+            // when it actually made progress, so multi-chunk reassembly is
+            // exercised too.
+            Ok(0) => {
+                if buf.available() >= before {
+                    break;
+                }
+            }
             Ok(1) => {}
             Ok(_) => break,
             Err(_) => break,
