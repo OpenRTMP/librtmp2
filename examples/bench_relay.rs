@@ -159,6 +159,7 @@ struct PlayerResult {
     frames_steady: u64,
     bytes_steady: u64,
     steady_window_secs: f64,
+    completed: bool,
 }
 
 fn run_player(url: String, run_secs: u64, warmup: Duration, epoch: Instant) -> PlayerResult {
@@ -176,6 +177,7 @@ fn run_player(url: String, run_secs: u64, warmup: Duration, epoch: Instant) -> P
     let connected = client.connect(&url).is_ok();
     let played = connected && client.play().is_ok();
 
+    let mut completed = false;
     if played {
         let deadline = Instant::now() + Duration::from_secs(run_secs);
         while Instant::now() < deadline {
@@ -183,6 +185,7 @@ fn run_player(url: String, run_secs: u64, warmup: Duration, epoch: Instant) -> P
                 break;
             }
         }
+        completed = Instant::now() >= deadline;
     }
 
     STATE.with(|s| {
@@ -202,6 +205,7 @@ fn run_player(url: String, run_secs: u64, warmup: Duration, epoch: Instant) -> P
             frames_steady: s.frames_steady,
             bytes_steady: s.bytes_steady,
             steady_window_secs,
+            completed,
         }
     })
 }
@@ -240,6 +244,7 @@ fn main() -> ExitCode {
     let total = results.len();
     let connected = results.iter().filter(|r| r.connected).count();
     let played = results.iter().filter(|r| r.played).count();
+    let incomplete = results.iter().filter(|r| r.played && !r.completed).count();
     let received_any = results.iter().filter(|r| r.frames_total > 0).count();
 
     let mut join_ms: Vec<f64> = results.iter().filter_map(|r| r.join_latency_ms).collect();
@@ -260,7 +265,7 @@ fn main() -> ExitCode {
         url_label, args.players, args.run_secs, args.warmup_ms
     );
     println!(
-        "connected={connected}/{total} played={played}/{total} received_frames={received_any}/{total}"
+        "connected={connected}/{total} played={played}/{total} incomplete={incomplete}/{played} received_frames={received_any}/{total}"
     );
     println!(
         "join latency ms (connect -> first frame): avg={:.2} p50={:.2} p95={:.2} p99={:.2} max={:.2}",
