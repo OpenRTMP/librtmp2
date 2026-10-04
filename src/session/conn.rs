@@ -1320,21 +1320,20 @@ impl Conn {
                     _ => ErrorCode::Internal,
                 });
             }
-            if rc == 0 {
-                let after = self.recv_buffer.available();
-                if after == before {
-                    no_progress += 1;
-                    if no_progress > 3 {
-                        break;
-                    }
-                } else {
-                    no_progress = 0;
-                }
-                if after == 0 && self.state < ConnState::Closing {
+            // Drive the no-progress guard from bytes consumed, not from `rc`:
+            // `read_messages` always returns 1, so keying off `rc == 0` left
+            // every recv that ends on a partial chunk spinning to `max_iter`.
+            let after = self.recv_buffer.available();
+            if after == before {
+                no_progress += 1;
+                if no_progress > 3 {
                     break;
                 }
             } else {
                 no_progress = 0;
+            }
+            if after == 0 && self.state < ConnState::Closing {
+                break;
             }
         }
         if self.window_ack_size > 0
