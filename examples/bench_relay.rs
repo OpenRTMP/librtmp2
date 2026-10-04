@@ -179,7 +179,9 @@ fn run_player(url: String, run_secs: u64, warmup: Duration, epoch: Instant) -> P
     if played {
         let deadline = Instant::now() + Duration::from_secs(run_secs);
         while Instant::now() < deadline {
-            let _ = client.poll(50);
+            if client.poll(50).is_err() {
+                break;
+            }
         }
     }
 
