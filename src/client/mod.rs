@@ -635,7 +635,13 @@ impl Client {
             if self.send_buffer.available() > 0 {
                 if let Some(t) = self.transport.as_ref() {
                     let again = send_poll_again.unwrap_or(2);
-                    poll_for_transport_direction(t.fd(), again, timeout_ms)?;
+                    // A full send buffer just means "not writable yet"; treat
+                    // the poll timeout as nothing-ready (as the Playing branch
+                    // does) instead of aborting a healthy publish session.
+                    match poll_for_transport_direction(t.fd(), again, timeout_ms) {
+                        Ok(()) | Err(ErrorCode::Timeout) => {}
+                        Err(e) => return Err(e),
+                    }
                 }
                 self.try_flush_send_buffer()?;
             }
