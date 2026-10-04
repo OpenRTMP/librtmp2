@@ -57,7 +57,7 @@ run_one() {
     # and disconnects before ffmpeg finishes (it sees "Connection reset by
     # peer"). Only treat it as a real failure if the server is still running,
     # i.e. ffmpeg died before the server ever got enough data.
-    if [ "$ff_rc" -ne 0 ] && kill -0 "$srv" 2>/dev/null; then
+    if [[ "$ff_rc" -ne 0 ]] && kill -0 "$srv" 2>/dev/null; then
         echo "[$label] ENHANCED-RTMP INTEROP FAILED (ffmpeg publish exit=$ff_rc, ingest server still running)"
         echo "== [$label] ingest log =="
         cat "$log"
@@ -68,7 +68,7 @@ run_one() {
 
     wait "$srv"; local rc=$?
     echo "== [$label] ingest log =="; cat "$log"
-    if [ "$rc" -ne 0 ]; then
+    if [[ "$rc" -ne 0 ]]; then
         echo "[$label] ENHANCED-RTMP INTEROP FAILED (ingest exit=$rc)"
         return 1
     fi
@@ -85,16 +85,16 @@ AV1_ENC=""
 for enc in libsvtav1 libaom-av1 librav1e; do
     if have_enc "$enc"; then AV1_ENC="$enc"; break; fi
 done
-if [ -n "$AV1_ENC" ]; then
+if [[ -n "$AV1_ENC" ]]; then
     tested=1
     sleep 2
     extra=""
-    [ "$AV1_ENC" = "libaom-av1" ] && extra="-cpu-used 8"
-    [ "$AV1_ENC" = "libsvtav1" ] && extra="-preset 12"
+    [[ "$AV1_ENC" = "libaom-av1" ]] && extra="-cpu-used 8"
+    [[ "$AV1_ENC" = "libsvtav1" ]] && extra="-preset 12"
     run_one av1 "$AV1_ENC" "$extra" "$((BASE_PORT + 1))"
 fi
 
-if [ "$tested" -eq 0 ]; then
+if [[ "$tested" -eq 0 ]]; then
     echo "No HEVC or AV1 encoder available in ffmpeg; skipping Enhanced-RTMP interop test."
     exit 0
 fi

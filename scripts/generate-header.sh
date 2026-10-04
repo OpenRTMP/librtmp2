@@ -17,7 +17,7 @@ if ! command -v cbindgen >/dev/null 2>&1; then
 fi
 
 INSTALLED_VERSION="$(cbindgen --version | awk '{print $2}')"
-if [ "${INSTALLED_VERSION}" != "${CBINDGEN_VERSION}" ]; then
+if [[ "${INSTALLED_VERSION}" != "${CBINDGEN_VERSION}" ]]; then
     echo "Error: cbindgen ${CBINDGEN_VERSION} is required, found ${INSTALLED_VERSION}." >&2
     echo "Install it with: cargo install --locked --version ${CBINDGEN_VERSION} --force cbindgen" >&2
     exit 1
