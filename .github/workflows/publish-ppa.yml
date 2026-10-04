@@ -139,7 +139,7 @@ jobs:
       - name: Vendor cargo dependencies for an offline build
         run: |
           mkdir -p .cargo
-          cargo vendor vendor > .cargo/config.toml
+          cargo vendor --locked vendor > .cargo/config.toml
 
       - name: Verify the raw vendored tree builds offline
         run: cargo build --locked --release --offline --all-features --verbose
