@@ -45,6 +45,8 @@ fn main() {
 
     let mut server = Server::new(config).expect("failed to create server");
     server.on_frame_cb = Some(on_frame);
+    server.on_publish_cb = Some(|_conn_id: u64, _app: &str, _stream_name: &str| true);
+    server.on_play_cb = Some(|_conn_id: u64, _app: &str, _stream_name: &str| true);
     server.listen(&bind_addr).expect("failed to listen");
     println!("listening on {bind_addr}");
 
