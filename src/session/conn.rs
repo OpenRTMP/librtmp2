@@ -819,11 +819,12 @@ impl Conn {
             }
             return Err(ErrorCode::Internal);
         }
-        let normalized = normalize_modex_payload_with_frame_type(
-            payload,
-            self.negotiated_caps.caps_ex_mask,
-            frame_type,
-        );
+        // Always peel ModEx wrappers before cache classification, as
+        // `handle_media_frame` does: gating on the negotiated `caps_ex_mask`
+        // would let an injector smuggle wrapper extension bytes past the
+        // init-cache / DeliveryHint codec detection.
+        let normalized =
+            normalize_modex_payload_with_frame_type(payload, CAPS_EX_MASK_MODEX, frame_type);
         if let Err(e) = self.queue_relay_frame(frame_type, timestamp, payload, normalized.as_ref())
         {
             // Don't let a rejected frame (e.g. over the pending-byte budget)

@@ -19,7 +19,8 @@ use std::net::TcpStream;
 use std::os::unix::io::{AsRawFd, FromRawFd};
 use std::sync::Arc;
 #[cfg(feature = "tls")]
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use std::time::Instant;
 
 #[cfg(feature = "tls")]
 const TLS_ACCEPT_TIMEOUT_SECS: u64 = 10;
@@ -536,11 +537,19 @@ impl Transport {
 
     /// Blocking send of the whole buffer (client-side synchronous I/O).
     ///
-    /// Uses a 10-second poll timeout rather than an infinite wait so a peer
-    /// that stops reading cannot block the caller indefinitely. Correctly
-    /// handles TLS WANT_READ during writes (e.g. renegotiation) by polling
-    /// for read readiness instead of write readiness.
+    /// Bounds the whole send with a 10-second deadline rather than an
+    /// infinite wait, so a peer that stops reading — or that trickles out a
+    /// few bytes just before each individual wait expires — cannot block the
+    /// caller indefinitely. Correctly handles TLS WANT_READ during writes
+    /// (e.g. renegotiation) by polling for read readiness instead of write
+    /// readiness.
     pub fn send(&mut self, data: &[u8]) -> Result<()> {
+        // A single fixed poll timeout only bounds each individual wait, not
+        // the send as a whole; poll against one absolute deadline so the
+        // wall-clock budget can't be reset by partial writes.
+        let deadline = Instant::now()
+            .checked_add(std::time::Duration::from_secs(10))
+            .ok_or(ErrorCode::Internal)?;
         let mut sent = 0;
         while sent < data.len() {
             let mut again = 0i32;
@@ -557,7 +566,11 @@ impl Transport {
                     events,
                     revents: 0,
                 };
-                let rc = unsafe { libc::poll(&mut pfd, 1, 10_000) };
+                // An exhausted budget truncates to 0 ms, which `poll(2)` reports
+                // as `rc == 0` and the branch below turns into `ErrorCode::Timeout`.
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                let timeout_ms = remaining.as_millis().min(i32::MAX as u128) as i32;
+                let rc = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
                 if rc == 0 {
                     return Err(ErrorCode::Timeout);
                 }

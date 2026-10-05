@@ -377,11 +377,14 @@ impl Client {
     /// command exchange. Call [`Client::set_tls_client_config`] before
     /// `connect()` to trust an additional CA bundle or disable verification.
     pub fn connect(&mut self, url: &str) -> Result<()> {
+        // Before any early return below: a failed connect must tear down the
+        // previous session, or a later `publish()`/`play()` keeps streaming to
+        // the old server.
+        self.reset_session_state();
         let (use_tls, host, port, app, stream_key) = parse_rtmp_url(url)?;
         if use_tls && !crate::transport::tls_available() {
             return Err(ErrorCode::Unsupported);
         }
-        self.reset_session_state();
 
         let connect_timeout = self
             .connect_timeout
@@ -741,8 +744,10 @@ impl Client {
                 if rc <= 0 {
                     break;
                 }
-            } else {
+            } else if again != 0 {
                 break;
+            } else {
+                return Err(ErrorCode::Io);
             }
         }
 
@@ -962,11 +967,12 @@ impl Client {
         payload: &[u8],
         messages_processed: &mut usize,
     ) -> Result<()> {
-        let normalized = normalize_modex_payload_with_frame_type(
-            payload,
-            self.negotiated_caps.caps_ex_mask,
-            frame_type,
-        );
+        // Always peel ModEx wrappers for frame metadata, as `handle_media_frame`
+        // does on the server side: gating on the negotiated `caps_ex_mask`
+        // (which never carries the MODEX bit) would report the wrapper's
+        // extension bytes at 1..5 as the codec FourCC.
+        let normalized =
+            normalize_modex_payload_with_frame_type(payload, CAPS_EX_MASK_MODEX, frame_type);
         let parse_payload = normalized.as_ref();
         let is_multitrack = is_multitrack_container(frame_type, parse_payload);
         let mut track_index = 0usize;
@@ -1267,10 +1273,10 @@ impl Client {
                 self.drain_ready_messages(&mut messages_processed)?;
             } else if n == 0 {
                 return Err(ErrorCode::Io);
-            } else if again == 2 {
+            } else if again != 0 {
                 break;
             } else {
-                break;
+                return Err(ErrorCode::Io);
             }
         }
         self.maybe_send_window_ack()?;
