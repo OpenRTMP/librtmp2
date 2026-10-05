@@ -246,6 +246,15 @@ fn main() -> ExitCode {
     let played = results.iter().filter(|r| r.played).count();
     let incomplete = results.iter().filter(|r| r.played && !r.completed).count();
     let received_any = results.iter().filter(|r| r.frames_total > 0).count();
+    // Steady-state averages must be taken over the players that actually
+    // reached the post-warmup window, not over every player that saw one
+    // frame -- `bytes_steady`/`frames_steady` are zero for anyone who dropped
+    // inside `--warmup-ms`, so mixing the two populations skewed every
+    // per-player and aggregate figure by received_any / steady_players.
+    let steady_players = results
+        .iter()
+        .filter(|r| r.steady_window_secs > 0.0)
+        .count();
 
     let mut join_ms: Vec<f64> = results.iter().filter_map(|r| r.join_latency_ms).collect();
     join_ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -254,8 +263,8 @@ fn main() -> ExitCode {
     let sum_bytes_steady: u64 = results.iter().map(|r| r.bytes_steady).sum();
     let sum_frames_total: u64 = results.iter().map(|r| r.frames_total).sum();
     let sum_bytes_total: u64 = results.iter().map(|r| r.bytes_total).sum();
-    let avg_steady_window = if received_any > 0 {
-        results.iter().map(|r| r.steady_window_secs).sum::<f64>() / received_any as f64
+    let avg_steady_window = if steady_players > 0 {
+        results.iter().map(|r| r.steady_window_secs).sum::<f64>() / steady_players as f64
     } else {
         0.0
     };
@@ -284,7 +293,7 @@ fn main() -> ExitCode {
          aggregate_throughput={:.2} Mbps avg_fps_per_player={:.2}",
         avg_steady_window,
         (sum_bytes_steady as f64 * 8.0) / avg_steady_window.max(1e-9) / 1_000_000.0,
-        sum_frames_steady as f64 / avg_steady_window.max(1e-9) / received_any.max(1) as f64,
+        sum_frames_steady as f64 / avg_steady_window.max(1e-9) / steady_players.max(1) as f64,
     );
 
     // Additive machine-readable line (the lines above keep their meaning);
@@ -294,7 +303,7 @@ fn main() -> ExitCode {
          steady_window_secs={:.2}",
         received_any,
         (sum_bytes_steady as f64 * 8.0) / avg_steady_window.max(1e-9) / 1e9,
-        sum_frames_steady as f64 / received_any.max(1) as f64,
+        sum_frames_steady as f64 / steady_players.max(1) as f64,
         avg_steady_window,
     );
 
