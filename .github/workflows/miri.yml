@@ -27,7 +27,7 @@ jobs:
           persist-credentials: false
 
       - name: Install nightly Rust with Miri
-        uses: dtolnay/rust-toolchain@0e28dd9a7764e5f83064112bb1f24025a14c313c # nightly
+        uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # nightly
         with:
           toolchain: nightly
           components: miri
