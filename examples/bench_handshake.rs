@@ -88,6 +88,13 @@ fn parse_args() -> Option<Args> {
         }
     }
 
+    // A degenerate `--count`/`--concurrency` runs zero handshakes, which made
+    // the success-rate line divide by zero (`NaN%`) and the exit gate report
+    // success for a benchmark that measured nothing.
+    if count == 0 || concurrency == 0 {
+        return None;
+    }
+
     let source = match url_list_path {
         Some(path) => UrlSource::List(bench_common::read_url_list(&path)?),
         None => UrlSource::Prefix(url_prefix?),
