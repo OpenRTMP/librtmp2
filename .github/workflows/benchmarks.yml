@@ -79,8 +79,7 @@ jobs:
       - name: Collect results
         run: |
           python3 scripts/bench_report.py collect \
-            --suite protocol=crit-protocol --suite relay=crit-relay \
-            --kind "$KIND" --tag "$TAG" --out results.json
+            --suite protocol --suite relay --kind "$KIND" --tag "$TAG"
 
       - name: Fetch baselines (last release, last main run)
         env:
@@ -89,14 +88,11 @@ jobs:
           # The checkout above has no credentials; the baselines live on the
           # public `bench-data` branch.
           git remote -v | grep -q origin || git remote add origin "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
-          python3 scripts/bench_report.py baselines --out-dir baselines --exclude-tag "$TAG"
+          python3 scripts/bench_report.py baselines --exclude-tag "$TAG"
 
       - name: Compare
         run: |
-          args=(--current results.json --mode "$KIND" --out comparison.md)
-          [ -f baselines/release.json ] && args+=(--release baselines/release.json)
-          [ -f baselines/previous.json ] && args+=(--previous baselines/previous.json)
-          python3 scripts/bench_report.py compare "${args[@]}" \
+          python3 scripts/bench_report.py compare --mode "$KIND" \
             --heading "### Benchmarks ($KIND run)"
           cat comparison.md >> "$GITHUB_STEP_SUMMARY"
           cat comparison.md
@@ -136,7 +132,7 @@ jobs:
         run: |
           # Heading and explanation are static text above the markers.
           sed '1,2d' comparison.md > ci-block.md
-          python3 scripts/bench_report.py splice --target ci --file BENCHMARKS.md --fragment ci-block.md
+          python3 scripts/bench_report.py splice --target ci
 
       - name: Commit BENCHMARKS.md
         run: |
@@ -190,7 +186,7 @@ jobs:
             sed '1,2d' comparison.md
           } > release-block.md
           gh release view "$TAG" --json body --jq .body > body.md
-          python3 scripts/bench_report.py splice --target release --file body.md --fragment release-block.md
+          python3 scripts/bench_report.py splice --target release
           gh release edit "$TAG" --notes-file body.md
 
       - name: Store under releases/ on bench-data

@@ -45,8 +45,9 @@ To try it locally:
 
 ```bash
 cargo bench --bench protocol -- --noplot && mv target/criterion crit-protocol
-python3 scripts/bench_report.py collect --suite protocol=crit-protocol --kind manual --out results.json
-python3 scripts/bench_report.py compare --current results.json
+python3 scripts/bench_report.py collect --suite protocol --kind manual   # reads crit-protocol/, writes results.json
+python3 scripts/bench_report.py compare                                  # reads results.json, writes comparison.md
+cat comparison.md
 ```
 
 ## Notes
