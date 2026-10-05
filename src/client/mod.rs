@@ -728,7 +728,11 @@ impl Client {
                     .write(&buf[..chunk_len])
                     .map_err(|_| ErrorCode::Internal)?;
                 bytes_drained += chunk_len;
-            } else if n == 0 {
+            } else if n == 0 || again == 0 {
+                // `again == 0` is a fatal recv error: the transport reports it
+                // without requesting a retry, so treating it like would-block
+                // would spin on a reset socket forever. Same as a zero-length
+                // read: not retryable, so surface it instead of looping.
                 return Err(ErrorCode::Io);
             } else if again == 2 {
                 // TLS renegotiation can need write-readiness during a read;
@@ -744,10 +748,8 @@ impl Client {
                 if rc <= 0 {
                     break;
                 }
-            } else if again != 0 {
-                break;
             } else {
-                return Err(ErrorCode::Io);
+                break;
             }
         }
 
@@ -1271,12 +1273,12 @@ impl Client {
                     .map_err(|_| ErrorCode::Internal)?;
                 bytes_drained += chunk_len;
                 self.drain_ready_messages(&mut messages_processed)?;
-            } else if n == 0 {
+            } else if n == 0 || again == 0 {
+                // A zero-length read, or a fatal recv error that the transport
+                // reported without requesting a retry, cannot make progress.
                 return Err(ErrorCode::Io);
-            } else if again != 0 {
-                break;
             } else {
-                return Err(ErrorCode::Io);
+                break;
             }
         }
         self.maybe_send_window_ack()?;
