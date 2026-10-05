@@ -237,3 +237,14 @@ jobs:
     with:
       tag: ${{ github.event.inputs.tag || github.ref_name }}
     secrets: inherit
+
+  # Benchmarks run after the release exists and are attached to it afterwards;
+  # PPA and crates.io publishing above do not wait for them.
+  benchmarks:
+    name: benchmarks
+    needs: package
+    uses: ./.github/workflows/benchmarks.yml
+    with:
+      tag: ${{ github.event.inputs.tag || github.ref_name }}
+    permissions:
+      contents: write
