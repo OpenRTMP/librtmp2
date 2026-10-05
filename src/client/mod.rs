@@ -631,6 +631,18 @@ impl Client {
         Ok(())
     }
 
+    /// Wait once for the socket to become writable, bounded by `timeout_ms`.
+    /// Returns `true` when it is writable (so the read can be retried) and
+    /// `false` on timeout or `poll(2)` error.
+    fn wait_writable_once(fd: std::os::unix::io::RawFd, timeout_ms: i32) -> bool {
+        let mut pfd = libc::pollfd {
+            fd,
+            events: libc::POLLOUT,
+            revents: 0,
+        };
+        unsafe { libc::poll(&mut pfd, 1, timeout_ms) > 0 }
+    }
+
     /// Poll for incoming control traffic and flush queued outbound bytes.
     pub fn poll(&mut self, timeout_ms: i32) -> Result<()> {
         if self.state == ClientState::Publishing {
@@ -728,26 +740,19 @@ impl Client {
                     .write(&buf[..chunk_len])
                     .map_err(|_| ErrorCode::Internal)?;
                 bytes_drained += chunk_len;
-            } else if n == 0 || again == 0 {
-                // `again == 0` is a fatal recv error: the transport reports it
-                // without requesting a retry, so treating it like would-block
-                // would spin on a reset socket forever. Same as a zero-length
-                // read: not retryable, so surface it instead of looping.
+            } else if n == 0 {
                 return Err(ErrorCode::Io);
-            } else if again == 2 {
-                // TLS renegotiation can need write-readiness during a read;
-                // the POLLIN wait above cannot detect that on its own. Wait
-                // for POLLOUT once, bounded by the same timeout, then retry
-                // the read instead of giving up on a writable socket.
-                let mut wpfd = libc::pollfd {
-                    fd: poll_fd,
-                    events: libc::POLLOUT,
-                    revents: 0,
-                };
-                let rc = unsafe { libc::poll(&mut wpfd, 1, timeout_ms) };
-                if rc <= 0 {
-                    break;
-                }
+            } else if again == 2 && !Self::wait_writable_once(poll_fd, timeout_ms) {
+                // TLS renegotiation can need write-readiness during a read; the
+                // POLLIN wait above cannot detect that on its own. Wait for
+                // POLLOUT once, bounded by the same timeout, then retry the read
+                // instead of giving up on a writable socket.
+                break;
+            } else if again == 0 {
+                // A fatal recv error that the transport reported without asking
+                // for a retry: treating it like would-block would spin on a
+                // reset socket forever, so surface it instead of looping.
+                return Err(ErrorCode::Io);
             } else {
                 break;
             }
@@ -1273,9 +1278,11 @@ impl Client {
                     .map_err(|_| ErrorCode::Internal)?;
                 bytes_drained += chunk_len;
                 self.drain_ready_messages(&mut messages_processed)?;
-            } else if n == 0 || again == 0 {
-                // A zero-length read, or a fatal recv error that the transport
-                // reported without requesting a retry, cannot make progress.
+            } else if n == 0 {
+                return Err(ErrorCode::Io);
+            } else if again == 0 {
+                // A fatal recv error with no retry requested: report it instead
+                // of spinning. Same shape as the arm in `poll`.
                 return Err(ErrorCode::Io);
             } else {
                 break;
