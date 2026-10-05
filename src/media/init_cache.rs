@@ -4,6 +4,7 @@ use crate::ertmp::multitrack_media::{
     is_multitrack_container, multitrack_has_keyframe, multitrack_has_sequence_start,
 };
 use crate::ertmp::{exaudio, exvideo, fourcc};
+use crate::media::modex::ERTMP_PACKET_TYPE_MODEX;
 use crate::types::{
     AudioCodec, AudioHeader, ERTMP_PACKET_TYPE_METADATA, FourCc, Frame, FrameType, VideoCodec,
     VideoHeader,
@@ -42,6 +43,12 @@ fn classify_video(payload: &[u8]) -> CacheFrameKind {
         return CacheFrameKind::LiveOnly;
     }
     if hdr.is_ex_header != 0 {
+        // Unpeeled ModEx wrappers expose extension metadata at bytes 1..5,
+        // not the inner packet type -- never cacheable (mirrors
+        // `Conn::detect_video_codec`).
+        if hdr.packet_type == ERTMP_PACKET_TYPE_MODEX {
+            return CacheFrameKind::LiveOnly;
+        }
         return match hdr.packet_type {
             0 => CacheFrameKind::VideoSequenceHeader,
             1 | 3 if hdr.frame_type == 1 => CacheFrameKind::VideoKeyframe,
@@ -80,6 +87,12 @@ fn classify_audio(payload: &[u8]) -> CacheFrameKind {
         return CacheFrameKind::LiveOnly;
     }
     if hdr.is_ex_header != 0 {
+        // Unpeeled ModEx wrappers expose extension metadata at bytes 1..5,
+        // not the inner packet type -- never cacheable (mirrors
+        // `Conn::detect_audio_codec`).
+        if hdr.packet_type == ERTMP_PACKET_TYPE_MODEX {
+            return CacheFrameKind::LiveOnly;
+        }
         if hdr.packet_type == 0 {
             CacheFrameKind::AudioSequenceHeader
         } else {
@@ -142,6 +155,12 @@ pub fn populate_av_frame(frame: &mut Frame, payload: &[u8]) {
 fn populate_video_frame(frame: &mut Frame, payload: &[u8]) {
     let mut hdr = VideoHeader::default();
     if exvideo::exvideo_parse(payload, &mut hdr).is_err() {
+        return;
+    }
+    // Unpeeled ModEx wrappers expose extension metadata at bytes 1..5, not
+    // the inner codec FourCC -- leave the frame's codec fields unset so
+    // deny/allow lists see an unknown codec (mirrors `detect_video_codec`).
+    if hdr.is_ex_header != 0 && hdr.packet_type == ERTMP_PACKET_TYPE_MODEX {
         return;
     }
     frame.composition_time = hdr.composition_time;
@@ -304,6 +323,12 @@ fn scan_object_for_color_info(
 fn populate_audio_frame(frame: &mut Frame, payload: &[u8]) {
     let mut hdr = AudioHeader::default();
     if exaudio::exaudio_parse(payload, &mut hdr).is_err() {
+        return;
+    }
+    // Unpeeled ModEx wrappers expose extension metadata at bytes 1..5, not
+    // the inner codec FourCC -- leave the frame's codec fields unset (mirrors
+    // `detect_audio_codec`).
+    if hdr.is_ex_header != 0 && hdr.packet_type == ERTMP_PACKET_TYPE_MODEX {
         return;
     }
     frame.audio_codec = hdr.audio_codec;
