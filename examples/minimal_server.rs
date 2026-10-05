@@ -27,9 +27,12 @@ extern "C" fn handle_sigint(_sig: i32) {
 }
 
 fn main() {
+    // Loopback by default: this example approves every publish and play, so
+    // binding all interfaces would hand an unauthenticated ingest path to
+    // anyone who can reach the port. Pass an explicit address to expose it.
     let bind_addr = env::args()
         .nth(1)
-        .unwrap_or_else(|| "0.0.0.0:1935".to_string());
+        .unwrap_or_else(|| "127.0.0.1:1935".to_string());
 
     let config = ServerConfig {
         max_connections: 16,
