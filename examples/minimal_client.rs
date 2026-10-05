@@ -32,7 +32,13 @@ fn main() -> ExitCode {
     }
     println!("[minimal_client] Publishing");
 
-    let payload = [0xABu8; 64];
+    // `send_frame` writes `data`/`size` verbatim, so this body is what the
+    // peer sees: 0x17 = FLV frame type 1 (keyframe) + codec id 7 (AVC),
+    // AVCPacketType 1 (single NALU), zero composition time, 55-byte NALU.
+    let mut payload = [0u8; 64];
+    payload[0] = 0x17;
+    payload[1] = 1;
+    payload[5..9].copy_from_slice(&55u32.to_be_bytes());
     let frame = Frame {
         frame_type: FrameType::Video,
         timestamp: 0,
