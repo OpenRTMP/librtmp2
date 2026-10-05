@@ -552,6 +552,13 @@ impl Transport {
             .ok_or(ErrorCode::Internal)?;
         let mut sent = 0;
         while sent < data.len() {
+            // The deadline has to be consulted on every iteration, not only in
+            // the `n == 0` wait below: a peer that keeps freeing just enough
+            // capacity to return a small positive write would otherwise reset
+            // the budget on every pass and outlive it indefinitely.
+            if Instant::now() >= deadline {
+                return Err(ErrorCode::Timeout);
+            }
             let mut again = 0i32;
             let n = self.try_send(&data[sent..], &mut again)?;
             if n == 0 {
