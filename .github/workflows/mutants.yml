@@ -34,7 +34,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       - name: Install cargo-mutants
-        uses: taiki-e/install-action@7ce576b8a1b2c9b62e6840ebfd9dbed7390a077b # cargo-mutants
+        uses: taiki-e/install-action@891775e118faa3e09b939b89bad87679103279b8 # cargo-mutants
 
       # Scoped to the parser/codec modules (highest payoff for catching
       # tests that run code without asserting on it). The full set currently
