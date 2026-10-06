@@ -6,9 +6,9 @@ GitHub-hosted runner and compares every run with the last release and the last
 
 | Trigger | What happens | Published? |
 |---|---|---|
-| Merge to `main` | Benchmarks run, the *CI benchmarks* block in [`BENCHMARKS.md`](../BENCHMARKS.md) is rewritten (a `docs(bench)` commit by `github-actions[bot]`), the run is stored as `latest.json` on the `bench-data` branch | yes — `BENCHMARKS.md` + website "next release" preview |
-| Release | `release.yml` calls the workflow in its own job after the GitHub Release exists, so PPA and crates.io publishing never wait for it. Results are attached to the release as `bench-results-<tag>.json` and `BENCHMARKS-<tag>.md`, appended to the release notes, and stored as `releases/<tag>.json` on `bench-data` | yes — on the release |
-| *Actions → Benchmarks → Run workflow* | Benchmarks run and the comparison appears in the **job summary** (and log). Nothing is committed, uploaded to a release, or written to `bench-data` | no |
+| Merge to `main` | Benchmarks run, the *CI benchmarks* block in [`BENCHMARKS.md`](../BENCHMARKS.md) is rewritten (a `docs(bench)` commit by `github-actions[bot]`), the run is stored as `bench/latest.json` in the same commit | yes — `BENCHMARKS.md` + website "next release" preview |
+| Release | `release.yml` calls the workflow in its own job after the GitHub Release exists, so PPA and crates.io publishing never wait for it. Results are attached to the release as `bench-results-<tag>.json` and `BENCHMARKS-<tag>.md`, appended to the release notes, and recorded as `bench/releases/<tag>.json` on `main` | yes — on the release |
+| *Actions → Benchmarks → Run workflow* | Benchmarks run and the comparison appears in the **job summary** (and log). Nothing is committed, uploaded to a release, or recorded under `bench/` | no |
 | Pull request | Same as the manual run | no |
 
 ## Reading the comparison
@@ -30,13 +30,15 @@ runner image of the machine that produced it.
 
 ## Data
 
-Results live on the orphan branch `bench-data` (written by
-[`scripts/publish-bench-data.sh`](../scripts/publish-bench-data.sh)):
+Results are plain files on `main` (committed by
+[`scripts/push-bench-data.sh`](../scripts/push-bench-data.sh)):
 
 ```
-latest.json            newest run on main, overwritten on every merge
-releases/<tag>.json    one file per release, never rewritten
+bench/latest.json            newest run on main, overwritten on every merge
+bench/releases/<tag>.json    one file per release, never rewritten
 ```
+
+openrtmp.org reads `latest.json` to show the newest CI run next to its release snapshots.
 
 [`scripts/bench_report.py`](../scripts/bench_report.py) collects Criterion
 output, fetches the baselines, renders the Markdown and splices it into
@@ -55,11 +57,11 @@ cat comparison.md
 - The release tag is **not** moved after the benchmark finished: the PPA
   upload and the crates.io package are built from the tagged commit, and
   re-pointing a published tag would make the tag disagree with them. The
-  release numbers are therefore attached to the GitHub Release (and stored on
-  `bench-data`) instead of living in the tagged source tree.
-- Pushing the `BENCHMARKS.md` update to `main` needs `contents: write` and a
+  release numbers are therefore attached to the GitHub Release (and recorded under
+  `bench/releases/` on `main`) instead of living in the tagged source tree.
+- Pushing the `BENCHMARKS.md` and `bench/` updates to `main` needs `contents: write` and a
   `main` that accepts pushes from `github-actions[bot]`. If branch protection
   blocks it, the job prints a warning and the numbers are still in the job
-  summary and on `bench-data`.
-- `paths-ignore: BENCHMARKS.md` keeps the bot's own commit from retriggering
+  summary.
+- `paths-ignore: BENCHMARKS.md, bench/**` keeps the bot's own commit from retriggering
   the workflow.
