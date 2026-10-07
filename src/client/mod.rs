@@ -742,12 +742,12 @@ impl Client {
                 bytes_drained += chunk_len;
             } else if n == 0 {
                 return Err(ErrorCode::Io);
-            } else if again == 2 && !Self::wait_writable_once(poll_fd, timeout_ms) {
+            } else if again == 2 && Self::wait_writable_once(poll_fd, timeout_ms) {
                 // TLS renegotiation can need write-readiness during a read; the
                 // POLLIN wait above cannot detect that on its own. Wait for
                 // POLLOUT once, bounded by the same timeout, then retry the read
                 // instead of giving up on a writable socket.
-                break;
+                continue;
             } else if again == 0 {
                 // A fatal recv error that the transport reported without asking
                 // for a retry: treating it like would-block would spin on a
