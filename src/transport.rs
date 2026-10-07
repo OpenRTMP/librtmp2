@@ -582,6 +582,9 @@ impl Transport {
                     return Err(ErrorCode::Timeout);
                 }
                 if rc < 0 {
+                    if std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                        continue;
+                    }
                     return Err(ErrorCode::Io);
                 }
                 continue;
@@ -711,6 +714,9 @@ impl TlsCtx {
                         return Err(ErrorCode::Timeout);
                     }
                     if rc < 0 {
+                        if std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                            continue;
+                        }
                         return Err(ErrorCode::Io);
                     }
                     match pending.progress()? {
