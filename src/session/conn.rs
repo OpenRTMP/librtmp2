@@ -148,6 +148,13 @@ pub(crate) struct RelayCongestion {
 struct PendingAuth {
     stream_name: String,
     requested_at: Instant,
+    /// Set when the stream this request was made for is torn down or replaced
+    /// before the decision arrives. The request stays in its slot (so a new
+    /// request cannot take its place and be authorized by the stale
+    /// completion, which is keyed only by `conn_id`) but a later completion
+    /// resolves it as a silent no-op instead of granting/denying a stream
+    /// that no longer exists.
+    withdrawn: bool,
 }
 
 impl RelayFrame {
@@ -2166,6 +2173,12 @@ impl Conn {
         let Some(pending) = self.pending_publish_auth.take() else {
             return Ok(());
         };
+        if pending.withdrawn {
+            // The stream was torn down or replaced while this decision was in
+            // flight; resolving the tombstone silently keeps a stale grant
+            // from authorizing whatever request came after it.
+            return Ok(());
+        }
         if allow {
             self.complete_publish_authorized(pending.stream_name)
         } else {
@@ -2179,6 +2192,9 @@ impl Conn {
         let Some(pending) = self.pending_play_auth.take() else {
             return Ok(());
         };
+        if pending.withdrawn {
+            return Ok(());
+        }
         if allow {
             self.complete_play_authorized(pending.stream_name)
         } else {
@@ -2186,11 +2202,28 @@ impl Conn {
         }
     }
 
+    /// Withdraw any in-flight publish/play authorization: the stream it was
+    /// requested for is being torn down or replaced, so a later completion
+    /// must not resurrect it. The request stays in its slot as a tombstone
+    /// until that completion (or the reap timeout) clears it, because
+    /// completions are looked up purely by `conn_id` -- an empty slot could
+    /// be refilled by a new request and authorized by the stale decision.
+    fn withdraw_pending_authorizations(&mut self) {
+        if let Some(pending) = self.pending_publish_auth.as_mut() {
+            pending.withdrawn = true;
+        }
+        if let Some(pending) = self.pending_play_auth.as_mut() {
+            pending.withdrawn = true;
+        }
+    }
+
     /// True while this connection is waiting on `complete_publish_authorization`
     /// or `complete_play_authorization`. While pending, no media flows either
     /// direction: `is_active_publisher_stream`/relay delivery both stay gated
     /// on `stream.is_publishing`/`stream.is_playing`, which are only set once
-    /// the authorization completes as `Allow`.
+    /// the authorization completes as `Allow`. A request withdrawn by a stream
+    /// teardown keeps its slot as a tombstone until the stale completion (or
+    /// the reap timeout) discards it, so this stays true across that teardown.
     pub fn has_pending_authorization(&self) -> bool {
         self.pending_publish_auth.is_some() || self.pending_play_auth.is_some()
     }
@@ -2352,8 +2385,7 @@ impl Conn {
                     // Withdraw any in-flight authorization for the replaced
                     // stream: a late completion must be the documented no-op,
                     // not a grant for the new stream.
-                    self.pending_publish_auth = None;
-                    self.pending_play_auth = None;
+                    self.withdraw_pending_authorizations();
                     self.active_stream_count = projected_stream_count;
                     self.next_stream_id += 1;
                     let stream_id = self.next_stream_id;
@@ -2395,6 +2427,7 @@ impl Conn {
                             self.pending_publish_auth = Some(PendingAuth {
                                 stream_name: name_str,
                                 requested_at: Instant::now(),
+                                withdrawn: false,
                             });
                             return Ok(());
                         }
@@ -2436,6 +2469,7 @@ impl Conn {
                             self.pending_play_auth = Some(PendingAuth {
                                 stream_name: name_str,
                                 requested_at: Instant::now(),
+                                withdrawn: false,
                             });
                             return Ok(());
                         }
@@ -2503,8 +2537,7 @@ impl Conn {
                 // Withdraw any in-flight authorization for the torn-down
                 // stream: a late completion must be the documented no-op,
                 // not a grant.
-                self.pending_publish_auth = None;
-                self.pending_play_auth = None;
+                self.withdraw_pending_authorizations();
                 if let Some(sid) = self.current_stream.as_ref().map(|s| s.stream_id) {
                     let _ = self.send_stream_lifecycle_eof(sid);
                 }
@@ -2625,8 +2658,7 @@ impl Conn {
                     // Withdraw any in-flight authorization for the closed
                     // stream: a late completion must be the documented no-op,
                     // not a grant.
-                    self.pending_publish_auth = None;
-                    self.pending_play_auth = None;
+                    self.withdraw_pending_authorizations();
                     let _ = self.send_stream_lifecycle_eof(target_id);
                 }
             }
@@ -7203,8 +7235,11 @@ mod tests {
         let mut unpublish = Buffer::with_capacity(128);
         command::build_fcunpublish(&mut unpublish, "s").unwrap();
         conn.handle_command(unpublish.as_slice()).unwrap();
-        assert!(!conn.has_pending_authorization());
+        // The withdrawn request stays in its slot as a tombstone until the
+        // stale completion (or the reap timeout) clears it.
+        assert!(conn.has_pending_authorization());
         conn.complete_publish_authorization(true).unwrap();
+        assert!(!conn.has_pending_authorization());
         assert!(!conn.current_stream.as_ref().unwrap().is_publishing);
 
         pending_publish(&mut conn);
@@ -7213,8 +7248,9 @@ mod tests {
         crate::amf::amf0::write_number(&mut close, 2.0).unwrap();
         crate::amf::amf0::write_null(&mut close).unwrap();
         conn.handle_command(close.as_slice()).unwrap();
-        assert!(!conn.has_pending_authorization());
+        assert!(conn.has_pending_authorization());
         conn.complete_publish_authorization(true).unwrap();
+        assert!(!conn.has_pending_authorization());
         assert!(!conn.current_stream.as_ref().unwrap().is_publishing);
 
         conn.state = ConnState::AppConnected;
@@ -7222,9 +7258,52 @@ mod tests {
         let mut create = Buffer::with_capacity(128);
         command::build_create_stream(&mut create, 2.0).unwrap();
         conn.handle_command(create.as_slice()).unwrap();
-        assert!(!conn.has_pending_authorization());
+        assert!(conn.has_pending_authorization());
         conn.complete_publish_authorization(true).unwrap();
+        assert!(!conn.has_pending_authorization());
         assert!(!conn.current_stream.as_ref().unwrap().is_publishing);
+    }
+
+    #[test]
+    fn a_withdrawn_request_cannot_authorize_its_replacement() {
+        // Regression (review: Codex/CodeRabbit/PR Lens): completions are keyed
+        // only by `conn_id`, so after a teardown the slot must not be empty --
+        // a new request could take the place of the withdrawn one and be
+        // authorized by the stale decision. The tombstone blocks the new
+        // request until the stale completion has been discarded.
+        fn pending_publish(conn: &mut Conn) {
+            conn.on_publish_auth_cb = Some(|_, _, _| AuthorizationResult::Pending);
+            conn.handle_command(publish_buf("s").as_slice()).unwrap();
+            assert!(conn.has_pending_authorization());
+        }
+
+        let mut conn = app_conn();
+        pending_publish(&mut conn);
+        let mut unpublish = Buffer::with_capacity(128);
+        command::build_fcunpublish(&mut unpublish, "s").unwrap();
+        conn.handle_command(unpublish.as_slice()).unwrap();
+
+        // A replacement request while the tombstone is in place is denied
+        // exactly like a second request next to a live pending one, so the
+        // stale completion below has nothing to authorize.
+        conn.handle_command(publish_buf("replacement").as_slice())
+            .unwrap();
+        assert!(
+            conn.pending_publish_auth
+                .as_ref()
+                .is_some_and(|p| p.withdrawn),
+            "the tombstone must still occupy the slot"
+        );
+
+        // The stale completion resolves the tombstone silently...
+        conn.complete_publish_authorization(true).unwrap();
+        assert!(!conn.has_pending_authorization());
+        assert!(!conn.current_stream.as_ref().unwrap().is_publishing);
+
+        // ...and only then can a fresh request start a new decision.
+        pending_publish(&mut conn);
+        conn.complete_publish_authorization(true).unwrap();
+        assert!(conn.current_stream.as_ref().unwrap().is_publishing);
     }
 
     #[test]
