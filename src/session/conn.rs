@@ -2349,6 +2349,11 @@ impl Conn {
                     // be bypassed by createStream -> publish without
                     // re-authorization.
                     self.relay_enabled = false;
+                    // Withdraw any in-flight authorization for the replaced
+                    // stream: a late completion must be the documented no-op,
+                    // not a grant for the new stream.
+                    self.pending_publish_auth = None;
+                    self.pending_play_auth = None;
                     self.active_stream_count = projected_stream_count;
                     self.next_stream_id += 1;
                     let stream_id = self.next_stream_id;
@@ -2495,6 +2500,11 @@ impl Conn {
                 // `true` here would let a new publish on this connection
                 // relay before it's actually re-authorized.
                 self.relay_enabled = false;
+                // Withdraw any in-flight authorization for the torn-down
+                // stream: a late completion must be the documented no-op,
+                // not a grant.
+                self.pending_publish_auth = None;
+                self.pending_play_auth = None;
                 if let Some(sid) = self.current_stream.as_ref().map(|s| s.stream_id) {
                     let _ = self.send_stream_lifecycle_eof(sid);
                 }
@@ -2612,6 +2622,11 @@ impl Conn {
                         self.session_setup_started = Instant::now();
                     }
                     self.relay_enabled = false;
+                    // Withdraw any in-flight authorization for the closed
+                    // stream: a late completion must be the documented no-op,
+                    // not a grant.
+                    self.pending_publish_auth = None;
+                    self.pending_play_auth = None;
                     let _ = self.send_stream_lifecycle_eof(target_id);
                 }
             }
@@ -7167,6 +7182,49 @@ mod tests {
             "first",
             "the rejected second request must not hijack the first request's authorization"
         );
+    }
+
+    #[test]
+    fn teardown_withdraws_an_in_flight_authorization() {
+        // Regression: a publish left Pending must not stay grantable after
+        // the client abandons the stream it was requested for. The
+        // FCUnpublish/deleteStream, closeStream and replacing createStream
+        // teardown paths withdraw the in-flight request, so a late
+        // completion is the documented no-op and can never grant.
+        fn pending_publish(conn: &mut Conn) {
+            conn.on_publish_auth_cb = Some(|_, _, _| AuthorizationResult::Pending);
+            conn.handle_command(publish_buf("s").as_slice()).unwrap();
+            assert!(conn.has_pending_authorization());
+        }
+
+        let mut conn = app_conn();
+
+        pending_publish(&mut conn);
+        let mut unpublish = Buffer::with_capacity(128);
+        command::build_fcunpublish(&mut unpublish, "s").unwrap();
+        conn.handle_command(unpublish.as_slice()).unwrap();
+        assert!(!conn.has_pending_authorization());
+        conn.complete_publish_authorization(true).unwrap();
+        assert!(!conn.current_stream.as_ref().unwrap().is_publishing);
+
+        pending_publish(&mut conn);
+        let mut close = Buffer::with_capacity(128);
+        crate::amf::amf0::write_string(&mut close, "closeStream").unwrap();
+        crate::amf::amf0::write_number(&mut close, 2.0).unwrap();
+        crate::amf::amf0::write_null(&mut close).unwrap();
+        conn.handle_command(close.as_slice()).unwrap();
+        assert!(!conn.has_pending_authorization());
+        conn.complete_publish_authorization(true).unwrap();
+        assert!(!conn.current_stream.as_ref().unwrap().is_publishing);
+
+        conn.state = ConnState::AppConnected;
+        pending_publish(&mut conn);
+        let mut create = Buffer::with_capacity(128);
+        command::build_create_stream(&mut create, 2.0).unwrap();
+        conn.handle_command(create.as_slice()).unwrap();
+        assert!(!conn.has_pending_authorization());
+        conn.complete_publish_authorization(true).unwrap();
+        assert!(!conn.current_stream.as_ref().unwrap().is_publishing);
     }
 
     #[test]
