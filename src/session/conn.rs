@@ -215,7 +215,10 @@ pub struct Conn {
     /// A later pause may refresh setup grace only after additional relay bytes
     /// have been sent, so historical activity cannot keep a slot alive forever.
     pause_grace_media_bytes_sent: u64,
-    pub client_fd: i32,
+    /// Copy of the transport's socket handle (`i32` file descriptor on Unix,
+    /// `u64` Winsock `SOCKET` on Windows), or [`crate::net::INVALID_SOCKET`]
+    /// once disconnected. The transport owns the socket.
+    pub client_fd: crate::net::RawSocket,
     /// Stable per-connection id (monotonic, never reused while the server runs).
     pub conn_id: u64,
     /// Peer socket address for logging (not persisted).
@@ -389,7 +392,7 @@ impl Conn {
             media_bytes_at_epoch_start: 0,
             media_bytes_sent: 0,
             pause_grace_media_bytes_sent: 0,
-            client_fd: -1,
+            client_fd: crate::net::INVALID_SOCKET,
             conn_id: 0,
             remote_addr: String::new(),
             transport: None,
@@ -1284,7 +1287,7 @@ impl Conn {
         Ok(())
     }
 
-    pub fn get_fd(&self) -> i32 {
+    pub fn get_fd(&self) -> crate::net::RawSocket {
         self.client_fd
     }
 
@@ -1402,7 +1405,7 @@ impl Conn {
     fn do_handshake_recurse(&mut self) -> i32 {
         match handshake::server_read_c1(&mut self.handshake, &mut self.recv_buffer) {
             Ok(()) => {
-                if self.client_fd >= 0 {
+                if self.client_fd != crate::net::INVALID_SOCKET {
                     let s0 = [0x03u8];
                     if self.send_buffer.write(&s0).is_err() {
                         return ErrorCode::Internal as i32;
@@ -2799,7 +2802,7 @@ impl Conn {
     }
 
     pub fn flush(&mut self) -> Result<()> {
-        if self.client_fd < 0 || self.send_buffer.available() == 0 {
+        if self.client_fd == crate::net::INVALID_SOCKET || self.send_buffer.available() == 0 {
             self.commit_flushed_ping();
             return Ok(());
         }
@@ -2838,7 +2841,7 @@ impl Conn {
     /// Drop the transport and clear the embedder-visible fd copy.
     pub fn disconnect_transport(&mut self) {
         self.transport = None;
-        self.client_fd = -1;
+        self.client_fd = crate::net::INVALID_SOCKET;
     }
 
     fn commit_flushed_ping(&mut self) {
@@ -2929,7 +2932,7 @@ impl Conn {
     /// it and the socket takes a vectored write (plaintext).
     pub(crate) fn can_stage_media(&self) -> bool {
         self.send_buffer.available() == 0
-            && self.client_fd >= 0
+            && self.client_fd != crate::net::INVALID_SOCKET
             && self.transport.as_ref().is_some_and(|t| !t.is_tls())
     }
 
@@ -4706,14 +4709,13 @@ mod tests {
 
     #[test]
     fn control_sized_flushes_do_not_count_as_send_progress() {
-        use std::os::unix::io::IntoRawFd;
-        use std::os::unix::net::UnixStream;
+        use crate::net::testing::{PairStream, stream_pair};
 
-        let (end, _peer) = UnixStream::pair().unwrap();
+        let (end, _peer) = stream_pair().unwrap();
         end.set_nonblocking(true).unwrap();
         let mut conn = Conn::new();
         conn.client_fd = 0;
-        conn.transport = Some(Transport::new_plain(end.into_raw_fd()));
+        conn.transport = Some(crate::net::testing::transport_from(end));
         conn.send_buffer.write(&[0u8; 64]).unwrap();
         conn.flush().unwrap();
         assert!(conn.last_send_progress.is_none());
@@ -4728,15 +4730,14 @@ mod tests {
     #[test]
     fn staged_media_send_matches_buffered_bytes() {
         use crate::chunk::media_out::encode_media_body;
+        use crate::net::testing::{PairStream, stream_pair};
         use std::io::Read;
-        use std::os::unix::io::IntoRawFd;
-        use std::os::unix::net::UnixStream;
 
-        let (end, mut peer) = UnixStream::pair().unwrap();
+        let (end, mut peer) = stream_pair().unwrap();
         end.set_nonblocking(true).unwrap();
         let mut direct = Conn::new();
         direct.client_fd = 0;
-        direct.transport = Some(Transport::new_plain(end.into_raw_fd()));
+        direct.transport = Some(crate::net::testing::transport_from(end));
         let mut buffered = Conn::new();
 
         // Small frames the socket takes whole, then one larger than the
@@ -4820,16 +4821,15 @@ mod tests {
 
     #[test]
     fn ping_timeout_starts_after_flush_not_queue() {
-        use std::os::unix::io::IntoRawFd;
-        use std::os::unix::net::UnixStream;
+        use crate::net::testing::{PairStream, stream_pair};
 
-        let (client_end, _peer) = UnixStream::pair().unwrap();
+        let (client_end, _peer) = stream_pair().unwrap();
         client_end.set_nonblocking(true).unwrap();
 
         let mut conn = Conn::new();
         conn.client_fd = 0;
         conn.state = ConnState::AppConnected;
-        conn.transport = Some(Transport::new_plain(client_end.into_raw_fd()));
+        conn.transport = Some(crate::net::testing::transport_from(client_end));
         conn.send_buffer.write(b"backlog").unwrap();
 
         conn.maybe_send_ping().unwrap();

@@ -4,7 +4,6 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::TcpListener;
-use std::os::unix::io::{AsRawFd, IntoRawFd};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -519,7 +518,11 @@ pub struct Server {
     /// bound, use [`Server::listener_fds`] to register every listener with an
     /// external readiness loop. [`Server::poll`] itself checks every bound
     /// listener internally.
-    pub server_fd: i32,
+    ///
+    /// An `i32` file descriptor on Unix and a `u64` Winsock `SOCKET` on
+    /// Windows (see [`net::RawSocket`]); [`net::INVALID_SOCKET`] when no
+    /// listener is bound.
+    pub server_fd: net::RawSocket,
     pub connections: Vec<Conn>,
     /// Fired for every audio/video frame on every connection.
     pub on_frame_cb: Option<fn(&Frame)>,
@@ -628,7 +631,7 @@ impl Server {
             player_congestion_timeout: DEFAULT_PLAYER_CONGESTION_TIMEOUT,
             compact_media_headers: true,
             running: false,
-            server_fd: -1,
+            server_fd: net::INVALID_SOCKET,
             connections: Vec::new(),
             on_frame_cb: None,
             on_connect_cb: None,
@@ -1025,8 +1028,8 @@ impl Server {
     fn bind_listener(&mut self, addr: &str) -> Result<TcpListener> {
         let listener = TcpListener::bind(addr).map_err(|_| ErrorCode::Io)?;
         listener.set_nonblocking(true).map_err(|_| ErrorCode::Io)?;
-        if self.server_fd < 0 {
-            self.server_fd = listener.as_raw_fd();
+        if self.server_fd == net::INVALID_SOCKET {
+            self.server_fd = net::as_raw(&listener);
         }
         self.running = true;
         Ok(listener)
@@ -1038,6 +1041,11 @@ impl Server {
     /// can each bind their own listener to the same address/port. The
     /// kernel load-balances incoming connections across every listener
     /// bound this way.
+    ///
+    /// Unix only: Windows has no `SO_REUSEPORT`, and its `SO_REUSEADDR`
+    /// lets a second socket take over a bound port rather than share load
+    /// with it, so it is not a substitute (see the Windows variant below).
+    #[cfg(unix)]
     fn bind_listener_reuseport(&mut self, addr: &str) -> Result<TcpListener> {
         use std::net::ToSocketAddrs;
         let sockaddr = addr
@@ -1059,21 +1067,35 @@ impl Server {
         sock.bind(&sockaddr.into()).map_err(|_| ErrorCode::Io)?;
         sock.listen(1024).map_err(|_| ErrorCode::Io)?;
         let listener: TcpListener = sock.into();
-        if self.server_fd < 0 {
-            self.server_fd = listener.as_raw_fd();
+        if self.server_fd == net::INVALID_SOCKET {
+            self.server_fd = net::as_raw(&listener);
         }
         self.running = true;
         Ok(listener)
+    }
+
+    /// Windows has no `SO_REUSEPORT`. Its `SO_REUSEADDR` is not equivalent:
+    /// it lets another socket bind the same port and steal connections
+    /// instead of having the kernel spread them across listeners, so
+    /// silently substituting it would be both a behavior change and a
+    /// port-hijacking risk. The reuse-port listen APIs therefore return
+    /// [`ErrorCode::Unsupported`] here; plain [`Self::listen`] /
+    /// [`Self::listen_tls`] work normally.
+    #[cfg(windows)]
+    fn bind_listener_reuseport(&mut self, _addr: &str) -> Result<TcpListener> {
+        Err(ErrorCode::Unsupported)
     }
 
     /// Return the file descriptor for every currently bound listener.
     ///
     /// Use this instead of the legacy [`Server::server_fd`] field when an
     /// external readiness loop needs to watch a multi-listener `Server`.
-    pub fn listener_fds(&self) -> Vec<i32> {
+    /// Each entry is an `i32` file descriptor on Unix and a `u64` Winsock
+    /// `SOCKET` on Windows (see [`net::RawSocket`]).
+    pub fn listener_fds(&self) -> Vec<net::RawSocket> {
         self.listeners
             .iter()
-            .map(|listener| listener.tcp.as_raw_fd())
+            .map(|listener| net::as_raw(&listener.tcp))
             .collect()
     }
 
@@ -1102,6 +1124,10 @@ impl Server {
     /// the kernel load-balances across them). Use [`Self::set_conn_id_base`]
     /// on each shard's `Server` beforehand so their connection ids don't
     /// collide.
+    ///
+    /// Returns [`ErrorCode::Unsupported`] on Windows, which has no
+    /// `SO_REUSEPORT` load balancing; bind one listener with
+    /// [`Self::listen`] there instead.
     pub fn listen_reuseport(&mut self, bind_addr: &str) -> Result<()> {
         let addr = Self::resolve_bind_addr(bind_addr)?;
         let tcp = self.bind_listener_reuseport(&addr)?;
@@ -1130,7 +1156,8 @@ impl Server {
     }
 
     /// Like [`Self::listen_tls`], but binds with `SO_REUSEPORT` -- see
-    /// [`Self::listen_reuseport`].
+    /// [`Self::listen_reuseport`]. Returns [`ErrorCode::Unsupported`] on
+    /// Windows.
     pub fn listen_tls_reuseport(
         &mut self,
         bind_addr: &str,
@@ -1269,18 +1296,16 @@ impl Server {
         self.next_listener_accept = 0;
         #[cfg(feature = "tls")]
         self.pending_tls.clear();
-        // bind_listener() only assigns server_fd when it's negative, so a
+        // bind_listener() only assigns server_fd when it's unset, so a
         // later listen() call after stop() must see it reset here or it
         // would keep exposing the now-closed fd from before this stop().
-        self.server_fd = -1;
+        self.server_fd = net::INVALID_SOCKET;
     }
 
     fn total_connection_slots_in_use(&self) -> usize {
-        let mut slots = self.connections.len();
+        let slots = self.connections.len();
         #[cfg(feature = "tls")]
-        {
-            slots += self.pending_tls.len();
-        }
+        let slots = slots + self.pending_tls.len();
         slots
     }
 
@@ -1513,7 +1538,7 @@ impl Server {
                         if let Some(ctx) = tls_ctx.as_ref() {
                             #[cfg(feature = "tls")]
                             {
-                                match ctx.accept_nonblocking(stream.into_raw_fd()) {
+                                match ctx.accept_nonblocking(stream) {
                                     Ok(TlsAcceptOutcome::Complete(transport)) => {
                                         self.add_connection(transport, remote_addr);
                                     }
@@ -1536,7 +1561,7 @@ impl Server {
                             }
                         } else {
                             let _ = stream.set_nonblocking(true);
-                            let transport = Transport::new_plain(stream.into_raw_fd());
+                            let transport = Transport::from_tcp_stream(stream);
                             self.add_connection(transport, remote_addr);
                         }
                     }
@@ -3096,13 +3121,12 @@ mod tests {
 
     #[test]
     fn oversized_relay_fan_out_still_makes_progress_each_poll() {
+        use crate::net::testing::{PairStream, stream_pair};
         use crate::session::stream::Stream;
         use crate::transport::Transport;
-        use std::os::unix::io::IntoRawFd;
-        use std::os::unix::net::UnixStream;
 
-        fn attached_conn(conn_id: u64, publishing: bool) -> (Conn, UnixStream) {
-            let (server_end, peer_end) = UnixStream::pair().unwrap();
+        fn attached_conn(conn_id: u64, publishing: bool) -> (Conn, PairStream) {
+            let (server_end, peer_end) = stream_pair().unwrap();
             server_end.set_nonblocking(true).unwrap();
             peer_end.set_nonblocking(true).unwrap();
 
@@ -3110,7 +3134,7 @@ mod tests {
             conn.conn_id = conn_id;
             conn.app = "live".to_string();
             conn.relay_enabled = true;
-            conn.transport = Some(Transport::new_plain(server_end.into_raw_fd()));
+            conn.transport = Some(crate::net::testing::transport_from(server_end));
             conn.current_stream = Some(Box::new(Stream {
                 stream_id: 1,
                 name: "stream".to_string(),
@@ -3153,17 +3177,16 @@ mod tests {
 
     #[test]
     fn process_connections_ready_skips_recv_for_connections_outside_readable_set() {
+        use crate::net::testing::{PairStream, stream_pair};
         use std::io::Write;
-        use std::os::unix::io::IntoRawFd;
-        use std::os::unix::net::UnixStream;
 
-        fn attached_idle_conn(conn_id: u64) -> (Conn, UnixStream) {
-            let (server_end, peer_end) = UnixStream::pair().unwrap();
+        fn attached_idle_conn(conn_id: u64) -> (Conn, PairStream) {
+            let (server_end, peer_end) = stream_pair().unwrap();
             server_end.set_nonblocking(true).unwrap();
             peer_end.set_nonblocking(true).unwrap();
             let mut conn = Conn::new();
             conn.conn_id = conn_id;
-            conn.transport = Some(Transport::new_plain(server_end.into_raw_fd()));
+            conn.transport = Some(crate::net::testing::transport_from(server_end));
             (conn, peer_end)
         }
 
@@ -3199,16 +3222,15 @@ mod tests {
 
     #[test]
     fn process_connections_ready_still_reaps_a_session_setup_timeout_when_not_readable() {
+        use crate::net::testing::{PairStream, stream_pair};
         use crate::transport::Transport;
-        use std::os::unix::io::IntoRawFd;
-        use std::os::unix::net::UnixStream;
         use std::time::Instant;
 
-        let (server_end, _peer_end) = UnixStream::pair().unwrap();
+        let (server_end, _peer_end) = stream_pair().unwrap();
         server_end.set_nonblocking(true).unwrap();
         let mut conn = Conn::new();
         conn.conn_id = 7;
-        conn.transport = Some(Transport::new_plain(server_end.into_raw_fd()));
+        conn.transport = Some(crate::net::testing::transport_from(server_end));
         // Force the session-setup timeout regardless of the real clock.
         conn.set_session_setup_started_for_test(
             Instant::now() - std::time::Duration::from_secs(3600),
@@ -3335,24 +3357,30 @@ mod tests {
         .unwrap()
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn listen_reuseport_is_unsupported_on_windows_but_listen_works() {
+        // Windows has no SO_REUSEPORT load balancing; the reuse-port APIs
+        // must say so instead of silently binding with SO_REUSEADDR.
+        let mut server = test_server();
+        assert_eq!(
+            server.listen_reuseport("127.0.0.1:0"),
+            Err(ErrorCode::Unsupported)
+        );
+        assert!(server.listener_fds().is_empty());
+        assert_eq!(server.server_fd, net::INVALID_SOCKET);
+        server.listen("127.0.0.1:0").unwrap();
+        assert_eq!(server.listener_fds(), vec![server.server_fd]);
+        assert_ne!(crate::net::testing::local_port(server.server_fd), 0);
+    }
+
+    #[cfg(unix)]
     #[test]
     fn listen_reuseport_allows_a_second_server_to_bind_the_same_port() {
         let mut server_a = test_server();
         server_a.listen_reuseport("127.0.0.1:0").unwrap();
 
-        let port = {
-            let mut addr: libc::sockaddr_in = unsafe { std::mem::zeroed() };
-            let mut len = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
-            let rc = unsafe {
-                libc::getsockname(
-                    server_a.server_fd,
-                    &mut addr as *mut _ as *mut libc::sockaddr,
-                    &mut len,
-                )
-            };
-            assert_eq!(rc, 0);
-            u16::from_be(addr.sin_port)
-        };
+        let port = { crate::net::testing::local_port(server_a.server_fd) };
 
         // A second, independent `Server` binding the same port with a plain
         // `listen()` must fail (proves the port really was taken)...
@@ -3366,8 +3394,8 @@ mod tests {
             .listen_reuseport(&format!("127.0.0.1:{port}"))
             .unwrap();
         assert_ne!(server_a.server_fd, server_b.server_fd);
-        assert!(server_a.server_fd >= 0);
-        assert!(server_b.server_fd >= 0);
+        assert_ne!(server_a.server_fd, net::INVALID_SOCKET);
+        assert_ne!(server_b.server_fd, net::INVALID_SOCKET);
     }
 
     /// Loopback clients can return from `connect()` before the listener's
@@ -3514,19 +3542,18 @@ mod tests {
         }
     }
 
-    fn flow_test_player(conn_id: u64) -> (Conn, std::os::unix::net::UnixStream) {
+    fn flow_test_player(conn_id: u64) -> (Conn, crate::net::testing::PairStream) {
+        use crate::net::testing::{PairStream, stream_pair};
         use crate::session::stream::Stream;
         use crate::transport::Transport;
-        use std::os::unix::io::IntoRawFd;
-        use std::os::unix::net::UnixStream;
 
-        let (server_end, peer_end) = UnixStream::pair().unwrap();
+        let (server_end, peer_end) = stream_pair().unwrap();
         server_end.set_nonblocking(true).unwrap();
         let mut conn = Conn::new();
         conn.conn_id = conn_id;
         conn.app = "live".to_string();
         conn.relay_enabled = true;
-        conn.transport = Some(Transport::new_plain(server_end.into_raw_fd()));
+        conn.transport = Some(crate::net::testing::transport_from(server_end));
         conn.current_stream = Some(Box::new(Stream {
             stream_id: 1,
             name: "stream".to_string(),
@@ -3802,18 +3829,17 @@ mod tests {
 
     #[test]
     fn script_metadata_relay_respects_receive_audio_and_video_toggles() {
+        use crate::net::testing::{PairStream, stream_pair};
         use crate::session::stream::Stream;
         use crate::transport::Transport;
-        use std::os::unix::io::IntoRawFd;
-        use std::os::unix::net::UnixStream;
 
-        let (server_end, _peer_end) = UnixStream::pair().unwrap();
+        let (server_end, _peer_end) = stream_pair().unwrap();
         server_end.set_nonblocking(true).unwrap();
 
         let mut player = Conn::new();
         player.app = "live".to_string();
         player.relay_enabled = true;
-        player.transport = Some(Transport::new_plain(server_end.into_raw_fd()));
+        player.transport = Some(crate::net::testing::transport_from(server_end));
         player.current_stream = Some(Box::new(Stream {
             stream_id: 1,
             name: "stream".to_string(),
@@ -3854,11 +3880,10 @@ mod tests {
 
     #[test]
     fn cached_metadata_replay_respects_receive_audio_and_video_toggles() {
+        use crate::net::testing::{PairStream, stream_pair};
         use crate::session::stream::Stream;
         use crate::transport::Transport;
         use std::io::Read;
-        use std::os::unix::io::IntoRawFd;
-        use std::os::unix::net::UnixStream;
 
         let mut server = test_server();
         let mut payload = vec![0x02, 0x00, 0x0A];
@@ -3867,7 +3892,7 @@ mod tests {
         payload.extend_from_slice(&[0x00, 0x00, 0x09]);
         server.cache_relay_frame(&relay_frame(FrameType::Script, payload));
 
-        let (server_end, mut peer_end) = UnixStream::pair().unwrap();
+        let (server_end, mut peer_end) = stream_pair().unwrap();
         server_end.set_nonblocking(true).unwrap();
         peer_end.set_nonblocking(true).unwrap();
 
@@ -3876,7 +3901,7 @@ mod tests {
         player.relay_enabled = true;
         player.needs_init_frames = true;
         player.client_fd = 0;
-        player.transport = Some(Transport::new_plain(server_end.into_raw_fd()));
+        player.transport = Some(crate::net::testing::transport_from(server_end));
         player.current_stream = Some(Box::new(Stream {
             stream_id: 1,
             name: "stream".to_string(),
@@ -4127,19 +4152,7 @@ mod tests {
         let mut server = Server::new(config).unwrap();
         server.listen("127.0.0.1:0").unwrap();
 
-        let port = {
-            let mut addr: libc::sockaddr_in = unsafe { std::mem::zeroed() };
-            let mut len = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
-            let rc = unsafe {
-                libc::getsockname(
-                    server.server_fd,
-                    &mut addr as *mut _ as *mut libc::sockaddr,
-                    &mut len,
-                )
-            };
-            assert_eq!(rc, 0);
-            u16::from_be(addr.sin_port)
-        };
+        let port = { crate::net::testing::local_port(server.server_fd) };
         let addr = format!("127.0.0.1:{port}");
 
         let mut streams = Vec::new();
@@ -4182,26 +4195,8 @@ mod tests {
             )
             .unwrap();
 
-        let plaintext_port = {
-            let fd = server.listener_fds()[0];
-            let mut addr: libc::sockaddr_in = unsafe { std::mem::zeroed() };
-            let mut len = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
-            let rc = unsafe {
-                libc::getsockname(fd, &mut addr as *mut _ as *mut libc::sockaddr, &mut len)
-            };
-            assert_eq!(rc, 0);
-            u16::from_be(addr.sin_port)
-        };
-        let tls_port = {
-            let fd = server.listener_fds()[1];
-            let mut addr: libc::sockaddr_in = unsafe { std::mem::zeroed() };
-            let mut len = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
-            let rc = unsafe {
-                libc::getsockname(fd, &mut addr as *mut _ as *mut libc::sockaddr, &mut len)
-            };
-            assert_eq!(rc, 0);
-            u16::from_be(addr.sin_port)
-        };
+        let plaintext_port = { crate::net::testing::local_port(server.listener_fds()[0]) };
+        let tls_port = { crate::net::testing::local_port(server.listener_fds()[1]) };
         let plaintext_addr = format!("127.0.0.1:{plaintext_port}");
         let tls_addr = format!("127.0.0.1:{tls_port}");
 
@@ -4266,19 +4261,7 @@ mod tests {
         let mut server = Server::new(config).unwrap();
         server.listen("127.0.0.1:0").unwrap();
 
-        let port = {
-            let mut addr: libc::sockaddr_in = unsafe { std::mem::zeroed() };
-            let mut len = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
-            let rc = unsafe {
-                libc::getsockname(
-                    server.server_fd,
-                    &mut addr as *mut _ as *mut libc::sockaddr,
-                    &mut len,
-                )
-            };
-            assert_eq!(rc, 0);
-            u16::from_be(addr.sin_port)
-        };
+        let port = { crate::net::testing::local_port(server.server_fd) };
         let addr = format!("127.0.0.1:{port}");
 
         let mut streams = Vec::new();
@@ -4322,19 +4305,7 @@ mod tests {
         let mut server = Server::new(config).unwrap();
         server.listen("127.0.0.1:0").unwrap();
 
-        let port = {
-            let mut addr: libc::sockaddr_in = unsafe { std::mem::zeroed() };
-            let mut len = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
-            let rc = unsafe {
-                libc::getsockname(
-                    server.server_fd,
-                    &mut addr as *mut _ as *mut libc::sockaddr,
-                    &mut len,
-                )
-            };
-            assert_eq!(rc, 0);
-            u16::from_be(addr.sin_port)
-        };
+        let port = { crate::net::testing::local_port(server.server_fd) };
         let addr = format!("127.0.0.1:{port}");
 
         let _first = std::net::TcpStream::connect(&addr).unwrap();
@@ -4386,19 +4357,7 @@ mod tests {
         let mut server = Server::new(config).unwrap();
         server.listen("127.0.0.1:0").unwrap();
 
-        let port = {
-            let mut addr: libc::sockaddr_in = unsafe { std::mem::zeroed() };
-            let mut len = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
-            let rc = unsafe {
-                libc::getsockname(
-                    server.server_fd,
-                    &mut addr as *mut _ as *mut libc::sockaddr,
-                    &mut len,
-                )
-            };
-            assert_eq!(rc, 0);
-            u16::from_be(addr.sin_port)
-        };
+        let port = { crate::net::testing::local_port(server.server_fd) };
         let addr = format!("127.0.0.1:{port}");
 
         let mut streams = Vec::new();
@@ -4431,19 +4390,7 @@ mod tests {
         let mut server = Server::new(config).unwrap();
         server.listen("127.0.0.1:0").unwrap();
 
-        let port = {
-            let mut addr: libc::sockaddr_in = unsafe { std::mem::zeroed() };
-            let mut len = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
-            let rc = unsafe {
-                libc::getsockname(
-                    server.server_fd,
-                    &mut addr as *mut _ as *mut libc::sockaddr,
-                    &mut len,
-                )
-            };
-            assert_eq!(rc, 0);
-            u16::from_be(addr.sin_port)
-        };
+        let port = { crate::net::testing::local_port(server.server_fd) };
         let addr = format!("127.0.0.1:{port}");
 
         let _stream = std::net::TcpStream::connect(&addr).unwrap();
@@ -4475,19 +4422,7 @@ mod tests {
         let mut server = Server::new(config).unwrap();
         server.listen("127.0.0.1:0").unwrap();
 
-        let port = {
-            let mut addr: libc::sockaddr_in = unsafe { std::mem::zeroed() };
-            let mut len = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
-            let rc = unsafe {
-                libc::getsockname(
-                    server.server_fd,
-                    &mut addr as *mut _ as *mut libc::sockaddr,
-                    &mut len,
-                )
-            };
-            assert_eq!(rc, 0);
-            u16::from_be(addr.sin_port)
-        };
+        let port = { crate::net::testing::local_port(server.server_fd) };
         let addr = format!("127.0.0.1:{port}");
 
         let _stream = std::net::TcpStream::connect(&addr).unwrap();
@@ -4519,19 +4454,7 @@ mod tests {
         let mut server = Server::new(config).unwrap();
         server.listen("127.0.0.1:0").unwrap();
 
-        let port = {
-            let mut addr: libc::sockaddr_in = unsafe { std::mem::zeroed() };
-            let mut len = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
-            let rc = unsafe {
-                libc::getsockname(
-                    server.server_fd,
-                    &mut addr as *mut _ as *mut libc::sockaddr,
-                    &mut len,
-                )
-            };
-            assert_eq!(rc, 0);
-            u16::from_be(addr.sin_port)
-        };
+        let port = { crate::net::testing::local_port(server.server_fd) };
         let addr = format!("127.0.0.1:{port}");
 
         let mut stream = std::net::TcpStream::connect(&addr).unwrap();
@@ -4586,19 +4509,7 @@ mod tests {
         let mut server = Server::new(config).unwrap();
         server.listen("127.0.0.1:0").unwrap();
 
-        let port = {
-            let mut addr: libc::sockaddr_in = unsafe { std::mem::zeroed() };
-            let mut len = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
-            let rc = unsafe {
-                libc::getsockname(
-                    server.server_fd,
-                    &mut addr as *mut _ as *mut libc::sockaddr,
-                    &mut len,
-                )
-            };
-            assert_eq!(rc, 0);
-            u16::from_be(addr.sin_port)
-        };
+        let port = { crate::net::testing::local_port(server.server_fd) };
         let addr = format!("127.0.0.1:{port}");
 
         let _stream = std::net::TcpStream::connect(&addr).unwrap();
@@ -4832,11 +4743,10 @@ mod tests {
         use crate::chunk::reader::ChunkMessage;
         use crate::chunk::writer::chunk_write;
         use crate::message::message::RTMP_MSG_AMF0_COMMAND;
+        use crate::net::testing::{PairStream, stream_pair};
         use crate::session::stream::Stream;
         use crate::transport::Transport;
         use crate::types::ConnState;
-        use std::os::unix::io::IntoRawFd;
-        use std::os::unix::net::UnixStream;
 
         let mut server = test_server();
 
@@ -4863,9 +4773,9 @@ mod tests {
             .lock()
             .unwrap()
             .insert(("live".to_string(), "victim".to_string()), conn_a.conn_id);
-        let (a_end, a_peer) = UnixStream::pair().unwrap();
+        let (a_end, a_peer) = stream_pair().unwrap();
         a_end.set_nonblocking(true).unwrap();
-        conn_a.transport = Some(Transport::new_plain(a_end.into_raw_fd()));
+        conn_a.transport = Some(crate::net::testing::transport_from(a_end));
         // Drop the peer side so conn_a's transport.recv() observes EOF (n == 0)
         // when process_connections() reads it, simulating the publisher
         // disconnecting.
@@ -4889,9 +4799,9 @@ mod tests {
         conn_b.publish_routes = Some(PublishRouteRegistry::new(Arc::clone(
             &server.active_publish_routes,
         )));
-        let (b_end, mut b_peer) = UnixStream::pair().unwrap();
+        let (b_end, mut b_peer) = stream_pair().unwrap();
         b_end.set_nonblocking(true).unwrap();
-        conn_b.transport = Some(Transport::new_plain(b_end.into_raw_fd()));
+        conn_b.transport = Some(crate::net::testing::transport_from(b_end));
 
         let mut publish_cmd = crate::buffer::Buffer::with_capacity(128);
         crate::message::command::build_publish(&mut publish_cmd, "victim", "live").unwrap();
@@ -4987,19 +4897,7 @@ mod tests {
             )
             .unwrap();
 
-        let port = {
-            let mut addr: libc::sockaddr_in = unsafe { std::mem::zeroed() };
-            let mut len = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
-            let rc = unsafe {
-                libc::getsockname(
-                    server.server_fd,
-                    &mut addr as *mut _ as *mut libc::sockaddr,
-                    &mut len,
-                )
-            };
-            assert_eq!(rc, 0);
-            u16::from_be(addr.sin_port)
-        };
+        let port = { crate::net::testing::local_port(server.server_fd) };
         let addr = format!("127.0.0.1:{port}");
 
         let mut clients = Vec::new();
@@ -5039,19 +4937,7 @@ mod tests {
             )
             .unwrap();
 
-        let port = {
-            let mut addr: libc::sockaddr_in = unsafe { std::mem::zeroed() };
-            let mut len = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
-            let rc = unsafe {
-                libc::getsockname(
-                    server.server_fd,
-                    &mut addr as *mut _ as *mut libc::sockaddr,
-                    &mut len,
-                )
-            };
-            assert_eq!(rc, 0);
-            u16::from_be(addr.sin_port)
-        };
+        let port = { crate::net::testing::local_port(server.server_fd) };
         let addr = format!("127.0.0.1:{port}");
 
         let mut clients = Vec::new();
@@ -5106,19 +4992,7 @@ mod tests {
             )
             .unwrap();
 
-        let port = {
-            let mut addr: libc::sockaddr_in = unsafe { std::mem::zeroed() };
-            let mut len = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
-            let rc = unsafe {
-                libc::getsockname(
-                    server.server_fd,
-                    &mut addr as *mut _ as *mut libc::sockaddr,
-                    &mut len,
-                )
-            };
-            assert_eq!(rc, 0);
-            u16::from_be(addr.sin_port)
-        };
+        let port = { crate::net::testing::local_port(server.server_fd) };
         let addr = format!("127.0.0.1:{port}");
 
         let mut clients = Vec::new();
@@ -5184,19 +5058,7 @@ mod tests {
             )
             .unwrap();
 
-        let port = {
-            let mut addr: libc::sockaddr_in = unsafe { std::mem::zeroed() };
-            let mut len = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
-            let rc = unsafe {
-                libc::getsockname(
-                    server.server_fd,
-                    &mut addr as *mut _ as *mut libc::sockaddr,
-                    &mut len,
-                )
-            };
-            assert_eq!(rc, 0);
-            u16::from_be(addr.sin_port)
-        };
+        let port = { crate::net::testing::local_port(server.server_fd) };
         let addr = format!("127.0.0.1:{port}");
 
         let mut clients = Vec::new();
@@ -5388,20 +5250,19 @@ mod tests {
 
     #[test]
     fn same_route_local_deferred_precedes_inject_under_budget() {
+        use crate::net::testing::{PairStream, stream_pair};
         use crate::session::stream::Stream;
         use crate::transport::Transport;
-        use std::os::unix::io::IntoRawFd;
-        use std::os::unix::net::UnixStream;
 
-        fn attached(conn_id: u64, publishing: bool) -> (Conn, UnixStream) {
-            let (server_end, peer_end) = UnixStream::pair().unwrap();
+        fn attached(conn_id: u64, publishing: bool) -> (Conn, PairStream) {
+            let (server_end, peer_end) = stream_pair().unwrap();
             server_end.set_nonblocking(true).unwrap();
             peer_end.set_nonblocking(true).unwrap();
             let mut conn = Conn::new();
             conn.conn_id = conn_id;
             conn.app = "live".to_string();
             conn.relay_enabled = true;
-            conn.transport = Some(Transport::new_plain(server_end.into_raw_fd()));
+            conn.transport = Some(crate::net::testing::transport_from(server_end));
             conn.current_stream = Some(Box::new(Stream {
                 stream_id: 1,
                 name: "stream".to_string(),
@@ -5475,13 +5336,12 @@ mod tests {
 
     #[test]
     fn inject_relay_frame_reaches_local_player() {
+        use crate::net::testing::{PairStream, stream_pair};
         use crate::session::stream::Stream;
         use crate::transport::Transport;
         use std::io::Read;
-        use std::os::unix::io::IntoRawFd;
-        use std::os::unix::net::UnixStream;
 
-        let (server_end, mut peer_end) = UnixStream::pair().unwrap();
+        let (server_end, mut peer_end) = stream_pair().unwrap();
         server_end.set_nonblocking(true).unwrap();
         peer_end.set_nonblocking(true).unwrap();
 
@@ -5490,7 +5350,7 @@ mod tests {
         player.app = "live".to_string();
         player.relay_enabled = true;
         player.client_fd = 0;
-        player.transport = Some(Transport::new_plain(server_end.into_raw_fd()));
+        player.transport = Some(crate::net::testing::transport_from(server_end));
         player.current_stream = Some(Box::new(Stream {
             stream_id: 1,
             name: "stream".to_string(),
@@ -5517,11 +5377,10 @@ mod tests {
 
     #[test]
     fn inject_headers_and_keyframe_seed_init_cache_for_late_player() {
+        use crate::net::testing::{PairStream, stream_pair};
         use crate::session::stream::Stream;
         use crate::transport::Transport;
         use std::io::Read;
-        use std::os::unix::io::IntoRawFd;
-        use std::os::unix::net::UnixStream;
 
         let mut server = test_server();
         server
@@ -5549,7 +5408,7 @@ mod tests {
         assert!(snap.last_keyframe.is_some());
         assert_eq!(snap.last_keyframe.as_ref().unwrap().0, 100);
 
-        let (server_end, mut peer_end) = UnixStream::pair().unwrap();
+        let (server_end, mut peer_end) = stream_pair().unwrap();
         server_end.set_nonblocking(true).unwrap();
         peer_end.set_nonblocking(true).unwrap();
 
@@ -5559,7 +5418,7 @@ mod tests {
         player.relay_enabled = true;
         player.needs_init_frames = true;
         player.client_fd = 0;
-        player.transport = Some(Transport::new_plain(server_end.into_raw_fd()));
+        player.transport = Some(crate::net::testing::transport_from(server_end));
         player.current_stream = Some(Box::new(Stream {
             stream_id: 1,
             name: "stream".to_string(),
@@ -5620,20 +5479,19 @@ mod tests {
 
     #[test]
     fn relay_export_skips_requeued_frames() {
+        use crate::net::testing::{PairStream, stream_pair};
         use crate::session::stream::Stream;
         use crate::transport::Transport;
-        use std::os::unix::io::IntoRawFd;
-        use std::os::unix::net::UnixStream;
 
-        fn attached(conn_id: u64, publishing: bool) -> (Conn, UnixStream) {
-            let (server_end, peer_end) = UnixStream::pair().unwrap();
+        fn attached(conn_id: u64, publishing: bool) -> (Conn, PairStream) {
+            let (server_end, peer_end) = stream_pair().unwrap();
             server_end.set_nonblocking(true).unwrap();
             peer_end.set_nonblocking(true).unwrap();
             let mut conn = Conn::new();
             conn.conn_id = conn_id;
             conn.app = "live".to_string();
             conn.relay_enabled = true;
-            conn.transport = Some(Transport::new_plain(server_end.into_raw_fd()));
+            conn.transport = Some(crate::net::testing::transport_from(server_end));
             conn.current_stream = Some(Box::new(Stream {
                 stream_id: 1,
                 name: "stream".to_string(),
@@ -5675,12 +5533,11 @@ mod tests {
 
     #[test]
     fn relay_export_orphaned_frames_on_next_poll_after_publisher_removed() {
+        use crate::net::testing::{PairStream, stream_pair};
         use crate::session::stream::Stream;
         use crate::transport::Transport;
-        use std::os::unix::io::IntoRawFd;
-        use std::os::unix::net::UnixStream;
 
-        let (server_end, _peer_end) = UnixStream::pair().unwrap();
+        let (server_end, _peer_end) = stream_pair().unwrap();
         server_end.set_nonblocking(true).unwrap();
 
         let mut publisher = Conn::new();
@@ -5696,7 +5553,7 @@ mod tests {
         player.conn_id = 2;
         player.app = "live".to_string();
         player.relay_enabled = true;
-        player.transport = Some(Transport::new_plain(server_end.into_raw_fd()));
+        player.transport = Some(crate::net::testing::transport_from(server_end));
         player.current_stream = Some(Box::new(Stream {
             stream_id: 1,
             name: "stream".to_string(),
@@ -5739,18 +5596,17 @@ mod tests {
 
     #[test]
     fn injected_frames_respect_receive_audio_video() {
+        use crate::net::testing::{PairStream, stream_pair};
         use crate::session::stream::Stream;
         use crate::transport::Transport;
-        use std::os::unix::io::IntoRawFd;
-        use std::os::unix::net::UnixStream;
 
-        let (server_end, _peer_end) = UnixStream::pair().unwrap();
+        let (server_end, _peer_end) = stream_pair().unwrap();
         server_end.set_nonblocking(true).unwrap();
 
         let mut player = Conn::new();
         player.app = "live".to_string();
         player.relay_enabled = true;
-        player.transport = Some(Transport::new_plain(server_end.into_raw_fd()));
+        player.transport = Some(crate::net::testing::transport_from(server_end));
         player.current_stream = Some(Box::new(Stream {
             stream_id: 1,
             name: "stream".to_string(),
@@ -6333,18 +6189,17 @@ mod tests {
 
     #[test]
     fn conn_will_receive_relay_frame_is_false_while_a_re_play_is_pending() {
+        use crate::net::testing::{PairStream, stream_pair};
         use crate::session::stream::Stream;
         use crate::transport::Transport;
-        use std::os::unix::io::IntoRawFd;
-        use std::os::unix::net::UnixStream;
 
-        let (server_end, _peer_end) = UnixStream::pair().unwrap();
+        let (server_end, _peer_end) = stream_pair().unwrap();
         server_end.set_nonblocking(true).unwrap();
 
         let mut player = Conn::new();
         player.app = "live".to_string();
         player.relay_enabled = true;
-        player.transport = Some(Transport::new_plain(server_end.into_raw_fd()));
+        player.transport = Some(crate::net::testing::transport_from(server_end));
         player.current_stream = Some(Box::new(Stream {
             stream_id: 1,
             name: "stream".to_string(),
