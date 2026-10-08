@@ -28,6 +28,10 @@ openssl = { version = "0.10.70", optional = true }
 parking_lot = "0.12"
 socket2 = { version = "0.6", features = ["all"] }
 
+# Winsock bindings for the Windows socket backend (src/net/windows.rs).
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Networking_WinSock", "Win32_System_IO"] }
+
 [build-dependencies]
 cc = "1"
 

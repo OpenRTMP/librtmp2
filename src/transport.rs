@@ -4,7 +4,11 @@
 //!
 //! The plaintext path is always available. The TLS path is feature-gated
 //! behind the "tls" feature (OpenSSL).
+//!
+//! All OS socket calls go through [`crate::net`], which selects the Unix or
+//! Windows backend at compile time.
 
+use crate::net::{self, Interest, RawSocket, SockIo, Wait};
 use crate::types::ErrorCode;
 use crate::types::Result;
 
@@ -13,10 +17,7 @@ use openssl::ssl::{
     HandshakeError, MidHandshakeSslStream, SslAcceptor, SslFiletype, SslMethod, SslStream,
     SslVerifyMode,
 };
-use std::mem::MaybeUninit;
 use std::net::TcpStream;
-#[cfg(feature = "tls")]
-use std::os::unix::io::{AsRawFd, FromRawFd};
 use std::sync::Arc;
 #[cfg(feature = "tls")]
 use std::time::Duration;
@@ -25,55 +26,24 @@ use std::time::Instant;
 #[cfg(feature = "tls")]
 const TLS_ACCEPT_TIMEOUT_SECS: u64 = 10;
 
-/// Most buffers [`Transport::try_send_vectored`] passes to one `sendmsg`
-/// (well under the kernel's `UIO_MAXIOV` of 1024).
-pub(crate) const MAX_SEND_PARTS: usize = 512;
-
-/// Fill `iov` with one entry per non-empty part (the first part minus its
-/// first `first_offset` bytes), up to `iov.len()` entries; returns how many
-/// were filled. Entries past the returned count stay uninitialised.
-fn fill_iovecs(
-    parts: &[&[u8]],
-    first_offset: usize,
-    iov: &mut [MaybeUninit<libc::iovec>],
-) -> usize {
-    let mut len = 0;
-    for (i, part) in parts.iter().enumerate() {
-        if len == iov.len() {
-            break;
-        }
-        let part = if i == 0 {
-            part.get(first_offset..).unwrap_or(&[])
-        } else {
-            part
-        };
-        if part.is_empty() {
-            continue;
-        }
-        iov[len].write(libc::iovec {
-            iov_base: part.as_ptr() as *mut libc::c_void,
-            iov_len: part.len(),
-        });
-        len += 1;
-    }
-    len
-}
+/// Most buffers [`Transport::try_send_vectored`] passes to one system call.
+pub(crate) use crate::net::MAX_SEND_PARTS;
 
 enum TransportInner {
-    Plain(i32),
+    Plain(RawSocket),
     #[cfg(feature = "tls")]
     Tls {
         stream: SslStream<TcpStream>,
-        /// Cached raw fd, used only for identification and `fd()` / `poll()`.
-        fd: i32,
+        /// Cached raw handle, used only for identification and `fd()` / `poll()`.
+        fd: RawSocket,
     },
 }
 
-/// Transport wraps a connected socket fd and presents a single send/recv API.
+/// Transport wraps a connected socket and presents a single send/recv API.
 ///
-/// The transport OWNS the file descriptor: it is closed when the transport
-/// is dropped (plain: explicit `close(2)`; TLS: via `TcpStream` drop inside
-/// the SSL stream).
+/// The transport OWNS the socket: it is closed exactly once, when the
+/// transport is dropped (plain: explicit `close(2)` / `closesocket`; TLS: via
+/// `TcpStream` drop inside the SSL stream).
 pub struct Transport {
     inner: TransportInner,
 }
@@ -96,33 +66,16 @@ pub struct TlsCtx {
 #[cfg(feature = "tls")]
 pub(crate) struct PendingTlsAccept {
     stream: MidHandshakeSslStream<TcpStream>,
-    fd: i32,
-    interest: TlsPollInterest,
+    fd: RawSocket,
+    interest: Interest,
 }
 
 #[cfg(feature = "tls")]
-#[derive(Clone, Copy)]
-enum TlsPollInterest {
-    Read,
-    Write,
-}
-
-#[cfg(feature = "tls")]
-impl TlsPollInterest {
-    fn poll_events(self) -> libc::c_short {
-        match self {
-            Self::Read => libc::POLLIN,
-            Self::Write => libc::POLLOUT,
-        }
-    }
-}
-
-#[cfg(feature = "tls")]
-fn tls_poll_interest(stream: &MidHandshakeSslStream<TcpStream>) -> TlsPollInterest {
+fn tls_poll_interest(stream: &MidHandshakeSslStream<TcpStream>) -> Interest {
     use openssl::ssl::ErrorCode as SslErr;
     match stream.error().code() {
-        SslErr::WANT_WRITE => TlsPollInterest::Write,
-        _ => TlsPollInterest::Read,
+        SslErr::WANT_WRITE => Interest::Write,
+        _ => Interest::Read,
     }
 }
 
@@ -132,16 +85,26 @@ pub(crate) enum TlsAcceptOutcome {
     WouldBlock(PendingTlsAccept),
 }
 
-fn last_errno() -> i32 {
-    std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
-}
-
 impl Transport {
-    /// Wrap an owned fd as a plaintext transport.
-    pub fn new_plain(fd: i32) -> Self {
+    /// Wrap an owned, connected socket as a plaintext transport. The
+    /// transport takes ownership and closes it on drop.
+    ///
+    /// On Unix `fd` is a file descriptor and its blocking mode is left
+    /// untouched (every call passes `MSG_DONTWAIT`). On Windows `fd` is a
+    /// Winsock `SOCKET`, which this switches to non-blocking mode because
+    /// Winsock has no per-call non-blocking flag.
+    pub fn new_plain(fd: RawSocket) -> Self {
+        net::prepare_transport_socket(fd);
         Self {
             inner: TransportInner::Plain(fd),
         }
+    }
+
+    /// Wrap a connected `TcpStream` as a plaintext transport, taking
+    /// ownership of its socket. Portable equivalent of
+    /// [`Transport::new_plain`] that needs no raw handle.
+    pub fn from_tcp_stream(stream: TcpStream) -> Self {
+        Self::new_plain(net::into_raw(stream))
     }
 
     #[cfg(feature = "tls")]
@@ -161,15 +124,21 @@ impl Transport {
         // process that forks child processes after opening a TLS connection
         // through this library, and that relies on the default SIGPIPE
         // behavior in those children, will need to restore SIG_DFL itself.
-        static SET_SIGPIPE_DISPOSITION: std::sync::Once = std::sync::Once::new();
-        SET_SIGPIPE_DISPOSITION.call_once(|| unsafe {
-            let current = libc::signal(libc::SIGPIPE, libc::SIG_IGN);
-            if current != libc::SIG_DFL && current != libc::SIG_ERR {
-                libc::signal(libc::SIGPIPE, current);
-            }
-        });
+        //
+        // Windows has no SIGPIPE: a write to a reset peer just fails with
+        // WSAECONNRESET, so there is nothing to ignore there.
+        #[cfg(unix)]
+        {
+            static SET_SIGPIPE_DISPOSITION: std::sync::Once = std::sync::Once::new();
+            SET_SIGPIPE_DISPOSITION.call_once(|| unsafe {
+                let current = libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+                if current != libc::SIG_DFL && current != libc::SIG_ERR {
+                    libc::signal(libc::SIGPIPE, current);
+                }
+            });
+        }
 
-        let raw_fd = stream.get_ref().as_raw_fd();
+        let raw_fd = net::as_raw(stream.get_ref());
         stream
             .get_ref()
             .set_nonblocking(true)
@@ -312,7 +281,7 @@ impl Transport {
             let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
                 return Err(ErrorCode::Timeout);
             };
-            // `poll(2)`'s granularity is milliseconds; round a sub-ms
+            // `poll(2)`/`WSAPoll`'s granularity is milliseconds; round a sub-ms
             // remainder down to an expired deadline instead of up to a full
             // 1ms wait, so the caller's absolute deadline can't be overshot.
             if remaining.as_millis() == 0 {
@@ -324,23 +293,17 @@ impl Transport {
             // deadline passed" — loop and recheck instead of timing out
             // early.
             let timeout_ms = remaining.as_millis().min(i32::MAX as u128) as i32;
-            let mut pfd = libc::pollfd {
-                fd: pending.get_ref().as_raw_fd(),
-                events: tls_poll_interest(&pending).poll_events(),
-                revents: 0,
-            };
-            let rc = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
-            if rc == 0 {
-                if Instant::now() >= deadline {
-                    return Err(ErrorCode::Timeout);
-                }
-                continue;
-            }
-            if rc < 0 {
-                if std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+            let fd = net::as_raw(pending.get_ref());
+            match net::poll_one(fd, tls_poll_interest(&pending), timeout_ms) {
+                Wait::Ready => {}
+                Wait::TimedOut => {
+                    if Instant::now() >= deadline {
+                        return Err(ErrorCode::Timeout);
+                    }
                     continue;
                 }
-                return Err(ErrorCode::Io);
+                Wait::Interrupted => continue,
+                Wait::Failed => return Err(ErrorCode::Io),
             }
             match pending.handshake() {
                 Ok(ssl_stream) => return Transport::new_tls(ssl_stream),
@@ -373,9 +336,11 @@ impl Transport {
         Err(ErrorCode::Unsupported)
     }
 
-    /// Return the underlying file descriptor (used for `poll(2)` and as a
-    /// connection identifier; I/O is performed through this struct).
-    pub fn fd(&self) -> i32 {
+    /// Return the underlying socket handle (used for readiness polling and
+    /// as a connection identifier; I/O is performed through this struct).
+    /// A file descriptor (`i32`) on Unix, a Winsock `SOCKET` (`u64`) on
+    /// Windows; see [`crate::net::RawSocket`].
+    pub fn fd(&self) -> RawSocket {
         match &self.inner {
             TransportInner::Plain(fd) => *fd,
             #[cfg(feature = "tls")]
@@ -401,20 +366,13 @@ impl Transport {
     ///   0 = fatal error.
     pub fn recv(&mut self, buf: &mut [u8], again: &mut i32) -> isize {
         match &mut self.inner {
-            TransportInner::Plain(fd) => unsafe {
-                let n = libc::recv(
-                    *fd,
-                    buf.as_mut_ptr() as *mut libc::c_void,
-                    buf.len(),
-                    libc::MSG_DONTWAIT,
-                );
-                if n < 0 {
-                    let err = last_errno();
-                    if err == libc::EINTR || err == libc::EAGAIN || err == libc::EWOULDBLOCK {
-                        *again = 1;
-                    }
+            TransportInner::Plain(fd) => match net::recv(*fd, buf) {
+                SockIo::Done(n) => n as isize,
+                SockIo::WouldBlock => {
+                    *again = 1;
+                    -1
                 }
-                n as isize
+                SockIo::Failed => -1,
             },
             #[cfg(feature = "tls")]
             TransportInner::Tls { stream, .. } => {
@@ -448,25 +406,14 @@ impl Transport {
             return Ok(0);
         }
         match &mut self.inner {
-            TransportInner::Plain(fd) => {
-                let n = unsafe {
-                    libc::send(
-                        *fd,
-                        data.as_ptr() as *const libc::c_void,
-                        data.len(),
-                        libc::MSG_DONTWAIT | libc::MSG_NOSIGNAL,
-                    )
-                };
-                if n < 0 {
-                    let err = last_errno();
-                    if err == libc::EINTR || err == libc::EAGAIN || err == libc::EWOULDBLOCK {
-                        *again = 2;
-                        return Ok(0);
-                    }
-                    return Err(ErrorCode::Io);
+            TransportInner::Plain(fd) => match net::send(*fd, data) {
+                SockIo::Done(n) => Ok(n),
+                SockIo::WouldBlock => {
+                    *again = 2;
+                    Ok(0)
                 }
-                Ok(n as usize)
-            }
+                SockIo::Failed => Err(ErrorCode::Io),
+            },
             #[cfg(feature = "tls")]
             TransportInner::Tls { stream, .. } => {
                 use openssl::ssl::ErrorCode as SslErr;
@@ -498,7 +445,8 @@ impl Transport {
     /// window. Returns the number of bytes written across all parts, or 0
     /// when the socket is not ready (see [`Self::try_send`] for `again`).
     /// At most [`MAX_SEND_PARTS`] non-empty parts go out per call; the
-    /// iovec array lives on the stack, so a send never allocates. TLS
+    /// `iovec` (Unix `sendmsg`) / `WSABUF` (Windows `WSASend`) array lives on
+    /// the stack, so a send never allocates or copies payload. TLS
     /// transports always return `Ok(0)` without writing: the caller
     /// buffers instead.
     pub(crate) fn try_send_vectored(
@@ -512,27 +460,14 @@ impl Transport {
             #[cfg(feature = "tls")]
             TransportInner::Tls { .. } => return Ok(0),
         };
-        let mut iov = [MaybeUninit::<libc::iovec>::uninit(); MAX_SEND_PARTS];
-        let len = fill_iovecs(parts, first_offset, &mut iov);
-        if len == 0 {
-            return Ok(0);
-        }
-        // SAFETY: an all-zero msghdr is valid; `iov[..len]` was initialised
-        // by `fill_iovecs` and points into `parts`, which outlives the call
-        // and is only read by sendmsg.
-        let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
-        msg.msg_iov = iov.as_mut_ptr().cast::<libc::iovec>();
-        msg.msg_iovlen = len as _;
-        let n = unsafe { libc::sendmsg(fd, &msg, libc::MSG_DONTWAIT | libc::MSG_NOSIGNAL) };
-        if n < 0 {
-            let err = last_errno();
-            if err == libc::EINTR || err == libc::EAGAIN || err == libc::EWOULDBLOCK {
+        match net::send_vectored(fd, parts, first_offset) {
+            SockIo::Done(n) => Ok(n),
+            SockIo::WouldBlock => {
                 *again = 2;
-                return Ok(0);
+                Ok(0)
             }
-            return Err(ErrorCode::Io);
+            SockIo::Failed => Err(ErrorCode::Io),
         }
-        Ok(n as usize)
     }
 
     /// Blocking send of the whole buffer (client-side synchronous I/O).
@@ -562,32 +497,20 @@ impl Transport {
             let mut again = 0i32;
             let n = self.try_send(&data[sent..], &mut again)?;
             if n == 0 {
-                let fd = self.fd();
-                let events = if again == 1 {
-                    libc::POLLIN
+                let interest = if again == 1 {
+                    Interest::Read
                 } else {
-                    libc::POLLOUT
+                    Interest::Write
                 };
-                let mut pfd = libc::pollfd {
-                    fd,
-                    events,
-                    revents: 0,
-                };
-                // An exhausted budget truncates to 0 ms, which `poll(2)` reports
-                // as `rc == 0` and the branch below turns into `ErrorCode::Timeout`.
+                // An exhausted budget truncates to 0 ms, which the poll reports
+                // as timed out and the branch below turns into `ErrorCode::Timeout`.
                 let remaining = deadline.saturating_duration_since(Instant::now());
                 let timeout_ms = remaining.as_millis().min(i32::MAX as u128) as i32;
-                let rc = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
-                if rc == 0 {
-                    return Err(ErrorCode::Timeout);
+                match net::poll_one(self.fd(), interest, timeout_ms) {
+                    Wait::Ready | Wait::Interrupted => continue,
+                    Wait::TimedOut => return Err(ErrorCode::Timeout),
+                    Wait::Failed => return Err(ErrorCode::Io),
                 }
-                if rc < 0 {
-                    if std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
-                        continue;
-                    }
-                    return Err(ErrorCode::Io);
-                }
-                continue;
             }
             sent += n;
         }
@@ -610,14 +533,10 @@ impl Transport {
 
 impl Drop for Transport {
     fn drop(&mut self) {
-        // For plain transports, explicitly close the owned fd.
-        // For TLS transports, SslStream<TcpStream> closes the fd when it drops.
+        // For plain transports, explicitly close the owned socket.
+        // For TLS transports, SslStream<TcpStream> closes it when it drops.
         match &self.inner {
-            TransportInner::Plain(fd) => {
-                if *fd >= 0 {
-                    unsafe { libc::close(*fd) };
-                }
-            }
+            TransportInner::Plain(fd) => net::close(*fd),
             #[cfg(feature = "tls")]
             TransportInner::Tls { .. } => {}
         }
@@ -666,8 +585,8 @@ impl TlsCtx {
     /// If the peer has not provided enough handshake data yet, the returned
     /// [`PendingTlsAccept`] can be stored and retried on a later `poll()` call.
     #[cfg(feature = "tls")]
-    pub(crate) fn accept_nonblocking(&self, fd: i32) -> Result<TlsAcceptOutcome> {
-        let tcp = unsafe { TcpStream::from_raw_fd(fd) };
+    pub(crate) fn accept_nonblocking(&self, tcp: TcpStream) -> Result<TlsAcceptOutcome> {
+        let fd = net::as_raw(&tcp);
         tcp.set_nonblocking(true).map_err(|_| ErrorCode::Io)?;
         match self.acceptor.accept(tcp) {
             Ok(ssl) => Ok(TlsAcceptOutcome::Complete(Transport::new_tls(ssl)?)),
@@ -683,8 +602,9 @@ impl TlsCtx {
         }
     }
 
-    /// Perform a TLS server handshake on the given fd and return a TLS
-    /// [`Transport`] that owns the fd.
+    /// Perform a TLS server handshake on the given socket (a file descriptor
+    /// on Unix, a Winsock `SOCKET` on Windows) and return a TLS
+    /// [`Transport`] that owns it.
     ///
     /// This convenience helper may block for up to 10 seconds while waiting for
     /// handshake readiness. The server's accept loop uses `accept_nonblocking`
@@ -693,8 +613,12 @@ impl TlsCtx {
     /// On failure the fd is closed (via the dropped `TcpStream` inside the
     /// error value) — the caller must not close it again.
     #[cfg(feature = "tls")]
-    pub fn accept(&self, fd: i32) -> Result<Transport> {
-        match self.accept_nonblocking(fd)? {
+    pub fn accept(&self, fd: RawSocket) -> Result<Transport> {
+        // SAFETY: by this function's contract the caller hands over an open,
+        // connected socket it owns; the TcpStream (or the handshake error
+        // holding it) closes it exactly once.
+        let tcp = unsafe { net::tcp_stream_from_raw(fd) };
+        match self.accept_nonblocking(tcp)? {
             TlsAcceptOutcome::Complete(transport) => Ok(transport),
             TlsAcceptOutcome::WouldBlock(mut pending) => {
                 let deadline = Instant::now() + Duration::from_secs(TLS_ACCEPT_TIMEOUT_SECS);
@@ -704,20 +628,11 @@ impl TlsCtx {
                     };
                     let timeout_ms = remaining.as_millis().min(i32::MAX as u128) as i32;
                     let timeout_ms = timeout_ms.max(1);
-                    let mut pfd = libc::pollfd {
-                        fd: pending.fd(),
-                        events: pending.poll_events(),
-                        revents: 0,
-                    };
-                    let rc = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
-                    if rc == 0 {
-                        return Err(ErrorCode::Timeout);
-                    }
-                    if rc < 0 {
-                        if std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
-                            continue;
-                        }
-                        return Err(ErrorCode::Io);
+                    match net::poll_one(pending.fd(), pending.interest, timeout_ms) {
+                        Wait::Ready => {}
+                        Wait::TimedOut => return Err(ErrorCode::Timeout),
+                        Wait::Interrupted => continue,
+                        Wait::Failed => return Err(ErrorCode::Io),
                     }
                     match pending.progress()? {
                         TlsAcceptOutcome::Complete(transport) => return Ok(transport),
@@ -729,19 +644,15 @@ impl TlsCtx {
     }
 
     #[cfg(not(feature = "tls"))]
-    pub fn accept(&self, _fd: i32) -> Result<Transport> {
+    pub fn accept(&self, _fd: RawSocket) -> Result<Transport> {
         Err(ErrorCode::Unsupported)
     }
 }
 
 #[cfg(feature = "tls")]
 impl PendingTlsAccept {
-    pub(crate) fn fd(&self) -> i32 {
+    pub(crate) fn fd(&self) -> RawSocket {
         self.fd
-    }
-
-    pub(crate) fn poll_events(&self) -> libc::c_short {
-        self.interest.poll_events()
     }
 
     pub(crate) fn progress(self) -> Result<TlsAcceptOutcome> {
@@ -777,7 +688,6 @@ mod client_tls_tests {
     use openssl::x509::extension::{BasicConstraints, SubjectAlternativeName};
     use openssl::x509::{X509, X509NameBuilder};
     use std::net::TcpListener;
-    use std::os::unix::io::IntoRawFd;
     use std::sync::atomic::{AtomicU32, Ordering};
 
     /// Generates a self-signed cert/key pair (PEM) for `cn`, written to
@@ -840,7 +750,7 @@ mod client_tls_tests {
             .expect("valid self-signed cert/key");
         std::thread::spawn(move || {
             if let Ok((stream, _)) = listener.accept() {
-                let fd = stream.into_raw_fd();
+                let fd = crate::net::into_raw(stream);
                 // Blocking accept: run the handshake to completion, ignoring
                 // the outcome — the test only cares whether the *client*
                 // observed success/failure.
@@ -964,173 +874,337 @@ mod client_tls_tests {
     }
 }
 
+/// Behavioural tests for the plaintext socket path, run against every
+/// stream type the platform offers: a Unix socketpair (Unix only, as
+/// before) and a TCP loopback connection (every platform, including
+/// Windows), so both socket backends are held to the same cases.
 #[cfg(test)]
 mod vectored_send_tests {
     use super::*;
-    use std::io::Read;
-    use std::os::fd::IntoRawFd;
-    use std::os::unix::net::UnixStream;
+    use crate::net::testing::{PeerStream, small_buffer_tcp_pair};
+    use std::io::{Read, Write};
+    use std::time::Duration;
 
-    /// A plaintext transport over one end of a socketpair.
-    fn pair() -> (Transport, UnixStream) {
-        let (a, b) = UnixStream::pair().unwrap();
-        a.set_nonblocking(true).unwrap();
-        (Transport::new_plain(a.into_raw_fd()), b)
-    }
-
-    fn read_exact_n(peer: &mut UnixStream, n: usize) -> Vec<u8> {
+    fn read_exact_n<P: Read>(peer: &mut P, n: usize) -> Vec<u8> {
         let mut out = vec![0u8; n];
         peer.read_exact(&mut out).unwrap();
         out
     }
 
-    #[test]
-    fn full_vectored_write_keeps_byte_order() {
-        let (mut t, mut peer) = pair();
-        let parts: [&[u8]; 3] = [b"abc", b"defg", b"h"];
-        let mut again = 0;
-        assert_eq!(t.try_send_vectored(&parts, 0, &mut again), Ok(8));
-        assert_eq!(read_exact_n(&mut peer, 8), b"abcdefgh");
-    }
+    macro_rules! plain_socket_suite {
+        ($suite:ident, $pair:expr, $partial_len:expr) => {
+            mod $suite {
+                use super::*;
 
-    #[test]
-    fn offset_into_first_part_skips_that_prefix() {
-        let (mut t, mut peer) = pair();
-        let parts: [&[u8]; 2] = [b"abcdef", b"gh"];
-        assert_eq!(t.try_send_vectored(&parts, 4, &mut 0), Ok(4));
-        assert_eq!(read_exact_n(&mut peer, 4), b"efgh");
-    }
-
-    #[test]
-    fn offset_at_or_past_the_end_of_first_part_sends_the_rest_only() {
-        let (mut t, mut peer) = pair();
-        let parts: [&[u8]; 2] = [b"abc", b"de"];
-        assert_eq!(t.try_send_vectored(&parts, 3, &mut 0), Ok(2));
-        assert_eq!(t.try_send_vectored(&parts, 99, &mut 0), Ok(2));
-        assert_eq!(read_exact_n(&mut peer, 4), b"dede");
-    }
-
-    #[test]
-    fn empty_parts_are_skipped_and_all_empty_writes_nothing() {
-        let (mut t, mut peer) = pair();
-        let parts: [&[u8]; 4] = [b"", b"ab", b"", b"c"];
-        assert_eq!(t.try_send_vectored(&parts, 0, &mut 0), Ok(3));
-        assert_eq!(read_exact_n(&mut peer, 3), b"abc");
-        let empty: [&[u8]; 2] = [b"", b""];
-        assert_eq!(t.try_send_vectored(&empty, 0, &mut 0), Ok(0));
-        assert_eq!(t.try_send_vectored(&[], 0, &mut 0), Ok(0));
-    }
-
-    #[test]
-    fn more_than_max_parts_go_out_in_windows_with_exact_order() {
-        let (mut t, mut peer) = pair();
-        // 2 * MAX_SEND_PARTS + 7 one-byte parts, interleaved with empties
-        // that must not count against the window.
-        let total = 2 * MAX_SEND_PARTS + 7;
-        let bytes: Vec<u8> = (0..total).map(|i| (i % 251) as u8).collect();
-        let mut parts: Vec<&[u8]> = Vec::new();
-        for i in 0..total {
-            parts.push(&bytes[i..i + 1]);
-            parts.push(&[]);
-        }
-        let mut next = 0;
-        let mut offset = 0;
-        let mut calls = 0;
-        let mut received = Vec::new();
-        while next < parts.len() {
-            let sent = t.try_send_vectored(&parts[next..], offset, &mut 0).unwrap();
-            assert!(sent > 0 && sent <= MAX_SEND_PARTS);
-            calls += 1;
-            received.extend(read_exact_n(&mut peer, sent));
-            let mut left = sent;
-            while left > 0 || (next < parts.len() && parts[next].len() == offset) {
-                let rest = parts[next].len() - offset;
-                if left < rest {
-                    offset += left;
-                    break;
+                fn pair() -> (Transport, impl Read + Write + PeerStream + Send + 'static) {
+                    $pair
                 }
-                left -= rest;
-                next += 1;
-                offset = 0;
-            }
-        }
-        assert_eq!(calls, 3);
-        assert_eq!(received, bytes);
-    }
 
-    #[test]
-    fn partial_write_reports_short_count_and_resume_continues_exactly() {
-        let (mut t, mut peer) = pair();
-        // Far more than the socketpair buffer holds: sendmsg must write
-        // only part of it, and resuming from the byte count must lose
-        // nothing.
-        let big: Vec<u8> = (0..4 * 1024 * 1024).map(|i| (i % 253) as u8).collect();
-        let parts: [&[u8]; 2] = [&big[..1_000_000], &big[1_000_000..]];
-        let first = t.try_send_vectored(&parts, 0, &mut 0).unwrap();
-        assert!(first > 0 && first < big.len(), "expected a partial write");
-        let mut got = Vec::new();
-        peer.set_nonblocking(true).unwrap();
-        let mut buf = vec![0u8; 1 << 16];
-        let mut sent = first;
-        loop {
-            match peer.read(&mut buf) {
-                Ok(n) => got.extend_from_slice(&buf[..n]),
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    if sent == big.len() && got.len() == big.len() {
-                        break;
+                #[test]
+                fn full_vectored_write_keeps_byte_order() {
+                    let (mut t, mut peer) = pair();
+                    let parts: [&[u8]; 3] = [b"abc", b"defg", b"h"];
+                    let mut again = 0;
+                    assert_eq!(t.try_send_vectored(&parts, 0, &mut again), Ok(8));
+                    assert_eq!(read_exact_n(&mut peer, 8), b"abcdefgh");
+                }
+
+                #[test]
+                fn offset_into_first_part_skips_that_prefix() {
+                    let (mut t, mut peer) = pair();
+                    let parts: [&[u8]; 2] = [b"abcdef", b"gh"];
+                    assert_eq!(t.try_send_vectored(&parts, 4, &mut 0), Ok(4));
+                    assert_eq!(read_exact_n(&mut peer, 4), b"efgh");
+                }
+
+                #[test]
+                fn offset_at_or_past_the_end_of_first_part_sends_the_rest_only() {
+                    let (mut t, mut peer) = pair();
+                    let parts: [&[u8]; 2] = [b"abc", b"de"];
+                    assert_eq!(t.try_send_vectored(&parts, 3, &mut 0), Ok(2));
+                    assert_eq!(t.try_send_vectored(&parts, 99, &mut 0), Ok(2));
+                    assert_eq!(read_exact_n(&mut peer, 4), b"dede");
+                }
+
+                #[test]
+                fn empty_parts_are_skipped_and_all_empty_writes_nothing() {
+                    let (mut t, mut peer) = pair();
+                    let parts: [&[u8]; 4] = [b"", b"ab", b"", b"c"];
+                    assert_eq!(t.try_send_vectored(&parts, 0, &mut 0), Ok(3));
+                    assert_eq!(read_exact_n(&mut peer, 3), b"abc");
+                    let empty: [&[u8]; 2] = [b"", b""];
+                    assert_eq!(t.try_send_vectored(&empty, 0, &mut 0), Ok(0));
+                    assert_eq!(t.try_send_vectored(&[], 0, &mut 0), Ok(0));
+                }
+
+                #[test]
+                fn more_than_max_parts_go_out_in_windows_with_exact_order() {
+                    let (mut t, mut peer) = pair();
+                    // 2 * MAX_SEND_PARTS + 7 one-byte parts, interleaved with
+                    // empties that must not count against the window.
+                    let total = 2 * MAX_SEND_PARTS + 7;
+                    let bytes: Vec<u8> = (0..total).map(|i| (i % 251) as u8).collect();
+                    let mut parts: Vec<&[u8]> = Vec::new();
+                    for i in 0..total {
+                        parts.push(&bytes[i..i + 1]);
+                        parts.push(&[]);
                     }
-                    if sent < big.len() {
-                        let (next, offset) = if sent < parts[0].len() {
-                            (0, sent)
+                    let mut next = 0;
+                    let mut offset = 0;
+                    let mut calls = 0;
+                    let mut received = Vec::new();
+                    while next < parts.len() {
+                        let sent = t.try_send_vectored(&parts[next..], offset, &mut 0).unwrap();
+                        assert!(sent > 0 && sent <= MAX_SEND_PARTS);
+                        calls += 1;
+                        received.extend(read_exact_n(&mut peer, sent));
+                        let mut left = sent;
+                        while left > 0 || (next < parts.len() && parts[next].len() == offset) {
+                            let rest = parts[next].len() - offset;
+                            if left < rest {
+                                offset += left;
+                                break;
+                            }
+                            left -= rest;
+                            next += 1;
+                            offset = 0;
+                        }
+                    }
+                    assert_eq!(calls, 3);
+                    assert_eq!(received, bytes);
+                }
+
+                #[test]
+                fn partial_write_reports_short_count_and_resume_continues_exactly() {
+                    let (mut t, mut peer) = pair();
+                    // Far more than the socket buffers hold: the vectored
+                    // write must take only part of it, and resuming from the
+                    // byte count must lose nothing.
+                    let total: usize = $partial_len;
+                    let big: Vec<u8> = (0..total).map(|i| (i % 253) as u8).collect();
+                    let split = total / 4;
+                    let parts: [&[u8]; 2] = [&big[..split], &big[split..]];
+                    let first = t.try_send_vectored(&parts, 0, &mut 0).unwrap();
+                    assert!(first > 0 && first < big.len(), "expected a partial write");
+                    let mut got = Vec::new();
+                    peer.set_nonblocking(true).unwrap();
+                    let mut buf = vec![0u8; 1 << 16];
+                    let mut sent = first;
+                    loop {
+                        match peer.read(&mut buf) {
+                            Ok(0) => panic!("peer saw EOF"),
+                            Ok(n) => got.extend_from_slice(&buf[..n]),
+                            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                                if sent == big.len() && got.len() == big.len() {
+                                    break;
+                                }
+                                if sent < big.len() {
+                                    let (next, offset) = if sent < parts[0].len() {
+                                        (0, sent)
+                                    } else {
+                                        (1, sent - parts[0].len())
+                                    };
+                                    sent += t
+                                        .try_send_vectored(&parts[next..], offset, &mut 0)
+                                        .unwrap();
+                                } else {
+                                    // Everything was handed to the OS; let a
+                                    // TCP loopback finish delivering it.
+                                    std::thread::sleep(Duration::from_millis(1));
+                                }
+                            }
+                            Err(e) => panic!("{e}"),
+                        }
+                    }
+                    assert_eq!(got, big);
+                }
+
+                #[test]
+                fn full_socket_reports_again_instead_of_an_error() {
+                    let (mut t, _peer) = pair();
+                    let chunk = vec![7u8; 1 << 20];
+                    let parts: [&[u8]; 1] = [&chunk];
+                    let mut again = 0;
+                    let mut guard = 0;
+                    // Fill the socket until the OS refuses more.
+                    loop {
+                        let n = t.try_send_vectored(&parts, 0, &mut again).unwrap();
+                        if n == 0 {
+                            break;
+                        }
+                        guard += 1;
+                        assert!(guard < 1000, "socket never filled");
+                    }
+                    assert_eq!(again, 2, "would-block must ask for write readiness");
+                }
+
+                #[test]
+                fn full_socket_plain_send_reports_again_and_recv_reports_would_block() {
+                    let (mut t, _peer) = pair();
+                    let chunk = vec![9u8; 1 << 20];
+                    let mut guard = 0;
+                    loop {
+                        let mut again = 0;
+                        let n = t.try_send(&chunk, &mut again).unwrap();
+                        if n == 0 {
+                            assert_eq!(again, 2);
+                            break;
+                        }
+                        guard += 1;
+                        assert!(guard < 1000, "socket never filled");
+                    }
+                    // Nothing was sent our way: a read must not block.
+                    let mut buf = [0u8; 16];
+                    let mut again = 0;
+                    assert_eq!(t.recv(&mut buf, &mut again), -1);
+                    assert_eq!(again, 1, "would-block must ask for read readiness");
+                }
+
+                #[test]
+                fn partial_reads_deliver_every_byte_in_order() {
+                    let (mut t, mut peer) = pair();
+                    let data: Vec<u8> = (0..200_000).map(|i| (i % 241) as u8).collect();
+                    let writer = std::thread::spawn(move || {
+                        for piece in data.chunks(7_919) {
+                            peer.write_all(piece).unwrap();
+                        }
+                        // Closing the write side ends the stream cleanly.
+                        drop(peer);
+                        data
+                    });
+                    let mut got = Vec::new();
+                    let mut buf = [0u8; 4096];
+                    let deadline = Instant::now() + Duration::from_secs(10);
+                    loop {
+                        assert!(Instant::now() < deadline, "read stalled");
+                        let mut again = 0;
+                        let n = t.recv(&mut buf, &mut again);
+                        if n > 0 {
+                            got.extend_from_slice(&buf[..n as usize]);
+                        } else if n == 0 {
+                            break;
                         } else {
-                            (1, sent - parts[0].len())
-                        };
-                        sent += t.try_send_vectored(&parts[next..], offset, &mut 0).unwrap();
+                            assert_eq!(again, 1, "only would-block is expected here");
+                            let fd = t.fd();
+                            crate::net::poll_one(fd, crate::net::Interest::Read, 100);
+                        }
+                    }
+                    assert_eq!(got, writer.join().unwrap());
+                }
+
+                #[test]
+                fn blocking_send_waits_for_a_slow_reader_and_delivers_everything() {
+                    let (mut t, mut peer) = pair();
+                    let data: Vec<u8> = (0..3 * 1024 * 1024).map(|i| (i % 239) as u8).collect();
+                    let expected = data.clone();
+                    let reader = std::thread::spawn(move || {
+                        let mut got = vec![0u8; expected.len()];
+                        let mut read = 0;
+                        while read < got.len() {
+                            // A slow consumer: small reads with pauses.
+                            let end = (read + 32 * 1024).min(got.len());
+                            peer.read_exact(&mut got[read..end]).unwrap();
+                            read = end;
+                            std::thread::sleep(Duration::from_millis(1));
+                        }
+                        assert_eq!(got, expected);
+                    });
+                    assert_eq!(t.send(&data), Ok(()));
+                    reader.join().unwrap();
+                }
+
+                #[test]
+                fn poll_one_times_out_on_an_idle_socket_and_wakes_on_data() {
+                    let (t, mut peer) = pair();
+                    let start = Instant::now();
+                    let w = crate::net::poll_one(t.fd(), crate::net::Interest::Read, 50);
+                    assert_eq!(w, crate::net::Wait::TimedOut);
+                    assert!(start.elapsed() >= Duration::from_millis(40));
+                    peer.write_all(b"x").unwrap();
+                    let w = crate::net::poll_one(t.fd(), crate::net::Interest::Read, 5_000);
+                    assert_eq!(w, crate::net::Wait::Ready);
+                    let w = crate::net::poll_one(t.fd(), crate::net::Interest::Write, 5_000);
+                    assert_eq!(w, crate::net::Wait::Ready);
+                }
+
+                #[test]
+                fn peer_shutdown_is_a_clean_eof() {
+                    let (mut t, peer) = pair();
+                    drop(peer);
+                    let mut buf = [0u8; 8];
+                    let deadline = Instant::now() + Duration::from_secs(5);
+                    loop {
+                        let mut again = 0;
+                        let n = t.recv(&mut buf, &mut again);
+                        if n == 0 {
+                            break;
+                        }
+                        assert_eq!(n, -1);
+                        assert_eq!(again, 1);
+                        assert!(Instant::now() < deadline, "EOF never arrived");
+                        crate::net::poll_one(t.fd(), crate::net::Interest::Read, 100);
                     }
                 }
-                Err(e) => panic!("{e}"),
+
+                #[test]
+                fn closed_peer_is_an_io_error_without_sigpipe() {
+                    let (mut t, peer) = pair();
+                    drop(peer);
+                    let parts: [&[u8]; 1] = [b"data"];
+                    // A socketpair fails on the first write; over TCP the
+                    // first write may still be accepted locally until the
+                    // peer's reset comes back, so keep writing (bounded).
+                    let deadline = Instant::now() + Duration::from_secs(5);
+                    loop {
+                        match t.try_send_vectored(&parts, 0, &mut 0) {
+                            Err(e) => {
+                                assert_eq!(e, ErrorCode::Io);
+                                break;
+                            }
+                            Ok(_) => {
+                                assert!(
+                                    Instant::now() < deadline,
+                                    "write to a closed peer kept succeeding"
+                                );
+                                std::thread::sleep(Duration::from_millis(5));
+                            }
+                        }
+                    }
+                }
             }
-        }
-        assert_eq!(got, big);
+        };
     }
 
+    #[cfg(unix)]
+    plain_socket_suite!(
+        socketpair,
+        {
+            let (a, b) = std::os::unix::net::UnixStream::pair().unwrap();
+            a.set_nonblocking(true).unwrap();
+            (Transport::new_plain(crate::net::into_raw(a)), b)
+        },
+        4 * 1024 * 1024
+    );
+
+    plain_socket_suite!(
+        tcp_loopback,
+        {
+            let (a, b) = small_buffer_tcp_pair();
+            (Transport::from_tcp_stream(a), b)
+        },
+        16 * 1024 * 1024
+    );
+
     #[test]
-    fn full_socket_reports_again_instead_of_an_error() {
-        let (mut t, _peer) = pair();
-        let chunk = vec![7u8; 1 << 20];
-        let parts: [&[u8]; 1] = [&chunk];
+    fn invalid_socket_operations_fail_cleanly() {
+        // A transport over the "no socket" sentinel must report errors, not
+        // crash or block, and dropping it must not close anything.
+        let mut t = Transport::new_plain(crate::net::INVALID_SOCKET);
+        let mut buf = [0u8; 4];
         let mut again = 0;
-        let mut guard = 0;
-        // Fill the socket until the kernel refuses more.
-        loop {
-            let n = t.try_send_vectored(&parts, 0, &mut again).unwrap();
-            if n == 0 {
-                break;
-            }
-            guard += 1;
-            assert!(guard < 1000, "socket never filled");
-        }
-        assert_eq!(again, 2, "EAGAIN must ask for write readiness");
-    }
-
-    #[test]
-    fn closed_peer_is_an_io_error_without_sigpipe() {
-        let (mut t, peer) = pair();
-        drop(peer);
-        let parts: [&[u8]; 1] = [b"data"];
-        assert_eq!(t.try_send_vectored(&parts, 0, &mut 0), Err(ErrorCode::Io));
-    }
-
-    #[test]
-    fn fill_iovecs_caps_at_capacity_and_skips_empties() {
-        let data = [1u8; 4];
-        let parts: Vec<&[u8]> = vec![&data[..0], &data[..2], &data[..0], &data[2..], &data];
-        let mut iov = [MaybeUninit::<libc::iovec>::uninit(); 2];
-        assert_eq!(fill_iovecs(&parts, 0, &mut iov), 2);
-        // SAFETY: both entries were just filled.
-        let first = unsafe { iov[0].assume_init() };
-        assert_eq!(first.iov_len, 2);
-        let second = unsafe { iov[1].assume_init() };
-        assert_eq!(second.iov_len, 2);
+        assert_eq!(t.recv(&mut buf, &mut again), -1);
+        assert_eq!(again, 0, "an invalid handle is fatal, not would-block");
+        assert_eq!(t.try_send(b"x", &mut 0), Err(ErrorCode::Io));
+        assert_eq!(t.try_send_vectored(&[b"x"], 0, &mut 0), Err(ErrorCode::Io));
     }
 }
