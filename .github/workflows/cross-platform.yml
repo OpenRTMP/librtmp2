@@ -38,6 +38,7 @@ jobs:
         run: |
           cargo test --all-features --verbose \
             --test server_client_loopback \
+            --test cross_platform_transport \
             --test e2e_publish_play_same_listener \
             --test e2e_publish_rejection \
             --test e2e_multiple_frames \
@@ -49,10 +50,101 @@ jobs:
           cargo build --locked --no-default-features --verbose
           cargo test --no-default-features --verbose
 
-# No Windows job: `server`, `client`, `transport`, and `session::conn` build
-# their socket ownership handoff on `std::os::unix::io::{AsRawFd, IntoRawFd,
-# FromRawFd}` throughout, not just behind the `tls` feature. Building even
-# `--no-default-features` on Windows fails with ~30 E0599 errors ("no method
-# named `as_raw_fd`/`into_raw_fd` found"). Making the socket layer portable to
-# `AsRawSocket`/`RawSocket` is a real feature, not a CI addition — tracked
-# separately rather than folded into this PR.
+  windows:
+    name: Windows / ${{ matrix.arch }} (native)
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            vcpkg_triplet: x64-windows-static-md
+          - arch: arm64
+            runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            vcpkg_triplet: arm64-windows-static-md
+    env:
+      CARGO_BUILD_TARGET: ${{ matrix.target }}
+      # Statically linked OpenSSL from vcpkg (same setup as the Windows
+      # packages), so the DLL and test binaries need no OpenSSL DLLs.
+      OPENSSL_STATIC: "1"
+      VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}\vcpkg-cache
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        with:
+          targets: ${{ matrix.target }}
+          components: clippy, rustfmt
+
+      - name: Verify Cargo.lock is up to date
+        run: cargo metadata --locked --all-features --format-version 1 > $null
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Cache vcpkg binaries
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: vcpkg-cache
+          key: vcpkg-openssl-${{ matrix.vcpkg_triplet }}-${{ runner.os }}-${{ runner.arch }}-v1
+
+      - name: Install static OpenSSL (vcpkg)
+        shell: pwsh
+        env:
+          VCPKG_TRIPLET: ${{ matrix.vcpkg_triplet }}
+        run: |
+          New-Item -ItemType Directory -Force -Path $env:VCPKG_DEFAULT_BINARY_CACHE | Out-Null
+          $root = $env:VCPKG_INSTALLATION_ROOT
+          if ([string]::IsNullOrWhiteSpace($root) -or -not (Test-Path "$root\vcpkg.exe")) {
+            $root = Join-Path $env:RUNNER_TEMP "vcpkg"
+            git clone --depth 1 https://github.com/microsoft/vcpkg.git $root
+            & "$root\bootstrap-vcpkg.bat" -disableMetrics
+          }
+          & "$root\vcpkg.exe" install "openssl:$env:VCPKG_TRIPLET"
+          if ($LASTEXITCODE -ne 0) { throw "vcpkg install failed" }
+          "OPENSSL_DIR=$root\installed\$env:VCPKG_TRIPLET" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Rustfmt
+        run: cargo fmt --all -- --check
+
+      - name: Clippy (all features)
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+      - name: Clippy (no default features)
+        run: cargo clippy --locked --all-targets --no-default-features -- -D warnings
+
+      - name: Build (all features)
+        run: cargo build --locked --all-features --verbose
+
+      - name: Test (all features)
+        run: cargo test --locked --all-features --verbose
+
+      - name: Run E2E integration tests (serial)
+        run: >-
+          cargo test --locked --all-features --verbose
+          --test server_client_loopback
+          --test cross_platform_transport
+          --test e2e_publish_play_same_listener
+          --test e2e_publish_rejection
+          --test e2e_multiple_frames
+          --test e2e_audio_frames
+          -- --test-threads=1
+
+      - name: Build & test without TLS
+        run: |
+          cargo build --locked --no-default-features --verbose
+          cargo test --locked --no-default-features --verbose
+
+      - name: Release build
+        run: cargo build --locked --release --all-features
+
+      - name: Smoke-test the release DLL (architecture, dependencies, C ABI)
+        shell: pwsh
+        run: scripts/windows-dll-smoke.ps1 -Dll "target/${{ matrix.target }}/release/librtmp2.dll" -Arch ${{ matrix.arch }}

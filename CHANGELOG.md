@@ -13,6 +13,25 @@ begin at `1.0.0`.
 
 ## [Unreleased]
 
+### Added
+- Native Windows support (x86_64 and ARM64, MSVC) for RTMP and RTMPS, client
+  and server. All socket calls now go through `src/net/`, with a Unix backend
+  (`recv`/`send`/`sendmsg`/`poll`, unchanged) and a Winsock backend
+  (`recv`/`send`/`WSASend`/`WSAPoll`), selected at compile time. See
+  `docs/windows.md`.
+- `net::RawSocket` / `net::INVALID_SOCKET` (the platform socket handle type and
+  its "no socket" value) and `Transport::from_tcp_stream()`.
+- Cross-platform loopback integration tests (`tests/cross_platform_transport.rs`)
+  and native Windows x64/ARM64 CI jobs.
+
+### Changed
+- Socket-handle fields and methods (`client_fd`, `server_fd`,
+  `listener_fds()`, `Transport::fd()`, `Transport::new_plain()`,
+  `TlsCtx::accept()`) use `net::RawSocket`, which is `i32` on Unix (no change)
+  and `u64` on Windows.
+- `Server::listen_reuseport()` / `listen_tls_reuseport()` return
+  `ErrorCode::Unsupported` on Windows, which has no `SO_REUSEPORT`.
+
 ## [0.11.0] — 2026-10-02
 
 ### Added
