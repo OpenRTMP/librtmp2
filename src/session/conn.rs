@@ -4740,14 +4740,19 @@ mod tests {
         direct.transport = Some(crate::net::testing::transport_from(end));
         let mut buffered = Conn::new();
 
-        // Small frames the socket takes whole, then one larger than the
-        // socket buffer so part of the batch has to be queued.
-        let batches = [
-            vec![vec![0x17u8; 300], vec![0xafu8; 40]],
-            vec![vec![0x27u8; 4 << 20], vec![0xafu8; 40]],
-        ];
+        // Small frames the socket takes whole, then batches larger than the
+        // socket buffer until part of one has to be queued. A Unix socket
+        // takes part of the first large batch; Winsock accepts a whole send
+        // while its buffer has room and refuses the next one, so there the
+        // second large batch is the one that gets queued.
+        let small = vec![vec![0x17u8; 300], vec![0xafu8; 40]];
+        let large = vec![vec![0x27u8; 4 << 20], vec![0xafu8; 40]];
         let mut ts = 0;
-        for (n, batch) in batches.iter().enumerate() {
+        for n in 0..8 {
+            if direct.send_buffer.available() > 0 {
+                break;
+            }
+            let batch = if n == 0 { &small } else { &large };
             assert!(direct.can_stage_media());
             let mut headers = Buffer::new();
             let mut bodies = Vec::new();
