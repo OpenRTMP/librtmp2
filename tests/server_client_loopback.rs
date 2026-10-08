@@ -178,12 +178,12 @@ fn listener_fds_exposes_every_bound_listener_and_stop_clears_them() {
 
     let fds = server.listener_fds();
     assert_eq!(fds.len(), 2, "each listen() call should expose its fd");
-    assert!(fds.iter().all(|fd| *fd >= 0));
+    assert!(fds.iter().all(|fd| *fd != librtmp2::net::INVALID_SOCKET));
     assert_ne!(fds[0], fds[1], "listeners must expose distinct fds");
     assert_eq!(server.server_fd, fds[0]);
 
     server.stop();
-    assert_eq!(server.server_fd, -1);
+    assert_eq!(server.server_fd, librtmp2::net::INVALID_SOCKET);
     assert!(server.listener_fds().is_empty());
 }
 
