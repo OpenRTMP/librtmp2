@@ -98,10 +98,7 @@ fn classify_audio(payload: &[u8]) -> CacheFrameKind {
         } else {
             CacheFrameKind::LiveOnly
         }
-    } else if hdr.audio_codec == AudioCodec::Aac
-        && hdr.aac_packet_type == 0
-        && payload.len() >= 2
-    {
+    } else if hdr.audio_codec == AudioCodec::Aac && hdr.aac_packet_type == 0 && payload.len() >= 2 {
         CacheFrameKind::AudioSequenceHeader
     } else {
         CacheFrameKind::LiveOnly
