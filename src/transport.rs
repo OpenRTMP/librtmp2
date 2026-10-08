@@ -977,36 +977,55 @@ mod vectored_send_tests {
                 #[test]
                 fn partial_write_reports_short_count_and_resume_continues_exactly() {
                     let (mut t, mut peer) = pair();
-                    // Far more than the socket buffers hold: the vectored
-                    // write must take only part of it, and resuming from the
-                    // byte count must lose nothing.
+                    // Far more than the socket buffers hold: a write must
+                    // come back short, and resuming from the byte count must
+                    // lose nothing. A Unix socket takes part of the first
+                    // write; Winsock takes a whole send while its buffer has
+                    // room and refuses the next with "would block" (a count
+                    // of 0), so the payload is written as a stream of copies
+                    // until a short write shows up.
                     let total: usize = $partial_len;
                     let big: Vec<u8> = (0..total).map(|i| (i % 253) as u8).collect();
                     let split = total / 4;
                     let parts: [&[u8]; 2] = [&big[..split], &big[split..]];
-                    let first = t.try_send_vectored(&parts, 0, &mut 0).unwrap();
-                    assert!(first > 0 && first < big.len(), "expected a partial write");
+                    // Write from stream position `pos` (any copy of `big`).
+                    let write_from = |t: &mut Transport, pos: usize| {
+                        let at = pos % big.len();
+                        let (next, offset) = if at < parts[0].len() {
+                            (0, at)
+                        } else {
+                            (1, at - parts[0].len())
+                        };
+                        let n = t.try_send_vectored(&parts[next..], offset, &mut 0).unwrap();
+                        (n, big.len() - at)
+                    };
+                    let mut sent = 0;
+                    let copies = loop {
+                        let (n, wanted) = write_from(&mut t, sent);
+                        sent += n;
+                        if n < wanted {
+                            break sent.div_ceil(big.len());
+                        }
+                        assert!(sent < 8 * big.len(), "expected a partial write");
+                    };
+                    assert!(sent > 0, "an empty socket must take some bytes");
+                    let stream_len = copies * big.len();
                     let mut got = Vec::new();
                     peer.set_nonblocking(true).unwrap();
                     let mut buf = vec![0u8; 1 << 16];
-                    let mut sent = first;
                     loop {
                         match peer.read(&mut buf) {
                             Ok(0) => panic!("peer saw EOF"),
                             Ok(n) => got.extend_from_slice(&buf[..n]),
                             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                                if sent == big.len() && got.len() == big.len() {
+                                if sent == stream_len && got.len() == stream_len {
                                     break;
                                 }
-                                if sent < big.len() {
-                                    let (next, offset) = if sent < parts[0].len() {
-                                        (0, sent)
-                                    } else {
-                                        (1, sent - parts[0].len())
-                                    };
-                                    sent += t
-                                        .try_send_vectored(&parts[next..], offset, &mut 0)
-                                        .unwrap();
+                                if sent < stream_len {
+                                    let (n, wanted) = write_from(&mut t, sent);
+                                    // Never run past the end of the stream.
+                                    assert!(n <= wanted);
+                                    sent += n;
                                 } else {
                                     // Everything was handed to the OS; let a
                                     // TCP loopback finish delivering it.
@@ -1016,7 +1035,10 @@ mod vectored_send_tests {
                             Err(e) => panic!("{e}"),
                         }
                     }
-                    assert_eq!(got, big);
+                    assert_eq!(got.len(), stream_len);
+                    for copy in got.chunks(big.len()) {
+                        assert!(copy == &big[..], "bytes lost or reordered");
+                    }
                 }
 
                 #[test]
