@@ -37,6 +37,9 @@ item_types = [
     "opaque",
     "functions"
 ]
+# Rust-only socket-handle helpers (librtmp2::net). No exported function takes
+# a socket, and INVALID_SOCKET would clash with <winsock2.h> in C.
+exclude = ["INVALID_SOCKET", "RawSocket"]
 
 [export.rename]
 "Server" = "lrtmp2_server_t"
