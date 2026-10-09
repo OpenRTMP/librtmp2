@@ -71,5 +71,5 @@ jobs:
             "https://crates.io/api/v1/crates/librtmp2/${VERSION}" >/dev/null 2>&1; then
             echo "librtmp2@${VERSION} is already on crates.io — skipping publish"
           else
-            cargo publish --all-features
+            cargo publish --locked --all-features
           fi

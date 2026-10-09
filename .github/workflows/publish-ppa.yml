@@ -185,26 +185,34 @@ jobs:
         run: lintian --pedantic "../librtmp2_${VERSION}~${SERIES}${BUILD_ID}_source.changes" || true
 
       - name: Import signing key
+        # Secrets go through the environment, never into the script text:
+        # an expression expanded inline becomes part of the shell source.
+        env:
+          PPA_GPG_PRIVATE_KEY: ${{ secrets.PPA_GPG_PRIVATE_KEY }}
         run: |
           mkdir -p ~/.gnupg && chmod 700 ~/.gnupg
           printf 'allow-loopback-pinentry\n' >> ~/.gnupg/gpg-agent.conf
           printf 'pinentry-mode loopback\n' >> ~/.gnupg/gpg.conf
           gpgconf --kill gpg-agent
-          printf '%s' "${{ secrets.PPA_GPG_PRIVATE_KEY }}" | gpg --batch --import
+          printf '%s' "$PPA_GPG_PRIVATE_KEY" | gpg --batch --import
 
       - name: Sign source package
         env:
           PPA_GPG_PASSPHRASE: ${{ secrets.PPA_GPG_PASSPHRASE }}
+          PPA_GPG_KEY_ID: ${{ secrets.PPA_GPG_KEY_ID }}
         run: |
           PASSFILE=$(mktemp)
           chmod 600 "$PASSFILE"
           trap 'shred -u "$PASSFILE" 2>/dev/null' EXIT
           printf '%s' "$PPA_GPG_PASSPHRASE" > "$PASSFILE"
-          debsign -k"${{ secrets.PPA_GPG_KEY_ID }}" \
+          debsign -k"$PPA_GPG_KEY_ID" \
             -p"gpg --batch --pinentry-mode loopback --passphrase-file $PASSFILE" \
             "../librtmp2_${VERSION}~${SERIES}${BUILD_ID}_source.changes"
 
       - name: Upload to PPA
+        env:
+          PPA_TARGET: ${{ vars.PPA_TARGET }}
         run: |
-          dput "ppa:${{ vars.PPA_TARGET }}" \
+          test -n "$PPA_TARGET" || { echo "::error::vars.PPA_TARGET is not set"; exit 1; }
+          dput "ppa:${PPA_TARGET}" \
             "../librtmp2_${VERSION}~${SERIES}${BUILD_ID}_source.changes"

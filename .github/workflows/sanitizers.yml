@@ -55,7 +55,7 @@ jobs:
       - name: Run unit tests with integer overflow checks
         env:
           RUSTFLAGS: "-C overflow-checks=on"
-        run: cargo test --lib --all-features --verbose
+        run: cargo test --locked --lib --all-features --verbose
 
   # No UBSan job: rustc's `-Zsanitizer` flag has no `undefined` value (its
   # accepted set is address/cfi/dataflow/hwaddress/kcfi/kernel-address/

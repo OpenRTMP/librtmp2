@@ -82,14 +82,24 @@ jobs:
         run: cargo build --locked --release --all-features --verbose
 
       - name: Run unit tests
-        run: cargo test --all-features --verbose
+        run: cargo test --locked --all-features --verbose
 
       - name: Run unit tests (no default features)
-        run: cargo test --no-default-features --verbose
+        run: cargo test --locked --no-default-features --verbose
+
+  cross-platform:
+    name: verify on macOS and Windows
+    needs: ensure-tag
+    if: always() && (needs.ensure-tag.result == 'success' || needs.ensure-tag.result == 'skipped')
+    uses: ./.github/workflows/cross-platform.yml
+    with:
+      ref: ${{ github.event.inputs.tag || github.ref }}
+    permissions:
+      contents: read
 
   package:
     name: build & package
-    needs: verify
+    needs: [verify, cross-platform]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

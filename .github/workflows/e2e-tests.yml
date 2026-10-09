@@ -27,7 +27,7 @@ jobs:
 
       - name: Run E2E integration tests
         run: |
-          cargo test --all-features --verbose \
+          cargo test --locked --all-features --verbose \
             --test server_client_loopback \
             --test e2e_publish_play_same_listener \
             --test e2e_publish_rejection \

@@ -44,9 +44,9 @@ jobs:
         run: cargo build --locked --all-features --verbose
 
       - name: Test (default features) at MSRV
-        run: cargo test --all-features --verbose
+        run: cargo test --locked --all-features --verbose
 
       - name: Build & test without TLS at MSRV
         run: |
           cargo build --locked --no-default-features --verbose
-          cargo test --no-default-features --verbose
+          cargo test --locked --no-default-features --verbose
