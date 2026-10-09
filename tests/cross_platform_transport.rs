@@ -141,7 +141,7 @@ fn relay_round_trip(
             while received_seqs().len() < frames as usize && Instant::now() < deadline {
                 client.poll(20).expect("player poll");
             }
-            let bodies = RECEIVED.with(|r| r.take());
+            let bodies = RECEIVED.with(std::cell::RefCell::take);
             done_tx.send(()).unwrap();
             bodies
         }));
