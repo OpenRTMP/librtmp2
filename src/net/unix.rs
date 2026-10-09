@@ -27,7 +27,9 @@ fn classify_error() -> SockIo {
 /// Nothing to do on Unix: every call passes `MSG_DONTWAIT`, so the
 /// descriptor's blocking mode is left exactly as the caller set it.
 #[inline]
-pub(crate) fn prepare_transport_socket(_fd: RawSocket) {}
+pub(crate) fn prepare_transport_socket(_fd: RawSocket) -> bool {
+    true
+}
 
 /// Non-blocking `recv(2)` into `buf`.
 #[inline]

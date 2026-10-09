@@ -39,15 +39,17 @@ fn classify_error() -> SockIo {
     }
 }
 
-/// Put `s` into non-blocking mode (`FIONBIO`). Best-effort: on an invalid
-/// handle this fails, and so does every later operation on it.
-pub(crate) fn prepare_transport_socket(s: RawSocket) {
+/// Put `s` into non-blocking mode (`FIONBIO`). Returns `false` if Winsock
+/// refuses, so the caller never drives a blocking socket from a poll loop.
+/// An invalid handle is left alone and reported as ready: every later
+/// operation on it fails anyway.
+pub(crate) fn prepare_transport_socket(s: RawSocket) -> bool {
     if s == INVALID_SOCKET {
-        return;
+        return true;
     }
     let mut nonblocking: u32 = 1;
     // SAFETY: `nonblocking` is a valid u32 for the duration of the call.
-    unsafe { ws::ioctlsocket(sock(s), FIONBIO, &mut nonblocking) };
+    unsafe { ws::ioctlsocket(sock(s), FIONBIO, &mut nonblocking) != SOCKET_ERROR }
 }
 
 /// Non-blocking `recv` into `buf`. A buffer longer than `i32::MAX` bytes

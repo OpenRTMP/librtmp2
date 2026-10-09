@@ -24,9 +24,11 @@ already have.
 ## Building
 
 ```powershell
-# OpenSSL, statically linked (x64; use arm64-windows-static-md on ARM64)
-vcpkg install openssl:x64-windows-static-md
-$env:OPENSSL_DIR = "$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows-static-md"
+# OpenSSL, statically linked (x64; use arm64-windows-static-md on ARM64).
+# VCPKG_ROOT is the vcpkg checkout, e.g. C:\vcpkg.
+$env:VCPKG_ROOT = "C:\vcpkg"
+& "$env:VCPKG_ROOT\vcpkg.exe" install openssl:x64-windows-static-md
+$env:OPENSSL_DIR = "$env:VCPKG_ROOT\installed\x64-windows-static-md"
 $env:OPENSSL_STATIC = "1"
 
 cargo build --release --target x86_64-pc-windows-msvc

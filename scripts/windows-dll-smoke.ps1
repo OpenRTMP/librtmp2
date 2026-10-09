@@ -114,16 +114,27 @@ try {
     if ($rc -ne 0) { throw "lrtmp2_server_listen failed with $rc" }
     $client = New-Object System.Net.Sockets.TcpClient
     $client.Connect("127.0.0.1", $Port)
-    # C0 + the start of C1: the server must accept and start the handshake.
+    # Full C0 + C1: the server must accept the client and answer with S0
+    # (version 3) followed by S1 and S2.
     $stream = $client.GetStream()
-    $stream.Write([byte[]](3, 0, 0, 0, 0), 0, 5)
-    for ($i = 0; $i -lt 20; $i++) {
+    $c0c1 = New-Object byte[] 1537
+    $c0c1[0] = 3
+    $stream.Write($c0c1, 0, $c0c1.Length)
+    $want = 1 + 1536 + 1536
+    $reply = New-Object byte[] $want
+    $got = 0
+    for ($i = 0; $i -lt 200 -and $got -lt $want; $i++) {
         $rc = [Lrtmp2Smoke]::lrtmp2_server_poll($server, 10)
         if ($rc -ne 0) { throw "lrtmp2_server_poll failed with $rc" }
+        while ($client.Available -gt 0 -and $got -lt $want) {
+            $got += $stream.Read($reply, $got, $want - $got)
+        }
     }
+    if ($got -lt $want) { throw "server sent $got of $want handshake bytes (S0+S1+S2)" }
+    if ($reply[0] -ne 3) { throw "server answered with RTMP version $($reply[0]), expected 3" }
     $client.Close()
     for ($i = 0; $i -lt 5; $i++) { [void][Lrtmp2Smoke]::lrtmp2_server_poll($server, 10) }
-    Write-Host "Server created, listened on 127.0.0.1:$Port, accepted and polled a TCP client"
+    Write-Host "Server created, listened on 127.0.0.1:$Port, accepted a TCP client and answered its handshake"
 } finally {
     [Lrtmp2Smoke]::lrtmp2_server_destroy($server)
 }
