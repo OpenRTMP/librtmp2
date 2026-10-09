@@ -4,6 +4,15 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+  # release.yml runs this before publishing anything, so a tag whose macOS
+  # or Windows build is broken never reaches the GitHub Release, crates.io
+  # or the PPA.
+  workflow_call:
+    inputs:
+      ref:
+        description: 'Git ref to test (defaults to the triggering ref)'
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -16,6 +25,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ inputs.ref || github.ref }}
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
@@ -32,11 +42,11 @@ jobs:
         run: cargo build --locked --all-features --verbose
 
       - name: Test (all features)
-        run: cargo test --all-features --verbose
+        run: cargo test --locked --all-features --verbose
 
       - name: Run E2E integration tests (serial)
         run: |
-          cargo test --all-features --verbose \
+          cargo test --locked --all-features --verbose \
             --test server_client_loopback \
             --test cross_platform_transport \
             --test e2e_publish_play_same_listener \
@@ -48,7 +58,7 @@ jobs:
       - name: Build & test without TLS
         run: |
           cargo build --locked --no-default-features --verbose
-          cargo test --no-default-features --verbose
+          cargo test --locked --no-default-features --verbose
 
   windows:
     name: Windows / ${{ matrix.arch }} (native)
@@ -75,6 +85,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ inputs.ref || github.ref }}
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable

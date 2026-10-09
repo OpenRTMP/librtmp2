@@ -32,11 +32,11 @@ jobs:
       run: cargo build --locked --all-features --verbose
 
     - name: Run tests (default features)
-      run: cargo test --all-features --verbose
+      run: cargo test --locked --all-features --verbose
 
     - name: Run E2E integration tests (serial)
       run: |
-        cargo test --all-features --verbose \
+        cargo test --locked --all-features --verbose \
           --test server_client_loopback \
           --test cross_platform_transport \
           --test e2e_publish_play_same_listener \
@@ -48,7 +48,7 @@ jobs:
     - name: Build & test without TLS
       run: |
         cargo build --locked --no-default-features --verbose
-        cargo test --no-default-features --verbose
+        cargo test --locked --no-default-features --verbose
 
     - name: Clippy
-      run: cargo clippy --all-features --all-targets -- -D warnings
+      run: cargo clippy --locked --all-features --all-targets -- -D warnings
