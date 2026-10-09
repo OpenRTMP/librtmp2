@@ -1,9 +1,11 @@
 //! Unix socket backend: `recv(2)`/`send(2)`/`sendmsg(2)`/`poll(2)`.
 //!
-//! Sockets may be in blocking mode: every call passes `MSG_DONTWAIT`, so a
-//! single operation never blocks regardless of the descriptor's `O_NONBLOCK`
-//! flag. Writes also pass `MSG_NOSIGNAL` so a reset peer surfaces as `EPIPE`
-//! instead of a process-killing `SIGPIPE`.
+//! A transport's socket is switched to `O_NONBLOCK` once
+//! ([`prepare_transport_socket`]). Every call also passes `MSG_DONTWAIT`,
+//! but that alone is not enough: macOS honours it for reads and ignores it
+//! for writes, so a blocking descriptor would stall a full send. Writes
+//! also pass `MSG_NOSIGNAL` so a reset peer surfaces as `EPIPE` instead of
+//! a process-killing `SIGPIPE`.
 
 use super::{Interest, MAX_SEND_PARTS, RawSocket, SockIo, Wait};
 use std::mem::MaybeUninit;
@@ -24,11 +26,21 @@ fn classify_error() -> SockIo {
     }
 }
 
-/// Nothing to do on Unix: every call passes `MSG_DONTWAIT`, so the
-/// descriptor's blocking mode is left exactly as the caller set it.
-#[inline]
-pub(crate) fn prepare_transport_socket(_fd: RawSocket) -> bool {
-    true
+/// Put `fd` into non-blocking mode (`O_NONBLOCK`). Returns `false` if
+/// `fcntl` refuses, so the caller never drives a blocking socket from a poll
+/// loop. An invalid descriptor is left alone and reported as ready: every
+/// later operation on it fails anyway.
+pub(crate) fn prepare_transport_socket(fd: RawSocket) -> bool {
+    if fd < 0 {
+        return true;
+    }
+    // SAFETY: F_GETFL/F_SETFL take no pointers; a stale `fd` is EBADF.
+    unsafe {
+        let flags = libc::fcntl(fd, libc::F_GETFL);
+        flags >= 0
+            && (flags & libc::O_NONBLOCK != 0
+                || libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) >= 0)
+    }
 }
 
 /// Non-blocking `recv(2)` into `buf`.
@@ -176,5 +188,20 @@ mod tests {
         assert_eq!(first.iov_len, 2);
         let second = unsafe { iov[1].assume_init() };
         assert_eq!(second.iov_len, 2);
+    }
+
+    #[test]
+    fn prepare_transport_socket_makes_a_blocking_socket_non_blocking() {
+        use std::os::fd::AsRawFd;
+        let (a, _b) = std::os::unix::net::UnixStream::pair().unwrap();
+        let fd = a.as_raw_fd();
+        // SAFETY: `fd` stays open for the whole test (`a` is alive).
+        let flags = || unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        assert_eq!(flags() & libc::O_NONBLOCK, 0, "pair starts blocking");
+        assert!(prepare_transport_socket(fd));
+        assert_ne!(flags() & libc::O_NONBLOCK, 0);
+        // Already non-blocking: still fine.
+        assert!(prepare_transport_socket(fd));
+        assert!(prepare_transport_socket(super::super::INVALID_SOCKET));
     }
 }

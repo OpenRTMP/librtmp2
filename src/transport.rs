@@ -89,13 +89,13 @@ impl Transport {
     /// Wrap an owned, connected socket as a plaintext transport. The
     /// transport takes ownership and closes it on drop.
     ///
-    /// On Unix `fd` is a file descriptor and its blocking mode is left
-    /// untouched (every call passes `MSG_DONTWAIT`). On Windows `fd` is a
-    /// Winsock `SOCKET`, which this switches to non-blocking mode because
-    /// Winsock has no per-call non-blocking flag. If Winsock refuses, the
-    /// socket is closed and the transport behaves like one on a dead peer:
-    /// every operation fails and the connection is dropped, instead of a
-    /// blocking socket stalling the poll loop.
+    /// `fd` is a file descriptor on Unix and a Winsock `SOCKET` on Windows.
+    /// Either way this switches it to non-blocking mode: Winsock has no
+    /// per-call non-blocking flag, and macOS ignores `MSG_DONTWAIT` on
+    /// writes. If the OS refuses, the socket is closed and the transport
+    /// behaves like one on a dead peer: every operation fails and the
+    /// connection is dropped, instead of a blocking socket stalling the poll
+    /// loop.
     pub fn new_plain(mut fd: RawSocket) -> Self {
         if !net::prepare_transport_socket(fd) {
             net::close(fd);

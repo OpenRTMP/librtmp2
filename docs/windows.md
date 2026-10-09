@@ -97,8 +97,9 @@ to `i32`. Use `net::INVALID_SOCKET` instead of comparing against `-1` or
 `TcpStream` without touching raw handles.
 
 `Transport::new_plain()` takes ownership of the socket on both platforms and
-closes it exactly once on drop. On Windows it also switches the socket to
-non-blocking mode, because Winsock has no per-call `MSG_DONTWAIT`.
+closes it exactly once on drop. It also switches the socket to non-blocking
+mode on both platforms: Winsock has no per-call `MSG_DONTWAIT`, and macOS
+ignores that flag on writes.
 
 The C API is unchanged: no exported function or struct carries a socket
 handle (`lrtmp2_conn_get_fd()` returns `-1` on every platform, as before).
