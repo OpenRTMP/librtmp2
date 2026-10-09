@@ -334,6 +334,7 @@ dependencies = [
  "parking_lot",
  "socket2",
  "thiserror",
+ "windows-sys",
 ]
 
 [[package]]

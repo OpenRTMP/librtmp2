@@ -91,6 +91,13 @@ The crate uses `crate-type = ["cdylib", "staticlib", "lib"]` and produces:
 - `librtmp2.a` / `librtmp2.lib` — staticlib for FFI consumers
 - Rust `lib` — for direct Cargo dependency
 
+### Supported platforms
+
+Linux, macOS and Windows (x86_64 and ARM64, MSVC), all with RTMP and RTMPS.
+Each is built and tested natively in CI. Windows build steps, OpenSSL setup
+and the few platform differences (native `SOCKET` handles, no
+`SO_REUSEPORT`) are in [`docs/windows.md`](docs/windows.md).
+
 ### TLS / RTMPS
 
 RTMPS (RTMP over TLS) is supported via OpenSSL and is **enabled by default** via the `tls` Cargo feature. To produce a plaintext-only build without the optional TLS/OpenSSL dependency:

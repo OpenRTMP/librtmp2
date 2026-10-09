@@ -53,6 +53,9 @@ FFI-compatible `extern "C"` layer (built as `cdylib`/`staticlib`/`lib`, see
 ```
 core (alloc.rs, bytes.rs, buffer.rs, log.rs, types.rs)
                     growable buffers, big-endian byte helpers, logging, error codes
+net/                OS socket layer: unix.rs (recv/send/sendmsg/poll) and
+                    windows.rs (Winsock recv/send/WSASend/WSAPoll), chosen by cfg;
+                    RawSocket handle type; transport.rs sits on top of it
 handshake.rs        C0/C1/C2 <-> S0/S1/S2; partial-read buffering; version detection
 chunk/              chunk_reader, chunk_writer, chunk_state (per-csid); SetChunkSize/Abort
 message/            reassembled message dispatch: control, user-control, AMF command decode/encode
@@ -78,6 +81,10 @@ TCP_ACCEPTED -> HANDSHAKE -> CONNECTED -> [CAPS_NEGOTIATED] -> APP_CONNECTED -> 
 (and the types they take/return) are the public FFI surface. Everything else
 in `src/` is free to change between minor versions. See `docs/abi-policy.md`
 for the full compatibility policy.
+
+**Platforms:** Linux, macOS and Windows (x86_64 + ARM64, MSVC). Never call
+`libc` socket functions or `std::os::unix` APIs outside `src/net/`; use the
+`net::` helpers so Windows keeps building. See `docs/windows.md`.
 
 **Threading:** The library is single-threaded per connection. Per-connection
 state (chunk state, session state) is not global, so a client and server can

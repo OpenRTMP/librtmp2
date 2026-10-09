@@ -21,7 +21,7 @@ jobs:
       run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
 
     - name: Install Rust
-      uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+      uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
 
     - name: Verify Cargo.lock is up to date
       run: cargo metadata --locked --all-features --format-version 1 > /dev/null
@@ -38,6 +38,7 @@ jobs:
       run: |
         cargo test --all-features --verbose \
           --test server_client_loopback \
+          --test cross_platform_transport \
           --test e2e_publish_play_same_listener \
           --test e2e_publish_rejection \
           --test e2e_multiple_frames \
@@ -50,4 +51,4 @@ jobs:
         cargo test --no-default-features --verbose
 
     - name: Clippy
-      run: cargo clippy --all-features --all-targets
+      run: cargo clippy --all-features --all-targets -- -D warnings

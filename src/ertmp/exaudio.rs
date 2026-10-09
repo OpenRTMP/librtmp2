@@ -173,7 +173,7 @@ mod tests {
         // where the unlisted nibble reports AAC and `classify_audio` would then
         // cache the junk bytes as a real AAC sequence header.
         for len in 1..5usize {
-            let mut data = [0x90u8; 4];
+            let data = [0x90u8; 4];
             let mut hdr = AudioHeader::default();
             assert!(
                 exaudio_parse(&data[..len], &mut hdr).is_err(),

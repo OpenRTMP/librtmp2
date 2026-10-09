@@ -1,4 +1,4 @@
-use criterion::{Criterion, Throughput, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use librtmp2::buffer::Buffer;
 use librtmp2::chunk::reader::{ChunkMessage, chunk_read};
 use librtmp2::chunk::state::ChunkRegistry;
@@ -8,6 +8,7 @@ use librtmp2::flv::{audio_tag, video_tag};
 use librtmp2::handshake::{self, Handshake};
 use librtmp2::message::command;
 use librtmp2::types::VideoTag;
+use std::hint::black_box;
 
 fn bench_chunk_roundtrip(c: &mut Criterion) {
     let payload: Vec<u8> = (0..4096u16).map(|i| (i % 256) as u8).collect();

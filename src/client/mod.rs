@@ -4,7 +4,6 @@
 
 use std::collections::VecDeque;
 use std::net::{TcpStream, ToSocketAddrs};
-use std::os::unix::io::IntoRawFd;
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
@@ -22,7 +21,7 @@ use crate::media::{
 use crate::message::command;
 use crate::message::control;
 use crate::message::message as msg_dispatch;
-use crate::net;
+use crate::net::{self, Interest, Wait};
 use crate::transport::Transport;
 use crate::types::*;
 
@@ -237,7 +236,10 @@ pub enum ClientState {
 
 /// RTMP client object.
 pub struct Client {
-    pub client_fd: i32,
+    /// Copy of the connected transport's socket handle (`i32` file
+    /// descriptor on Unix, `u64` Winsock `SOCKET` on Windows), or
+    /// [`net::INVALID_SOCKET`] when not connected. The transport owns it.
+    pub client_fd: net::RawSocket,
     pub transport: Option<Transport>,
     pub handshake: Handshake,
     pub state: ClientState,
@@ -313,7 +315,7 @@ impl Client {
     /// Create a new client.
     pub fn new() -> Self {
         Self {
-            client_fd: -1,
+            client_fd: net::INVALID_SOCKET,
             transport: None,
             handshake: Handshake::default(),
             state: ClientState::Disconnected,
@@ -434,7 +436,7 @@ impl Client {
                 remaining,
             )?
         } else {
-            Transport::new_plain(stream.into_raw_fd())
+            Transport::from_tcp_stream(stream)
         };
 
         self.state = ClientState::Handshaking;
@@ -633,14 +635,9 @@ impl Client {
 
     /// Wait once for the socket to become writable, bounded by `timeout_ms`.
     /// Returns `true` when it is writable (so the read can be retried) and
-    /// `false` on timeout or `poll(2)` error.
-    fn wait_writable_once(fd: std::os::unix::io::RawFd, timeout_ms: i32) -> bool {
-        let mut pfd = libc::pollfd {
-            fd,
-            events: libc::POLLOUT,
-            revents: 0,
-        };
-        unsafe { libc::poll(&mut pfd, 1, timeout_ms) > 0 }
+    /// `false` on timeout or poll error.
+    fn wait_writable_once(fd: net::RawSocket, timeout_ms: i32) -> bool {
+        net::poll_one(fd, Interest::Write, timeout_ms) == Wait::Ready
     }
 
     /// Poll for incoming control traffic and flush queued outbound bytes.
@@ -706,14 +703,9 @@ impl Client {
         // progress -- there is no need to block on socket readiness when
         // complete messages were just delivered.
         if messages_processed == 0 && !has_buffered_tls_data {
-            let mut pfd = libc::pollfd {
-                fd: poll_fd,
-                events: libc::POLLIN,
-                revents: 0,
-            };
-            // poll(2) already treats a negative timeout as "block indefinitely"
-            // (the POSIX idiom), so pass it through as-is instead of clamping to 0.
-            unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
+            // poll(2) and WSAPoll both treat a negative timeout as "block
+            // indefinitely", so pass it through as-is instead of clamping to 0.
+            net::poll_one(poll_fd, Interest::Read, timeout_ms);
         }
 
         let mut buf = [0u8; 65536];
@@ -1238,16 +1230,11 @@ impl Client {
         let mut messages_processed = 0usize;
         self.drain_ready_messages(&mut messages_processed)?;
 
-        if messages_processed == 0 && !has_buffered_tls_data {
-            let mut pfd = libc::pollfd {
-                fd: poll_fd,
-                events: libc::POLLIN,
-                revents: 0,
-            };
-            let rc = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
-            if rc <= 0 {
-                return Ok(());
-            }
+        if messages_processed == 0
+            && !has_buffered_tls_data
+            && net::poll_one(poll_fd, Interest::Read, timeout_ms) != Wait::Ready
+        {
+            return Ok(());
         }
 
         let mut buf = [0u8; 4096];
@@ -1312,7 +1299,7 @@ impl Client {
     fn reset_session_state(&mut self) {
         // Drop transport first: it owns and closes the fd.
         self.transport = None;
-        self.client_fd = -1;
+        self.client_fd = net::INVALID_SOCKET;
         self.recv_buffer.reset();
         self.send_buffer.reset();
         self.chunk_reg.destroy();
@@ -1560,29 +1547,15 @@ impl Client {
 /// A signal delivered during the wait (`EINTR`) is transient, same as
 /// `Transport::recv`/`try_send` already treat it — retry rather than
 /// surfacing it as a hard I/O error and aborting the caller's read/handshake.
-fn poll_for_transport_direction(fd: i32, again: i32, timeout_ms: i32) -> Result<()> {
-    let events = if again == 2 {
-        libc::POLLOUT
-    } else {
-        libc::POLLIN
-    };
+fn poll_for_transport_direction(fd: net::RawSocket, again: i32, timeout_ms: i32) -> Result<()> {
+    let interest = Interest::from_again(again);
     loop {
-        let mut pfd = libc::pollfd {
-            fd,
-            events,
-            revents: 0,
-        };
-        let rc = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
-        if rc == 0 {
-            return Err(ErrorCode::Timeout);
+        match net::poll_one(fd, interest, timeout_ms) {
+            Wait::Ready => return Ok(()),
+            Wait::TimedOut => return Err(ErrorCode::Timeout),
+            Wait::Interrupted => continue,
+            Wait::Failed => return Err(ErrorCode::Io),
         }
-        if rc < 0 {
-            if std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
-                continue;
-            }
-            return Err(ErrorCode::Io);
-        }
-        return Ok(());
     }
 }
 
@@ -1633,12 +1606,8 @@ fn send_bounded(transport: &mut Transport, data: &[u8], deadline: Instant) -> Re
 /// recomputes the remaining time on every iteration — a signal arriving near
 /// the deadline must not restart a full poll interval and blow through the
 /// caller's wall-clock budget.
-fn poll_until_deadline(fd: i32, again: i32, deadline: Instant) -> Result<()> {
-    let events = if again == 2 {
-        libc::POLLOUT
-    } else {
-        libc::POLLIN
-    };
+fn poll_until_deadline(fd: net::RawSocket, again: i32, deadline: Instant) -> Result<()> {
+    let interest = Interest::from_again(again);
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         // `poll(2)`'s granularity is milliseconds, so a sub-millisecond
@@ -1653,25 +1622,17 @@ fn poll_until_deadline(fd: i32, again: i32, deadline: Instant) -> Result<()> {
         // "this clamped wait expired", not "the real deadline passed" — loop
         // and recheck instead of timing out early.
         let timeout_ms = remaining.as_millis().min(i32::MAX as u128) as i32;
-        let mut pfd = libc::pollfd {
-            fd,
-            events,
-            revents: 0,
-        };
-        let rc = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
-        if rc == 0 {
-            if Instant::now() >= deadline {
-                return Err(ErrorCode::Timeout);
-            }
-            continue;
-        }
-        if rc < 0 {
-            if std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+        match net::poll_one(fd, interest, timeout_ms) {
+            Wait::Ready => return Ok(()),
+            Wait::TimedOut => {
+                if Instant::now() >= deadline {
+                    return Err(ErrorCode::Timeout);
+                }
                 continue;
             }
-            return Err(ErrorCode::Io);
+            Wait::Interrupted => continue,
+            Wait::Failed => return Err(ErrorCode::Io),
         }
-        return Ok(());
     }
 }
 
@@ -1719,10 +1680,8 @@ impl Drop for Client {
         // no transport (e.g. the fd was set but connecting failed before the
         // transport was stored, which cannot currently happen — this guard is
         // here for correctness if the two ever diverge).
-        if self.transport.is_none() && self.client_fd >= 0 {
-            unsafe {
-                libc::close(self.client_fd);
-            }
+        if self.transport.is_none() && self.client_fd != net::INVALID_SOCKET {
+            net::close(self.client_fd);
         }
     }
 }
@@ -1936,18 +1895,17 @@ mod tests {
 
     #[test]
     fn poll_rejects_recv_buffer_growth_past_staging_cap() {
+        use crate::net::testing::{PairStream, stream_pair};
         use std::io::Write;
-        use std::os::unix::io::IntoRawFd;
-        use std::os::unix::net::UnixStream;
 
-        let (client_end, mut peer) = UnixStream::pair().unwrap();
+        let (client_end, mut peer) = stream_pair().unwrap();
         client_end.set_nonblocking(true).unwrap();
         peer.set_nonblocking(true).unwrap();
         peer.write_all(&[0x01, 0x02, 0x03]).unwrap();
 
         let mut client = Client::new();
         client.state = ClientState::Playing;
-        client.transport = Some(Transport::new_plain(client_end.into_raw_fd()));
+        client.transport = Some(crate::net::testing::transport_from(client_end));
         // More than one poll() worth of drain budget (MAX_MESSAGES_PER_POLL
         // trivial 13-byte complete messages = 3328 bytes) can clear, so the
         // cap must still reject growth once the budgeted drain isn't enough.
@@ -1962,10 +1920,9 @@ mod tests {
     #[test]
     fn try_flush_send_buffer_shrinks_after_full_drain() {
         use crate::buffer::BUFFER_RESET_CAPACITY;
-        use std::os::unix::io::{AsRawFd, IntoRawFd};
-        use std::os::unix::net::UnixStream;
+        use crate::net::testing::stream_pair;
 
-        let (client_end, _peer) = UnixStream::pair().unwrap();
+        let (client_end, _peer) = stream_pair().unwrap();
 
         // The default unix-domain socket buffer is much smaller on macOS
         // (~8 KiB) than on Linux, so a write past it would only partially
@@ -1973,25 +1930,13 @@ mod tests {
         // payload explicitly so the "fully drains in one write" assumption
         // below holds on every platform this runs on.
         let big_len = BUFFER_RESET_CAPACITY * 4;
-        let wanted_buf_size = (big_len + BUFFER_RESET_CAPACITY) as libc::c_int;
-        for fd in [client_end.as_raw_fd(), _peer.as_raw_fd()] {
-            for opt in [libc::SO_SNDBUF, libc::SO_RCVBUF] {
-                let rc = unsafe {
-                    libc::setsockopt(
-                        fd,
-                        libc::SOL_SOCKET,
-                        opt,
-                        &wanted_buf_size as *const libc::c_int as *const libc::c_void,
-                        std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-                    )
-                };
-                assert_eq!(
-                    rc,
-                    0,
-                    "setsockopt(fd={fd}, opt={opt}) failed: {}",
-                    std::io::Error::last_os_error()
-                );
-            }
+        let wanted_buf_size = big_len + BUFFER_RESET_CAPACITY;
+        for end in [&client_end, &_peer] {
+            let sock = socket2::SockRef::from(end);
+            sock.set_send_buffer_size(wanted_buf_size)
+                .expect("set SO_SNDBUF");
+            sock.set_recv_buffer_size(wanted_buf_size)
+                .expect("set SO_RCVBUF");
         }
 
         // The kernel may clamp the requested size below what was asked for
@@ -2000,23 +1945,9 @@ mod tests {
         // rather than trusting the setsockopt call above blindly - otherwise
         // this test would fail with the same cryptic assertion it exists to
         // avoid, just on a different platform.
-        let mut effective_sndbuf: libc::c_int = 0;
-        let mut effective_len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
-        let rc = unsafe {
-            libc::getsockopt(
-                client_end.as_raw_fd(),
-                libc::SOL_SOCKET,
-                libc::SO_SNDBUF,
-                &mut effective_sndbuf as *mut libc::c_int as *mut libc::c_void,
-                &mut effective_len,
-            )
-        };
-        assert_eq!(
-            rc,
-            0,
-            "getsockopt(SO_SNDBUF) failed: {}",
-            std::io::Error::last_os_error()
-        );
+        let effective_sndbuf = socket2::SockRef::from(&client_end)
+            .send_buffer_size()
+            .expect("get SO_SNDBUF");
         assert!(
             effective_sndbuf >= wanted_buf_size,
             "environment's effective SO_SNDBUF ({effective_sndbuf}) is below what this test needs ({wanted_buf_size}); the full-drain-in-one-write assumption below won't hold here"
@@ -2025,7 +1956,7 @@ mod tests {
         client_end.set_nonblocking(true).unwrap();
 
         let mut client = Client::new();
-        client.transport = Some(Transport::new_plain(client_end.into_raw_fd()));
+        client.transport = Some(crate::net::testing::transport_from(client_end));
 
         // Simulate a large keyframe having grown send_buffer well past its
         // reset capacity. This is well within the unix socket's send buffer,
@@ -2296,18 +2227,17 @@ mod tests {
 
     #[test]
     fn poll_drains_leftover_messages_before_enforcing_staging_cap() {
+        use crate::net::testing::{PairStream, stream_pair};
         use std::io::Write;
-        use std::os::unix::io::IntoRawFd;
-        use std::os::unix::net::UnixStream;
 
-        let (client_end, mut peer) = UnixStream::pair().unwrap();
+        let (client_end, mut peer) = stream_pair().unwrap();
         client_end.set_nonblocking(true).unwrap();
         peer.set_nonblocking(true).unwrap();
         peer.write_all(&[0x01, 0x02, 0x03]).unwrap();
 
         let mut client = Client::new();
         client.state = ClientState::Playing;
-        client.transport = Some(Transport::new_plain(client_end.into_raw_fd()));
+        client.transport = Some(crate::net::testing::transport_from(client_end));
         // Simulate a prior poll() that stopped at MAX_MESSAGES_PER_POLL:
         // recv_buffer is staged right up to the cap with trivial 13-byte
         // complete messages (2-byte extended-csid basic header + 11-byte
@@ -2326,12 +2256,11 @@ mod tests {
 
     #[test]
     fn poll_does_not_block_on_socket_readiness_when_messages_already_staged() {
+        use crate::net::testing::{PairStream, stream_pair};
         use std::io::Write;
-        use std::os::unix::io::IntoRawFd;
-        use std::os::unix::net::UnixStream;
         use std::time::Instant;
 
-        let (client_end, peer) = UnixStream::pair().unwrap();
+        let (client_end, peer) = stream_pair().unwrap();
         client_end.set_nonblocking(true).unwrap();
         // Keep `peer` alive but never send anything further, so the socket
         // never becomes readable -- if poll() waited on readiness before
@@ -2340,7 +2269,7 @@ mod tests {
 
         let mut client = Client::new();
         client.state = ClientState::Playing;
-        client.transport = Some(Transport::new_plain(client_end.into_raw_fd()));
+        client.transport = Some(crate::net::testing::transport_from(client_end));
         // One complete trivial message already staged: 2-byte extended-csid
         // basic header + 11-byte zeroed fmt=0 message header (msg_length=0).
         client.recv_buffer.write(&[0u8; 13]).unwrap();
@@ -2362,11 +2291,10 @@ mod tests {
 
     #[test]
     fn publish_and_play_honor_command_io_deadline() {
-        use std::os::unix::io::IntoRawFd;
-        use std::os::unix::net::UnixStream;
+        use crate::net::testing::{PairStream, stream_pair};
         use std::time::Duration;
 
-        let (client_end, _peer) = UnixStream::pair().unwrap();
+        let (client_end, _peer) = stream_pair().unwrap();
         client_end.set_nonblocking(true).unwrap();
 
         let mut client = Client::new();
@@ -2374,7 +2302,7 @@ mod tests {
         client.state = ClientState::AppConnected;
         client.stream_id = 1;
         client.stream_key = "stream".to_string();
-        client.transport = Some(Transport::new_plain(client_end.into_raw_fd()));
+        client.transport = Some(crate::net::testing::transport_from(client_end));
 
         let started = Instant::now();
         assert_eq!(client.publish().unwrap_err(), ErrorCode::Timeout);
@@ -2402,9 +2330,8 @@ mod tests {
         // `NetStream.Play.Reset`) before the terminal `NetStream.Play.Start`.
         // That must not be treated as a failure -- play() should keep
         // waiting for the expected code instead of aborting.
+        use crate::net::testing::{PairStream, stream_pair};
         use std::io::Write;
-        use std::os::unix::io::IntoRawFd;
-        use std::os::unix::net::UnixStream;
 
         fn onstatus_chunk(level: &str, code: &str) -> Vec<u8> {
             let mut payload = Buffer::new();
@@ -2421,7 +2348,7 @@ mod tests {
             wire.peek().to_vec()
         }
 
-        let (client_end, mut peer) = UnixStream::pair().unwrap();
+        let (client_end, mut peer) = stream_pair().unwrap();
         client_end.set_nonblocking(true).unwrap();
 
         peer.write_all(&onstatus_chunk("status", "NetStream.Play.Reset"))
@@ -2433,7 +2360,7 @@ mod tests {
         client.state = ClientState::AppConnected;
         client.stream_id = 1;
         client.stream_key = "stream".to_string();
-        client.transport = Some(Transport::new_plain(client_end.into_raw_fd()));
+        client.transport = Some(crate::net::testing::transport_from(client_end));
 
         client.play().unwrap();
         assert_eq!(client.state, ClientState::Playing);
@@ -2447,9 +2374,8 @@ mod tests {
         // budget on every iteration -- that would let it process unbounded
         // inbound bytes for a single play() call. The shared budget should
         // exhaust and fail well before the command I/O deadline.
+        use crate::net::testing::{PairStream, stream_pair};
         use std::io::Write;
-        use std::os::unix::io::IntoRawFd;
-        use std::os::unix::net::UnixStream;
         use std::time::Duration;
 
         fn onstatus_chunk(level: &str, code: &str) -> Vec<u8> {
@@ -2467,7 +2393,7 @@ mod tests {
             wire.peek().to_vec()
         }
 
-        let (client_end, mut peer) = UnixStream::pair().unwrap();
+        let (client_end, mut peer) = stream_pair().unwrap();
         client_end.set_nonblocking(true).unwrap();
         // Bound the writer's blocking write_all() calls: once play() stops
         // draining (budget exhausted), nothing reads the socket anymore, so
@@ -2486,13 +2412,17 @@ mod tests {
                 }
                 sent += reset_chunk.len();
             }
+            // Hand the socket back instead of dropping it here: closing it
+            // early would let a slow play() see EOF (Io) before exhausting
+            // its budget (Timeout), which is not what this test is about.
+            peer
         });
 
         let mut client = Client::new();
         client.state = ClientState::AppConnected;
         client.stream_id = 1;
         client.stream_key = "stream".to_string();
-        client.transport = Some(Transport::new_plain(client_end.into_raw_fd()));
+        client.transport = Some(crate::net::testing::transport_from(client_end));
 
         let started = Instant::now();
         let err = client.play().unwrap_err();
@@ -2546,15 +2476,14 @@ mod tests {
 
     #[test]
     fn inbound_ping_rate_limit_rejects_flood() {
-        use std::os::unix::io::IntoRawFd;
-        use std::os::unix::net::UnixStream;
+        use crate::net::testing::{PairStream, stream_pair};
 
-        let (client_end, _peer) = UnixStream::pair().unwrap();
+        let (client_end, _peer) = stream_pair().unwrap();
         client_end.set_nonblocking(true).unwrap();
 
         let mut client = Client::new();
         client.state = ClientState::AppConnected;
-        client.transport = Some(Transport::new_plain(client_end.into_raw_fd()));
+        client.transport = Some(crate::net::testing::transport_from(client_end));
 
         let mut ping = Buffer::with_capacity(6);
         for i in 0..MAX_INBOUND_PING_RESPONSES {
@@ -2572,17 +2501,16 @@ mod tests {
 
     #[test]
     fn inbound_ping_requests_are_answered() {
+        use crate::net::testing::{PairStream, stream_pair};
         use std::io::Read;
-        use std::os::unix::io::IntoRawFd;
-        use std::os::unix::net::UnixStream;
 
-        let (client_end, mut peer) = UnixStream::pair().unwrap();
+        let (client_end, mut peer) = stream_pair().unwrap();
         client_end.set_nonblocking(true).unwrap();
         peer.set_nonblocking(true).unwrap();
 
         let mut client = Client::new();
         client.state = ClientState::AppConnected;
-        client.transport = Some(Transport::new_plain(client_end.into_raw_fd()));
+        client.transport = Some(crate::net::testing::transport_from(client_end));
 
         let mut ping = Buffer::with_capacity(6);
         control::write_user_control_ping_request(&mut ping, 99).unwrap();
@@ -2819,18 +2747,17 @@ mod tests {
 
     #[test]
     fn send_frame_payload_services_inbound_pings() {
+        use crate::net::testing::{PairStream, stream_pair};
         use std::io::{Read, Write};
-        use std::os::unix::io::IntoRawFd;
-        use std::os::unix::net::UnixStream;
 
-        let (client_end, mut peer) = UnixStream::pair().unwrap();
+        let (client_end, mut peer) = stream_pair().unwrap();
         client_end.set_nonblocking(true).unwrap();
 
         let mut client = Client::new();
         client.chunk_reg.init();
         client.state = ClientState::Publishing;
         client.stream_id = 1;
-        client.transport = Some(Transport::new_plain(client_end.into_raw_fd()));
+        client.transport = Some(crate::net::testing::transport_from(client_end));
 
         peer.write_all(&rtmp_user_control_ping_chunk(77)).unwrap();
 
@@ -2850,18 +2777,17 @@ mod tests {
 
     #[test]
     fn publishing_poll_services_inbound_pings() {
+        use crate::net::testing::{PairStream, stream_pair};
         use std::io::{Read, Write};
-        use std::os::unix::io::IntoRawFd;
-        use std::os::unix::net::UnixStream;
 
-        let (client_end, mut peer) = UnixStream::pair().unwrap();
+        let (client_end, mut peer) = stream_pair().unwrap();
         client_end.set_nonblocking(true).unwrap();
 
         let mut client = Client::new();
         client.chunk_reg.init();
         client.state = ClientState::Publishing;
         client.stream_id = 1;
-        client.transport = Some(Transport::new_plain(client_end.into_raw_fd()));
+        client.transport = Some(crate::net::testing::transport_from(client_end));
 
         peer.write_all(&rtmp_user_control_ping_chunk(88)).unwrap();
 

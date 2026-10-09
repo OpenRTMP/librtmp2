@@ -2,10 +2,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use librtmp2::client::Client;
 use librtmp2::server::Server;
 use librtmp2::types::*;
+use std::hint::black_box;
 
 const FRAME_LEN: usize = 256;
 const RTMP_PORT: u16 = 19680;
