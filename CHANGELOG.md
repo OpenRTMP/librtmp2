@@ -31,6 +31,31 @@ begin at `1.0.0`.
   and `u64` on Windows.
 - `Server::listen_reuseport()` / `listen_tls_reuseport()` return
   `ErrorCode::Unsupported` on Windows, which has no `SO_REUSEPORT`.
+- On Unix the transport now puts its socket into `O_NONBLOCK` mode when it
+  takes it over (as the Windows backend does with `FIONBIO`). macOS ignores
+  `MSG_DONTWAIT` on `send`/`sendmsg`, so a plaintext client could block once
+  the socket buffer was full. On Windows a socket that cannot be made
+  non-blocking is closed instead of stalling the poll loop.
+- CI benchmark history is kept in `bench/` on `main` (`bench/latest.json`,
+  `bench/releases/<tag>.json`) instead of a separate `bench-data` branch;
+  `bench/` is excluded from the published crate.
+
+### Fixed
+- Async publish/play authorization: a decision that arrives after its stream
+  was torn down or replaced (`FCUnpublish`/`deleteStream`, `closeStream`, a
+  new `createStream`) is a silent no-op instead of authorizing whatever
+  request came next. The withdrawn request keeps its slot until the stale
+  completion or the timeout clears it, so `has_pending_authorization()` stays
+  `true` until then.
+- A pending authorization reaped by the 15 s timeout seals its slot, so a
+  completion that arrives later can never authorize a newer request on the
+  same connection.
+- `poll(2)` interrupted by a signal (`EINTR`) during a blocking send or a TLS
+  accept is retried instead of failing the connection with `Io`.
+- The client's receive loop retries the read after a TLS `WANT_WRITE` once
+  the socket is writable, instead of giving up on a writable socket.
+- `scripts/bench_report.py` reads and writes its reports as UTF-8 and retries
+  the baseline fetch, keeping the measurements when it fails.
 
 ## [0.11.0] — 2026-10-02
 
