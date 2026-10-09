@@ -165,7 +165,7 @@ has the same per-operation shape (one system call, no allocation, no payload
 copy).
 
 Linux before and after the socket layer change, with librtmp2-server
-relaying one 2.5 Mbit/s stream (mean of two interleaved rounds per build):
+relaying one 2.5 Mbit/s stream:
 
 | Viewers | Server CPU (% of one core) | Peak RSS | Delivered |
 |---------|----------------------------|----------|-----------|
