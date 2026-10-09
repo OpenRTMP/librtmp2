@@ -36,6 +36,10 @@ begin at `1.0.0`.
   `MSG_DONTWAIT` on `send`/`sendmsg`, so a plaintext client could block once
   the socket buffer was full. On Windows a socket that cannot be made
   non-blocking is closed instead of stalling the poll loop.
+- `examples/minimal_server` binds `127.0.0.1:1935` by default (pass an
+  address as the first argument to expose it), because it accepts every
+  publish and play request.
+- CI builds use the committed `Cargo.lock` (`--locked`).
 - CI benchmark history is kept in `bench/` on `main` (`bench/latest.json`,
   `bench/releases/<tag>.json`) instead of a separate `bench-data` branch;
   `bench/` is excluded from the published crate.
@@ -47,13 +51,47 @@ begin at `1.0.0`.
   request came next. The withdrawn request keeps its slot until the stale
   completion or the timeout clears it, so `has_pending_authorization()` stays
   `true` until then.
-- A pending authorization reaped by the 15 s timeout seals its slot, so a
-  completion that arrives later can never authorize a newer request on the
-  same connection.
+- A pending authorization reaped by the 15 s timeout now also closes the
+  connection: the deny response is flushed, then the server tears the
+  connection down in the same tick, so the client has to reconnect to try
+  again. The reaped slot stays sealed, so a completion that arrives later can
+  never authorize a newer request.
+- A republish on an already-publishing connection (for example a stream
+  rename) no longer keeps relaying media under the old authorization while
+  the new decision is pending, and a deferred-relay publisher's media counts
+  toward the squat deadline.
 - `poll(2)` interrupted by a signal (`EINTR`) during a blocking send or a TLS
   accept is retried instead of failing the connection with `Io`.
 - The client's receive loop retries the read after a TLS `WANT_WRITE` once
   the socket is writable, instead of giving up on a writable socket.
+- Chunk reader: a fmt=3 chunk that starts a new message right after a fmt=0
+  message repeats the fmt=0 timestamp as its delta (RTMP spec 5.3.1.2.4),
+  instead of reusing the previous message's timestamp.
+- The client handles `AbortMessage` in all of its dispatch paths and discards
+  the partial message on the aborted CSID.
+- Legacy FLV `SoundFormat` 14 is MP3 8 kHz, not Opus (Opus is only signaled
+  through the E-RTMP ExHeader); reserved legacy sound format nibbles are
+  rejected, and unregistered enhanced FourCCs are no longer labeled H.264.
+- `AMF3_DATA` messages have their one-byte AMF0 marker stripped even when it
+  is the whole body, and re-parsing `connect` or the `connect` `_result` into
+  a reused `ConnectInfo`/`NegotiatedCaps` no longer keeps stale optional
+  fields.
+- The init cache ignores unpeeled ModEx wrappers instead of parsing them as
+  an ex-header, and a route whose only cached video is the combined
+  `avc_header` is classified as multitrack so congested players can resync
+  on audio.
+- Client: a fatal `recv` error ends `poll()` with `Io` instead of returning
+  `Ok` forever (which busy-spun embedders on a reset socket); a failed
+  `connect()` resets the previous session so a later `publish()` cannot
+  stream to the old server; a full send buffer while publishing is treated as
+  "not writable yet" instead of aborting the session; and a receive that ends
+  on a partial chunk no longer spins.
+- The transport's 10 s send poll timeout is an absolute deadline instead of
+  restarting on every iteration.
+- `examples/minimal_server` registers its publish/play callbacks so it
+  actually accepts streams, `examples/minimal_client` sends the frame type it
+  declares, and `bench_handshake`/`bench_relay` reject `--count 0` and stop
+  on a dead viewer.
 - `scripts/bench_report.py` reads and writes its reports as UTF-8 and retries
   the baseline fetch, keeping the measurements when it fails.
 
