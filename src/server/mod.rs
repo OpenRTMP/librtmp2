@@ -6218,7 +6218,7 @@ mod tests {
         assert!(!conn.has_pending_authorization());
         assert!(!conn.current_stream.as_ref().unwrap().is_publishing);
         assert!(
-            conn.transport.is_none() && conn.client_fd < 0,
+            conn.transport.is_none() && conn.client_fd == crate::net::INVALID_SOCKET,
             "the reap must tear the connection's transport down"
         );
 
