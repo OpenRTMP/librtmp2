@@ -92,9 +92,15 @@ impl Transport {
     /// On Unix `fd` is a file descriptor and its blocking mode is left
     /// untouched (every call passes `MSG_DONTWAIT`). On Windows `fd` is a
     /// Winsock `SOCKET`, which this switches to non-blocking mode because
-    /// Winsock has no per-call non-blocking flag.
-    pub fn new_plain(fd: RawSocket) -> Self {
-        net::prepare_transport_socket(fd);
+    /// Winsock has no per-call non-blocking flag. If Winsock refuses, the
+    /// socket is closed and the transport behaves like one on a dead peer:
+    /// every operation fails and the connection is dropped, instead of a
+    /// blocking socket stalling the poll loop.
+    pub fn new_plain(mut fd: RawSocket) -> Self {
+        if !net::prepare_transport_socket(fd) {
+            net::close(fd);
+            fd = net::INVALID_SOCKET;
+        }
         Self {
             inner: TransportInner::Plain(fd),
         }
