@@ -3231,9 +3231,10 @@ mod tests {
         let mut conn = Conn::new();
         conn.conn_id = 7;
         conn.transport = Some(crate::net::testing::transport_from(server_end));
-        // Force the session-setup timeout regardless of the real clock.
+        // Force the session-setup timeout regardless of the real clock. Keep
+        // the backdating short: a Windows Instant cannot reach back past boot.
         conn.set_session_setup_started_for_test(
-            Instant::now() - std::time::Duration::from_secs(3600),
+            Instant::now() - std::time::Duration::from_secs(60),
         );
 
         let mut server = test_server();

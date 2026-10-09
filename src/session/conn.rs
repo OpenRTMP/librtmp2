@@ -4500,7 +4500,7 @@ mod tests {
         conn.media_bytes_received = 1;
 
         // Simulate having been connected/publishing for a long time already.
-        conn.set_session_setup_started_for_test(Instant::now() - Duration::from_secs(3600));
+        conn.set_session_setup_started_for_test(Instant::now() - Duration::from_secs(60));
         assert!(
             !conn.session_setup_timed_out(),
             "an active publisher must not be reaped regardless of connection age"
@@ -4620,7 +4620,7 @@ mod tests {
             is_playing: true,
             ..Stream::new(1)
         }));
-        conn.set_session_setup_started_for_test(Instant::now() - Duration::from_secs(3600));
+        conn.set_session_setup_started_for_test(Instant::now() - Duration::from_secs(60));
         assert!(
             !conn.session_setup_timed_out(),
             "an active player must not be reaped regardless of connection age"
