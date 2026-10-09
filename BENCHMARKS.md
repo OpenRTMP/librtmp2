@@ -119,15 +119,16 @@ changes since 0.10.0 (frames chunked once per fan-out and sent to every
 player without a per-player copy, compact chunk headers, 4096-byte client
 publish chunks, per-player flow control). For end-to-end numbers see the
 cross-server comparison in `librtmp2-server`'s `BENCHMARKS.md`: with
-`librtmp2-server` 0.6.0 built on librtmp2 0.10.2, 100 concurrent viewers
-joined in 2.9 ms on average (p95 6.5 ms), ahead of MediaMTX (5.5 /
-10.9 ms) and LiveForge (13.0 / 26.2 ms), with every viewer receiving the
-full frame rate; SRS 8.0 and nginx-rtmp took 73 and 90 ms on average for
-the same join.
-Players connect faster too (connect + play in 1.95 ms on average, against
-3.0 ms for LiveForge and 4.6 ms for MediaMTX), and 1000 concurrent viewers
-of one stream all received the full frame rate while the server used 60%
-of one core and 32 MiB of memory.
+`librtmp2-server` 0.6.2 built on librtmp2 0.11.0, 100 concurrent viewers
+joined in 4.9 ms on average (p95 10.4 ms), ahead of MediaMTX v1.21.2
+(7.7 / 15.8 ms) and LiveForge (12.5 / 23.5 ms), with every viewer
+receiving the full frame rate; SRS 8.0 and nginx-rtmp (nginx 1.31.6) took
+72 and 91 ms on average for the same join.
+Players connect faster too (connect + play in 2.83 ms on average, against
+4.01 ms for LiveForge and 5.66 ms for MediaMTX), and 1000 concurrent
+viewers of one stream all received the full frame rate while the server
+used 73% of one core and 32 MiB of memory (2000 viewers: full frame rate,
+88% of one core, 52 MiB).
 That is a whole-system result: it includes that server's own changes
 (multi-core sharding, auth wake-ups, publishes and plays answered from an
 in-memory key cache) and does not isolate the effect of
