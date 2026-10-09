@@ -163,3 +163,14 @@ same stack-allocated buffers as before; the abstraction is a set of
 `#[inline]` functions taking the raw handle by value. The Windows backend
 has the same per-operation shape (one system call, no allocation, no payload
 copy).
+
+Linux before and after the socket layer change, with librtmp2-server
+relaying one 2.5 Mbit/s stream (mean of two interleaved rounds per build):
+
+| Viewers | Server CPU (% of one core) | Peak RSS | Delivered |
+|---------|----------------------------|----------|-----------|
+| 1000 | 71.5 → 69.0 | 32 → 32 MiB | full frame rate, 1.1 Gbit/s |
+| 2000 | 89.8 → 90.5 | 51.6 → 52.9 MiB | full frame rate, 2.2 Gbit/s |
+
+The Criterion relay benchmarks are unchanged (`relay/publish_to_player/100`
++0.7 %, `relay/publish_to_player/500` ±0 %).
