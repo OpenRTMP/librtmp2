@@ -10,8 +10,8 @@
 //! `send_vectored`, `poll_one`, `close`), which are implemented once per
 //! platform and selected at compile time:
 //!
-//! - Unix (`unix.rs`): `recv(2)`/`send(2)` with `MSG_DONTWAIT` (plus
-//!   `MSG_NOSIGNAL` on writes), `sendmsg(2)` with a stack `iovec` array for
+//! - Unix (`unix.rs`): `recv(2)`/`send(2)` on an `O_NONBLOCK` socket with
+//!   `MSG_DONTWAIT` (plus `MSG_NOSIGNAL` on writes), `sendmsg(2)` with a stack `iovec` array for
 //!   vectored writes, and `poll(2)` for readiness.
 //! - Windows (`windows.rs`): Winsock `recv`/`send` on a socket put into
 //!   non-blocking mode (Winsock has no per-call `MSG_DONTWAIT`), `WSASend`
