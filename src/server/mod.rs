@@ -1281,11 +1281,24 @@ impl Server {
     /// Auto-deny any publish/play authorization that's been `Pending` longer
     /// than `self.pending_auth_timeout` across all connections. Called every
     /// [`Self::poll`] tick.
-    fn reap_timed_out_pending_auth(&mut self) {
+    ///
+    /// The reap is terminal for the connection it fires on: the deny response
+    /// is flushed, then the connection is torn down and its index pushed onto
+    /// `closed`, so a completion the host still owes for the reaped request can
+    /// never be delivered to a replacement request admitted on that same
+    /// connection (the seal the reap set is never lifted). Indices of
+    /// connections that closed this tick are pushed onto `closed`.
+    fn reap_timed_out_pending_auth(&mut self, closed: &mut Vec<usize>) {
         let timeout = self.pending_auth_timeout;
-        for conn in self.connections.iter_mut() {
-            conn.reap_timed_out_pending_auth(timeout);
+        for (i, conn) in self.connections.iter_mut().enumerate() {
+            let reaped = conn.reap_timed_out_pending_auth(timeout);
+            // Flush the deny response before the transport goes away, so the
+            // peer still sees a protocol answer for its request.
             let _ = conn.flush();
+            if reaped {
+                conn.disconnect_transport();
+                closed.push(i);
+            }
         }
     }
 
@@ -1605,7 +1618,7 @@ impl Server {
         let mut closed = Vec::new();
 
         // Drive recv/processing for every connection.
-        self.reap_timed_out_pending_auth();
+        self.reap_timed_out_pending_auth(&mut closed);
         self.drain_pending_cache_evictions();
         // Reap expired external inject claims *before* receiving publish
         // commands — otherwise a socket publisher on a stale inject route
@@ -6178,14 +6191,149 @@ mod tests {
 
     #[test]
     fn reap_timed_out_pending_auth_denies_stuck_publish_requests() {
+        use crate::net::testing::stream_pair;
+        use std::io::Read;
+
         let mut server = test_server();
         server.pending_auth_timeout = Duration::from_secs(0);
-        server.connections.push(pending_publish_conn(44));
 
-        server.reap_timed_out_pending_auth();
+        // Attached to a real socket so the teardown is observable.
+        let (server_end, mut peer) = stream_pair().unwrap();
+        server_end.set_nonblocking(true).unwrap();
+        peer.set_nonblocking(true).unwrap();
+        let mut stuck = pending_publish_conn(44);
+        stuck.transport = Some(crate::net::testing::transport_from(server_end));
+        stuck.client_fd = stuck.transport.as_ref().unwrap().fd();
+        server.connections.push(stuck);
+
+        let mut closed = Vec::new();
+        server.reap_timed_out_pending_auth(&mut closed);
+
+        assert_eq!(
+            closed,
+            vec![0],
+            "the reaped connection must be queued for close"
+        );
         let conn = server.connections.iter().find(|c| c.conn_id == 44).unwrap();
         assert!(!conn.has_pending_authorization());
         assert!(!conn.current_stream.as_ref().unwrap().is_publishing);
+        assert!(
+            conn.transport.is_none() && conn.client_fd == crate::net::INVALID_SOCKET,
+            "the reap must tear the connection's transport down"
+        );
+
+        // ...but the deny response reached the peer before it went away.
+        let mut buf = [0u8; 4096];
+        assert!(
+            peer.read(&mut buf).unwrap_or(0) > 0,
+            "the peer must still receive a protocol answer for its request"
+        );
+    }
+
+    #[test]
+    fn reap_timed_out_pending_auth_tears_down_stuck_play_requests() {
+        let mut server = test_server();
+        server.pending_auth_timeout = Duration::from_secs(0);
+        server.connections.push(pending_play_conn(45));
+
+        let mut closed = Vec::new();
+        server.reap_timed_out_pending_auth(&mut closed);
+        assert_eq!(
+            closed,
+            vec![0],
+            "the reaped play connection must be queued for close"
+        );
+
+        // The host's late completion for the reaped request is inert and does
+        // not lift the seal.
+        server.complete_play_authorization(45, true).unwrap();
+        let conn = server
+            .connections
+            .iter_mut()
+            .find(|c| c.conn_id == 45)
+            .unwrap();
+        assert!(
+            !conn.has_pending_authorization(),
+            "the late completion must not have reopened the sealed play slot"
+        );
+        assert!(!conn.current_stream.as_ref().unwrap().is_playing);
+
+        // A follow-up play on the reaped connection is still denied.
+        conn.on_play_auth_cb = Some(|_, _, _| AuthorizationResult::Allow);
+        let mut buf = crate::buffer::Buffer::with_capacity(128);
+        crate::message::command::build_play(&mut buf, "replacement").unwrap();
+        conn.handle_command(buf.as_slice()).unwrap();
+        assert!(
+            !conn.current_stream.as_ref().unwrap().is_playing,
+            "a reaped connection must never admit a new play"
+        );
+    }
+
+    #[test]
+    fn a_late_completion_cannot_reopen_a_reaped_server_connection() {
+        let mut server = test_server();
+        server.pending_auth_timeout = Duration::from_secs(0);
+        server.connections.push(pending_publish_conn(46));
+
+        let mut closed = Vec::new();
+        server.reap_timed_out_pending_auth(&mut closed);
+        assert_eq!(closed, vec![0]);
+
+        // The server-level lookup still finds the conn, but the completion is
+        // inert: the reap's seal stays set.
+        server.complete_publish_authorization(46, true).unwrap();
+        let conn = server
+            .connections
+            .iter_mut()
+            .find(|c| c.conn_id == 46)
+            .unwrap();
+        assert!(
+            !conn.has_pending_authorization(),
+            "the late completion must not have reopened the sealed publish slot"
+        );
+        assert!(!conn.current_stream.as_ref().unwrap().is_publishing);
+
+        // The replacement request the stale completion could otherwise have
+        // authorized is denied outright.
+        conn.on_publish_auth_cb = Some(|_, _, _| AuthorizationResult::Allow);
+        let mut buf = crate::buffer::Buffer::with_capacity(128);
+        crate::message::command::build_publish(&mut buf, "replacement", "live").unwrap();
+        conn.handle_command(buf.as_slice()).unwrap();
+        assert!(
+            !conn.current_stream.as_ref().unwrap().is_publishing,
+            "a reaped connection must never admit a new publish"
+        );
+    }
+
+    #[test]
+    fn a_reaped_connection_is_removed_from_the_server_on_the_next_poll() {
+        use crate::net::testing::stream_pair;
+        use std::io::Read;
+
+        let mut server = test_server();
+        server.pending_auth_timeout = Duration::from_secs(0);
+        let (server_end, mut peer) = stream_pair().unwrap();
+        server_end.set_nonblocking(true).unwrap();
+        peer.set_nonblocking(true).unwrap();
+        let mut stuck = pending_publish_conn(47);
+        stuck.transport = Some(crate::net::testing::transport_from(server_end));
+        stuck.client_fd = stuck.transport.as_ref().unwrap().fd();
+        server.connections.push(stuck);
+
+        server.process_connections().unwrap();
+
+        assert!(
+            server.connections.is_empty(),
+            "a connection reaped for a stuck pending authorization must be closed"
+        );
+        // The late completion finds no such conn_id at all and resolves
+        // nothing, which is the whole point of making the reap terminal.
+        assert!(server.complete_publish_authorization(47, true).is_ok());
+        let mut buf = [0u8; 4096];
+        assert!(
+            peer.read(&mut buf).unwrap_or(0) > 0,
+            "the peer must still receive the deny response"
+        );
     }
 
     #[test]
