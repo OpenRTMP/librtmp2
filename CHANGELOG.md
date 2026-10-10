@@ -11,7 +11,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 While in alpha the project stays on `0.x`; semantic-versioning guarantees only
 begin at `1.0.0`.
 
-## [Unreleased]
+## [0.12.0] — 2026-10-10
 
 ### Added
 - Native Windows support (x86_64 and ARM64, MSVC) for RTMP and RTMPS, client
@@ -39,7 +39,10 @@ begin at `1.0.0`.
 - `examples/minimal_server` binds `127.0.0.1:1935` by default (pass an
   address as the first argument to expose it), because it accepts every
   publish and play request.
-- CI builds use the committed `Cargo.lock` (`--locked`).
+- CI builds, tests and `cargo publish` use the committed `Cargo.lock`
+  (`--locked`).
+- A release tag is built and tested on macOS and Windows (x86_64 and ARM64)
+  before anything is published; previously only Linux gated the release.
 - CI benchmark history is kept in `bench/` on `main` (`bench/latest.json`,
   `bench/releases/<tag>.json`) instead of a separate `bench-data` branch;
   `bench/` is excluded from the published crate.
@@ -94,6 +97,8 @@ begin at `1.0.0`.
   on a dead viewer.
 - `scripts/bench_report.py` reads and writes its reports as UTF-8 and retries
   the baseline fetch, keeping the measurements when it fails.
+- Broken links in the API documentation (`AuthDecision`, `split_host_port`,
+  `Conn`); CI now builds the docs with warnings as errors.
 
 ## [0.11.0] — 2026-10-02
 
@@ -985,7 +990,8 @@ and others.
 - Protocol mapping documents for legacy, E-RTMP v1, and E-RTMP v2
 - `CONTRIBUTING.md` guidelines
 
-[Unreleased]: https://github.com/OpenRTMP/librtmp2/compare/v0.10.2...HEAD
+[0.12.0]: https://github.com/OpenRTMP/librtmp2/compare/v0.11.0...v0.12.0
+[0.11.0]: https://github.com/OpenRTMP/librtmp2/compare/v0.10.2...v0.11.0
 [0.10.2]: https://github.com/OpenRTMP/librtmp2/compare/v0.10.1...v0.10.2
 [0.10.1]: https://github.com/OpenRTMP/librtmp2/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/OpenRTMP/librtmp2/compare/v0.9.3...v0.10.0
