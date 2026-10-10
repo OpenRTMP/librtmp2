@@ -170,8 +170,8 @@ pub(crate) const MAX_SEND_PARTS: usize = 512;
 /// Accepts:
 /// - "host:port"        -> host, port
 /// - "host"             -> host, def_port
-/// - "[v6addr]:port"    -> v6addr (brackets stripped), port
-/// - "[v6addr]"         -> v6addr, def_port
+/// - "\[v6addr\]:port"    -> v6addr (brackets stripped), port
+/// - "\[v6addr\]"         -> v6addr, def_port
 /// - "fe80::1" / "::"   -> the whole string as host, def_port
 /// - ":port"            -> "" (empty host = wildcard), port
 ///

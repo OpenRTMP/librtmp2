@@ -52,3 +52,8 @@ jobs:
 
     - name: Clippy
       run: cargo clippy --locked --all-features --all-targets -- -D warnings
+
+    - name: Docs (broken intra-doc links fail the build)
+      env:
+        RUSTDOCFLAGS: -D warnings
+      run: cargo doc --locked --no-deps --all-features
