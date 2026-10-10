@@ -488,7 +488,7 @@ impl Conn {
 
     /// True when an inbound peer has held a connection slot without being an
     /// active publisher or player for longer than
-    /// [`RTMP_SESSION_SETUP_TIMEOUT`]. Covers incomplete handshakes, post-
+    /// the 10 s session-setup timeout. Covers incomplete handshakes, post-
     /// `connect` idle sessions that only answer server pings, and sessions
     /// that stopped publishing/playing and haven't resumed within a fresh
     /// grace window (`session_setup_started` is reset on every such
@@ -2186,7 +2186,7 @@ impl Conn {
     /// find the `conn_id` at all in that case; see
     /// [`crate::server::Server::complete_publish_authorization`]).
     ///
-    /// A completion that arrives after [`Self::reap_timed_out_pending_auth`]
+    /// A completion that arrives after the pending-authorization timeout reap
     /// already denied the request is equally inert: it applies to nothing, and
     /// it does *not* lift the seal the reap set. The reap is terminal for the
     /// connection (the built-in server tears it down), so the sealed slot is

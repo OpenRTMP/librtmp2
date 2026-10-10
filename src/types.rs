@@ -112,8 +112,10 @@ pub enum ConnState {
 /// Outcome of a play/publish authorization check.
 ///
 /// `on_publish_cb`/`on_play_cb` (and their FFI equivalents) can only answer
-/// synchronously with a `bool`. [`Conn::on_publish_auth_cb`]/
-/// [`Conn::on_play_auth_cb`] (see `session::conn`) return this instead, so an
+/// synchronously with a `bool`.
+/// [`Conn::on_publish_auth_cb`](crate::session::conn::Conn::on_publish_auth_cb)/
+/// [`Conn::on_play_auth_cb`](crate::session::conn::Conn::on_play_auth_cb)
+/// return this instead, so an
 /// integrator whose authorization work is itself asynchronous (e.g. a
 /// database lookup dispatched to a worker thread) can return `Pending`
 /// without blocking the RTMP processing loop. The connection then waits --
