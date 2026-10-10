@@ -31,11 +31,11 @@ jobs:
         uses: taiki-e/install-action@be76f545a6a2f94fb131c5bb748ebed32edb5760 # cargo-llvm-cov
 
       - name: Run unit tests under coverage instrumentation
-        run: cargo llvm-cov --no-report --all-features --lib --verbose
+        run: cargo llvm-cov --no-report --locked --all-features --lib --verbose
 
       - name: Run E2E integration tests under coverage instrumentation (serial)
         run: |
-          cargo llvm-cov --no-report --all-features --verbose \
+          cargo llvm-cov --no-report --locked --all-features --verbose \
             --test server_client_loopback \
             --test e2e_publish_play_same_listener \
             --test e2e_publish_rejection \
