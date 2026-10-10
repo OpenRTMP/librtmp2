@@ -65,7 +65,7 @@ jobs:
           # A restored target/ cache may hold Criterion output of earlier runs
           # (or of the other suite), which would be mislabelled below.
           rm -rf target/criterion
-          cargo bench --bench protocol --features default -- --sample-size 20 --noplot 2>&1 | tee bench-protocol.txt
+          cargo bench --locked --bench protocol --features default -- --sample-size 20 --noplot 2>&1 | tee bench-protocol.txt
           rm -rf crit-protocol && mv target/criterion crit-protocol
 
       - name: Run relay benchmarks
@@ -74,7 +74,7 @@ jobs:
           # A restored target/ cache may hold Criterion output of earlier runs
           # (or of the other suite), which would be mislabelled below.
           rm -rf target/criterion
-          cargo bench --bench relay --features default -- --sample-size 10 --noplot 2>&1 | tee bench-relay.txt
+          cargo bench --locked --bench relay --features default -- --sample-size 10 --noplot 2>&1 | tee bench-relay.txt
           rm -rf crit-relay && mv target/criterion crit-relay
 
       - name: Collect results
