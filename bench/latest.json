@@ -4,12 +4,12 @@
  "kind": "main",
  "version": "0.12.0",
  "tag": null,
- "commit": "1dbdb1a9cffa915384e7842dc86f5878932d34ea",
- "date": "2026-10-10T16:41:08Z",
- "run_url": "https://github.com/OpenRTMP/librtmp2/actions/runs/38068510796",
+ "commit": "de65067e0dc12eb709228bf43b1e25b3576e5173",
+ "date": "2026-10-11T18:05:49Z",
+ "run_url": "https://github.com/OpenRTMP/librtmp2/actions/runs/38162226895",
  "deps": {},
  "environment": {
-  "cpu": "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz",
+  "cpu": "AMD EPYC 7763 64-Core Processor",
   "vcpus": 4,
   "ram_gib": 15.6,
   "kernel": "Linux 6.17.0-1022-azure x86_64",
@@ -20,52 +20,52 @@
  "suites": {
   "protocol": {
    "amf0_build_connect": {
-    "ns": 217.82497034446442,
-    "ci_rel": 0.0021233258502024,
+    "ns": 218.24159407585452,
+    "ci_rel": 0.0003503097992232619,
     "bytes": null,
     "elements": null
    },
    "chunk/write_read_roundtrip": {
-    "ns": 4142.322508284025,
-    "ci_rel": 0.0020800344665554116,
+    "ns": 5938.973461743272,
+    "ci_rel": 0.004967198290720073,
     "bytes": 4096,
     "elements": null
    },
    "flv/audio_tag_aac": {
-    "ns": 0.9440178984144914,
-    "ci_rel": 0.007794967584653764,
+    "ns": 1.2470209049280256,
+    "ci_rel": 0.0015503360447492376,
     "bytes": null,
     "elements": null
    },
    "flv/video_tag_h264": {
-    "ns": 0.8655701558406974,
-    "ci_rel": 0.0006962752733656981,
+    "ns": 1.2484337652944504,
+    "ci_rel": 0.003215291298952812,
     "bytes": null,
     "elements": null
    },
    "fourcc_to_video_codec_avc1": {
-    "ns": 2.018054592981677,
-    "ci_rel": 0.0006488960745734209,
+    "ns": 2.4921661165599356,
+    "ci_rel": 0.0006978488331067316,
     "bytes": null,
     "elements": null
    },
    "server_read_c1": {
-    "ns": 916.2749178835802,
-    "ci_rel": 0.0004894268368721156,
+    "ns": 1067.2991183013057,
+    "ci_rel": 0.0010001543341579605,
     "bytes": null,
     "elements": null
    }
   },
   "relay": {
    "relay/publish_to_player/100": {
-    "ns": 97138849.5948052,
-    "ci_rel": 0.000255191209464329,
+    "ns": 96899161.78181818,
+    "ci_rel": 0.0017097384935485834,
     "bytes": null,
     "elements": 100
    },
    "relay/publish_to_player/500": {
-    "ns": 98725856.9922078,
-    "ci_rel": 0.0009336051044182278,
+    "ns": 99033543.09610389,
+    "ci_rel": 0.001908644299835735,
     "bytes": null,
     "elements": 500
    }
