@@ -209,6 +209,11 @@ pub struct Conn {
     /// telemetry, so the deadline compares against this baseline (mirroring
     /// `pause_grace_media_bytes_sent`) instead of expecting it to be cleared.
     media_bytes_at_epoch_start: u64,
+    /// Route key for which the publish-media deadline was most recently armed.
+    /// Used to avoid re-arming the deadline when a peer cycles
+    /// `publish`/`FCUnpublish` for the same route without sending media: only a
+    /// route change or media flow since the last arming starts a fresh window.
+    publish_media_deadline_route: Option<String>,
     /// Audio/video payload bytes sent to this peer.
     pub media_bytes_sent: u64,
     /// Snapshot of `media_bytes_sent` consumed by the last pause-grace reset.
@@ -401,6 +406,7 @@ impl Conn {
             media_bytes_received: 0,
             injected_media_bytes: 0,
             media_bytes_at_epoch_start: 0,
+            publish_media_deadline_route: None,
             media_bytes_sent: 0,
             pause_grace_media_bytes_sent: 0,
             client_fd: crate::net::INVALID_SOCKET,
@@ -2075,13 +2081,19 @@ impl Conn {
             }
         }
         // Start a publish-media deadline only for a genuinely new publish
-        // session or route. Repeating `publish` for the route already owned
-        // by this connection must not refresh the timer. Armed after the
-        // eviction enqueue above, which can still reject the rename: that
-        // rollback leaves the previous stream publishing, so resetting the
-        // deadline first would hand the still-live publisher a fresh media
-        // clock it never asked for.
-        if !was_publishing || renaming_route {
+        // epoch: the route changed, or media has flowed since the deadline was
+        // last armed. Repeating `publish` for the same route -- including
+        // after an `FCUnpublish`/`deleteStream` that cleared `is_publishing` --
+        // with no media since then must NOT re-arm the timer, or a peer can
+        // cycle publish/unpublish to dodge the publish-media squat reaper
+        // forever and squat the route.
+        let route_changed = self
+            .publish_media_deadline_route
+            .as_deref()
+            .is_none_or(|armed| armed != next_route_key.as_str());
+        let media_since_arm =
+            self.received_media_in_current_epoch() || self.injected_media_bytes > 0;
+        if route_changed || media_since_arm {
             self.session_setup_started = Instant::now();
             // Injected and socket-received activity from a prior publish/idle
             // epoch must not exempt a new empty publish from the media
@@ -2089,6 +2101,7 @@ impl Conn {
             // telemetry, so rebase the epoch on a snapshot of it.
             self.injected_media_bytes = 0;
             self.media_bytes_at_epoch_start = self.media_bytes_received;
+            self.publish_media_deadline_route = Some(next_route_key.clone());
         }
         if self.defer_media_relay {
             // Reset only when leaving a prior play role or switching the
@@ -4517,6 +4530,38 @@ mod tests {
         assert!(
             conn.session_setup_timed_out(),
             "repeating publish for the already-owned route must not refresh the media deadline"
+        );
+    }
+
+    #[test]
+    fn publish_unpublish_cycle_same_route_does_not_refresh_media_deadline() {
+        use std::time::{Duration, Instant};
+
+        let mut conn = Conn::new();
+        conn.app = "live".to_string();
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+
+        let mut buf = Buffer::with_capacity(128);
+        command::build_publish(&mut buf, "room", "live").unwrap();
+        conn.handle_command(buf.as_slice()).unwrap();
+        assert!(conn.current_stream.as_ref().unwrap().is_publishing);
+
+        conn.set_session_setup_started_for_test(Instant::now() - Duration::from_secs(3));
+
+        let mut buf = Buffer::with_capacity(128);
+        command::build_fcunpublish(&mut buf, "room").unwrap();
+        conn.handle_command(buf.as_slice()).unwrap();
+        assert!(!conn.current_stream.as_ref().unwrap().is_publishing);
+
+        let mut buf = Buffer::with_capacity(128);
+        command::build_publish(&mut buf, "room", "live").unwrap();
+        conn.handle_command(buf.as_slice()).unwrap();
+        assert!(conn.current_stream.as_ref().unwrap().is_publishing);
+
+        assert!(
+            conn.session_setup_timed_out(),
+            "publishing, unpublishing and republishing the same route without \
+             media must not refresh the publish-media squat deadline"
         );
     }
 
