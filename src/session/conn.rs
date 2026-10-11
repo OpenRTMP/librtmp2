@@ -204,11 +204,19 @@ pub struct Conn {
     /// injects toward publisher liveness and deferred-relay drain so route
     /// squatters still time out and metadata is not stuck while relay is deferred.
     pub injected_media_bytes: u64,
+    /// Lifetime count of bytes accepted via `inject_relay_frame`. Unlike
+    /// `injected_media_bytes` it is never reset by a publish/idle teardown, so
+    /// the media-deadline arming logic can tell an inject-only publisher's
+    /// same-route republish apart from an empty publish/unpublish squat cycle.
+    injected_media_bytes_total: u64,
     /// Snapshot of `media_bytes_received` taken when the current publish/idle
     /// epoch armed its media deadline. That counter is lifetime socket
     /// telemetry, so the deadline compares against this baseline (mirroring
     /// `pause_grace_media_bytes_sent`) instead of expecting it to be cleared.
     media_bytes_at_epoch_start: u64,
+    /// Snapshot of `injected_media_bytes_total` taken when the current
+    /// publish/idle epoch armed its media deadline (see `media_bytes_at_epoch_start`).
+    injected_bytes_at_epoch_start: u64,
     /// Route key for which the publish-media deadline was most recently armed.
     /// Used to avoid re-arming the deadline when a peer cycles
     /// `publish`/`FCUnpublish` for the same route without sending media: only a
@@ -405,7 +413,9 @@ impl Conn {
             bytes_at_last_ack: 0,
             media_bytes_received: 0,
             injected_media_bytes: 0,
+            injected_media_bytes_total: 0,
             media_bytes_at_epoch_start: 0,
+            injected_bytes_at_epoch_start: 0,
             publish_media_deadline_route: None,
             media_bytes_sent: 0,
             pause_grace_media_bytes_sent: 0,
@@ -480,6 +490,16 @@ impl Conn {
     /// armed" rather than testing the counter against zero.
     fn received_media_in_current_epoch(&self) -> bool {
         self.media_bytes_received > self.media_bytes_at_epoch_start
+    }
+
+    /// True when media (socket or trusted inject) has arrived since the current
+    /// publish-media deadline was armed. Uses lifetime counters so an
+    /// `FCUnpublish`/`deleteStream` that clears the per-epoch counters does not
+    /// hide activity that already happened during this publish session (an
+    /// inject-only publisher's same-route republish must still re-arm).
+    fn media_flowed_since_arm(&self) -> bool {
+        self.media_bytes_received > self.media_bytes_at_epoch_start
+            || self.injected_media_bytes_total > self.injected_bytes_at_epoch_start
     }
 
     /// True when no socket media and no trusted inject has arrived since the
@@ -885,6 +905,9 @@ impl Conn {
         // holds `relay_enabled` off.
         self.injected_media_bytes = self
             .injected_media_bytes
+            .saturating_add((payload.len() as u64).max(1));
+        self.injected_media_bytes_total = self
+            .injected_media_bytes_total
             .saturating_add((payload.len() as u64).max(1));
         Ok(())
     }
@@ -2091,8 +2114,7 @@ impl Conn {
             .publish_media_deadline_route
             .as_deref()
             .is_none_or(|armed| armed != next_route_key.as_str());
-        let media_since_arm =
-            self.received_media_in_current_epoch() || self.injected_media_bytes > 0;
+        let media_since_arm = self.media_flowed_since_arm();
         if route_changed || media_since_arm {
             self.session_setup_started = Instant::now();
             // Injected and socket-received activity from a prior publish/idle
@@ -2101,6 +2123,7 @@ impl Conn {
             // telemetry, so rebase the epoch on a snapshot of it.
             self.injected_media_bytes = 0;
             self.media_bytes_at_epoch_start = self.media_bytes_received;
+            self.injected_bytes_at_epoch_start = self.injected_media_bytes_total;
             self.publish_media_deadline_route = Some(next_route_key.clone());
         }
         if self.defer_media_relay {
@@ -2219,6 +2242,10 @@ impl Conn {
             return Ok(());
         }
         if allow {
+            // The route was not held while the decision was pending, so a
+            // same-route completion must start a fresh media window rather than
+            // inherit whatever remained of the pre-pending publish's deadline.
+            self.publish_media_deadline_route = None;
             self.complete_publish_authorized(pending.stream_name)
         } else {
             self.send_publish_denied()
@@ -4562,6 +4589,64 @@ mod tests {
             conn.session_setup_timed_out(),
             "publishing, unpublishing and republishing the same route without \
              media must not refresh the publish-media squat deadline"
+        );
+    }
+
+    #[test]
+    fn inject_only_publisher_same_route_republish_rearms_media_deadline() {
+        use std::time::{Duration, Instant};
+
+        let mut conn = app_conn();
+        conn.handle_command(publish_buf("s").as_slice()).unwrap();
+        assert!(conn.current_stream.as_ref().unwrap().is_publishing);
+
+        // Media arrives only through a trusted inject (no socket media).
+        conn.inject_relay_frame(FrameType::Video, 0, &[0x17, 0x01, 0xAA])
+            .unwrap();
+        conn.set_session_setup_started_for_test(Instant::now() - Duration::from_secs(30));
+
+        let mut unpublish = Buffer::with_capacity(128);
+        command::build_fcunpublish(&mut unpublish, "s").unwrap();
+        conn.handle_command(unpublish.as_slice()).unwrap();
+        assert!(!conn.current_stream.as_ref().unwrap().is_publishing);
+
+        // The teardown cleared the per-epoch inject counter, but the inject was
+        // real media: a same-route republish must still start a fresh window.
+        conn.handle_command(publish_buf("s").as_slice()).unwrap();
+        assert!(conn.current_stream.as_ref().unwrap().is_publishing);
+        assert!(
+            !conn.session_setup_timed_out(),
+            "an inject-only publisher's same-route republish must re-arm the media deadline"
+        );
+    }
+
+    #[test]
+    fn pending_publish_allow_starts_a_fresh_media_deadline() {
+        use std::time::{Duration, Instant};
+
+        let mut conn = app_conn();
+        conn.handle_command(publish_buf("s").as_slice()).unwrap();
+        assert!(conn.current_stream.as_ref().unwrap().is_publishing);
+
+        conn.set_session_setup_started_for_test(Instant::now() - Duration::from_secs(30));
+        let mut unpublish = Buffer::with_capacity(128);
+        command::build_fcunpublish(&mut unpublish, "s").unwrap();
+        conn.handle_command(unpublish.as_slice()).unwrap();
+        assert!(!conn.current_stream.as_ref().unwrap().is_publishing);
+
+        conn.on_publish_auth_cb = Some(|_, _, _| AuthorizationResult::Pending);
+        conn.handle_command(publish_buf("s").as_slice()).unwrap();
+        assert!(conn.has_pending_authorization());
+
+        // The pending window can last up to the pending-auth timeout, during
+        // which the route was not held, so the completion must start a fresh
+        // media window rather than inherit the old, expired deadline.
+        conn.set_session_setup_started_for_test(Instant::now() - Duration::from_secs(30));
+        conn.complete_publish_authorization(true).unwrap();
+        assert!(conn.current_stream.as_ref().unwrap().is_publishing);
+        assert!(
+            !conn.session_setup_timed_out(),
+            "a same-route completion after a pending publish must start a fresh media window"
         );
     }
 
