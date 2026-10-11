@@ -1011,10 +1011,17 @@ impl Conn {
         self.relay_enabled && self.is_publisher_stream(msg_stream_id)
     }
 
-    /// True when an active->idle transition carried meaningful media flow and
-    /// should grant a fresh setup-timeout window (mirrors pause grace).
-    fn teardown_refreshes_setup_timer(&self) -> bool {
-        self.media_bytes_sent > 0 || self.media_bytes_received > 0 || self.injected_media_bytes > 0
+    /// Grant teardown grace only for media not consumed by an earlier reset.
+    fn teardown_refreshes_setup_timer(&mut self) -> bool {
+        if !self.media_flowed_since_arm()
+            && self.media_bytes_sent <= self.pause_grace_media_bytes_sent
+        {
+            return false;
+        }
+        self.media_bytes_at_epoch_start = self.media_bytes_received;
+        self.injected_bytes_at_epoch_start = self.injected_media_bytes_total;
+        self.pause_grace_media_bytes_sent = self.media_bytes_sent;
+        true
     }
 
     fn authorize_media_frame(
@@ -2059,6 +2066,7 @@ impl Conn {
             .as_ref()
             .map(|s| s.is_publishing)
             .unwrap_or(false);
+        let was_playing = self.current_stream.as_ref().is_some_and(|s| s.is_playing);
         let prev_route_key = self.relay_route_key();
         let next_route_key = if !self.relay_key.is_empty() {
             self.relay_key.clone()
@@ -2103,19 +2111,15 @@ impl Conn {
                 );
             }
         }
-        // Start a publish-media deadline only for a genuinely new publish
-        // epoch: the route changed, or media has flowed since the deadline was
-        // last armed. Repeating `publish` for the same route -- including
-        // after an `FCUnpublish`/`deleteStream` that cleared `is_publishing` --
-        // with no media since then must NOT re-arm the timer, or a peer can
-        // cycle publish/unpublish to dodge the publish-media squat reaper
-        // forever and squat the route.
+        // Keep the deadline across duplicate active publishes and empty
+        // unpublish/republish cycles. A route change, a transition from play,
+        // or new media followed by a fresh publish starts a new window.
         let route_changed = self
             .publish_media_deadline_route
             .as_deref()
             .is_none_or(|armed| armed != next_route_key.as_str());
         let media_since_arm = self.media_flowed_since_arm();
-        if route_changed || media_since_arm {
+        if route_changed || was_playing || (!was_publishing && media_since_arm) {
             self.session_setup_started = Instant::now();
             // Injected and socket-received activity from a prior publish/idle
             // epoch must not exempt a new empty publish from the media
@@ -2242,10 +2246,21 @@ impl Conn {
             return Ok(());
         }
         if allow {
-            // The route was not held while the decision was pending, so a
-            // same-route completion must start a fresh media window rather than
-            // inherit whatever remained of the pre-pending publish's deadline.
-            self.publish_media_deadline_route = None;
+            // Pending authorization may start a fresh window only if it did
+            // not supersede an active publisher already holding this route.
+            let next_route = if self.relay_key.is_empty() {
+                pending.stream_name.as_str()
+            } else {
+                self.relay_key.as_str()
+            };
+            let already_publishing_same_route = self
+                .current_stream
+                .as_ref()
+                .is_some_and(|s| s.is_publishing)
+                && self.publish_media_deadline_route.as_deref() == Some(next_route);
+            if !already_publishing_same_route {
+                self.publish_media_deadline_route = None;
+            }
             self.complete_publish_authorized(pending.stream_name)
         } else {
             self.send_publish_denied()
@@ -4648,6 +4663,81 @@ mod tests {
             !conn.session_setup_timed_out(),
             "a same-route completion after a pending publish must start a fresh media window"
         );
+    }
+
+    #[test]
+    fn duplicate_publish_after_media_keeps_the_original_deadline() {
+        use std::time::{Duration, Instant};
+
+        let mut conn = app_conn();
+        conn.handle_command(publish_buf("s").as_slice()).unwrap();
+        conn.media_bytes_received = 1;
+        let original = Instant::now() - Duration::from_secs(3);
+        conn.set_session_setup_started_for_test(original);
+
+        conn.handle_command(publish_buf("s").as_slice()).unwrap();
+        assert_eq!(conn.session_setup_started, original);
+        assert_eq!(conn.media_bytes_at_epoch_start, 0);
+        assert!(!conn.session_setup_timed_out());
+    }
+
+    #[test]
+    fn pending_duplicate_publish_keeps_the_original_deadline() {
+        use std::time::{Duration, Instant};
+
+        let mut conn = app_conn();
+        conn.handle_command(publish_buf("s").as_slice()).unwrap();
+        conn.media_bytes_received = 1;
+        let original = Instant::now() - Duration::from_secs(3);
+        conn.set_session_setup_started_for_test(original);
+
+        conn.on_publish_auth_cb = Some(|_, _, _| AuthorizationResult::Pending);
+        conn.handle_command(publish_buf("s").as_slice()).unwrap();
+        assert!(conn.has_pending_authorization());
+        conn.complete_publish_authorization(true).unwrap();
+
+        assert_eq!(conn.session_setup_started, original);
+        assert_eq!(conn.media_bytes_at_epoch_start, 0);
+        assert!(!conn.session_setup_timed_out());
+    }
+
+    #[test]
+    fn play_to_publish_starts_a_new_media_deadline() {
+        use std::time::{Duration, Instant};
+
+        let mut conn = app_conn();
+        conn.handle_command(publish_buf("s").as_slice()).unwrap();
+        let mut play = Buffer::with_capacity(128);
+        command::build_play(&mut play, "s").unwrap();
+        conn.handle_command(play.as_slice()).unwrap();
+        assert!(conn.current_stream.as_ref().unwrap().is_playing);
+
+        conn.set_session_setup_started_for_test(Instant::now() - Duration::from_secs(3));
+        conn.handle_command(publish_buf("s").as_slice()).unwrap();
+        assert!(conn.current_stream.as_ref().unwrap().is_publishing);
+        assert!(!conn.session_setup_timed_out());
+    }
+
+    #[test]
+    fn repeated_teardown_without_new_media_does_not_extend_grace() {
+        use std::time::{Duration, Instant};
+
+        let mut conn = app_conn();
+        conn.handle_command(publish_buf("s").as_slice()).unwrap();
+        conn.media_bytes_received = 1;
+        conn.set_session_setup_started_for_test(Instant::now() - Duration::from_secs(30));
+
+        let mut unpublish = Buffer::with_capacity(128);
+        command::build_fcunpublish(&mut unpublish, "s").unwrap();
+        conn.handle_command(unpublish.as_slice()).unwrap();
+        assert!(!conn.session_setup_timed_out());
+        assert_eq!(conn.media_bytes_at_epoch_start, 1);
+
+        conn.handle_command(publish_buf("s").as_slice()).unwrap();
+        conn.set_session_setup_started_for_test(Instant::now() - Duration::from_secs(3));
+        conn.handle_command(unpublish.as_slice()).unwrap();
+        conn.handle_command(publish_buf("s").as_slice()).unwrap();
+        assert!(conn.session_setup_timed_out());
     }
 
     #[test]
