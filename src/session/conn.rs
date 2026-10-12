@@ -347,7 +347,7 @@ pub struct Conn {
     /// Exact stream-name key currently held in `publish_routes` for this conn.
     /// Must be released on teardown even when `relay_key` later diverges from
     /// the RTMP publish name (librtmp2-server pins `relay_key` to the DB id).
-    claimed_publish_route: Option<String>,
+    pub(crate) claimed_publish_route: Option<String>,
     /// Cache keys to evict after the publisher renames its stream.
     pub pending_cache_evictions: Vec<(String, String)>,
     /// Routes this connection abandoned via rename/teardown for which relay
