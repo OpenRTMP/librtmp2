@@ -15,7 +15,9 @@ pub fn fourcc_parse(data: &[u8]) -> Result<[u8; 5]> {
 }
 
 fn is_composition_time_codec(fourcc: &[u8]) -> bool {
-    fourcc[..4] == *b"avc1" || fourcc[..4] == *b"hvc1"
+    // E-RTMP / oxideav: SI24 composition time on CodedFrames for avc1/hvc1/vvc1.
+    // Parsing VVC CT does not re-advertise vvc1 in connect caps.
+    fourcc[..4] == *b"avc1" || fourcc[..4] == *b"hvc1" || fourcc[..4] == *b"vvc1"
 }
 
 /// Parse an Enhanced RTMP v1 video tag header.
@@ -236,5 +238,21 @@ mod tests {
         assert_eq!(hdr.is_ex_header, 0);
         assert_eq!(hdr.header_size, 1);
         assert_eq!(hdr.composition_time, 0);
+    }
+
+    #[test]
+    fn vvc1_coded_frames_consume_composition_time() {
+        let data = [0x91, b'v', b'v', b'c', b'1', 0x00, 0x01, 0x2C, 0xAA];
+        let mut hdr = VideoHeader::default();
+        exvideo_parse(&data, &mut hdr).unwrap();
+        assert_eq!(hdr.is_ex_header, 1);
+        assert_eq!(hdr.packet_type, 1);
+        assert_eq!(&hdr.fourcc[..4], b"vvc1");
+        assert_eq!(hdr.composition_time, 0x00012C);
+        assert_eq!(hdr.header_size, 8);
+
+        let mut buf = [0u8; 8];
+        assert_eq!(exvideo_write(&hdr, &mut buf), 8);
+        assert_eq!(&buf[..], &data[..8]);
     }
 }

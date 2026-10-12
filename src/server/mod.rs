@@ -1625,6 +1625,10 @@ impl Server {
         // gets BadName in this poll and never retries after the reaper runs.
         self.reap_stale_inject_routes();
         self.recv_and_reap_connections(readable, &mut closed);
+        // After recv may have force-released a route (authorized releaseStream),
+        // detach any still-publishing conn that no longer owns its claimed
+        // route so it cannot keep fanning media into the shared stream.
+        self.detach_displaced_route_owners();
 
         // Ordering within this function is deliberate: evictions from
         // renames processed by the recv loop just above are applied here,
@@ -2911,6 +2915,28 @@ impl Server {
                 cache.audio_track_headers.clear();
                 cache.aac_header = Some(frame.payload.clone());
             }
+        }
+    }
+
+    /// Clear relay state on publishers whose `claimed_publish_route` is no
+    /// longer owned by them in `active_publish_routes` (typically after an
+    /// authorized `releaseStream` force-clear). Does not mutate the registry
+    /// itself — FMS map-clear semantics stay on `force_release`.
+    fn detach_displaced_route_owners(&mut self) {
+        let Ok(routes) = self.active_publish_routes.lock() else {
+            return;
+        };
+        let snapshot = routes.clone();
+        drop(routes);
+        for conn in &mut self.connections {
+            let Some(claimed) = conn.claimed_publish_route.as_ref() else {
+                continue;
+            };
+            let key = (conn.app.clone(), claimed.clone());
+            if snapshot.get(&key) == Some(&conn.conn_id) {
+                continue;
+            }
+            conn.detach_lost_publish_route();
         }
     }
 
@@ -4541,6 +4567,109 @@ mod tests {
 
         server.process_connections().unwrap();
         assert_eq!(server.connections.len(), 0);
+    }
+
+    #[test]
+    fn displaced_publisher_stops_relaying_after_force_release() {
+        fn allow_release(_conn_id: u64, _app: &str, _stream_name: &str) -> bool {
+            true
+        }
+
+        let mut server = test_server();
+        server.on_release_stream_cb = Some(allow_release);
+
+        let mut owner = Conn::new();
+        owner.conn_id = 1;
+        owner.app = "live".to_string();
+        owner.current_stream = Some(Box::new(crate::session::stream::Stream {
+            stream_id: 1,
+            name: String::new(),
+            is_publishing: false,
+            is_playing: false,
+            paused: false,
+            receive_audio: true,
+            receive_video: true,
+        }));
+        owner.publish_routes = Some(PublishRouteRegistry::new(Arc::clone(
+            &server.active_publish_routes,
+        )));
+        owner.on_release_stream_cb = Some(allow_release);
+
+        let mut challenger = Conn::new();
+        challenger.conn_id = 2;
+        challenger.app = "live".to_string();
+        challenger.publish_routes = Some(PublishRouteRegistry::new(Arc::clone(
+            &server.active_publish_routes,
+        )));
+        challenger.on_release_stream_cb = Some(allow_release);
+
+        let mut create = crate::buffer::Buffer::with_capacity(128);
+        crate::message::command::build_create_stream(&mut create, 1.0).unwrap();
+        owner.handle_command(create.as_slice()).unwrap();
+
+        let mut publish = crate::buffer::Buffer::with_capacity(128);
+        crate::message::command::build_publish(&mut publish, "cam", "live").unwrap();
+        owner.handle_command(publish.as_slice()).unwrap();
+        assert!(owner.relay_enabled);
+        assert_eq!(owner.claimed_publish_route.as_deref(), Some("cam"));
+
+        owner
+            .inject_relay_frame(FrameType::Video, 1, &[0x17, 0x01, 0xAA])
+            .unwrap();
+        assert_eq!(owner.pending_relay.len(), 1);
+
+        let mut release = crate::buffer::Buffer::with_capacity(128);
+        crate::message::command::build_release_stream(&mut release, "cam").unwrap();
+        challenger.handle_command(release.as_slice()).unwrap();
+        assert!(
+            server
+                .active_publish_routes
+                .lock()
+                .unwrap()
+                .get(&("live".to_string(), "cam".to_string()))
+                .is_none()
+        );
+
+        // Simulate the post-recv reconciliation the poll loop runs.
+        server.connections = vec![owner, challenger];
+        server.detach_displaced_route_owners();
+        let abandoned = server.drain_pending_cache_evictions();
+        server.drop_stale_pending_relay_for_abandoned_routes(&abandoned);
+        let batch = server.build_relay_frame_batch();
+
+        assert!(
+            batch.is_empty(),
+            "displaced owner's queued frames must not enter the relay batch"
+        );
+        assert!(
+            !server.connections[0].relay_enabled,
+            "displaced owner must stop relaying"
+        );
+        assert!(server.connections[0].claimed_publish_route.is_none());
+        assert!(
+            server.connections[0].relay_route_abandoned("live", "cam"),
+            "abandoned route must be recorded so budget-deferred frames cannot recache"
+        );
+
+        // New owner can claim and relay after the force-clear.
+        let mut create2 = crate::buffer::Buffer::with_capacity(128);
+        crate::message::command::build_create_stream(&mut create2, 1.0).unwrap();
+        server.connections[1]
+            .handle_command(create2.as_slice())
+            .unwrap();
+        let mut publish2 = crate::buffer::Buffer::with_capacity(128);
+        crate::message::command::build_publish(&mut publish2, "cam", "live").unwrap();
+        server.connections[1]
+            .handle_command(publish2.as_slice())
+            .unwrap();
+        assert!(server.connections[1].relay_enabled);
+        server.connections[1]
+            .inject_relay_frame(FrameType::Video, 2, &[0x17, 0x01, 0xBB])
+            .unwrap();
+        let batch2 = server.build_relay_frame_batch();
+        assert_eq!(batch2.len(), 1);
+        assert_eq!(batch2[0].publisher_conn_id, 2);
+        assert_eq!(batch2[0].payload, vec![0x17, 0x01, 0xBB]);
     }
 
     #[test]

@@ -715,6 +715,21 @@ impl Conn {
         }
     }
 
+    /// Stop relaying a publish route this connection no longer owns in the
+    /// shared registry (e.g. after another peer's authorized `releaseStream`).
+    /// Does not call `routes.release` — the map entry is already absent or
+    /// held by someone else. Leaves `is_publishing` set for liveness timers.
+    pub(crate) fn detach_lost_publish_route(&mut self) {
+        let Some(route) = self.claimed_publish_route.take() else {
+            return;
+        };
+        self.relay_enabled = false;
+        let app = self.app.clone();
+        self.pending_relay
+            .retain(|f| !(f.app == app && f.stream_name == route));
+        let _ = self.push_pending_cache_eviction(app, route);
+    }
+
     pub(crate) fn relay_route_abandoned(&self, app: &str, route: &str) -> bool {
         self.abandoned_relay_routes
             .iter()
