@@ -4614,6 +4614,10 @@ mod tests {
         let mut owner = Conn::new();
         owner.conn_id = 1;
         owner.app = "live".to_string();
+        // createStream refuses below AppConnected; without this the owner's
+        // pre-seeded current_stream masks the failure, but the challenger's
+        // later createStream+publish path never enables relay.
+        owner.state = ConnState::AppConnected;
         owner.current_stream = Some(Box::new(crate::session::stream::Stream {
             stream_id: 1,
             name: String::new(),
@@ -4632,6 +4636,7 @@ mod tests {
         let mut challenger = Conn::new();
         challenger.conn_id = 2;
         challenger.app = "live".to_string();
+        challenger.state = ConnState::AppConnected;
         challenger.publish_routes = Some(PublishRouteRegistry::new(Arc::clone(
             &server.active_publish_routes,
         )));
