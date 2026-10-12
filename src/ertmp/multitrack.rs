@@ -43,8 +43,7 @@ pub fn multitrack_parse(mt: &mut Multitrack, data: &[u8]) -> Result<()> {
     }
 
     let copy_len = name_len.min(63);
-    mt.track_name[..copy_len]
-        .copy_from_slice(&data[name_offset + 3..name_offset + 3 + copy_len]);
+    mt.track_name[..copy_len].copy_from_slice(&data[name_offset + 3..name_offset + 3 + copy_len]);
     mt.track_name[copy_len] = 0;
 
     Ok(())
