@@ -4601,9 +4601,15 @@ mod tests {
         fn allow_release(_conn_id: u64, _app: &str, _stream_name: &str) -> bool {
             true
         }
+        // `on_release_stream_cb` trips `requires_explicit_publish_auth`, so
+        // publish must also be explicitly allowed or the owner never relays.
+        fn allow_publish(_conn_id: u64, _app: &str, _stream_name: &str) -> bool {
+            true
+        }
 
         let mut server = test_server();
         server.on_release_stream_cb = Some(allow_release);
+        server.on_publish_cb = Some(allow_publish);
 
         let mut owner = Conn::new();
         owner.conn_id = 1;
@@ -4621,6 +4627,7 @@ mod tests {
             &server.active_publish_routes,
         )));
         owner.on_release_stream_cb = Some(allow_release);
+        owner.on_publish_cb = Some(allow_publish);
 
         let mut challenger = Conn::new();
         challenger.conn_id = 2;
@@ -4629,6 +4636,7 @@ mod tests {
             &server.active_publish_routes,
         )));
         challenger.on_release_stream_cb = Some(allow_release);
+        challenger.on_publish_cb = Some(allow_publish);
 
         let mut create = crate::buffer::Buffer::with_capacity(128);
         crate::message::command::build_create_stream(&mut create, 1.0).unwrap();

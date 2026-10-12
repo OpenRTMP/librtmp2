@@ -728,9 +728,8 @@ impl Conn {
         // Frames are keyed by `relay_route_key()` at queue time — after an
         // integrator pins `relay_key`, that can differ from the claimed name.
         let live = self.relay_route_key();
-        self.pending_relay.retain(|f| {
-            !(f.app == app && (f.stream_name == claimed || f.stream_name == live))
-        });
+        self.pending_relay
+            .retain(|f| !(f.app == app && (f.stream_name == claimed || f.stream_name == live)));
         let mut evicted = std::collections::HashSet::new();
         for route_key in [claimed, live] {
             if !route_key.is_empty() && evicted.insert(route_key.clone()) {
