@@ -41,6 +41,9 @@ pub fn exvideo_parse(data: &[u8], hdr: &mut VideoHeader) -> Result<()> {
                 ct
             };
             hdr.composition_time = ct as u32;
+            // Bytes 1..5 were consumed into VideoHeader; match the enhanced-path
+            // contract that header_size covers every interpreted header byte.
+            hdr.header_size = 5;
         }
         return Ok(());
     }
@@ -212,5 +215,26 @@ mod tests {
         hdr.fourcc[..4].copy_from_slice(b"avc1");
         let mut buf = [0u8; 4];
         assert_eq!(exvideo_write(&hdr, &mut buf), 0);
+    }
+
+    #[test]
+    fn legacy_avc_sets_header_size_after_composition_time() {
+        // tag=0x17 (key + AVC), AVCPacketType=1, CT=42
+        let data = [0x17, 0x01, 0x00, 0x00, 0x2A, 0xDE, 0xAD];
+        let mut hdr = VideoHeader::default();
+        exvideo_parse(&data, &mut hdr).unwrap();
+        assert_eq!(hdr.is_ex_header, 0);
+        assert_eq!(hdr.composition_time, 42);
+        assert_eq!(hdr.header_size, 5);
+    }
+
+    #[test]
+    fn legacy_non_avc_keeps_header_size_one() {
+        let data = [0x12, 0x00, 0x00, 0x00, 0x00];
+        let mut hdr = VideoHeader::default();
+        exvideo_parse(&data, &mut hdr).unwrap();
+        assert_eq!(hdr.is_ex_header, 0);
+        assert_eq!(hdr.header_size, 1);
+        assert_eq!(hdr.composition_time, 0);
     }
 }

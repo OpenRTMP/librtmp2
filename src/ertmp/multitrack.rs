@@ -28,18 +28,23 @@ pub fn multitrack_parse(mt: &mut Multitrack, data: &[u8]) -> Result<()> {
         crate::types::MultitrackType::Metadata
     };
 
+    // AMF0_STRING: marker 0x02, then UI16 length, then bytes.
     let name_offset = 9;
-    if name_offset + 2 > data.len() {
+    if name_offset + 3 > data.len() {
         return Err(ErrorCode::Io);
     }
+    if data[name_offset] != 0x02 {
+        return Err(ErrorCode::Protocol);
+    }
 
-    let name_len = ((data[name_offset] as usize) << 8) | (data[name_offset + 1] as usize);
-    if name_offset + 2 + name_len > data.len() {
+    let name_len = ((data[name_offset + 1] as usize) << 8) | (data[name_offset + 2] as usize);
+    if name_offset + 3 + name_len > data.len() {
         return Err(ErrorCode::Io);
     }
 
     let copy_len = name_len.min(63);
-    mt.track_name[..copy_len].copy_from_slice(&data[name_offset + 2..name_offset + 2 + copy_len]);
+    mt.track_name[..copy_len]
+        .copy_from_slice(&data[name_offset + 3..name_offset + 3 + copy_len]);
     mt.track_name[copy_len] = 0;
 
     Ok(())
@@ -48,7 +53,7 @@ pub fn multitrack_parse(mt: &mut Multitrack, data: &[u8]) -> Result<()> {
 /// Write a multitrack descriptor. Returns bytes written.
 pub fn multitrack_write(mt: &Multitrack, buf: &mut [u8]) -> usize {
     let name_len = mt.track_name.iter().position(|&b| b == 0).unwrap_or(63);
-    let needed = 1 + 8 + 2 + name_len;
+    let needed = 1 + 8 + 1 + 2 + name_len;
     if buf.len() < needed {
         return 0;
     }
@@ -62,7 +67,9 @@ pub fn multitrack_write(mt: &Multitrack, buf: &mut [u8]) -> usize {
     buf[offset..offset + 8].copy_from_slice(&(mt.track_type as u8 as f64).to_be_bytes());
     offset += 8;
 
-    // AMF0_STRING: 2-byte length + N bytes
+    // AMF0_STRING: marker + 2-byte length + N bytes
+    buf[offset] = 0x02;
+    offset += 1;
     buf[offset] = (name_len >> 8) as u8;
     buf[offset + 1] = name_len as u8;
     offset += 2;
@@ -129,5 +136,35 @@ mod tests {
         assert!(multitrack_parse(&mut mt, &[0x00; 8]).is_err());
         assert_eq!(mt.track_type, MultitrackType::Audio);
         assert_eq!(mt.track_name[0], 0);
+    }
+
+    #[test]
+    fn name_round_trips_with_amf0_string_marker() {
+        let mut mt = Multitrack {
+            track_type: MultitrackType::Video,
+            track_name: [0; 64],
+        };
+        mt.track_name[..3].copy_from_slice(b"cam");
+
+        let mut buf = [0u8; 128];
+        let n = multitrack_write(&mt, &mut buf);
+        assert_eq!(n, 1 + 8 + 1 + 2 + 3);
+        assert_eq!(buf[9], 0x02);
+        assert_eq!(&buf[10..12], &[0x00, 0x03]);
+        assert_eq!(&buf[12..15], b"cam");
+
+        // Spec-shaped bytes (marker before UI16) must parse.
+        let mut out = Multitrack::default();
+        multitrack_parse(&mut out, &buf[..n]).unwrap();
+        assert_eq!(&out.track_name[..3], b"cam");
+
+        // Missing 0x02 marker is a protocol error (old writer shape).
+        let legacy = [
+            0x00, 0x3F, 0xF0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, b'c', b'a', b'm',
+        ];
+        assert!(matches!(
+            multitrack_parse(&mut out, &legacy),
+            Err(ErrorCode::Protocol)
+        ));
     }
 }
