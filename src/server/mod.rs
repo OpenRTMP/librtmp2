@@ -1625,10 +1625,16 @@ impl Server {
         // gets BadName in this poll and never retries after the reaper runs.
         self.reap_stale_inject_routes();
         self.recv_and_reap_connections(readable, &mut closed);
+        // Drain rename evictions from recv first so detach can still enqueue
+        // cache clears when the per-conn eviction queue was near capacity.
+        let mut abandoned_this_batch = self.drain_pending_cache_evictions();
         // After recv may have force-released a route (authorized releaseStream),
-        // detach any still-publishing conn that no longer owns its claimed
+        // detach any still-live publisher that no longer owns its claimed
         // route so it cannot keep fanning media into the shared stream.
-        self.detach_displaced_route_owners();
+        // Skip connections already marked closed this tick — their registry
+        // entries were removed on close, and wiping pending_relay would drop
+        // the final accepted media before orphan/export.
+        self.detach_displaced_route_owners(&closed);
 
         // Ordering within this function is deliberate: evictions from
         // renames processed by the recv loop just above are applied here,
@@ -1646,7 +1652,7 @@ impl Server {
         // caching for the connection that actually abandoned the route;
         // a *different* publisher's legitimate same-batch frame for an
         // identical (app, name) is unaffected.
-        let abandoned_this_batch = self.drain_pending_cache_evictions();
+        abandoned_this_batch.extend(self.drain_pending_cache_evictions());
 
         self.drop_stale_pending_relay_for_abandoned_routes(&abandoned_this_batch);
         let relay_frames = self.build_relay_frame_batch();
@@ -2922,21 +2928,42 @@ impl Server {
     /// longer owned by them in `active_publish_routes` (typically after an
     /// authorized `releaseStream` force-clear). Does not mutate the registry
     /// itself — FMS map-clear semantics stay on `force_release`.
-    fn detach_displaced_route_owners(&mut self) {
-        let Ok(routes) = self.active_publish_routes.lock() else {
-            return;
-        };
-        let snapshot = routes.clone();
-        drop(routes);
-        for conn in &mut self.connections {
-            let Some(claimed) = conn.claimed_publish_route.as_ref() else {
-                continue;
+    ///
+    /// `closed` are connection indices already scheduled for teardown this
+    /// tick; those must not be treated as displaced (their map entries were
+    /// removed on close so final queued media can still orphan/export).
+    fn detach_displaced_route_owners(&mut self, closed: &[usize]) {
+        let closed_ids: HashSet<u64> = closed
+            .iter()
+            .filter_map(|&i| self.connections.get(i).map(|c| c.conn_id))
+            .collect();
+        let mut to_detach = Vec::new();
+        {
+            let Ok(routes) = self.active_publish_routes.lock() else {
+                return;
             };
-            let key = (conn.app.clone(), claimed.clone());
-            if snapshot.get(&key) == Some(&conn.conn_id) {
-                continue;
+            for (i, conn) in self.connections.iter().enumerate() {
+                if closed_ids.contains(&conn.conn_id) {
+                    continue;
+                }
+                // Socket-less / unit-test conns without the shared registry
+                // keep a local claim; do not treat a missing map entry as
+                // displacement.
+                if conn.publish_routes.is_none() {
+                    continue;
+                }
+                let Some(claimed) = conn.claimed_publish_route.as_ref() else {
+                    continue;
+                };
+                let key = (conn.app.clone(), claimed.clone());
+                if routes.get(&key) == Some(&conn.conn_id) {
+                    continue;
+                }
+                to_detach.push(i);
             }
-            conn.detach_lost_publish_route();
+        }
+        for i in to_detach {
+            self.connections[i].detach_lost_publish_route();
         }
     }
 
@@ -4632,7 +4659,7 @@ mod tests {
 
         // Simulate the post-recv reconciliation the poll loop runs.
         server.connections = vec![owner, challenger];
-        server.detach_displaced_route_owners();
+        server.detach_displaced_route_owners(&[]);
         let abandoned = server.drain_pending_cache_evictions();
         server.drop_stale_pending_relay_for_abandoned_routes(&abandoned);
         let batch = server.build_relay_frame_batch();

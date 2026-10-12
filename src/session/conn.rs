@@ -720,14 +720,23 @@ impl Conn {
     /// Does not call `routes.release` — the map entry is already absent or
     /// held by someone else. Leaves `is_publishing` set for liveness timers.
     pub(crate) fn detach_lost_publish_route(&mut self) {
-        let Some(route) = self.claimed_publish_route.take() else {
+        let Some(claimed) = self.claimed_publish_route.take() else {
             return;
         };
         self.relay_enabled = false;
         let app = self.app.clone();
-        self.pending_relay
-            .retain(|f| !(f.app == app && f.stream_name == route));
-        let _ = self.push_pending_cache_eviction(app, route);
+        // Frames are keyed by `relay_route_key()` at queue time — after an
+        // integrator pins `relay_key`, that can differ from the claimed name.
+        let live = self.relay_route_key();
+        self.pending_relay.retain(|f| {
+            !(f.app == app && (f.stream_name == claimed || f.stream_name == live))
+        });
+        let mut evicted = std::collections::HashSet::new();
+        for route_key in [claimed, live] {
+            if !route_key.is_empty() && evicted.insert(route_key.clone()) {
+                self.try_push_pending_cache_eviction(app.clone(), route_key);
+            }
+        }
     }
 
     pub(crate) fn relay_route_abandoned(&self, app: &str, route: &str) -> bool {
