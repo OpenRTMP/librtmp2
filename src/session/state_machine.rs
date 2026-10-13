@@ -18,8 +18,16 @@ static STATE_NAMES: &[&str] = &[
 ];
 
 /// Attempt a state transition. Backward transitions are rejected.
+///
+/// `Publishing` and `Playing` are peer roles: Ord places Publishing before
+/// Playing for ABI/discriminant stability, not lifecycle order, so both
+/// directions between those two states are allowed.
 pub fn conn_transition(current: &mut ConnState, new_state: ConnState) -> Result<()> {
-    if new_state < *current {
+    let peer_role_switch = matches!(
+        (*current, new_state),
+        (ConnState::Playing, ConnState::Publishing) | (ConnState::Publishing, ConnState::Playing)
+    );
+    if !peer_role_switch && new_state < *current {
         return Err(ErrorCode::Protocol);
     }
     *current = new_state;
