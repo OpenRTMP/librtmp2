@@ -1246,27 +1246,41 @@ impl Server {
     /// Resolve a `publish` request that `on_publish_auth_cb` left `Pending`
     /// on connection `conn_id`.
     ///
-    /// Harmless no-op if `conn_id` no longer exists (the connection
-    /// disconnected while authorization was pending) or if this
-    /// authorization was already completed -- safe to call at most once per
-    /// pending request, or extra times, without side effects.
-    pub fn complete_publish_authorization(&mut self, conn_id: u64, allow: bool) -> Result<()> {
+    /// `request_id` is the id the callback returned in
+    /// [`AuthorizationResult::Pending`]; a call carrying any other id resolves
+    /// nothing, so a decision for a request that has since been torn down,
+    /// replaced, or superseded by the opposite role cannot be applied to the
+    /// request that holds the slot by then. Harmless no-op if `conn_id` no
+    /// longer exists (the connection disconnected while authorization was
+    /// pending) or if this authorization was already completed -- safe to call
+    /// at most once per pending request, or extra times, without side effects.
+    pub fn complete_publish_authorization(
+        &mut self,
+        conn_id: u64,
+        request_id: u64,
+        allow: bool,
+    ) -> Result<()> {
         let Some(conn) = self.connections.iter_mut().find(|c| c.conn_id == conn_id) else {
             return Ok(());
         };
-        conn.complete_publish_authorization(allow)?;
+        conn.complete_publish_authorization(request_id, allow)?;
         let _ = conn.flush();
         Ok(())
     }
 
     /// Resolve a `play` request that `on_play_auth_cb` left `Pending` on
     /// connection `conn_id`. See [`Self::complete_publish_authorization`]
-    /// for no-op semantics.
-    pub fn complete_play_authorization(&mut self, conn_id: u64, allow: bool) -> Result<()> {
+    /// for the `request_id` semantics and no-op behaviour.
+    pub fn complete_play_authorization(
+        &mut self,
+        conn_id: u64,
+        request_id: u64,
+        allow: bool,
+    ) -> Result<()> {
         let Some(conn) = self.connections.iter_mut().find(|c| c.conn_id == conn_id) else {
             return Ok(());
         };
-        conn.complete_play_authorization(allow)?;
+        conn.complete_play_authorization(request_id, allow)?;
         // Send the init frames in the same write as NetStream.Play.Start. A
         // completion arrives between poll ticks, when no cache eviction is
         // pending, so the cache holds no abandoned route's frames here.
@@ -6310,7 +6324,7 @@ mod tests {
         conn.conn_id = conn_id;
         conn.app = "live".to_string();
         conn.current_stream = Some(Box::new(Stream::new(1)));
-        conn.on_publish_auth_cb = Some(|_, _, _| AuthorizationResult::Pending);
+        conn.on_publish_auth_cb = Some(|_, _, _| AuthorizationResult::Pending { request_id: 1 });
         let mut buf = crate::buffer::Buffer::with_capacity(128);
         crate::message::command::build_publish(&mut buf, "s", "live").unwrap();
         conn.handle_command(buf.as_slice()).unwrap();
@@ -6324,7 +6338,7 @@ mod tests {
         conn.conn_id = conn_id;
         conn.app = "live".to_string();
         conn.current_stream = Some(Box::new(Stream::new(1)));
-        conn.on_play_auth_cb = Some(|_, _, _| AuthorizationResult::Pending);
+        conn.on_play_auth_cb = Some(|_, _, _| AuthorizationResult::Pending { request_id: 1 });
         let mut buf = crate::buffer::Buffer::with_capacity(128);
         crate::message::command::build_play(&mut buf, "s").unwrap();
         conn.handle_command(buf.as_slice()).unwrap();
@@ -6335,8 +6349,8 @@ mod tests {
     #[test]
     fn completion_for_unknown_connection_is_harmless() {
         let mut server = test_server();
-        assert!(server.complete_publish_authorization(9999, true).is_ok());
-        assert!(server.complete_play_authorization(9999, false).is_ok());
+        assert!(server.complete_publish_authorization(9999, 1, true).is_ok());
+        assert!(server.complete_play_authorization(9999, 1, false).is_ok());
     }
 
     #[test]
@@ -6344,7 +6358,7 @@ mod tests {
         let mut server = test_server();
         server.connections.push(pending_publish_conn(42));
 
-        server.complete_publish_authorization(42, true).unwrap();
+        server.complete_publish_authorization(42, 1, true).unwrap();
         let conn = server.connections.iter().find(|c| c.conn_id == 42).unwrap();
         assert!(conn.current_stream.as_ref().unwrap().is_publishing);
         assert!(!conn.has_pending_authorization());
@@ -6355,7 +6369,7 @@ mod tests {
         let mut server = test_server();
         server.connections.push(pending_play_conn(43));
 
-        server.complete_play_authorization(43, false).unwrap();
+        server.complete_play_authorization(43, 1, false).unwrap();
         let conn = server.connections.iter().find(|c| c.conn_id == 43).unwrap();
         assert!(!conn.current_stream.as_ref().unwrap().is_playing);
         assert!(!conn.has_pending_authorization());
@@ -6418,7 +6432,7 @@ mod tests {
 
         // The host's late completion for the reaped request is inert and does
         // not lift the seal.
-        server.complete_play_authorization(45, true).unwrap();
+        server.complete_play_authorization(45, 1, true).unwrap();
         let conn = server
             .connections
             .iter_mut()
@@ -6453,7 +6467,7 @@ mod tests {
 
         // The server-level lookup still finds the conn, but the completion is
         // inert: the reap's seal stays set.
-        server.complete_publish_authorization(46, true).unwrap();
+        server.complete_publish_authorization(46, 1, true).unwrap();
         let conn = server
             .connections
             .iter_mut()
@@ -6500,7 +6514,7 @@ mod tests {
         );
         // The late completion finds no such conn_id at all and resolves
         // nothing, which is the whole point of making the reap terminal.
-        assert!(server.complete_publish_authorization(47, true).is_ok());
+        assert!(server.complete_publish_authorization(47, 1, true).is_ok());
         let mut buf = [0u8; 4096];
         assert!(
             peer.read(&mut buf).unwrap_or(0) > 0,
@@ -6539,7 +6553,7 @@ mod tests {
         // is now awaiting a fresh authorization decision -- delivery must
         // stop even though `stream.is_playing` is still true from the prior
         // Allow.
-        player.on_play_auth_cb = Some(|_, _, _| AuthorizationResult::Pending);
+        player.on_play_auth_cb = Some(|_, _, _| AuthorizationResult::Pending { request_id: 1 });
         let mut buf = crate::buffer::Buffer::with_capacity(128);
         crate::message::command::build_play(&mut buf, "stream").unwrap();
         player.handle_command(buf.as_slice()).unwrap();

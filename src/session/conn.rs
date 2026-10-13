@@ -141,20 +141,19 @@ pub(crate) struct RelayCongestion {
 }
 
 /// A publish or play request whose authorization callback returned
-/// [`AuthorizationResult::Pending`]. Captures what's needed to resume the
+/// `AuthorizationResult::Pending`. Captures what's needed to resume the
 /// normal publish/play flow from `complete_publish_authorization`/
 /// `complete_play_authorization` without re-parsing the original command.
 #[derive(Debug, Clone)]
 struct PendingAuth {
     stream_name: String,
     requested_at: Instant,
-    /// Set when the stream this request was made for is torn down or replaced
-    /// before the decision arrives. The request stays in its slot (so a new
-    /// request cannot take its place and be authorized by the stale
-    /// completion, which is keyed only by `conn_id`) but a later completion
-    /// resolves it as a silent no-op instead of granting/denying a stream
-    /// that no longer exists.
-    withdrawn: bool,
+    /// The integrator's identifier for this request, echoed back in the
+    /// completion that resolves it. A completion carrying a different id is
+    /// ignored, which is what lets the connection drop a request whose stream
+    /// was torn down or whose role was superseded without leaving a tombstone
+    /// that blocks the next request of that role.
+    request_id: u64,
 }
 
 impl RelayFrame {
@@ -312,6 +311,13 @@ pub struct Conn {
     /// Set while a `play` request is waiting on `on_play_auth_cb` (`Pending`)
     /// for a decision via `complete_play_authorization`.
     pending_play_auth: Option<PendingAuth>,
+    /// Request ids this connection already answered or discarded, oldest first
+    /// and bounded by [`Self::RESOLVED_AUTH_ID_MEMORY`]. A `publish` reusing one
+    /// is refused: its completion could not be told apart from the one still
+    /// owed for the earlier request with that id.
+    resolved_publish_auth_ids: Vec<u64>,
+    /// Same as [`Self::resolved_publish_auth_ids`], for `play` requests.
+    resolved_play_auth_ids: Vec<u64>,
     /// Set when [`Self::reap_timed_out_pending_auth`] denied a `publish`
     /// request on the library's side. The reap is that request's terminal
     /// answer, so once set a new `publish` can never claim the freed slot --
@@ -457,6 +463,8 @@ impl Conn {
             on_play_auth_cb: None,
             pending_publish_auth: None,
             pending_play_auth: None,
+            resolved_publish_auth_ids: Vec::new(),
+            resolved_play_auth_ids: Vec::new(),
             publish_auth_sealed: false,
             play_auth_sealed: false,
             on_shared_object_auth_cb: None,
@@ -2084,13 +2092,10 @@ impl Conn {
         // connection: the grant below claims the session, so a late play
         // completion must become the documented no-op instead of calling
         // `complete_play_authorized`, which would evict this publish route and
-        // flip the connection into Playing. The slot stays as a tombstone
-        // because completions are looked up by `conn_id` alone -- clearing it
-        // would let a new play request take its place and be authorized by the
-        // stale decision.
-        if let Some(pending) = self.pending_play_auth.as_mut() {
-            pending.withdrawn = true;
-        }
+        // flip the connection into Playing. The request is dropped and its id
+        // remembered, so the decision still owed for it resolves nothing while
+        // the slot stays free for a later play request.
+        self.drop_pending_play_auth();
         // Use current_stream.is_publishing rather than self.state here:
         // conn_transition() only allows forward moves through ConnState, so
         // a play-then-publish sequence leaves self.state stuck at Playing
@@ -2209,13 +2214,11 @@ impl Conn {
     /// `Allow`) or later from [`Self::complete_play_authorization`]
     /// (`Pending` -> `Allow`).
     fn complete_play_authorized(&mut self, name_str: String) -> Result<()> {
-        // Mirror of the withdrawal in `complete_publish_authorized`: this
-        // grant takes the session over for play, so an in-flight publish
-        // decision on the same connection must not be able to flip it back
-        // into Publishing when its completion arrives.
-        if let Some(pending) = self.pending_publish_auth.as_mut() {
-            pending.withdrawn = true;
-        }
+        // Mirror of the drop in `complete_publish_authorized`: this grant takes
+        // the session over for play, so an in-flight publish decision on the
+        // same connection must not be able to flip it back into Publishing when
+        // its completion arrives.
+        self.drop_pending_publish_auth();
         if !self.defer_media_relay {
             self.relay_enabled = true;
         }
@@ -2275,20 +2278,24 @@ impl Conn {
     /// it does *not* lift the seal the reap set. The reap is terminal for the
     /// connection (the built-in server tears it down), so the sealed slot is
     /// never reopened for a request made after the reap.
-    pub fn complete_publish_authorization(&mut self, allow: bool) -> Result<()> {
-        let Some(pending) = self.pending_publish_auth.take() else {
-            // Either a duplicate completion, or the reap already answered for
-            // this request. The seal stays set: the reap is terminal for this
-            // connection, and clearing it here would let a request made after
-            // the reap claim the freed slot and be resolved by this completion.
-            return Ok(());
-        };
-        if pending.withdrawn {
-            // The stream was torn down or replaced while this decision was in
-            // flight; resolving the tombstone silently keeps a stale grant
-            // from authorizing whatever request came after it.
+    pub fn complete_publish_authorization(&mut self, request_id: u64, allow: bool) -> Result<()> {
+        // A completion that does not match the request currently waiting is
+        // either a duplicate or a decision for a request this connection
+        // already discarded (torn down, replaced, or superseded by the
+        // opposite role). Resolving nothing keeps it from granting/denying a
+        // request it was never issued for.
+        if !self
+            .pending_publish_auth
+            .as_ref()
+            .is_some_and(|pending| pending.request_id == request_id)
+        {
+            self.remember_publish_auth_id(request_id);
             return Ok(());
         }
+        let Some(pending) = self.pending_publish_auth.take() else {
+            return Ok(());
+        };
+        self.remember_publish_auth_id(request_id);
         if allow {
             // Pending authorization may start a fresh window only if it did
             // not supersede an active publisher already holding this route.
@@ -2314,13 +2321,19 @@ impl Conn {
     /// Resolve a `play` request left `Pending` by `on_play_auth_cb`. See
     /// [`Self::complete_publish_authorization`] for no-op semantics, including
     /// that a completion for a reaped request leaves `play_auth_sealed` set.
-    pub fn complete_play_authorization(&mut self, allow: bool) -> Result<()> {
+    pub fn complete_play_authorization(&mut self, request_id: u64, allow: bool) -> Result<()> {
+        if !self
+            .pending_play_auth
+            .as_ref()
+            .is_some_and(|pending| pending.request_id == request_id)
+        {
+            self.remember_play_auth_id(request_id);
+            return Ok(());
+        }
         let Some(pending) = self.pending_play_auth.take() else {
             return Ok(());
         };
-        if pending.withdrawn {
-            return Ok(());
-        }
+        self.remember_play_auth_id(request_id);
         if allow {
             self.complete_play_authorized(pending.stream_name)
         } else {
@@ -2328,18 +2341,59 @@ impl Conn {
         }
     }
 
-    /// Withdraw any in-flight publish/play authorization: the stream it was
-    /// requested for is being torn down or replaced, so a later completion
-    /// must not resurrect it. The request stays in its slot as a tombstone
-    /// until that completion (or the reap timeout) clears it, because
-    /// completions are looked up purely by `conn_id` -- an empty slot could
-    /// be refilled by a new request and authorized by the stale decision.
-    fn withdraw_pending_authorizations(&mut self) {
-        if let Some(pending) = self.pending_publish_auth.as_mut() {
-            pending.withdrawn = true;
+    /// How many answered request ids are remembered per role. A connection
+    /// never has more than one request per role in flight, so a handful covers
+    /// every completion that can still arrive; the bound keeps a long-lived
+    /// connection from growing this list without limit.
+    const RESOLVED_AUTH_ID_MEMORY: usize = 8;
+
+    fn remember_resolved_auth_id(ids: &mut Vec<u64>, request_id: u64) {
+        if ids.contains(&request_id) {
+            return;
         }
-        if let Some(pending) = self.pending_play_auth.as_mut() {
-            pending.withdrawn = true;
+        if ids.len() >= Self::RESOLVED_AUTH_ID_MEMORY {
+            ids.remove(0);
+        }
+        ids.push(request_id);
+    }
+
+    fn remember_publish_auth_id(&mut self, request_id: u64) {
+        Self::remember_resolved_auth_id(&mut self.resolved_publish_auth_ids, request_id);
+    }
+
+    fn remember_play_auth_id(&mut self, request_id: u64) {
+        Self::remember_resolved_auth_id(&mut self.resolved_play_auth_ids, request_id);
+    }
+
+    /// Drop any in-flight publish/play authorization: the stream it was
+    /// requested for is being torn down or replaced, so a later completion must
+    /// not resurrect it. The ids are remembered instead of the requests, so the
+    /// slot stays free for the next request of that role -- a completion for the
+    /// dropped request carries a different id and resolves nothing.
+    fn drop_pending_authorizations(&mut self) {
+        if let Some(pending) = self.pending_publish_auth.take() {
+            self.remember_publish_auth_id(pending.request_id);
+        }
+        if let Some(pending) = self.pending_play_auth.take() {
+            self.remember_play_auth_id(pending.request_id);
+        }
+    }
+
+    /// Drop the opposite role's in-flight request when this role is granted the
+    /// session: the grant takes the connection over, so a decision for that
+    /// request must not be able to flip it back.
+    /// Drop the opposite role's in-flight request when this role is granted the
+    /// session: the grant takes the connection over, so a decision for that
+    /// request must not be able to flip it back.
+    fn drop_pending_publish_auth(&mut self) {
+        if let Some(pending) = self.pending_publish_auth.take() {
+            self.remember_publish_auth_id(pending.request_id);
+        }
+    }
+
+    fn drop_pending_play_auth(&mut self) {
+        if let Some(pending) = self.pending_play_auth.take() {
+            self.remember_play_auth_id(pending.request_id);
         }
     }
 
@@ -2347,9 +2401,10 @@ impl Conn {
     /// or `complete_play_authorization`. While pending, no media flows either
     /// direction: `is_active_publisher_stream`/relay delivery both stay gated
     /// on `stream.is_publishing`/`stream.is_playing`, which are only set once
-    /// the authorization completes as `Allow`. A request withdrawn by a stream
-    /// teardown keeps its slot as a tombstone until the stale completion (or
-    /// the reap timeout) discards it, so this stays true across that teardown.
+    /// the authorization completes as `Allow`. A request dropped by a stream
+    /// teardown or by the opposite role being granted keeps its id remembered
+    /// but not its slot, so the stale completion resolves nothing and the role
+    /// stays free for a new request.
     pub fn has_pending_authorization(&self) -> bool {
         self.pending_publish_auth.is_some() || self.pending_play_auth.is_some()
     }
@@ -2382,22 +2437,24 @@ impl Conn {
     /// that arrives afterwards is a no-op that leaves the seal set.
     pub(crate) fn reap_timed_out_pending_auth(&mut self, timeout: Duration) -> bool {
         let mut reaped = false;
-        if self
+        if let Some(request_id) = self
             .pending_publish_auth
             .as_ref()
-            .is_some_and(|p| p.requested_at.elapsed() >= timeout)
+            .filter(|p| p.requested_at.elapsed() >= timeout)
+            .map(|p| p.request_id)
         {
             self.publish_auth_sealed = true;
-            let _ = self.complete_publish_authorization(false);
+            let _ = self.complete_publish_authorization(request_id, false);
             reaped = true;
         }
-        if self
+        if let Some(request_id) = self
             .pending_play_auth
             .as_ref()
-            .is_some_and(|p| p.requested_at.elapsed() >= timeout)
+            .filter(|p| p.requested_at.elapsed() >= timeout)
+            .map(|p| p.request_id)
         {
             self.play_auth_sealed = true;
-            let _ = self.complete_play_authorization(false);
+            let _ = self.complete_play_authorization(request_id, false);
             reaped = true;
         }
         reaped
@@ -2539,7 +2596,7 @@ impl Conn {
                     // Withdraw any in-flight authorization for the replaced
                     // stream: a late completion must be the documented no-op,
                     // not a grant for the new stream.
-                    self.withdraw_pending_authorizations();
+                    self.drop_pending_authorizations();
                     self.active_stream_count = projected_stream_count;
                     self.next_stream_id += 1;
                     let stream_id = self.next_stream_id;
@@ -2563,14 +2620,14 @@ impl Conn {
                 else {
                     return Ok(());
                 };
-                // A decision is already in flight for this connection -- never
+                // A decision is already in flight for this role -- never
                 // overwrite `pending_publish_auth` with a second request, or
-                // the completion that eventually arrives (looked up purely by
-                // conn_id) would authorize whichever stream name was stored
-                // last rather than the one the resolving decision was for. A
-                // slot sealed by the reap is off limits for the same reason:
-                // the reap already answered that request, so its completion
-                // must not be able to reach a request made after it.
+                // the completion that eventually arrives would authorize
+                // whichever stream name was stored last rather than the one the
+                // resolving decision was for. A slot sealed by the reap is off
+                // limits for the same reason: the reap already answered that
+                // request, so its completion must not be able to reach a
+                // request made after it.
                 if self.pending_publish_auth.is_some() || self.publish_auth_sealed {
                     return self.send_publish_denied();
                 }
@@ -2580,11 +2637,19 @@ impl Conn {
                         AuthorizationResult::Deny => {
                             return self.send_publish_denied();
                         }
-                        AuthorizationResult::Pending => {
+                        AuthorizationResult::Pending { request_id } => {
+                            if self.resolved_publish_auth_ids.contains(&request_id) {
+                                // This connection already answered a request
+                                // with this id, so the completion still owed for
+                                // it is indistinguishable from the one this
+                                // request would wait for. Refuse rather than
+                                // let a stale decision resolve the new stream.
+                                return self.send_publish_denied();
+                            }
                             self.pending_publish_auth = Some(PendingAuth {
                                 stream_name: name_str,
                                 requested_at: Instant::now(),
-                                withdrawn: false,
+                                request_id,
                             });
                             return Ok(());
                         }
@@ -2623,11 +2688,18 @@ impl Conn {
                         AuthorizationResult::Deny => {
                             return self.send_play_denied();
                         }
-                        AuthorizationResult::Pending => {
+                        AuthorizationResult::Pending { request_id } => {
+                            if self.resolved_play_auth_ids.contains(&request_id) {
+                                // See the matching guard in the "publish" arm:
+                                // an id this connection already answered cannot
+                                // be told apart from the completion still owed
+                                // for the earlier request.
+                                return self.send_play_denied();
+                            }
                             self.pending_play_auth = Some(PendingAuth {
                                 stream_name: name_str,
                                 requested_at: Instant::now(),
-                                withdrawn: false,
+                                request_id,
                             });
                             return Ok(());
                         }
@@ -2695,7 +2767,7 @@ impl Conn {
                 // Withdraw any in-flight authorization for the torn-down
                 // stream: a late completion must be the documented no-op,
                 // not a grant.
-                self.withdraw_pending_authorizations();
+                self.drop_pending_authorizations();
                 if let Some(sid) = self.current_stream.as_ref().map(|s| s.stream_id) {
                     let _ = self.send_stream_lifecycle_eof(sid);
                 }
@@ -2816,7 +2888,7 @@ impl Conn {
                     // Withdraw any in-flight authorization for the closed
                     // stream: a late completion must be the documented no-op,
                     // not a grant.
-                    self.withdraw_pending_authorizations();
+                    self.drop_pending_authorizations();
                     let _ = self.send_stream_lifecycle_eof(target_id);
                 }
             }
@@ -4708,7 +4780,7 @@ mod tests {
         conn.handle_command(unpublish.as_slice()).unwrap();
         assert!(!conn.current_stream.as_ref().unwrap().is_publishing);
 
-        conn.on_publish_auth_cb = Some(|_, _, _| AuthorizationResult::Pending);
+        conn.on_publish_auth_cb = Some(|_, _, _| AuthorizationResult::Pending { request_id: 1 });
         conn.handle_command(publish_buf("s").as_slice()).unwrap();
         assert!(conn.has_pending_authorization());
 
@@ -4716,7 +4788,7 @@ mod tests {
         // which the route was not held, so the completion must start a fresh
         // media window rather than inherit the old, expired deadline.
         conn.set_session_setup_started_for_test(Instant::now() - Duration::from_secs(30));
-        conn.complete_publish_authorization(true).unwrap();
+        conn.complete_publish_authorization(1, true).unwrap();
         assert!(conn.current_stream.as_ref().unwrap().is_publishing);
         assert!(
             !conn.session_setup_timed_out(),
@@ -4750,10 +4822,10 @@ mod tests {
         let original = Instant::now() - Duration::from_secs(3);
         conn.set_session_setup_started_for_test(original);
 
-        conn.on_publish_auth_cb = Some(|_, _, _| AuthorizationResult::Pending);
+        conn.on_publish_auth_cb = Some(|_, _, _| AuthorizationResult::Pending { request_id: 1 });
         conn.handle_command(publish_buf("s").as_slice()).unwrap();
         assert!(conn.has_pending_authorization());
-        conn.complete_publish_authorization(true).unwrap();
+        conn.complete_publish_authorization(1, true).unwrap();
 
         assert_eq!(conn.session_setup_started, original);
         assert_eq!(conn.media_bytes_at_epoch_start, 0);
@@ -6557,7 +6629,7 @@ mod tests {
         // A peer using only the new async auth callback (no legacy
         // on_publish_cb/on_play_cb, no dedicated on_shared_object_auth_cb)
         // must still be fail-closed for shared objects.
-        conn.on_publish_auth_cb = Some(|_, _, _| AuthorizationResult::Pending);
+        conn.on_publish_auth_cb = Some(|_, _, _| AuthorizationResult::Pending { request_id: 1 });
         conn.on_shared_object_cb = Some(record_so);
 
         let so = SharedObjectMessage {
@@ -7323,7 +7395,7 @@ mod tests {
     #[test]
     fn publish_auth_pending_then_allow() {
         let mut conn = app_conn();
-        conn.on_publish_auth_cb = Some(|_, _, _| AuthorizationResult::Pending);
+        conn.on_publish_auth_cb = Some(|_, _, _| AuthorizationResult::Pending { request_id: 1 });
         conn.handle_command(publish_buf("s").as_slice()).unwrap();
         assert!(
             !conn.current_stream.as_ref().unwrap().is_publishing,
@@ -7332,7 +7404,7 @@ mod tests {
         assert!(conn.has_pending_authorization());
         assert!(!conn.relay_enabled);
 
-        conn.complete_publish_authorization(true).unwrap();
+        conn.complete_publish_authorization(1, true).unwrap();
         assert!(conn.current_stream.as_ref().unwrap().is_publishing);
         assert_eq!(conn.state, ConnState::Publishing);
         assert!(!conn.has_pending_authorization());
@@ -7341,11 +7413,11 @@ mod tests {
     #[test]
     fn publish_auth_pending_then_deny() {
         let mut conn = app_conn();
-        conn.on_publish_auth_cb = Some(|_, _, _| AuthorizationResult::Pending);
+        conn.on_publish_auth_cb = Some(|_, _, _| AuthorizationResult::Pending { request_id: 1 });
         conn.handle_command(publish_buf("s").as_slice()).unwrap();
         assert!(conn.has_pending_authorization());
 
-        conn.complete_publish_authorization(false).unwrap();
+        conn.complete_publish_authorization(1, false).unwrap();
         assert!(!conn.current_stream.as_ref().unwrap().is_publishing);
         assert!(!conn.has_pending_authorization());
     }
@@ -7353,7 +7425,7 @@ mod tests {
     #[test]
     fn play_auth_pending_then_allow() {
         let mut conn = app_conn();
-        conn.on_play_auth_cb = Some(|_, _, _| AuthorizationResult::Pending);
+        conn.on_play_auth_cb = Some(|_, _, _| AuthorizationResult::Pending { request_id: 1 });
         conn.handle_command(play_buf("s").as_slice()).unwrap();
         assert!(
             !conn.current_stream.as_ref().unwrap().is_playing,
@@ -7361,7 +7433,7 @@ mod tests {
         );
         assert!(conn.has_pending_authorization());
 
-        conn.complete_play_authorization(true).unwrap();
+        conn.complete_play_authorization(1, true).unwrap();
         assert!(conn.current_stream.as_ref().unwrap().is_playing);
         assert_eq!(conn.state, ConnState::Playing);
         assert!(!conn.has_pending_authorization());
@@ -7370,11 +7442,11 @@ mod tests {
     #[test]
     fn play_auth_pending_then_deny() {
         let mut conn = app_conn();
-        conn.on_play_auth_cb = Some(|_, _, _| AuthorizationResult::Pending);
+        conn.on_play_auth_cb = Some(|_, _, _| AuthorizationResult::Pending { request_id: 1 });
         conn.handle_command(play_buf("s").as_slice()).unwrap();
         assert!(conn.has_pending_authorization());
 
-        conn.complete_play_authorization(false).unwrap();
+        conn.complete_play_authorization(1, false).unwrap();
         assert!(!conn.current_stream.as_ref().unwrap().is_playing);
         assert!(!conn.has_pending_authorization());
     }
@@ -7382,7 +7454,7 @@ mod tests {
     #[test]
     fn publish_grant_withdraws_an_in_flight_play_decision() {
         let mut conn = app_conn();
-        conn.on_play_auth_cb = Some(|_, _, _| AuthorizationResult::Pending);
+        conn.on_play_auth_cb = Some(|_, _, _| AuthorizationResult::Pending { request_id: 1 });
         conn.handle_command(play_buf("s").as_slice()).unwrap();
         assert!(conn.has_pending_play_authorization());
 
@@ -7395,7 +7467,7 @@ mod tests {
 
         // The stale play completion must be inert rather than evicting the
         // publish route and flipping the connection into Playing.
-        conn.complete_play_authorization(true).unwrap();
+        conn.complete_play_authorization(1, true).unwrap();
         assert!(conn.current_stream.as_ref().unwrap().is_publishing);
         assert!(
             !conn.current_stream.as_ref().unwrap().is_playing,
@@ -7407,7 +7479,7 @@ mod tests {
     #[test]
     fn play_grant_withdraws_an_in_flight_publish_decision() {
         let mut conn = app_conn();
-        conn.on_publish_auth_cb = Some(|_, _, _| AuthorizationResult::Pending);
+        conn.on_publish_auth_cb = Some(|_, _, _| AuthorizationResult::Pending { request_id: 1 });
         conn.handle_command(publish_buf("s").as_slice()).unwrap();
         assert!(conn.has_pending_publish_authorization());
 
@@ -7418,7 +7490,7 @@ mod tests {
 
         // Symmetric guard: the stale publish completion must not flip the
         // player back into Publishing.
-        conn.complete_publish_authorization(true).unwrap();
+        conn.complete_publish_authorization(1, true).unwrap();
         assert!(conn.current_stream.as_ref().unwrap().is_playing);
         assert!(
             !conn.current_stream.as_ref().unwrap().is_publishing,
@@ -7433,7 +7505,7 @@ mod tests {
         conn.handle_command(publish_buf("s").as_slice()).unwrap();
         assert!(conn.is_active_publisher_stream(1));
 
-        conn.on_play_auth_cb = Some(|_, _, _| AuthorizationResult::Pending);
+        conn.on_play_auth_cb = Some(|_, _, _| AuthorizationResult::Pending { request_id: 1 });
         conn.handle_command(play_buf("other").as_slice()).unwrap();
         assert!(conn.has_pending_authorization());
 
@@ -7453,7 +7525,7 @@ mod tests {
     #[test]
     fn pending_publish_media_is_dropped_until_authorized() {
         let mut conn = app_conn();
-        conn.on_publish_auth_cb = Some(|_, _, _| AuthorizationResult::Pending);
+        conn.on_publish_auth_cb = Some(|_, _, _| AuthorizationResult::Pending { request_id: 1 });
         conn.handle_command(publish_buf("s").as_slice()).unwrap();
 
         // Media sent while pending must not be relayed -- is_publishing is
@@ -7463,7 +7535,7 @@ mod tests {
             .unwrap();
         assert!(conn.pending_relay.is_empty());
 
-        conn.complete_publish_authorization(true).unwrap();
+        conn.complete_publish_authorization(1, true).unwrap();
         conn.handle_media_frame(1, FrameType::Video, 0, &[0x17, 0, 0, 0, 0], None)
             .unwrap();
         assert_eq!(conn.pending_relay.len(), 1);
@@ -7503,7 +7575,7 @@ mod tests {
         // still pending) must not panic and leaves nothing to clean up --
         // no route was ever claimed for a request that never got Allow.
         let mut conn = app_conn();
-        conn.on_publish_auth_cb = Some(|_, _, _| AuthorizationResult::Pending);
+        conn.on_publish_auth_cb = Some(|_, _, _| AuthorizationResult::Pending { request_id: 1 });
         conn.handle_command(publish_buf("s").as_slice()).unwrap();
         assert!(conn.has_pending_authorization());
         drop(conn);
@@ -7512,15 +7584,15 @@ mod tests {
     #[test]
     fn duplicate_publish_authorization_completion_is_harmless() {
         let mut conn = app_conn();
-        conn.on_publish_auth_cb = Some(|_, _, _| AuthorizationResult::Pending);
+        conn.on_publish_auth_cb = Some(|_, _, _| AuthorizationResult::Pending { request_id: 1 });
         conn.handle_command(publish_buf("s").as_slice()).unwrap();
 
-        conn.complete_publish_authorization(true).unwrap();
+        conn.complete_publish_authorization(1, true).unwrap();
         assert!(conn.current_stream.as_ref().unwrap().is_publishing);
         // Second completion for the same (now-resolved) request is a no-op,
         // not a panic or a state change (e.g. it must not re-deny an already
         // -allowed publish).
-        conn.complete_publish_authorization(false).unwrap();
+        conn.complete_publish_authorization(1, false).unwrap();
         assert!(conn.current_stream.as_ref().unwrap().is_publishing);
     }
 
@@ -7528,8 +7600,8 @@ mod tests {
     fn multiple_concurrent_pending_connections_are_independent() {
         let mut a = app_conn();
         let mut b = app_conn();
-        a.on_publish_auth_cb = Some(|_, _, _| AuthorizationResult::Pending);
-        b.on_publish_auth_cb = Some(|_, _, _| AuthorizationResult::Pending);
+        a.on_publish_auth_cb = Some(|_, _, _| AuthorizationResult::Pending { request_id: 1 });
+        b.on_publish_auth_cb = Some(|_, _, _| AuthorizationResult::Pending { request_id: 1 });
         a.handle_command(publish_buf("stream-a").as_slice())
             .unwrap();
         b.handle_command(publish_buf("stream-b").as_slice())
@@ -7537,7 +7609,7 @@ mod tests {
         assert!(a.has_pending_authorization());
         assert!(b.has_pending_authorization());
 
-        a.complete_publish_authorization(true).unwrap();
+        a.complete_publish_authorization(1, true).unwrap();
         assert!(a.current_stream.as_ref().unwrap().is_publishing);
         assert!(
             !b.current_stream.as_ref().unwrap().is_publishing,
@@ -7545,14 +7617,14 @@ mod tests {
         );
         assert!(b.has_pending_authorization());
 
-        b.complete_publish_authorization(true).unwrap();
+        b.complete_publish_authorization(1, true).unwrap();
         assert!(b.current_stream.as_ref().unwrap().is_publishing);
     }
 
     #[test]
     fn pending_publish_auth_times_out_and_denies() {
         let mut conn = app_conn();
-        conn.on_publish_auth_cb = Some(|_, _, _| AuthorizationResult::Pending);
+        conn.on_publish_auth_cb = Some(|_, _, _| AuthorizationResult::Pending { request_id: 1 });
         conn.handle_command(publish_buf("s").as_slice()).unwrap();
         assert!(conn.has_pending_authorization());
 
@@ -7580,7 +7652,7 @@ mod tests {
     #[test]
     fn second_publish_while_pending_does_not_overwrite_first_request() {
         let mut conn = app_conn();
-        conn.on_publish_auth_cb = Some(|_, _, _| AuthorizationResult::Pending);
+        conn.on_publish_auth_cb = Some(|_, _, _| AuthorizationResult::Pending { request_id: 1 });
         conn.handle_command(publish_buf("first").as_slice())
             .unwrap();
         assert!(conn.has_pending_authorization());
@@ -7593,7 +7665,7 @@ mod tests {
         conn.handle_command(publish_buf("second").as_slice())
             .unwrap();
 
-        conn.complete_publish_authorization(true).unwrap();
+        conn.complete_publish_authorization(1, true).unwrap();
         assert_eq!(
             conn.current_stream.as_ref().unwrap().name,
             "first",
@@ -7604,13 +7676,13 @@ mod tests {
     #[test]
     fn second_play_while_pending_does_not_overwrite_first_request() {
         let mut conn = app_conn();
-        conn.on_play_auth_cb = Some(|_, _, _| AuthorizationResult::Pending);
+        conn.on_play_auth_cb = Some(|_, _, _| AuthorizationResult::Pending { request_id: 1 });
         conn.handle_command(play_buf("first").as_slice()).unwrap();
         assert!(conn.has_pending_authorization());
 
         conn.handle_command(play_buf("second").as_slice()).unwrap();
 
-        conn.complete_play_authorization(true).unwrap();
+        conn.complete_play_authorization(1, true).unwrap();
         assert_eq!(
             conn.current_stream.as_ref().unwrap().name,
             "first",
@@ -7619,14 +7691,15 @@ mod tests {
     }
 
     #[test]
-    fn teardown_withdraws_an_in_flight_authorization() {
+    fn teardown_discards_an_in_flight_authorization() {
         // Regression: a publish left Pending must not stay grantable after
         // the client abandons the stream it was requested for. The
         // FCUnpublish/deleteStream, closeStream and replacing createStream
-        // teardown paths withdraw the in-flight request, so a late
-        // completion is the documented no-op and can never grant.
+        // teardown paths drop the in-flight request (remembering its id), so a
+        // late completion resolves nothing and can never grant.
         fn pending_publish(conn: &mut Conn) {
-            conn.on_publish_auth_cb = Some(|_, _, _| AuthorizationResult::Pending);
+            conn.on_publish_auth_cb =
+                Some(|_, _, _| AuthorizationResult::Pending { request_id: 1 });
             conn.handle_command(publish_buf("s").as_slice()).unwrap();
             assert!(conn.has_pending_authorization());
         }
@@ -7637,10 +7710,10 @@ mod tests {
         let mut unpublish = Buffer::with_capacity(128);
         command::build_fcunpublish(&mut unpublish, "s").unwrap();
         conn.handle_command(unpublish.as_slice()).unwrap();
-        // The withdrawn request stays in its slot as a tombstone until the
-        // stale completion (or the reap timeout) clears it.
-        assert!(conn.has_pending_authorization());
-        conn.complete_publish_authorization(true).unwrap();
+        // The slot is freed right away: the request is gone, and only its id is
+        // remembered, so a fresh request need not wait for the stale decision.
+        assert!(!conn.has_pending_authorization());
+        conn.complete_publish_authorization(1, true).unwrap();
         assert!(!conn.has_pending_authorization());
         assert!(!conn.current_stream.as_ref().unwrap().is_publishing);
 
@@ -7650,8 +7723,8 @@ mod tests {
         crate::amf::amf0::write_number(&mut close, 2.0).unwrap();
         crate::amf::amf0::write_null(&mut close).unwrap();
         conn.handle_command(close.as_slice()).unwrap();
-        assert!(conn.has_pending_authorization());
-        conn.complete_publish_authorization(true).unwrap();
+        assert!(!conn.has_pending_authorization());
+        conn.complete_publish_authorization(1, true).unwrap();
         assert!(!conn.has_pending_authorization());
         assert!(!conn.current_stream.as_ref().unwrap().is_publishing);
 
@@ -7660,62 +7733,89 @@ mod tests {
         let mut create = Buffer::with_capacity(128);
         command::build_create_stream(&mut create, 2.0).unwrap();
         conn.handle_command(create.as_slice()).unwrap();
-        assert!(conn.has_pending_authorization());
-        conn.complete_publish_authorization(true).unwrap();
+        assert!(!conn.has_pending_authorization());
+        conn.complete_publish_authorization(1, true).unwrap();
         assert!(!conn.has_pending_authorization());
         assert!(!conn.current_stream.as_ref().unwrap().is_publishing);
     }
 
     #[test]
-    fn a_withdrawn_request_cannot_authorize_its_replacement() {
-        // Regression (review: Codex/CodeRabbit/PR Lens): completions are keyed
-        // only by `conn_id`, so after a teardown the slot must not be empty --
-        // a new request could take the place of the withdrawn one and be
-        // authorized by the stale decision. The tombstone blocks the new
-        // request until the stale completion has been discarded.
-        fn pending_publish(conn: &mut Conn) {
-            conn.on_publish_auth_cb = Some(|_, _, _| AuthorizationResult::Pending);
+    fn a_discarded_request_cannot_authorize_its_replacement() {
+        // Regression (review: Codex/CodeRabbit/PR Lens): a completion used to
+        // be keyed only by `conn_id`, so after a teardown the freed slot had to
+        // stay occupied by a tombstone -- a new request taking its place could
+        // otherwise be authorized by the stale decision. The request id now
+        // separates the two: the slot is free for a replacement whose decision
+        // is its own, and the stale completion matches neither.
+        fn pending_publish(conn: &mut Conn, request_id: u64) {
+            conn.on_publish_auth_cb =
+                Some(move |_, _, _| AuthorizationResult::Pending { request_id });
             conn.handle_command(publish_buf("s").as_slice()).unwrap();
             assert!(conn.has_pending_authorization());
         }
 
         let mut conn = app_conn();
-        pending_publish(&mut conn);
+        pending_publish(&mut conn, 1);
         let mut unpublish = Buffer::with_capacity(128);
         command::build_fcunpublish(&mut unpublish, "s").unwrap();
         conn.handle_command(unpublish.as_slice()).unwrap();
 
-        // A replacement request while the tombstone is in place is denied
-        // exactly like a second request next to a live pending one, so the
-        // stale completion below has nothing to authorize.
-        conn.handle_command(publish_buf("replacement").as_slice())
-            .unwrap();
+        // A replacement request with its own id is admitted immediately, so a
+        // teardown no longer costs the next request a full timeout.
+        pending_publish(&mut conn, 2);
+
+        // The stale completion for the discarded request resolves nothing...
+        conn.complete_publish_authorization(1, true).unwrap();
         assert!(
-            conn.pending_publish_auth
-                .as_ref()
-                .is_some_and(|p| p.withdrawn),
-            "the tombstone must still occupy the slot"
+            !conn.current_stream.as_ref().unwrap().is_publishing,
+            "a completion for the discarded request must not grant the replacement"
+        );
+        assert!(
+            conn.has_pending_authorization(),
+            "the replacement's own decision is still owed"
         );
 
-        // The stale completion resolves the tombstone silently...
-        conn.complete_publish_authorization(true).unwrap();
-        assert!(!conn.has_pending_authorization());
-        assert!(!conn.current_stream.as_ref().unwrap().is_publishing);
-
-        // ...and only then can a fresh request start a new decision.
-        pending_publish(&mut conn);
-        conn.complete_publish_authorization(true).unwrap();
+        // ...and the replacement's own completion is what grants.
+        conn.complete_publish_authorization(2, true).unwrap();
         assert!(conn.current_stream.as_ref().unwrap().is_publishing);
     }
 
     #[test]
-    fn a_reaped_request_cannot_authorize_its_replacement() {
-        // Regression: the reap discards the tombstone the round-8 fix relies
-        // on, so without a seal a completion for the reaped request would
-        // resolve whatever request refilled the slot -- a grant the host made
-        // for an earlier stream, applied to a stream it never decided on.
+    fn a_request_reusing_an_answered_id_is_refused() {
+        // A request reusing an id this connection already answered cannot be
+        // told apart from the completion still owed for the earlier one, so it
+        // is refused instead of risking that stale decision.
         let mut conn = app_conn();
-        conn.on_publish_auth_cb = Some(|_, _, _| AuthorizationResult::Pending);
+        conn.on_publish_auth_cb = Some(|_, _, _| AuthorizationResult::Pending { request_id: 7 });
+        conn.handle_command(publish_buf("first").as_slice()).unwrap();
+        conn.complete_publish_authorization(7, true).unwrap();
+        assert!(conn.current_stream.as_ref().unwrap().is_publishing);
+
+        // Same id: refused, and no pending slot is opened for it.
+        conn.handle_command(publish_buf("reused").as_slice()).unwrap();
+        assert!(
+            !conn.has_pending_authorization(),
+            "a reused request id must not open a new pending slot"
+        );
+        assert_eq!(conn.current_stream.as_ref().unwrap().name, "first");
+
+        // A fresh id is fine.
+        conn.on_publish_auth_cb = Some(|_, _, _| AuthorizationResult::Pending { request_id: 8 });
+        conn.handle_command(publish_buf("fresh").as_slice()).unwrap();
+        assert!(conn.has_pending_authorization());
+        conn.complete_publish_authorization(8, true).unwrap();
+        assert_eq!(conn.current_stream.as_ref().unwrap().name, "fresh");
+    }
+
+    #[test]
+    fn a_reaped_request_cannot_authorize_its_replacement() {
+        // Regression: the reap answers the pending request itself, so its id is
+        // remembered as answered. A completion for it resolves nothing even if
+        // the slot were refilled, and the seal keeps the slot closed anyway --
+        // otherwise a grant the host made for an earlier stream could be
+        // applied to a stream it never decided on.
+        let mut conn = app_conn();
+        conn.on_publish_auth_cb = Some(|_, _, _| AuthorizationResult::Pending { request_id: 1 });
         conn.handle_command(publish_buf("first").as_slice())
             .unwrap();
         assert!(conn.has_pending_authorization());
@@ -7742,7 +7842,7 @@ mod tests {
 
         // The stale completion for the reaped request stays inert: it must not
         // authorize the replacement that tried to take its place...
-        conn.complete_publish_authorization(true).unwrap();
+        conn.complete_publish_authorization(1, true).unwrap();
         assert!(!conn.current_stream.as_ref().unwrap().is_publishing);
 
         // ...and must not lift the seal either: the reap is terminal for this
@@ -7768,7 +7868,7 @@ mod tests {
         // the seal set -- the slot stays closed for the rest of this
         // connection's life instead of being reopened for a fresh decision.
         let mut conn = app_conn();
-        conn.on_publish_auth_cb = Some(|_, _, _| AuthorizationResult::Pending);
+        conn.on_publish_auth_cb = Some(|_, _, _| AuthorizationResult::Pending { request_id: 1 });
         conn.handle_command(publish_buf("s").as_slice()).unwrap();
         if let Some(pending) = conn.pending_publish_auth.as_mut() {
             pending.requested_at = Instant::now() - Duration::from_secs(60);
@@ -7776,7 +7876,7 @@ mod tests {
         conn.reap_timed_out_pending_auth(Duration::from_secs(30));
         assert!(!conn.has_pending_authorization());
 
-        conn.complete_publish_authorization(false).unwrap();
+        conn.complete_publish_authorization(1, false).unwrap();
         assert!(!conn.current_stream.as_ref().unwrap().is_publishing);
         assert!(
             conn.publish_auth_sealed,
@@ -7795,7 +7895,7 @@ mod tests {
     fn a_late_play_completion_after_the_reap_does_not_unseal_the_slot() {
         // Play-side mirror of the test above.
         let mut conn = app_conn();
-        conn.on_play_auth_cb = Some(|_, _, _| AuthorizationResult::Pending);
+        conn.on_play_auth_cb = Some(|_, _, _| AuthorizationResult::Pending { request_id: 1 });
         conn.handle_command(play_buf("s").as_slice()).unwrap();
         if let Some(pending) = conn.pending_play_auth.as_mut() {
             pending.requested_at = Instant::now() - Duration::from_secs(60);
@@ -7807,7 +7907,7 @@ mod tests {
         assert!(!conn.has_pending_authorization());
         assert!(!conn.current_stream.as_ref().unwrap().is_playing);
 
-        conn.complete_play_authorization(true).unwrap();
+        conn.complete_play_authorization(1, true).unwrap();
         assert!(
             conn.play_auth_sealed && !conn.current_stream.as_ref().unwrap().is_playing,
             "a late completion after the reap must not lift the play seal"
@@ -7827,34 +7927,34 @@ mod tests {
         // never touched: a duplicate completion stays the documented no-op and
         // the slot remains usable for a fresh decision.
         let mut conn = app_conn();
-        conn.on_publish_auth_cb = Some(|_, _, _| AuthorizationResult::Pending);
+        conn.on_publish_auth_cb = Some(|_, _, _| AuthorizationResult::Pending { request_id: 1 });
         conn.handle_command(publish_buf("first").as_slice())
             .unwrap();
 
-        conn.complete_publish_authorization(true).unwrap();
+        conn.complete_publish_authorization(1, true).unwrap();
         assert!(conn.current_stream.as_ref().unwrap().is_publishing);
-        conn.complete_publish_authorization(false).unwrap();
+        conn.complete_publish_authorization(1, false).unwrap();
         assert!(
             conn.current_stream.as_ref().unwrap().is_publishing,
             "a duplicate completion must not re-deny an allowed publish"
         );
         assert!(!conn.publish_auth_sealed);
 
-        conn.on_publish_auth_cb = Some(|_, _, _| AuthorizationResult::Pending);
+        conn.on_publish_auth_cb = Some(|_, _, _| AuthorizationResult::Pending { request_id: 2 });
         conn.handle_command(publish_buf("second").as_slice())
             .unwrap();
         assert!(
             conn.has_pending_authorization(),
             "without a reap, a new request must still start a fresh decision"
         );
-        conn.complete_publish_authorization(true).unwrap();
+        conn.complete_publish_authorization(2, true).unwrap();
         assert!(conn.current_stream.as_ref().unwrap().is_publishing);
 
-        conn.on_play_auth_cb = Some(|_, _, _| AuthorizationResult::Pending);
+        conn.on_play_auth_cb = Some(|_, _, _| AuthorizationResult::Pending { request_id: 1 });
         conn.handle_command(play_buf("s").as_slice()).unwrap();
-        conn.complete_play_authorization(true).unwrap();
+        conn.complete_play_authorization(1, true).unwrap();
         assert!(conn.current_stream.as_ref().unwrap().is_playing);
-        conn.complete_play_authorization(false).unwrap();
+        conn.complete_play_authorization(1, false).unwrap();
         assert!(
             conn.current_stream.as_ref().unwrap().is_playing,
             "a duplicate play completion must not re-deny an allowed play"
@@ -7870,7 +7970,7 @@ mod tests {
             .unwrap();
         assert!(conn.current_stream.as_ref().unwrap().is_publishing);
 
-        conn.on_publish_auth_cb = Some(|_, _, _| AuthorizationResult::Pending);
+        conn.on_publish_auth_cb = Some(|_, _, _| AuthorizationResult::Pending { request_id: 1 });
         conn.handle_command(publish_buf("second").as_slice())
             .unwrap();
         assert!(conn.has_pending_authorization());
@@ -7886,7 +7986,7 @@ mod tests {
             "media must not relay while a re-authorization decision is in flight"
         );
 
-        conn.complete_publish_authorization(true).unwrap();
+        conn.complete_publish_authorization(1, true).unwrap();
         conn.handle_media_frame(1, FrameType::Video, 0, &[0x17, 0, 0, 0, 0], None)
             .unwrap();
         assert_eq!(conn.pending_relay.len(), 1);
@@ -7913,7 +8013,7 @@ mod tests {
             "baseline: onMetaData relays on the authorized route"
         );
 
-        conn.on_publish_auth_cb = Some(|_, _, _| AuthorizationResult::Pending);
+        conn.on_publish_auth_cb = Some(|_, _, _| AuthorizationResult::Pending { request_id: 1 });
         conn.handle_command(publish_buf("second").as_slice())
             .unwrap();
         assert!(conn.has_pending_authorization());
@@ -7927,7 +8027,7 @@ mod tests {
              every audio/video frame on that route is already dropped"
         );
 
-        conn.complete_publish_authorization(true).unwrap();
+        conn.complete_publish_authorization(1, true).unwrap();
         conn.handle_publisher_data_message(1, 0, &payload).unwrap();
         assert_eq!(
             conn.pending_relay.len(),
@@ -7939,7 +8039,7 @@ mod tests {
     #[test]
     fn session_setup_timeout_exempts_pending_authorization() {
         let mut conn = app_conn();
-        conn.on_publish_auth_cb = Some(|_, _, _| AuthorizationResult::Pending);
+        conn.on_publish_auth_cb = Some(|_, _, _| AuthorizationResult::Pending { request_id: 1 });
         conn.handle_command(publish_buf("s").as_slice()).unwrap();
         assert!(conn.has_pending_authorization());
 
@@ -7950,7 +8050,7 @@ mod tests {
              reap_timed_out_pending_auth's own (longer) timeout governs it instead"
         );
 
-        conn.complete_publish_authorization(false).unwrap();
+        conn.complete_publish_authorization(1, false).unwrap();
         assert!(
             conn.session_setup_timed_out(),
             "once resolved, the normal setup timeout applies again"

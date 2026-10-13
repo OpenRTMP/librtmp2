@@ -11,6 +11,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 While in alpha the project stays on `0.x`; semantic-versioning guarantees only
 begin at `1.0.0`.
 
+## [0.13.0] — 2026-10-14
+
+### Changed
+
+- **Breaking (Rust API, not part of the `extern "C"` surface):**
+  `AuthorizationResult::Pending` now carries the integrator's `request_id`, and
+  `complete_publish_authorization` / `complete_play_authorization` (on both
+  `Conn` and `Server`) take it. A completion therefore resolves only the request
+  it was issued for: a decision for a request the connection has already
+  discarded -- its stream torn down or replaced, or the opposite role granted in
+  the meantime -- is ignored instead of being applied to whichever request holds
+  the slot by then. The id must be unique per connection and role; a request
+  reusing an id the connection already answered is denied, because its
+  completion could not be told apart from the one still owed for the earlier
+  request.
+- The pending-authorization slot is no longer kept occupied by a tombstone after
+  a teardown or after the opposite role is granted. The freed slot is usable by
+  the next request immediately, so such an event no longer costs a new publish
+  or play request a full pending-auth timeout before it can be decided.
+- The publish-side media/route gates consult only a pending *publish* decision,
+  and the player-side gates only a pending *play* decision. A play request
+  awaiting a decision no longer stops an already-authorized publisher's relay
+  (and vice versa); a republish awaiting a decision still stops that publisher's
+  media, as before.
+
+### Removed
+
+- The internal `withdrawn` tombstone mechanism on pending authorizations, which
+  request ids replace.
+
 ## [0.12.0] — 2026-10-10
 
 ### Added
