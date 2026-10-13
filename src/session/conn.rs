@@ -7699,16 +7699,24 @@ mod tests {
         // FCUnpublish/deleteStream, closeStream and replacing createStream
         // teardown paths drop the in-flight request (remembering its id), so a
         // late completion resolves nothing and can never grant.
-        fn pending_publish(conn: &mut Conn) {
-            conn.on_publish_auth_cb =
-                Some(|_, _, _| AuthorizationResult::Pending { request_id: 1 });
+        fn pending_publish(conn: &mut Conn, cb: fn(u64, &str, &str) -> AuthorizationResult) {
+            conn.on_publish_auth_cb = Some(cb);
             conn.handle_command(publish_buf("s").as_slice()).unwrap();
             assert!(conn.has_pending_authorization());
+        }
+        fn pending_id_1(_: u64, _: &str, _: &str) -> AuthorizationResult {
+            AuthorizationResult::Pending { request_id: 1 }
+        }
+        fn pending_id_2(_: u64, _: &str, _: &str) -> AuthorizationResult {
+            AuthorizationResult::Pending { request_id: 2 }
+        }
+        fn pending_id_3(_: u64, _: &str, _: &str) -> AuthorizationResult {
+            AuthorizationResult::Pending { request_id: 3 }
         }
 
         let mut conn = app_conn();
 
-        pending_publish(&mut conn);
+        pending_publish(&mut conn, pending_id_1);
         let mut unpublish = Buffer::with_capacity(128);
         command::build_fcunpublish(&mut unpublish, "s").unwrap();
         conn.handle_command(unpublish.as_slice()).unwrap();
@@ -7719,24 +7727,24 @@ mod tests {
         assert!(!conn.has_pending_authorization());
         assert!(!conn.current_stream.as_ref().unwrap().is_publishing);
 
-        pending_publish(&mut conn);
+        pending_publish(&mut conn, pending_id_2);
         let mut close = Buffer::with_capacity(128);
         crate::amf::amf0::write_string(&mut close, "closeStream").unwrap();
         crate::amf::amf0::write_number(&mut close, 2.0).unwrap();
         crate::amf::amf0::write_null(&mut close).unwrap();
         conn.handle_command(close.as_slice()).unwrap();
         assert!(!conn.has_pending_authorization());
-        conn.complete_publish_authorization(1, true).unwrap();
+        conn.complete_publish_authorization(2, true).unwrap();
         assert!(!conn.has_pending_authorization());
         assert!(!conn.current_stream.as_ref().unwrap().is_publishing);
 
         conn.state = ConnState::AppConnected;
-        pending_publish(&mut conn);
+        pending_publish(&mut conn, pending_id_3);
         let mut create = Buffer::with_capacity(128);
         command::build_create_stream(&mut create, 2.0).unwrap();
         conn.handle_command(create.as_slice()).unwrap();
         assert!(!conn.has_pending_authorization());
-        conn.complete_publish_authorization(1, true).unwrap();
+        conn.complete_publish_authorization(3, true).unwrap();
         assert!(!conn.has_pending_authorization());
         assert!(!conn.current_stream.as_ref().unwrap().is_publishing);
     }
