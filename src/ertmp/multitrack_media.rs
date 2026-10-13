@@ -177,6 +177,21 @@ pub fn multitrack_has_sequence_start(frame_type: FrameType, payload: &[u8]) -> b
     valid && found
 }
 
+/// True when a valid multitrack container carries Enhanced Metadata as the
+/// shared inner packet type (`ERTMP_PACKET_TYPE_METADATA` / audio metadata 3).
+pub fn multitrack_has_metadata(frame_type: FrameType, payload: &[u8]) -> bool {
+    let metadata_ty = match frame_type {
+        FrameType::Video => 4, // ERTMP_PACKET_TYPE_METADATA
+        FrameType::Audio => 3, // ERTMP_AUDIO_PACKET_TYPE_METADATA
+        _ => return false,
+    };
+    let mut found = false;
+    let valid = foreach_track(frame_type, payload, |track| {
+        found |= track.packet_type == metadata_ty;
+    });
+    valid && found
+}
+
 pub fn multitrack_has_keyframe(payload: &[u8]) -> bool {
     if !is_multitrack_container(FrameType::Video, payload) {
         return false;
