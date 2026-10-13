@@ -2289,7 +2289,10 @@ impl Conn {
             .as_ref()
             .is_some_and(|pending| pending.request_id == request_id)
         {
-            self.remember_publish_auth_id(request_id);
+            // Do not remember this id. The ring only holds ids this connection
+            // actually answered or dropped; a duplicate or never-issued
+            // completion must not evict one of those, and must not block a
+            // later request that legitimately uses this id.
             return Ok(());
         }
         let Some(pending) = self.pending_publish_auth.take() else {
@@ -2327,7 +2330,6 @@ impl Conn {
             .as_ref()
             .is_some_and(|pending| pending.request_id == request_id)
         {
-            self.remember_play_auth_id(request_id);
             return Ok(());
         }
         let Some(pending) = self.pending_play_auth.take() else {
@@ -7747,22 +7749,27 @@ mod tests {
         // otherwise be authorized by the stale decision. The request id now
         // separates the two: the slot is free for a replacement whose decision
         // is its own, and the stale completion matches neither.
-        fn pending_publish(conn: &mut Conn, request_id: u64) {
-            conn.on_publish_auth_cb =
-                Some(move |_, _, _| AuthorizationResult::Pending { request_id });
+        fn pending_publish(conn: &mut Conn, cb: fn(u64, &str, &str) -> AuthorizationResult) {
+            conn.on_publish_auth_cb = Some(cb);
             conn.handle_command(publish_buf("s").as_slice()).unwrap();
             assert!(conn.has_pending_authorization());
         }
+        fn pending_id_1(_: u64, _: &str, _: &str) -> AuthorizationResult {
+            AuthorizationResult::Pending { request_id: 1 }
+        }
+        fn pending_id_2(_: u64, _: &str, _: &str) -> AuthorizationResult {
+            AuthorizationResult::Pending { request_id: 2 }
+        }
 
         let mut conn = app_conn();
-        pending_publish(&mut conn, 1);
+        pending_publish(&mut conn, pending_id_1);
         let mut unpublish = Buffer::with_capacity(128);
         command::build_fcunpublish(&mut unpublish, "s").unwrap();
         conn.handle_command(unpublish.as_slice()).unwrap();
 
         // A replacement request with its own id is admitted immediately, so a
         // teardown no longer costs the next request a full timeout.
-        pending_publish(&mut conn, 2);
+        pending_publish(&mut conn, pending_id_2);
 
         // The stale completion for the discarded request resolves nothing...
         conn.complete_publish_authorization(1, true).unwrap();
