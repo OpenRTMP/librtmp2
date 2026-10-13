@@ -126,16 +126,25 @@ pub enum ConnState {
 ///
 /// [`Conn`]: crate::session::conn::Conn
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(C)]
 pub enum AuthorizationResult {
     /// Authorization succeeded; proceed with the normal publish/play flow.
-    Allow = 0,
+    Allow,
     /// Authorization failed; proceed with the normal rejection flow.
-    Deny = 1,
+    Deny,
     /// Authorization is still in progress. The connection is held open with
     /// media blocked until a later `complete_*_authorization` call (or a
     /// timeout) resolves it.
-    Pending = 2,
+    ///
+    /// `request_id` is the integrator's own identifier for this request, echoed
+    /// back to `complete_publish_authorization`/`complete_play_authorization`,
+    /// so a completion resolves only the request it was issued for: a decision
+    /// for a request the connection has already discarded -- torn down,
+    /// replaced, or superseded when the opposite role was granted -- is ignored
+    /// rather than applied to whatever request holds the slot by then. It must
+    /// be unique per connection and role; a request reusing an id this
+    /// connection already answered is refused, because its completion could not
+    /// be told apart from the one owed for the earlier request.
+    Pending { request_id: u64 },
 }
 
 /* ── Frame types ── */

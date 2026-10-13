@@ -1,3 +1,12 @@
+librtmp2 (0.13.0-1) UNRELEASED; urgency=medium
+
+  * Breaking Rust API: AuthorizationResult::Pending carries a request_id, and
+    complete_publish_authorization / complete_play_authorization take it, so a
+    late decision cannot be applied to a different request. The pending slot
+    is freed on teardown instead of staying occupied.
+
+ -- OpenRTMP <info@openrtmp.org>  Wed, 14 Oct 2026 00:30:00 +0000
+
 librtmp2 (0.12.0-1) UNRELEASED; urgency=medium
 
   * Native Windows support (x86_64 and ARM64); Linux and macOS socket
