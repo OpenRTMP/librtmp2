@@ -281,6 +281,18 @@ mod tests {
             chunk_write(&mut wire, &msg, payload, payload.len(), 128),
             Err(ErrorCode::Chunk)
         );
+
+        let mut header = Buffer::new();
+        assert_eq!(
+            write_first_header(&mut header, RTMP_MAX_CSID + 1, 0, 0, 1, 0x14, 1),
+            Err(ErrorCode::Chunk)
+        );
+
+        let mut body = Buffer::new();
+        assert_eq!(
+            write_chunk_body(&mut body, RTMP_MAX_CSID + 1, payload, 128, None),
+            Err(ErrorCode::Chunk)
+        );
     }
 
     #[test]
