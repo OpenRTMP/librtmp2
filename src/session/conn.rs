@@ -820,7 +820,7 @@ impl Conn {
             // route, and every audio/video frame on it is dropped. Relaying
             // `onMetaData` to the old route's players during that window would
             // keep re-announcing a stream whose media has already stopped.
-            && !self.has_pending_authorization()
+            && !self.has_pending_publish_authorization()
             && self
                 .current_stream
                 .as_ref()
@@ -1016,14 +1016,17 @@ impl Conn {
     }
 
     /// Whether `msg_stream_id` is this connection's own active publish stream,
-    /// ignoring whether relay delivery is currently enabled. Pending
-    /// authorizations are excluded: a republish on an already-publishing
+    /// ignoring whether relay delivery is currently enabled. A pending
+    /// *publish* authorization is excluded: a republish on an already-publishing
     /// connection (e.g. a stream rename) leaves `stream.is_publishing` set
     /// while the new decision is `Pending` -- without this check inbound media
     /// would keep being relayed under the still-active old authorization
-    /// instead of stopping until the new one resolves.
+    /// instead of stopping until the new one resolves. A pending *play*
+    /// decision does not gate publisher media: it cannot revoke the publish
+    /// authorization this connection already holds, and `complete_play_authorized`
+    /// withdraws an in-flight publish request before taking the session over.
     fn is_publisher_stream(&self, msg_stream_id: u32) -> bool {
-        !self.has_pending_authorization()
+        !self.has_pending_publish_authorization()
             && self
                 .current_stream
                 .as_ref()
@@ -2077,6 +2080,17 @@ impl Conn {
     /// immediately (synchronous `Allow`) or later from
     /// [`Self::complete_publish_authorization`] (`Pending` -> `Allow`).
     fn complete_publish_authorized(&mut self, name_str: String) -> Result<()> {
+        // `publish` supersedes any in-flight `play` decision on this
+        // connection: the grant below claims the session, so a late play
+        // completion must become the documented no-op instead of calling
+        // `complete_play_authorized`, which would evict this publish route and
+        // flip the connection into Playing. The slot stays as a tombstone
+        // because completions are looked up by `conn_id` alone -- clearing it
+        // would let a new play request take its place and be authorized by the
+        // stale decision.
+        if let Some(pending) = self.pending_play_auth.as_mut() {
+            pending.withdrawn = true;
+        }
         // Use current_stream.is_publishing rather than self.state here:
         // conn_transition() only allows forward moves through ConnState, so
         // a play-then-publish sequence leaves self.state stuck at Playing
@@ -2195,6 +2209,13 @@ impl Conn {
     /// `Allow`) or later from [`Self::complete_play_authorization`]
     /// (`Pending` -> `Allow`).
     fn complete_play_authorized(&mut self, name_str: String) -> Result<()> {
+        // Mirror of the withdrawal in `complete_publish_authorized`: this
+        // grant takes the session over for play, so an in-flight publish
+        // decision on the same connection must not be able to flip it back
+        // into Publishing when its completion arrives.
+        if let Some(pending) = self.pending_publish_auth.as_mut() {
+            pending.withdrawn = true;
+        }
         if !self.defer_media_relay {
             self.relay_enabled = true;
         }
@@ -2331,6 +2352,21 @@ impl Conn {
     /// the reap timeout) discards it, so this stays true across that teardown.
     pub fn has_pending_authorization(&self) -> bool {
         self.pending_publish_auth.is_some() || self.pending_play_auth.is_some()
+    }
+
+    /// True while a `publish` request is awaiting
+    /// `complete_publish_authorization`. Media/route gates on the publish role
+    /// use this instead of [`Self::has_pending_authorization`] so a pending
+    /// `play` decision cannot stop an authorized publisher's relay.
+    pub fn has_pending_publish_authorization(&self) -> bool {
+        self.pending_publish_auth.is_some()
+    }
+
+    /// True while a `play` request is awaiting `complete_play_authorization`.
+    /// Symmetric counterpart of [`Self::has_pending_publish_authorization`] for
+    /// the player-side relay gates.
+    pub fn has_pending_play_authorization(&self) -> bool {
+        self.pending_play_auth.is_some()
     }
 
     /// Auto-deny any publish/play authorization that has been `Pending`
@@ -7341,6 +7377,77 @@ mod tests {
         conn.complete_play_authorization(false).unwrap();
         assert!(!conn.current_stream.as_ref().unwrap().is_playing);
         assert!(!conn.has_pending_authorization());
+    }
+
+    #[test]
+    fn publish_grant_withdraws_an_in_flight_play_decision() {
+        let mut conn = app_conn();
+        conn.on_play_auth_cb = Some(|_, _, _| AuthorizationResult::Pending);
+        conn.handle_command(play_buf("s").as_slice()).unwrap();
+        assert!(conn.has_pending_play_authorization());
+
+        // A publish decision that allows on the same connection supersedes the
+        // in-flight play request and takes the session over.
+        conn.on_publish_auth_cb = Some(|_, _, _| AuthorizationResult::Allow);
+        conn.handle_command(publish_buf("s").as_slice()).unwrap();
+        assert!(conn.current_stream.as_ref().unwrap().is_publishing);
+        assert!(!conn.current_stream.as_ref().unwrap().is_playing);
+
+        // The stale play completion must be inert rather than evicting the
+        // publish route and flipping the connection into Playing.
+        conn.complete_play_authorization(true).unwrap();
+        assert!(conn.current_stream.as_ref().unwrap().is_publishing);
+        assert!(
+            !conn.current_stream.as_ref().unwrap().is_playing,
+            "a stale play completion must not evict a live publish into Playing"
+        );
+        assert_eq!(conn.state, ConnState::Publishing);
+    }
+
+    #[test]
+    fn play_grant_withdraws_an_in_flight_publish_decision() {
+        let mut conn = app_conn();
+        conn.on_publish_auth_cb = Some(|_, _, _| AuthorizationResult::Pending);
+        conn.handle_command(publish_buf("s").as_slice()).unwrap();
+        assert!(conn.has_pending_publish_authorization());
+
+        conn.on_play_auth_cb = Some(|_, _, _| AuthorizationResult::Allow);
+        conn.handle_command(play_buf("s").as_slice()).unwrap();
+        assert!(conn.current_stream.as_ref().unwrap().is_playing);
+        assert!(!conn.current_stream.as_ref().unwrap().is_publishing);
+
+        // Symmetric guard: the stale publish completion must not flip the
+        // player back into Publishing.
+        conn.complete_publish_authorization(true).unwrap();
+        assert!(conn.current_stream.as_ref().unwrap().is_playing);
+        assert!(
+            !conn.current_stream.as_ref().unwrap().is_publishing,
+            "a stale publish completion must not steal the session from the player"
+        );
+        assert_eq!(conn.state, ConnState::Playing);
+    }
+
+    #[test]
+    fn pending_play_does_not_freeze_an_active_publisher() {
+        let mut conn = app_conn();
+        conn.handle_command(publish_buf("s").as_slice()).unwrap();
+        assert!(conn.is_active_publisher_stream(1));
+
+        conn.on_play_auth_cb = Some(|_, _, _| AuthorizationResult::Pending);
+        conn.handle_command(play_buf("other").as_slice()).unwrap();
+        assert!(conn.has_pending_authorization());
+
+        assert!(
+            conn.is_active_publisher_stream(1),
+            "a pending play decision must not stop the authorized publisher's media"
+        );
+        conn.handle_media_frame(1, FrameType::Video, 0, &[0x17, 0, 0, 0, 0], None)
+            .unwrap();
+        assert_eq!(
+            conn.pending_relay.len(),
+            1,
+            "publisher media must keep relaying while only a play decision is pending"
+        );
     }
 
     #[test]
