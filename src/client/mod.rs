@@ -1662,6 +1662,9 @@ fn parse_rtmp_url(url: &str) -> Result<(bool, String, u16, String, String)> {
     let mut host = String::new();
     let mut port_str = String::new();
     net::split_host_port(authority, &mut host, &mut port_str, default_port)?;
+    if host.is_empty() {
+        return Err(ErrorCode::Internal);
+    }
     let port: u16 = port_str.parse().map_err(|_| ErrorCode::Internal)?;
 
     let mut parts = path.splitn(2, '/');
