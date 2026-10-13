@@ -234,6 +234,23 @@ impl ChunkRegistry {
         self.streams.iter().filter(|s| s.reassembling).count()
     }
 
+    /// True when [`Self::get_or_create_index`] would succeed without mutating.
+    pub(crate) fn can_get_or_create(&self, csid: u32) -> bool {
+        if let Some(&idx) = self.csid_index.get(&csid) {
+            let stream = &self.streams[idx];
+            if stream.in_use && stream.csid == csid {
+                return stream.reassembling || self.active_reassembling() < self.max_active_csids;
+            }
+        }
+        if self.active_reassembling() >= self.max_active_csids {
+            return false;
+        }
+        if self.streams.iter().any(|s| !s.in_use) {
+            return true;
+        }
+        self.streams.len() < MAX_CHUNK_STREAMS
+    }
+
     /// Release a stream's reassembly buffer from the running total.
     pub(crate) fn release_stream_reassembly_by_csid(&mut self, csid: u32) -> usize {
         let Some(idx) = self.csid_index.get(&csid).copied() else {
