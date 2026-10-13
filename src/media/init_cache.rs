@@ -328,11 +328,17 @@ fn populate_audio_frame(frame: &mut Frame, payload: &[u8]) {
     if hdr.is_ex_header != 0 && hdr.packet_type == ERTMP_PACKET_TYPE_MODEX {
         return;
     }
-    frame.audio_codec = hdr.audio_codec;
     frame.audio_sample_rate = hdr.sample_rate as u32;
     frame.audio_channels = hdr.channels;
     frame.audio_bit_depth = if hdr.sample_size != 0 { 16 } else { 8 };
     frame.audio_fourcc = FourCc { cc: hdr.fourcc };
+    if hdr.is_ex_header != 0 {
+        if let Ok(codec) = fourcc::fourcc_to_audio_codec(&hdr.fourcc) {
+            frame.audio_codec = codec;
+        }
+    } else {
+        frame.audio_codec = hdr.audio_codec;
+    }
 }
 
 fn legacy_video_codec(codec_id: u8) -> VideoCodec {
