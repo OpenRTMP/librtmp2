@@ -1651,6 +1651,13 @@ fn parse_rtmp_url(url: &str) -> Result<(bool, String, u16, String, String)> {
         Some(i) => (&rest[..i], &rest[i + 1..]),
         None => (rest, ""),
     };
+    let authority = authority
+        .rsplit_once('@')
+        .map(|(_, host)| host)
+        .unwrap_or(authority);
+    if authority.is_empty() {
+        return Err(ErrorCode::Internal);
+    }
 
     let mut host = String::new();
     let mut port_str = String::new();
