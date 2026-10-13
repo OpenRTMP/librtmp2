@@ -1901,7 +1901,7 @@ impl Server {
         let Some(ref stream) = conn.current_stream else {
             return false;
         };
-        if !stream.is_playing || !conn.relay_enabled || conn.has_pending_authorization() {
+        if !stream.is_playing || !conn.relay_enabled || conn.has_pending_play_authorization() {
             return false;
         }
         let receive_audio = stream.receive_audio;
@@ -2362,7 +2362,10 @@ impl Server {
             // switch) leaves `stream.is_playing` set while the new decision
             // is `Pending` -- media must stop until it resolves, not keep
             // delivering frames for the still-active prior authorization.
-            || conn.has_pending_authorization()
+            // Only a pending *play* decision gates player delivery: a pending
+            // publish request cannot revoke the play authorization this
+            // connection already holds.
+            || conn.has_pending_play_authorization()
         {
             return false;
         }
