@@ -173,6 +173,22 @@ pub fn chunk_read(
         }
     }
 
+    // fmt=2/3 with zero prior message length: reject before header drain so
+    // Err(Chunk) never leaves the cursor past the basic/message header.
+    if (fmt == 2 || fmt == 3)
+        && reg
+            .get(csid)
+            .is_some_and(|s| s.reassembly_bytes_read == 0 && s.type0_msg_length == 0)
+    {
+        return Err(ErrorCode::Chunk);
+    }
+
+    // Active-CSID / stream-table caps: same failure modes as get_or_create_index,
+    // checked before consume so a full header is not drained on Err(Chunk).
+    if !reg.can_get_or_create(csid) {
+        return Err(ErrorCode::Chunk);
+    }
+
     if available < total_header_needed + to_read {
         return Ok(0);
     }
