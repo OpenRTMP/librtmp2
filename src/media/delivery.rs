@@ -7,6 +7,7 @@
 
 use super::init_cache::{CacheFrameKind, classify_cache_frame};
 use crate::ertmp::exvideo;
+use crate::ertmp::multitrack_media::{is_multitrack_container, multitrack_has_metadata};
 use crate::types::{ERTMP_PACKET_TYPE_METADATA, FrameType, VideoHeader};
 
 /// How a live media frame may be treated under congestion.
@@ -76,6 +77,19 @@ impl DeliveryHint {
 }
 
 fn is_enhanced_video_metadata(payload: &[u8]) -> bool {
+    // Multitrack outer packet type is 6; metadata lives in the shared inner
+    // track descriptor — check that before a single-track ExHeader parse.
+    if is_multitrack_container(FrameType::Video, payload) {
+        return multitrack_has_metadata(FrameType::Video, payload);
+    }
+    // Legacy AVC/AAC tags are not ExHeader; skip parse so classify_cache_frame
+    // does not re-parse the same ordinary payload on the common path.
+    let Some(&b0) = payload.first() else {
+        return false;
+    };
+    if b0 & 0x80 == 0 {
+        return false;
+    }
     let mut hdr = VideoHeader::default();
     if exvideo::exvideo_parse(payload, &mut hdr).is_err() {
         return false;
@@ -147,6 +161,14 @@ mod tests {
         let enhanced_meta = [0x94, b'h', b'v', b'c', b'1'];
         assert_eq!(
             hint(FrameType::Video, &enhanced_meta, true),
+            DeliveryHint::Critical
+        );
+        // Multitrack outer type 6 with shared inner packet_type 4 (Metadata).
+        let multitrack_meta = vec![
+            0x86, 0x14, b'a', b'v', b'c', b'1', 0x00, 0x00, 0x00, 0x03, 0xAA, 0xBB, 0xCC,
+        ];
+        assert_eq!(
+            hint(FrameType::Video, &multitrack_meta, true),
             DeliveryHint::Critical
         );
     }
