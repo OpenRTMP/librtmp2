@@ -7802,12 +7802,14 @@ mod tests {
         // is refused instead of risking that stale decision.
         let mut conn = app_conn();
         conn.on_publish_auth_cb = Some(|_, _, _| AuthorizationResult::Pending { request_id: 7 });
-        conn.handle_command(publish_buf("first").as_slice()).unwrap();
+        conn.handle_command(publish_buf("first").as_slice())
+            .unwrap();
         conn.complete_publish_authorization(7, true).unwrap();
         assert!(conn.current_stream.as_ref().unwrap().is_publishing);
 
         // Same id: refused, and no pending slot is opened for it.
-        conn.handle_command(publish_buf("reused").as_slice()).unwrap();
+        conn.handle_command(publish_buf("reused").as_slice())
+            .unwrap();
         assert!(
             !conn.has_pending_authorization(),
             "a reused request id must not open a new pending slot"
@@ -7816,7 +7818,8 @@ mod tests {
 
         // A fresh id is fine.
         conn.on_publish_auth_cb = Some(|_, _, _| AuthorizationResult::Pending { request_id: 8 });
-        conn.handle_command(publish_buf("fresh").as_slice()).unwrap();
+        conn.handle_command(publish_buf("fresh").as_slice())
+            .unwrap();
         assert!(conn.has_pending_authorization());
         conn.complete_publish_authorization(8, true).unwrap();
         assert_eq!(conn.current_stream.as_ref().unwrap().name, "fresh");
