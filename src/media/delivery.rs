@@ -6,7 +6,8 @@
 //! init cache ([`classify_cache_frame`]), and travels with the frame.
 
 use super::init_cache::{CacheFrameKind, classify_cache_frame};
-use crate::types::FrameType;
+use crate::ertmp::exvideo;
+use crate::types::{ERTMP_PACKET_TYPE_METADATA, FrameType, VideoHeader};
 
 /// How a live media frame may be treated under congestion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -34,6 +35,13 @@ impl DeliveryHint {
         match frame_type {
             FrameType::Script | FrameType::Metadata => return Self::Critical,
             FrameType::Audio | FrameType::Video => {}
+        }
+        // Enhanced RTMP Metadata (colorInfo, …) rides as FrameType::Video with
+        // ExHeader packet_type 4 — still Critical under congestion, matching
+        // script onMetaData. Keep classify_cache_frame's LiveOnly so init-cache
+        // does not treat metadata as a sequence header.
+        if frame_type == FrameType::Video && is_enhanced_video_metadata(payload) {
+            return Self::Critical;
         }
         match classify_cache_frame(frame_type, payload) {
             CacheFrameKind::VideoSequenceHeader | CacheFrameKind::AudioSequenceHeader => {
@@ -65,6 +73,14 @@ impl DeliveryHint {
             _ => None,
         }
     }
+}
+
+fn is_enhanced_video_metadata(payload: &[u8]) -> bool {
+    let mut hdr = VideoHeader::default();
+    if exvideo::exvideo_parse(payload, &mut hdr).is_err() {
+        return false;
+    }
+    hdr.is_ex_header != 0 && hdr.packet_type == ERTMP_PACKET_TYPE_METADATA
 }
 
 #[cfg(test)]
@@ -125,6 +141,12 @@ mod tests {
         );
         assert_eq!(
             hint(FrameType::Metadata, &[], false),
+            DeliveryHint::Critical
+        );
+        // ExHeader | frame_type=1 | packet_type=4 (Metadata) + FourCC hvc1
+        let enhanced_meta = [0x94, b'h', b'v', b'c', b'1'];
+        assert_eq!(
+            hint(FrameType::Video, &enhanced_meta, true),
             DeliveryHint::Critical
         );
     }

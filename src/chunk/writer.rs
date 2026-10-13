@@ -20,6 +20,12 @@ pub fn chunk_write(
         return chunk_write(out, msg, payload, payload_len, 128);
     }
 
+    // RTMP basic headers encode at most CSID 65599 (2-byte form: 64 + u16).
+    // Reject oversized ids rather than silently aliasing via 16-bit masking.
+    if msg.csid > RTMP_MAX_CSID {
+        return Err(ErrorCode::Chunk);
+    }
+
     // Only fmt=0 is safe for this stateless writer:
     // - fmt=1/2 carry a timestamp *delta* on the wire (RTMP spec 5.3.1.1),
     //   which the reader adds to the running per-CSID timestamp; this writer
@@ -76,6 +82,9 @@ pub fn chunk_write(
 /// timestamp.
 pub(crate) const EXTENDED_TIMESTAMP_MARKER: u32 = 0xFFFFFF;
 
+/// Maximum chunk-stream id representable in an RTMP basic header (spec 5.3.1.1).
+pub(crate) const RTMP_MAX_CSID: u32 = 65599;
+
 /// Encoded size of a first-chunk header written by [`write_first_header`].
 pub fn first_header_len(csid: u32, fmt: u8, ts_field: u32) -> usize {
     let (_, basic_len) = basic_header(csid, fmt);
@@ -111,6 +120,9 @@ pub fn write_first_header(
 ) -> Result<()> {
     if fmt > 2 {
         return Err(ErrorCode::Internal);
+    }
+    if csid > RTMP_MAX_CSID {
+        return Err(ErrorCode::Chunk);
     }
     let ext_ts = ts_field >= EXTENDED_TIMESTAMP_MARKER;
     let mut hdr = [0u8; 3 + 11 + 4];
@@ -171,6 +183,9 @@ pub fn write_chunk_body(
     chunk_size: usize,
     ext_ts: Option<u32>,
 ) -> Result<()> {
+    if csid > RTMP_MAX_CSID {
+        return Err(ErrorCode::Chunk);
+    }
     let chunk_size = if chunk_size == 0 { 128 } else { chunk_size };
     out.reserve(chunk_body_len(
         csid,
@@ -248,6 +263,25 @@ mod tests {
     use super::*;
     use crate::chunk::reader::chunk_read;
     use crate::chunk::state::ChunkRegistry;
+
+    #[test]
+    fn rejects_csid_above_rtmp_maximum() {
+        let payload = b"x";
+        let msg = ChunkMessage {
+            csid: RTMP_MAX_CSID + 1,
+            fmt: 0,
+            timestamp: 0,
+            msg_length: payload.len() as u32,
+            msg_type_id: 0x14,
+            msg_stream_id: 1,
+            is_complete: false,
+        };
+        let mut wire = Buffer::new();
+        assert_eq!(
+            chunk_write(&mut wire, &msg, payload, payload.len(), 128),
+            Err(ErrorCode::Chunk)
+        );
+    }
 
     #[test]
     fn single_chunk_round_trips_through_reader() {
