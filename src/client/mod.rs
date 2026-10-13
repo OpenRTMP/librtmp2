@@ -441,7 +441,10 @@ impl Client {
 
         self.state = ClientState::Handshaking;
         if let Err(e) = self.do_handshake(&mut transport, deadline) {
-            // transport drops here, closing the fd via Transport::drop
+            // transport drops here, closing the fd via Transport::drop.
+            // Mirror the AMF-connect failure path: without a reset the client
+            // would report Handshaking while fully disconnected.
+            self.reset_session_state();
             return Err(e);
         }
 
