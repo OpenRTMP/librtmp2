@@ -69,8 +69,9 @@ pub fn exaudio_parse(data: &[u8], hdr: &mut AudioHeader) -> Result<()> {
     hdr.packet_type = b0 & 0x0F;
     hdr.fourcc[..4].copy_from_slice(&data[1..5]);
     hdr.header_size = 5;
-    hdr.audio_codec =
-        fourcc::fourcc_to_audio_codec(&data[1..5]).unwrap_or(crate::types::AudioCodec::Aac);
+    if let Ok(codec) = fourcc::fourcc_to_audio_codec(&data[1..5]) {
+        hdr.audio_codec = codec;
+    }
 
     Ok(())
 }
