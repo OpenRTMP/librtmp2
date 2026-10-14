@@ -54,6 +54,9 @@ fn run_churn(addr: &'static str, warmup: u32, measured: u32) -> (u64, u64) {
     server.on_play_cb = Some(allow_play);
 
     let (tx, rx) = std::sync::mpsc::channel::<&'static str>();
+    // The server acknowledges once the baseline is sampled, so no measured
+    // round can overlap the baseline measurement.
+    let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
     let client = thread::spawn(move || {
         let url = format!("rtmp://{addr}/live");
         let round = |i: u32| {
@@ -70,6 +73,7 @@ fn run_churn(addr: &'static str, warmup: u32, measured: u32) -> (u64, u64) {
             round(i);
         }
         tx.send("warm").unwrap();
+        go_rx.recv().unwrap();
         for i in 0..measured {
             round(warmup + i);
         }
@@ -87,6 +91,7 @@ fn run_churn(addr: &'static str, warmup: u32, measured: u32) -> (u64, u64) {
                     server.poll(5).unwrap();
                 }
                 baseline = rss_kib().unwrap_or(0);
+                go_tx.send(()).unwrap();
             }
             Ok(_) => break,
             Err(_) => {}
