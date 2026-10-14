@@ -30,6 +30,15 @@ pub fn classify_cache_frame(frame_type: FrameType, payload: &[u8]) -> CacheFrame
 }
 
 fn classify_video(payload: &[u8]) -> CacheFrameKind {
+    // FrameType 5 is a VideoCommand: its low nibble is not a packet type, so
+    // it can be neither a sequence header nor a keyframe -- whatever the
+    // nibble looks like (including the multitrack one).
+    if payload
+        .first()
+        .is_some_and(|b| b & 0x80 != 0 && (b >> 4) & 0x07 == VIDEO_FRAME_TYPE_COMMAND)
+    {
+        return CacheFrameKind::LiveOnly;
+    }
     if is_multitrack_container(FrameType::Video, payload) {
         if multitrack_has_sequence_start(FrameType::Video, payload) {
             // A malformed track configuration must not replace a cached valid
@@ -54,11 +63,6 @@ fn classify_video(payload: &[u8]) -> CacheFrameKind {
         // not the inner packet type -- never cacheable (mirrors
         // `Conn::detect_video_codec`).
         if hdr.packet_type == ERTMP_PACKET_TYPE_MODEX {
-            return CacheFrameKind::LiveOnly;
-        }
-        // FrameType 5 is a VideoCommand frame: its PacketType nibble is not a
-        // packet type, so it can never be a sequence header or keyframe.
-        if hdr.frame_type == VIDEO_FRAME_TYPE_COMMAND {
             return CacheFrameKind::LiveOnly;
         }
         return match hdr.packet_type {
@@ -648,6 +652,44 @@ mod tests {
         let payload = avc_seq(1);
         assert_eq!(
             classify_cache_frame(FrameType::Video, &payload),
+            CacheFrameKind::VideoSequenceHeader
+        );
+    }
+
+    #[test]
+    fn command_frames_are_live_only_for_every_packet_type_nibble() {
+        // ExHeader + FrameType 5 + each low nibble, with a multitrack-shaped
+        // body: 0xD6 is the one that previously reached the multitrack branch.
+        let body = mt_avc_seq(&[(0, &valid_avc())]);
+        for nibble in 0..16u8 {
+            let mut payload = body.clone();
+            payload[0] = 0x80 | (5 << 4) | nibble;
+            assert_eq!(
+                classify_cache_frame(FrameType::Video, &payload),
+                CacheFrameKind::LiveOnly,
+                "nibble {nibble}"
+            );
+        }
+        let mut hvc = hvc_seq(1);
+        hvc[0] = 0xD0;
+        assert_eq!(
+            classify_cache_frame(FrameType::Video, &hvc),
+            CacheFrameKind::LiveOnly
+        );
+    }
+
+    #[test]
+    fn avc_header_with_truncated_high_profile_extension_is_not_cached() {
+        let mut payload = avc_seq(1);
+        payload.extend_from_slice(&[0xFD, 0xF8, 0xF8, 2, 0, 9, 0x6D]);
+        assert_eq!(
+            classify_cache_frame(FrameType::Video, &payload),
+            CacheFrameKind::LiveOnly
+        );
+        let mut ok = avc_seq(1);
+        ok.extend_from_slice(&[0xFD, 0xF8, 0xF8, 0]);
+        assert_eq!(
+            classify_cache_frame(FrameType::Video, &ok),
             CacheFrameKind::VideoSequenceHeader
         );
     }

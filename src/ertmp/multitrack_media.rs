@@ -53,7 +53,11 @@ pub fn is_multitrack_container(frame_type: FrameType, payload: &[u8]) -> bool {
     (payload[0] & 0x0F) == expected
 }
 
-pub fn foreach_track(
+/// Walk the tracks of a multitrack container without collecting them.
+/// `visit` is invoked as each track is parsed, so it can run before a later
+/// track turns out to be malformed; callers that need all-or-nothing
+/// semantics validate with a first pass (see [`foreach_track`]).
+fn walk_tracks(
     frame_type: FrameType,
     payload: &[u8],
     mut visit: impl FnMut(&MediaTrackSlice<'_>),
@@ -84,7 +88,7 @@ pub fn foreach_track(
         pos += 4;
     }
 
-    let mut tracks = Vec::new();
+    let mut track_count = 0usize;
     loop {
         let fourcc = if multitrack_type == AvMultitrackType::ManyTracksManyCodecs as u8 {
             if pos + 4 > payload.len() {
@@ -127,10 +131,11 @@ pub fn foreach_track(
         if pos + track_size > payload.len() {
             return false;
         }
-        if tracks.len() >= MAX_MULTITRACK_SUBTRACKS {
+        if track_count >= MAX_MULTITRACK_SUBTRACKS {
             return false;
         }
-        tracks.push(MediaTrackSlice {
+        track_count += 1;
+        visit(&MediaTrackSlice {
             track_id,
             packet_type: inner_packet_type,
             fourcc,
@@ -147,13 +152,18 @@ pub fn foreach_track(
         }
     }
 
-    if pos != payload.len() || tracks.is_empty() {
-        return false;
-    }
-    for track in &tracks {
-        visit(track);
-    }
-    true
+    pos == payload.len() && track_count > 0
+}
+
+/// Visit every track of a valid multitrack container. Returns `false`
+/// without visiting anything when the container is malformed. Allocation-free:
+/// the container is validated in a first pass, then visited in a second.
+pub fn foreach_track(
+    frame_type: FrameType,
+    payload: &[u8],
+    visit: impl FnMut(&MediaTrackSlice<'_>),
+) -> bool {
+    walk_tracks(frame_type, payload, |_| {}) && walk_tracks(frame_type, payload, visit)
 }
 
 pub fn first_track_fourcc(frame_type: FrameType, payload: &[u8]) -> Option<[u8; 4]> {

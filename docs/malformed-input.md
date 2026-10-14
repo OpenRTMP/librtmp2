@@ -22,7 +22,7 @@ guarantees below are deliberately split between the transport layer and the
 
 `media::codec_config` checks the structure of `AVCDecoderConfigurationRecord`
 and `HEVCDecoderConfigurationRecord` (and of every sequence-start track of an
-E-RTMP multitrack container): version, SPS/PPS presence, array/entry counts and
+E-RTMP multitrack container): version, SPS/PPS presence, the optional High-profile extension section, array/entry counts and
 lengths inside the record, no empty parameter set. Other FourCCs only need a
 non-empty record. It never decodes video and allocates nothing; it is not run
 for coded frames.
@@ -48,5 +48,5 @@ whether a downstream decoder copes with a mid-stream switch is out of scope.
 - `tests/malformed_churn.rs` – connect/garbage/disconnect churn with a
   baseline-relative memory check (long variant: `--ignored`, weekly CI).
 - `tests/video_config_robustness.rs` + `fuzz/fuzz_targets/video_config.rs`
-  (seeds in `fuzz/seeds/video_config`) – mutation pass on stable, libFuzzer on
+  (seeds in `tests/seeds/video_config`) – mutation pass on stable, libFuzzer on
   nightly.

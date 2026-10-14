@@ -1,6 +1,6 @@
 //! Deterministic mutation pass over the `video_config` fuzz seeds.
 //!
-//! Runs on stable in normal CI: every seed in `fuzz/seeds/video_config` is
+//! Runs on stable in normal CI: every seed in `tests/seeds/video_config` is
 //! truncated at every length, bit-flipped, and has boundary values written at
 //! every offset, and the same functions as the `video_config` fuzz target must
 //! neither panic nor violate its invariants.
@@ -15,10 +15,10 @@ use librtmp2::media::{
 };
 use librtmp2::types::{Frame, FrameType, VideoTag};
 
-include!("../fuzz/video_config_check.rs");
+include!("support/video_config_check.rs");
 
 fn seeds() -> Vec<(String, Vec<u8>)> {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("fuzz/seeds/video_config");
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/seeds/video_config");
     let mut out: Vec<_> = fs::read_dir(dir)
         .expect("seed directory")
         .map(|e| e.unwrap())
