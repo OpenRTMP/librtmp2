@@ -283,7 +283,7 @@ fn assert_late_joiner_saw_only_valid_state() {
     );
     for p in late.iter() {
         assert!(
-            !malformed_configs().contains(p) || p.is_empty(),
+            !malformed_configs().contains(p),
             "late joiner received a malformed configuration: {p:?}"
         );
     }
