@@ -8,7 +8,6 @@
 mod common;
 
 use std::io::{Read, Write};
-use std::net::TcpStream;
 use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -85,14 +84,7 @@ fn malformed_configs() -> Vec<Vec<u8>> {
 /// Send protocol garbage over a raw socket after a completed handshake and
 /// verify the server closes the connection.
 fn raw_attacker(payload: &[u8]) -> bool {
-    let mut s = TcpStream::connect(ADDR).unwrap();
-    s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-    let mut c0c1 = vec![3u8];
-    c0c1.extend_from_slice(&[0u8; 1536]);
-    s.write_all(&c0c1).unwrap();
-    let mut s0s1s2 = vec![0u8; 1 + 1536 + 1536];
-    s.read_exact(&mut s0s1s2).unwrap();
-    s.write_all(&[0u8; 1536]).unwrap(); // C2
+    let mut s = common::raw_handshake(ADDR);
     let _ = s.write_all(payload);
     let mut sink = [0u8; 4096];
     loop {
