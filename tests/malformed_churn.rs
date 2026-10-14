@@ -107,7 +107,9 @@ fn run_churn(addr: &'static str, warmup: u32, measured: u32) -> (u64, u64) {
 
 fn assert_stable(baseline: u64, after: u64, measured: u32) {
     if baseline == 0 {
-        return; // no /proc on this platform
+        // No /proc on this platform: say so instead of passing silently.
+        eprintln!("skipping RSS stability check: memory measurement unavailable");
+        return;
     }
     // Growth allowed for allocator noise: 16 MiB, or 5% of the baseline.
     let allowed = (16 * 1024).max(baseline / 20);
