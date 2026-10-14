@@ -2483,23 +2483,23 @@ impl Server {
         key.0
             .len()
             .saturating_add(key.1.len())
-            .saturating_add(cache.avc_header.as_ref().map(|v| v.len()).unwrap_or(0))
+            .saturating_add(cache.avc_header.as_ref().map(Vec::len).unwrap_or(0))
             .saturating_add(
                 cache
                     .video_track_headers
                     .values()
-                    .map(|v| v.len())
+                    .map(Vec::len)
                     .sum::<usize>(),
             )
-            .saturating_add(cache.aac_header.as_ref().map(|v| v.len()).unwrap_or(0))
+            .saturating_add(cache.aac_header.as_ref().map(Vec::len).unwrap_or(0))
             .saturating_add(
                 cache
                     .audio_track_headers
                     .values()
-                    .map(|v| v.len())
+                    .map(Vec::len)
                     .sum::<usize>(),
             )
-            .saturating_add(cache.metadata.as_ref().map(|v| v.len()).unwrap_or(0))
+            .saturating_add(cache.metadata.as_ref().map(Vec::len).unwrap_or(0))
             .saturating_add(
                 cache
                     .last_keyframe
@@ -2770,7 +2770,7 @@ impl Server {
                 .stream_cache
                 .get(&key)
                 .and_then(|cache| cache.metadata.as_ref())
-                .map(|v| v.len())
+                .map(Vec::len)
                 .unwrap_or(0);
             if !self.reserve_stream_cache_storage(
                 &key,
@@ -2876,8 +2876,8 @@ impl Server {
                     // its bytes are replaceable for this reservation.
                     let stale_keyframe =
                         Self::stale_keyframe_len(cache, &seq_tracks, &frame.payload);
-                    let combined = cache.avc_header.as_ref().map(|v| v.len()).unwrap_or(0);
-                    let tracks: usize = cache.video_track_headers.values().map(|v| v.len()).sum();
+                    let combined = cache.avc_header.as_ref().map(Vec::len).unwrap_or(0);
+                    let tracks: usize = cache.video_track_headers.values().map(Vec::len).sum();
                     if seq_tracks.len() > 1 {
                         // Clears all track headers; replaces combined header.
                         combined
@@ -2890,7 +2890,7 @@ impl Server {
                                 cache
                                     .video_track_headers
                                     .get(track_id)
-                                    .map(|v| v.len())
+                                    .map(Vec::len)
                                     .unwrap_or(0),
                             )
                             .saturating_add(stale_keyframe)
@@ -2910,8 +2910,8 @@ impl Server {
                         FrameType::Audio,
                         frame.cache_payload(),
                     );
-                    let combined = cache.aac_header.as_ref().map(|v| v.len()).unwrap_or(0);
-                    let tracks: usize = cache.audio_track_headers.values().map(|v| v.len()).sum();
+                    let combined = cache.aac_header.as_ref().map(Vec::len).unwrap_or(0);
+                    let tracks: usize = cache.audio_track_headers.values().map(Vec::len).sum();
                     if seq_tracks.len() > 1 {
                         combined.saturating_add(tracks)
                     } else if let Some(track_id) = seq_tracks.first() {
@@ -2919,7 +2919,7 @@ impl Server {
                             cache
                                 .audio_track_headers
                                 .get(track_id)
-                                .map(|v| v.len())
+                                .map(Vec::len)
                                 .unwrap_or(0),
                         )
                     } else {

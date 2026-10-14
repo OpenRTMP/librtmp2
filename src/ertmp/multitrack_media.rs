@@ -53,6 +53,35 @@ pub fn is_multitrack_container(frame_type: FrameType, payload: &[u8]) -> bool {
     (payload[0] & 0x0F) == expected
 }
 
+/// Read the 4-byte FourCC at `pos`.
+fn read_fourcc(payload: &[u8], pos: usize) -> Option<[u8; 4]> {
+    payload.get(pos..pos.checked_add(4)?)?.try_into().ok()
+}
+
+/// Parse one track header at `pos`: the track id and, for ManyTracks forms,
+/// the u24 size. Returns `(track_id, body_start, body_len)` with the body
+/// bounds-checked against `payload`.
+fn read_track_header(payload: &[u8], pos: usize, one_track: bool) -> Option<(u8, usize, usize)> {
+    let track_id = *payload.get(pos)?;
+    let mut body = pos + 1;
+    let len = if one_track {
+        payload.len() - body
+    } else {
+        let size = read_u24(payload.get(body..body + 3)?);
+        body += 3;
+        // ManyTracks / ManyTracksManyCodecs allow up to 4096 sub-tracks in a
+        // single ~16 KiB message. Zero-length sub-tracks pack the maximum
+        // track count into the smallest wire footprint and force per-track
+        // authorization and on_frame callbacks with no payload work to
+        // amortize the cost -- reject them as malformed.
+        if size == 0 {
+            return None;
+        }
+        size
+    };
+    (body + len <= payload.len()).then_some((track_id, body, len))
+}
+
 /// Walk the tracks of a multitrack container without collecting them.
 /// `visit` is invoked as each track is parsed, so it can run before a later
 /// track turns out to be malformed; callers that need all-or-nothing
@@ -65,93 +94,59 @@ fn walk_tracks(
     if !is_multitrack_container(frame_type, payload) || payload.len() < 3 {
         return false;
     }
-
     let multitrack_type = (payload[1] >> 4) & 0x0F;
-    let inner_packet_type = payload[1] & 0x0F;
     if multitrack_type > AvMultitrackType::ManyTracksManyCodecs as u8 {
         return false;
     }
-
+    let many_codecs = multitrack_type == AvMultitrackType::ManyTracksManyCodecs as u8;
+    let one_track = multitrack_type == AvMultitrackType::OneTrack as u8;
+    let packet_type = payload[1] & 0x0F;
     let video_frame_type = if frame_type == FrameType::Video {
         (payload[0] >> 4) & 0x07
     } else {
         0
     };
+
     let mut pos = 2usize;
     let mut shared_fourcc = [0u8; 4];
-
-    if multitrack_type != AvMultitrackType::ManyTracksManyCodecs as u8 {
-        if pos + 4 > payload.len() {
+    if !many_codecs {
+        let Some(cc) = read_fourcc(payload, pos) else {
             return false;
-        }
-        shared_fourcc.copy_from_slice(&payload[pos..pos + 4]);
+        };
+        shared_fourcc = cc;
         pos += 4;
     }
 
     let mut track_count = 0usize;
     loop {
-        let fourcc = if multitrack_type == AvMultitrackType::ManyTracksManyCodecs as u8 {
-            if pos + 4 > payload.len() {
+        let fourcc = if many_codecs {
+            let Some(cc) = read_fourcc(payload, pos) else {
                 return false;
-            }
-            let mut cc = [0u8; 4];
-            cc.copy_from_slice(&payload[pos..pos + 4]);
+            };
             pos += 4;
             cc
         } else {
             shared_fourcc
         };
-
-        if pos >= payload.len() {
+        let Some((track_id, body, len)) = read_track_header(payload, pos, one_track) else {
             return false;
-        }
-        let track_id = payload[pos];
-        pos += 1;
-
-        let track_size = if multitrack_type != AvMultitrackType::OneTrack as u8 {
-            if pos + 3 > payload.len() {
-                return false;
-            }
-            let size = read_u24(&payload[pos..pos + 3]);
-            pos += 3;
-            size
-        } else {
-            payload.len() - pos
         };
-
-        // ManyTracks / ManyTracksManyCodecs allow up to 4096 sub-tracks in a
-        // single ~16 KiB message. Zero-length sub-tracks pack the maximum
-        // track count into the smallest wire footprint and force per-track
-        // authorization and on_frame callbacks with no payload work to
-        // amortize the cost — reject them as malformed.
-        if multitrack_type != AvMultitrackType::OneTrack as u8 && track_size == 0 {
-            return false;
-        }
-
-        if pos + track_size > payload.len() {
-            return false;
-        }
         if track_count >= MAX_MULTITRACK_SUBTRACKS {
             return false;
         }
         track_count += 1;
         visit(&MediaTrackSlice {
             track_id,
-            packet_type: inner_packet_type,
+            packet_type,
             fourcc,
             video_frame_type,
-            payload: &payload[pos..pos + track_size],
+            payload: &payload[body..body + len],
         });
-        pos += track_size;
-
-        if multitrack_type == AvMultitrackType::OneTrack as u8 {
-            break;
-        }
-        if pos == payload.len() {
+        pos = body + len;
+        if one_track || pos == payload.len() {
             break;
         }
     }
-
     pos == payload.len() && track_count > 0
 }
 

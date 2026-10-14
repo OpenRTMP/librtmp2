@@ -33,74 +33,87 @@ fn classify_video(payload: &[u8]) -> CacheFrameKind {
     // FrameType 5 is a VideoCommand: its low nibble is not a packet type, so
     // it can be neither a sequence header nor a keyframe -- whatever the
     // nibble looks like (including the multitrack one).
-    if payload
-        .first()
-        .is_some_and(|b| b & 0x80 != 0 && (b >> 4) & 0x07 == VIDEO_FRAME_TYPE_COMMAND)
-    {
+    if is_video_command(payload) {
         return CacheFrameKind::LiveOnly;
     }
     if is_multitrack_container(FrameType::Video, payload) {
-        if multitrack_has_sequence_start(FrameType::Video, payload) {
-            // A malformed track configuration must not replace a cached valid
-            // one: relay it live, never cache it.
-            return if multitrack_sequence_configs_valid(payload) {
-                CacheFrameKind::VideoSequenceHeader
-            } else {
-                CacheFrameKind::LiveOnly
-            };
-        }
-        if multitrack_has_keyframe(payload) {
-            return CacheFrameKind::VideoKeyframe;
-        }
-        return CacheFrameKind::LiveOnly;
+        return classify_multitrack_video(payload);
     }
     let mut hdr = VideoHeader::default();
     if exvideo::exvideo_parse(payload, &mut hdr).is_err() {
         return CacheFrameKind::LiveOnly;
     }
     if hdr.is_ex_header != 0 {
-        // Unpeeled ModEx wrappers expose extension metadata at bytes 1..5,
-        // not the inner packet type -- never cacheable (mirrors
-        // `Conn::detect_video_codec`).
-        if hdr.packet_type == ERTMP_PACKET_TYPE_MODEX {
-            return CacheFrameKind::LiveOnly;
-        }
-        return match hdr.packet_type {
-            0 => {
-                let record = payload.get(hdr.header_size..).unwrap_or(&[]);
-                if validate_config_record(ConfigCodec::from_fourcc(&hdr.fourcc), record) {
-                    CacheFrameKind::VideoSequenceHeader
-                } else {
-                    CacheFrameKind::LiveOnly
-                }
-            }
-            1 | 3 if hdr.frame_type == 1 => CacheFrameKind::VideoKeyframe,
-            _ => CacheFrameKind::LiveOnly,
-        };
+        classify_ex_video(payload, &hdr)
+    } else {
+        classify_legacy_video(payload)
     }
-    let codec_id = payload[0] & 0x0F;
-    let frame_type_nibble = (payload[0] >> 4) & 0x0F;
-    if codec_id == 7 && payload.len() >= 2 && payload[1] == 0 {
-        // AVCPacketType 0: 1 + 1 + SI24 CompositionTime, then the record.
-        let record = payload.get(5..).unwrap_or(&[]);
-        return if validate_config_record(ConfigCodec::Avc, record) {
+}
+
+fn is_video_command(payload: &[u8]) -> bool {
+    payload
+        .first()
+        .is_some_and(|b| b & 0x80 != 0 && (b >> 4) & 0x07 == VIDEO_FRAME_TYPE_COMMAND)
+}
+
+/// A sequence header is only cacheable when its configuration record is
+/// structurally valid; a malformed one is relayed live but never cached.
+fn sequence_header_kind(codec: ConfigCodec, record: &[u8]) -> CacheFrameKind {
+    if validate_config_record(codec, record) {
+        CacheFrameKind::VideoSequenceHeader
+    } else {
+        CacheFrameKind::LiveOnly
+    }
+}
+
+fn classify_multitrack_video(payload: &[u8]) -> CacheFrameKind {
+    if multitrack_has_sequence_start(FrameType::Video, payload) {
+        return if multitrack_sequence_configs_valid(payload) {
             CacheFrameKind::VideoSequenceHeader
         } else {
             CacheFrameKind::LiveOnly
         };
     }
+    if multitrack_has_keyframe(payload) {
+        CacheFrameKind::VideoKeyframe
+    } else {
+        CacheFrameKind::LiveOnly
+    }
+}
+
+fn classify_ex_video(payload: &[u8], hdr: &VideoHeader) -> CacheFrameKind {
+    // Unpeeled ModEx wrappers expose extension metadata at bytes 1..5,
+    // not the inner packet type -- never cacheable (mirrors
+    // `Conn::detect_video_codec`).
+    match hdr.packet_type {
+        ERTMP_PACKET_TYPE_MODEX => CacheFrameKind::LiveOnly,
+        0 => sequence_header_kind(
+            ConfigCodec::from_fourcc(&hdr.fourcc),
+            payload.get(hdr.header_size..).unwrap_or(&[]),
+        ),
+        1 | 3 if hdr.frame_type == 1 => CacheFrameKind::VideoKeyframe,
+        _ => CacheFrameKind::LiveOnly,
+    }
+}
+
+fn classify_legacy_video(payload: &[u8]) -> CacheFrameKind {
+    let codec_id = payload[0] & 0x0F;
+    let frame_type_nibble = (payload[0] >> 4) & 0x0F;
+    let avc_packet_type = payload.get(1).copied();
+    if codec_id == 7 && avc_packet_type == Some(0) {
+        // AVCPacketType 0: 1 + 1 + SI24 CompositionTime, then the record.
+        return sequence_header_kind(ConfigCodec::Avc, payload.get(5..).unwrap_or(&[]));
+    }
+    if frame_type_nibble != 1 {
+        return CacheFrameKind::LiveOnly;
+    }
     // Legacy AVC: nibble 1 is "keyframe" for sequence-end (AVCPacketType 2)
     // as well as coded IDR (type 1). Only NALU packets are cacheable IDRs.
-    if frame_type_nibble == 1 {
-        if codec_id == 7 {
-            if payload.len() >= 2 && payload[1] == 1 {
-                return CacheFrameKind::VideoKeyframe;
-            }
-            return CacheFrameKind::LiveOnly;
-        }
-        return CacheFrameKind::VideoKeyframe;
+    if codec_id != 7 || avc_packet_type == Some(1) {
+        CacheFrameKind::VideoKeyframe
+    } else {
+        CacheFrameKind::LiveOnly
     }
-    CacheFrameKind::LiveOnly
 }
 
 const VIDEO_FRAME_TYPE_COMMAND: u8 = 5;

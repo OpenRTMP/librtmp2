@@ -103,6 +103,192 @@ fn wait_for(deadline: Instant, mut done: impl FnMut() -> bool) {
     }
 }
 
+const PER_PHASE: u32 = 40;
+
+fn is_counted_frame(p: &[u8]) -> bool {
+    p.len() == 9 && p[0] == 0x27
+}
+
+fn frames_seen_by_viewer_b() -> usize {
+    VIEWER_B
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|p| is_counted_frame(p))
+        .count()
+}
+
+/// The unrelated stream: publisher B, numbered frames, viewer B.
+struct StreamB {
+    publisher: Client,
+    viewer: Client,
+    sent: u32,
+}
+
+impl StreamB {
+    fn start() -> Result<Self, ErrorCode> {
+        let mut publisher = Client::new();
+        t!(publisher.connect(&format!("{URL}/b")));
+        t!(publisher.publish());
+        t!(publisher.send_frame_payload(FrameType::Video, 0, &avc_header(1)));
+        let mut viewer = Client::new();
+        viewer.on_frame_cb = Some(|f| capture(f, &VIEWER_B));
+        t!(viewer.connect(&format!("{URL}/b")));
+        t!(viewer.play());
+        Ok(Self {
+            publisher,
+            viewer,
+            sent: 0,
+        })
+    }
+
+    fn send(&mut self, n: u32) -> Result<(), ErrorCode> {
+        for _ in 0..n {
+            let seq = self.sent;
+            t!(self
+                .publisher
+                .send_frame_payload(FrameType::Video, seq, &counted_frame(seq)));
+            self.sent += 1;
+            t!(self.viewer.poll(0));
+        }
+        Ok(())
+    }
+
+    /// Wait until every frame sent so far reached viewer B.
+    fn drain(&mut self) -> Result<(), ErrorCode> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline && (frames_seen_by_viewer_b() as u32) < self.sent {
+            t!(self.viewer.poll(20));
+        }
+        Ok(())
+    }
+}
+
+/// Publisher A sends malformed codec configuration mid-stream.
+fn phase_malformed_configs(pub_a: &mut Client, b: &mut StreamB) -> Result<(), ErrorCode> {
+    for (i, bad) in malformed_configs().iter().enumerate() {
+        // A may be disconnected by the server; that is its own business.
+        let _ = pub_a.send_frame_payload(FrameType::Video, 2 + i as u32, bad);
+        t!(b.send(2));
+    }
+    b.send(PER_PHASE)
+}
+
+/// Raw protocol garbage on fresh connections.
+fn phase_raw_garbage(b: &mut StreamB) -> Result<(), ErrorCode> {
+    let garbage: [&[u8]; 4] = [
+        &[0x03, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0x14, 0, 0, 0, 0], // 16 MiB-1 command
+        &[
+            0x02, 0, 0, 0, 0, 0, 4, 0x01, 0, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0xFF,
+        ], // huge chunk size
+        &[0x42; 256],
+        &[0xC3; 512], // type-3 chunks with no prior header
+    ];
+    for g in garbage {
+        assert!(raw_attacker(g), "server must drop garbage connection");
+        t!(b.send(5));
+    }
+    b.send(PER_PHASE)
+}
+
+/// A late joiner on A sees only A's valid header, never malformed data.
+fn phase_late_joiner() -> Result<(), ErrorCode> {
+    let mut late = Client::new();
+    late.on_frame_cb = Some(|f| capture(f, &LATE_A));
+    t!(late.connect(&format!("{URL}/a")));
+    t!(late.play());
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline && LATE_A.lock().unwrap().is_empty() {
+        t!(late.poll(20));
+    }
+    Ok(())
+}
+
+/// A disconnects; its route is released and a new publisher can take it,
+/// and a brand new publisher/viewer pair works after the incident.
+fn phase_replacement_after_incident(pub_a: Client) -> Result<(), ErrorCode> {
+    drop(pub_a);
+    thread::sleep(Duration::from_millis(200));
+    let mut pub_c = Client::new();
+    t!(pub_c.connect(&format!("{URL}/a")));
+    t!(pub_c.publish());
+    let mut viewer_c = Client::new();
+    viewer_c.on_frame_cb = Some(|f| capture(f, &LATE_C));
+    t!(viewer_c.connect(&format!("{URL}/a")));
+    t!(viewer_c.play());
+    thread::sleep(Duration::from_millis(100));
+    t!(pub_c.send_frame_payload(FrameType::Video, 0, &counted_frame(7777)));
+    wait_for(Instant::now() + Duration::from_secs(3), || {
+        let _ = viewer_c.poll(20);
+        LATE_C
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|p| p.ends_with(&7777u32.to_be_bytes()))
+    });
+    Ok(())
+}
+
+fn run_scenario() -> Result<(), ErrorCode> {
+    let mut b = StreamB::start()?;
+
+    let mut pub_a = Client::new();
+    t!(pub_a.connect(&format!("{URL}/a")));
+    t!(pub_a.publish());
+    t!(pub_a.send_frame_payload(FrameType::Video, 0, &avc_header(9)));
+    t!(pub_a.send_frame_payload(FrameType::Video, 1, &[0x17, 0x01, 0, 0, 0, 0xEE]));
+
+    t!(b.send(PER_PHASE));
+    t!(phase_malformed_configs(&mut pub_a, &mut b));
+    t!(phase_raw_garbage(&mut b));
+    t!(b.drain());
+    t!(phase_late_joiner());
+
+    // A framing violation may cost A its own connection; B must not notice.
+    let _ = pub_a.send_frame_payload(FrameType::Video, 99, &framing_violation());
+    t!(b.send(PER_PHASE));
+    t!(b.drain());
+
+    phase_replacement_after_incident(pub_a)
+}
+
+fn assert_viewer_b_unaffected() {
+    let b = VIEWER_B.lock().unwrap();
+    let counters: Vec<u32> = b
+        .iter()
+        .filter(|p| is_counted_frame(p))
+        .map(|p| u32::from_be_bytes(p[5..9].try_into().unwrap()))
+        .collect();
+    assert!(
+        counters.len() >= (PER_PHASE * 4) as usize,
+        "viewer B only received {} frames",
+        counters.len()
+    );
+    assert_eq!(
+        counters,
+        (0..counters.len() as u32).collect::<Vec<_>>(),
+        "viewer B must see B's frames complete and in order"
+    );
+    assert!(
+        b.iter().any(|p| *p == avc_header(1)),
+        "viewer B lost its header"
+    );
+}
+
+fn assert_late_joiner_saw_only_valid_state() {
+    let late = LATE_A.lock().unwrap();
+    assert!(
+        late.iter().any(|p| *p == avc_header(9)),
+        "late joiner on A must receive A's last valid header, got {late:?}"
+    );
+    for p in late.iter() {
+        assert!(
+            !malformed_configs().contains(p) || p.is_empty(),
+            "late joiner received a malformed configuration: {p:?}"
+        );
+    }
+}
+
 #[test]
 fn malformed_publisher_does_not_disrupt_unrelated_stream() {
     let mut server = Server::new(ServerConfig {
@@ -115,131 +301,9 @@ fn malformed_publisher_does_not_disrupt_unrelated_stream() {
     server.on_publish_cb = Some(allow_publish);
     server.on_play_cb = Some(allow_play);
 
-    const PER_PHASE: u32 = 40;
-
     let (done_tx, done_rx) = std::sync::mpsc::channel();
     let client = thread::spawn(move || {
-        let result = (|| -> Result<(), ErrorCode> {
-            let mut pub_b = Client::new();
-            t!(pub_b.connect(&format!("{URL}/b")));
-            t!(pub_b.publish());
-            t!(pub_b.send_frame_payload(FrameType::Video, 0, &avc_header(1)));
-
-            let mut viewer_b = Client::new();
-            viewer_b.on_frame_cb = Some(|f| capture(f, &VIEWER_B));
-            t!(viewer_b.connect(&format!("{URL}/b")));
-            t!(viewer_b.play());
-
-            let mut pub_a = Client::new();
-            t!(pub_a.connect(&format!("{URL}/a")));
-            t!(pub_a.publish());
-            t!(pub_a.send_frame_payload(FrameType::Video, 0, &avc_header(9)));
-            t!(pub_a.send_frame_payload(FrameType::Video, 1, &[0x17, 0x01, 0, 0, 0, 0xEE]));
-
-            let seq = std::cell::Cell::new(0u32);
-            let send_b =
-                |pub_b: &mut Client, viewer_b: &mut Client, n: u32| -> Result<(), ErrorCode> {
-                    for _ in 0..n {
-                        let n = seq.get();
-                        t!(pub_b.send_frame_payload(FrameType::Video, n, &counted_frame(n)));
-                        seq.set(n + 1);
-                        t!(viewer_b.poll(0));
-                    }
-                    Ok(())
-                };
-
-            t!(send_b(&mut pub_b, &mut viewer_b, PER_PHASE));
-
-            // Phase 2: A sends malformed codec configuration mid-stream.
-            for (i, bad) in malformed_configs().iter().enumerate() {
-                // A may be disconnected by the server; that is its own business.
-                let _ = pub_a.send_frame_payload(FrameType::Video, 2 + i as u32, bad);
-                t!(send_b(&mut pub_b, &mut viewer_b, 2));
-            }
-            t!(send_b(&mut pub_b, &mut viewer_b, PER_PHASE));
-
-            // Phase 3: raw protocol garbage on fresh connections.
-            let garbage: [&[u8]; 4] = [
-                &[0x03, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0x14, 0, 0, 0, 0], // 16 MiB-1 command
-                &[
-                    0x02, 0, 0, 0, 0, 0, 4, 0x01, 0, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0xFF,
-                ], // huge chunk size
-                &[0x42; 256],
-                &[0xC3; 512], // type-3 chunks with no prior header
-            ];
-            for g in garbage {
-                assert!(raw_attacker(g), "server must drop garbage connection");
-                t!(send_b(&mut pub_b, &mut viewer_b, 5));
-            }
-            t!(send_b(&mut pub_b, &mut viewer_b, PER_PHASE));
-
-            // Drain: every frame B sent must reach its viewer in order.
-            let total = seq.get();
-            let deadline = Instant::now() + Duration::from_secs(5);
-            while Instant::now() < deadline {
-                t!(viewer_b.poll(20));
-                let n = VIEWER_B
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .filter(|p| p.len() == 9 && p[0] == 0x27)
-                    .count();
-                if n as u32 >= total {
-                    break;
-                }
-            }
-
-            // A late joiner on A sees only A's valid header, never malformed data.
-            let mut late = Client::new();
-            late.on_frame_cb = Some(|f| capture(f, &LATE_A));
-            t!(late.connect(&format!("{URL}/a")));
-            t!(late.play());
-            let deadline = Instant::now() + Duration::from_secs(3);
-            while Instant::now() < deadline && LATE_A.lock().unwrap().is_empty() {
-                t!(late.poll(20));
-            }
-
-            // A framing violation may cost A its own connection; B must not notice.
-            let _ = pub_a.send_frame_payload(FrameType::Video, 99, &framing_violation());
-            t!(send_b(&mut pub_b, &mut viewer_b, PER_PHASE));
-            let deadline = Instant::now() + Duration::from_secs(5);
-            while Instant::now() < deadline {
-                t!(viewer_b.poll(20));
-                let n = VIEWER_B
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .filter(|p| p.len() == 9 && p[0] == 0x27)
-                    .count();
-                if n as u32 >= seq.get() {
-                    break;
-                }
-            }
-
-            // A disconnects; its route is released and a new publisher can take it,
-            // and a brand new publisher/viewer pair works after the incident.
-            drop(pub_a);
-            thread::sleep(Duration::from_millis(200));
-            let mut pub_c = Client::new();
-            t!(pub_c.connect(&format!("{URL}/a")));
-            t!(pub_c.publish());
-            let mut viewer_c = Client::new();
-            viewer_c.on_frame_cb = Some(|f| capture(f, &LATE_C));
-            t!(viewer_c.connect(&format!("{URL}/a")));
-            t!(viewer_c.play());
-            thread::sleep(Duration::from_millis(100));
-            t!(pub_c.send_frame_payload(FrameType::Video, 0, &counted_frame(7777)));
-            let deadline = Instant::now() + Duration::from_secs(3);
-            wait_for(deadline, || {
-                let _ = viewer_c.poll(20);
-                LATE_C
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .any(|p| p.ends_with(&7777u32.to_be_bytes()))
-            });
-            Ok(())
-        })();
+        let result = run_scenario();
         let _ = done_tx.send(result.is_ok());
         result
     });
@@ -257,39 +321,8 @@ fn malformed_publisher_does_not_disrupt_unrelated_stream() {
     client.join().unwrap().ok();
     assert!(ok, "client scenario failed");
 
-    let b = VIEWER_B.lock().unwrap();
-    let counters: Vec<u32> = b
-        .iter()
-        .filter(|p| p.len() == 9 && p[0] == 0x27)
-        .map(|p| u32::from_be_bytes(p[5..9].try_into().unwrap()))
-        .collect();
-    assert!(
-        counters.len() >= (PER_PHASE * 4) as usize,
-        "viewer B only received {} frames",
-        counters.len()
-    );
-    assert_eq!(
-        counters,
-        (0..counters.len() as u32).collect::<Vec<_>>(),
-        "viewer B must see B's frames complete and in order"
-    );
-    assert!(
-        b.iter().any(|p| *p == avc_header(1)),
-        "viewer B lost its header"
-    );
-
-    let late = LATE_A.lock().unwrap();
-    assert!(
-        late.iter().any(|p| *p == avc_header(9)),
-        "late joiner on A must receive A's last valid header, got {late:?}"
-    );
-    for p in late.iter() {
-        assert!(
-            !malformed_configs().contains(p) || p.is_empty(),
-            "late joiner received a malformed configuration: {p:?}"
-        );
-    }
-
+    assert_viewer_b_unaffected();
+    assert_late_joiner_saw_only_valid_state();
     assert!(
         LATE_C
             .lock()
