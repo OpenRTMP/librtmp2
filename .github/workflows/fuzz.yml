@@ -48,11 +48,15 @@ jobs:
         run: cargo install cargo-fuzz --locked
 
       - name: Run fuzz target
+        env:
+          TARGET: ${{ matrix.target }}
+          SECONDS_LIMIT: ${{ env.FUZZ_SECONDS }}
         run: |
-          mkdir -p "fuzz/corpus/${{ matrix.target }}"
-          seeds="tests/seeds/${{ matrix.target }}"
-          cargo fuzz run "${{ matrix.target }}" "fuzz/corpus/${{ matrix.target }}" $( [ -d "$seeds" ] && echo "$seeds" ) -- \
-            -max_total_time=${{ env.FUZZ_SECONDS }} \
+          mkdir -p "fuzz/corpus/$TARGET"
+          args=("fuzz/corpus/$TARGET")
+          [ -d "tests/seeds/$TARGET" ] && args+=("tests/seeds/$TARGET")
+          cargo fuzz run "$TARGET" "${args[@]}" -- \
+            -max_total_time="$SECONDS_LIMIT" \
             -reload=0 \
             -print_final_stats=1
 
