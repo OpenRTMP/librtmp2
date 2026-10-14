@@ -79,6 +79,27 @@ pub fn validate_avc_record(record: &[u8]) -> bool {
             None => return false,
         }
     }
+    validate_avc_extension(&record[pos..])
+}
+
+/// High-profile records may append `chroma_format`, the two bit depths and
+/// `numOfSequenceParameterSetExt` followed by that many u16-prefixed,
+/// non-empty parameter sets. Some encoders omit the section entirely (accepted);
+/// if any bytes follow the PPS list they must form a complete, bounded section.
+fn validate_avc_extension(ext: &[u8]) -> bool {
+    if ext.is_empty() {
+        return true;
+    }
+    let Some(&num_sps_ext) = ext.get(3) else {
+        return false;
+    };
+    let mut pos = 4usize;
+    for _ in 0..num_sps_ext {
+        match skip_param_set(ext, pos) {
+            Some(next) => pos = next,
+            None => return false,
+        }
+    }
     true
 }
 
@@ -221,8 +242,31 @@ mod tests {
         assert!(validate_avc_record(&multi));
         // High-profile extension bytes after the last PPS are tolerated.
         let mut ext = valid_avc();
-        ext.extend_from_slice(&[0xFC, 0xFD, 0xF8, 0xF8]);
+        ext.extend_from_slice(&[0xFD, 0xF8, 0xF8, 0x00]);
         assert!(validate_avc_record(&ext));
+    }
+
+    #[test]
+    fn avc_validates_the_high_profile_extension_section() {
+        let base = valid_avc();
+        let with = |tail: &[u8]| [&base[..], tail].concat();
+        // Complete section with zero and with two SPS extensions.
+        assert!(validate_avc_record(&with(&[0xFD, 0xF8, 0xF8, 0])));
+        assert!(validate_avc_record(&with(&[
+            0xFD, 0xF8, 0xF8, 2, 0, 2, 0x6D, 1, 0, 1, 0x6D
+        ])));
+        // Missing/truncated fields, extension count beyond the record, an
+        // empty extension SPS and a cut-off entry are all rejected.
+        assert!(!validate_avc_record(&with(&[0xFD])));
+        assert!(!validate_avc_record(&with(&[0xFD, 0xF8, 0xF8])));
+        assert!(!validate_avc_record(&with(&[
+            0xFD, 0xF8, 0xF8, 3, 0, 1, 0x6D
+        ])));
+        assert!(!validate_avc_record(&with(&[0xFD, 0xF8, 0xF8, 1, 0, 0])));
+        assert!(!validate_avc_record(&with(&[
+            0xFD, 0xF8, 0xF8, 1, 0, 5, 0x6D
+        ])));
+        assert!(!validate_avc_record(&with(&[0xFD, 0xF8, 0xF8, 0xFF])));
     }
 
     #[test]

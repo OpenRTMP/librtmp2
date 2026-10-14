@@ -1,5 +1,5 @@
 // Shared by the `video_config` fuzz target and
-// `tests/video_config_robustness.rs` (via `include!`).
+// `tests/video_config_robustness.rs` (via `include!`; kept under `tests/` so it ships in the published package).
 
 fn check(payload: &[u8]) {
     let kind = classify_cache_frame(FrameType::Video, payload);

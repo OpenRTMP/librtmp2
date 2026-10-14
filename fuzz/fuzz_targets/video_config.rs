@@ -15,7 +15,7 @@ use librtmp2::media::{
 };
 use librtmp2::types::{Frame, FrameType, VideoTag};
 
-include!("../video_config_check.rs");
+include!("../../tests/support/video_config_check.rs");
 
 fuzz_target!(|data: &[u8]| {
     check(data);

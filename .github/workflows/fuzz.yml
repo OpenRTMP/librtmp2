@@ -50,7 +50,7 @@ jobs:
       - name: Run fuzz target
         run: |
           mkdir -p "fuzz/corpus/${{ matrix.target }}"
-          seeds="fuzz/seeds/${{ matrix.target }}"
+          seeds="tests/seeds/${{ matrix.target }}"
           cargo fuzz run "${{ matrix.target }}" "fuzz/corpus/${{ matrix.target }}" $( [ -d "$seeds" ] && echo "$seeds" ) -- \
             -max_total_time=${{ env.FUZZ_SECONDS }} \
             -reload=0 \

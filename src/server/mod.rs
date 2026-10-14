@@ -2728,6 +2728,33 @@ impl Server {
             .sum()
     }
 
+    /// True when `payload` is exactly the video sequence header already
+    /// cached for its slot (combined or per-track), i.e. a repeat that leaves
+    /// the cached configuration unchanged.
+    fn video_header_unchanged(cache: &StreamCache, seq_tracks: &[u8], payload: &[u8]) -> bool {
+        match seq_tracks {
+            [track_id] => {
+                cache.avc_header.is_none()
+                    && cache.video_track_headers.get(track_id).map(Vec::as_slice) == Some(payload)
+            }
+            _ => {
+                cache.avc_header.as_deref() == Some(payload) && cache.video_track_headers.is_empty()
+            }
+        }
+    }
+
+    /// Bytes of the cached keyframe that a changed video header will discard.
+    fn stale_keyframe_len(cache: &StreamCache, seq_tracks: &[u8], payload: &[u8]) -> usize {
+        if Self::video_header_unchanged(cache, seq_tracks, payload) {
+            return 0;
+        }
+        cache
+            .last_keyframe
+            .as_ref()
+            .map(|(_, v)| v.len())
+            .unwrap_or(0)
+    }
+
     fn cache_relay_frame(&mut self, frame: &RelayFrame) {
         if frame.frame_type == FrameType::Script || frame.frame_type == FrameType::Metadata {
             // Injected Script events (e.g. onCuePoint) must still fan out live,
@@ -2794,6 +2821,9 @@ impl Server {
                         FrameType::Video,
                         frame.cache_payload(),
                     );
+                    // The publisher moved to a configuration we cannot cache;
+                    // the keyframe of the previous one is stale as well.
+                    cache.last_keyframe = None;
                     if seq_tracks.len() > 1 {
                         cache.avc_header = None;
                         cache.video_track_headers.clear();
@@ -2842,22 +2872,32 @@ impl Server {
                         FrameType::Video,
                         frame.cache_payload(),
                     );
+                    // A changed header also discards the cached keyframe, so
+                    // its bytes are replaceable for this reservation.
+                    let stale_keyframe =
+                        Self::stale_keyframe_len(cache, &seq_tracks, &frame.payload);
                     let combined = cache.avc_header.as_ref().map(|v| v.len()).unwrap_or(0);
                     let tracks: usize = cache.video_track_headers.values().map(|v| v.len()).sum();
                     if seq_tracks.len() > 1 {
                         // Clears all track headers; replaces combined header.
-                        combined.saturating_add(tracks)
+                        combined
+                            .saturating_add(tracks)
+                            .saturating_add(stale_keyframe)
                     } else if let Some(track_id) = seq_tracks.first() {
                         // Clears combined header; replaces one track slot.
-                        combined.saturating_add(
-                            cache
-                                .video_track_headers
-                                .get(track_id)
-                                .map(|v| v.len())
-                                .unwrap_or(0),
-                        )
+                        combined
+                            .saturating_add(
+                                cache
+                                    .video_track_headers
+                                    .get(track_id)
+                                    .map(|v| v.len())
+                                    .unwrap_or(0),
+                            )
+                            .saturating_add(stale_keyframe)
                     } else {
-                        combined.saturating_add(tracks)
+                        combined
+                            .saturating_add(tracks)
+                            .saturating_add(stale_keyframe)
                     }
                 } else if is_keyframe {
                     cache
@@ -2913,16 +2953,7 @@ impl Server {
             // produced with: once the publisher switches configuration (or
             // codec), the cached keyframe is stale and must not be replayed
             // behind the new header. A repeated identical header keeps it.
-            let unchanged = match seq_tracks.as_slice() {
-                [track_id] => {
-                    cache.avc_header.is_none()
-                        && cache.video_track_headers.get(track_id) == Some(&frame.payload)
-                }
-                _ => {
-                    cache.avc_header.as_ref() == Some(&frame.payload)
-                        && cache.video_track_headers.is_empty()
-                }
-            };
+            let unchanged = Self::video_header_unchanged(cache, &seq_tracks, &frame.payload);
             if !unchanged {
                 cache.last_keyframe = None;
             }
@@ -4457,6 +4488,37 @@ mod tests {
             Some(&mt_avc_seq(&[(0, &good)]))
         );
         assert!(cache.avc_header.is_none());
+    }
+
+    #[test]
+    fn changed_header_that_only_fits_without_the_stale_keyframe_is_admitted() {
+        let mut server = test_server();
+        let key = ("live".to_string(), "stream".to_string());
+        server.cache_relay_frame(&relay_frame(FrameType::Video, avc_seq_len(1, 100)));
+        let keyframe = [&[0x17u8, 0x01, 0, 0, 0][..], &[0xAA; 2000][..]].concat();
+        server.cache_relay_frame(&relay_frame(FrameType::Video, keyframe));
+        // Cap = today's total: the larger replacement header only fits
+        // because the old keyframe is discarded together with the old header.
+        server.resource_limits.max_stream_cache_bytes = server.stream_cache_bytes();
+        let bigger = avc_seq_len(2, 400);
+        server.cache_relay_frame(&relay_frame(FrameType::Video, bigger.clone()));
+        let cache = server.stream_cache.get(&key).unwrap();
+        assert_eq!(cache.avc_header.as_deref(), Some(&bigger[..]));
+        assert!(cache.last_keyframe.is_none());
+    }
+
+    #[test]
+    fn oversized_changed_header_also_drops_the_stale_keyframe() {
+        let mut server = test_server();
+        let key = ("live".to_string(), "stream".to_string());
+        server.cache_relay_frame(&relay_frame(FrameType::Video, avc_seq(1)));
+        server.cache_relay_frame(&relay_frame(FrameType::Video, vec![0x17, 0x01, 0, 0, 0, 9]));
+        server.cache_relay_frame(&relay_frame(
+            FrameType::Video,
+            avc_seq_len(2, MAX_CACHED_INIT_FRAME_BYTES + 1),
+        ));
+        let cache = server.stream_cache.get(&key);
+        assert!(cache.is_none_or(|c| c.avc_header.is_none() && c.last_keyframe.is_none()));
     }
 
     #[test]
