@@ -100,8 +100,8 @@ fn is_enhanced_video_metadata(payload: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::media::codec_config::test_vectors::*;
 
-    const AVC_SEQ: [u8; 5] = [0x17, 0x00, 0, 0, 0];
     const AVC_KEY: [u8; 5] = [0x17, 0x01, 0, 0, 0];
     const AVC_INTER: [u8; 5] = [0x27, 0x01, 0, 0, 0];
     const AAC_SEQ: [u8; 4] = [0xAF, 0x00, 0x12, 0x10];
@@ -114,7 +114,7 @@ mod tests {
     #[test]
     fn h264_headers_are_critical_keyframes_resync_inter_frames_droppable() {
         assert_eq!(
-            hint(FrameType::Video, &AVC_SEQ, true),
+            hint(FrameType::Video, &avc_seq(1), true),
             DeliveryHint::Critical
         );
         assert_eq!(
@@ -177,7 +177,7 @@ mod tests {
     fn enhanced_rtmp_hevc_headers_and_keyframes() {
         // ExVideo header byte: IsExHeader (0x80) | frame type << 4 | packet
         // type (0 = sequence start, 1 = coded frames), then the FourCC.
-        let seq = [0x90, b'h', b'v', b'c', b'1', 0xAA];
+        let seq = hvc_seq(1);
         let key = [0x91, b'h', b'v', b'c', b'1', 0, 0, 0, 0xAA];
         let inter = [0xA1, b'h', b'v', b'c', b'1', 0, 0, 0, 0xAA];
         assert_eq!(hint(FrameType::Video, &seq, true), DeliveryHint::Critical);

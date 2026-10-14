@@ -1,9 +1,10 @@
 //! Init-frame classification and Frame population for the relay hot path.
 
 use crate::ertmp::multitrack_media::{
-    is_multitrack_container, multitrack_has_keyframe, multitrack_has_sequence_start,
+    foreach_track, is_multitrack_container, multitrack_has_keyframe, multitrack_has_sequence_start,
 };
 use crate::ertmp::{exaudio, exvideo, fourcc};
+use crate::media::codec_config::{ConfigCodec, validate_config_record};
 use crate::media::modex::ERTMP_PACKET_TYPE_MODEX;
 use crate::types::{
     AudioCodec, AudioHeader, ERTMP_PACKET_TYPE_METADATA, FourCc, Frame, FrameType, VideoCodec,
@@ -31,7 +32,13 @@ pub fn classify_cache_frame(frame_type: FrameType, payload: &[u8]) -> CacheFrame
 fn classify_video(payload: &[u8]) -> CacheFrameKind {
     if is_multitrack_container(FrameType::Video, payload) {
         if multitrack_has_sequence_start(FrameType::Video, payload) {
-            return CacheFrameKind::VideoSequenceHeader;
+            // A malformed track configuration must not replace a cached valid
+            // one: relay it live, never cache it.
+            return if multitrack_sequence_configs_valid(payload) {
+                CacheFrameKind::VideoSequenceHeader
+            } else {
+                CacheFrameKind::LiveOnly
+            };
         }
         if multitrack_has_keyframe(payload) {
             return CacheFrameKind::VideoKeyframe;
@@ -49,8 +56,20 @@ fn classify_video(payload: &[u8]) -> CacheFrameKind {
         if hdr.packet_type == ERTMP_PACKET_TYPE_MODEX {
             return CacheFrameKind::LiveOnly;
         }
+        // FrameType 5 is a VideoCommand frame: its PacketType nibble is not a
+        // packet type, so it can never be a sequence header or keyframe.
+        if hdr.frame_type == VIDEO_FRAME_TYPE_COMMAND {
+            return CacheFrameKind::LiveOnly;
+        }
         return match hdr.packet_type {
-            0 => CacheFrameKind::VideoSequenceHeader,
+            0 => {
+                let record = payload.get(hdr.header_size..).unwrap_or(&[]);
+                if validate_config_record(ConfigCodec::from_fourcc(&hdr.fourcc), record) {
+                    CacheFrameKind::VideoSequenceHeader
+                } else {
+                    CacheFrameKind::LiveOnly
+                }
+            }
             1 | 3 if hdr.frame_type == 1 => CacheFrameKind::VideoKeyframe,
             _ => CacheFrameKind::LiveOnly,
         };
@@ -58,7 +77,13 @@ fn classify_video(payload: &[u8]) -> CacheFrameKind {
     let codec_id = payload[0] & 0x0F;
     let frame_type_nibble = (payload[0] >> 4) & 0x0F;
     if codec_id == 7 && payload.len() >= 2 && payload[1] == 0 {
-        return CacheFrameKind::VideoSequenceHeader;
+        // AVCPacketType 0: 1 + 1 + SI24 CompositionTime, then the record.
+        let record = payload.get(5..).unwrap_or(&[]);
+        return if validate_config_record(ConfigCodec::Avc, record) {
+            CacheFrameKind::VideoSequenceHeader
+        } else {
+            CacheFrameKind::LiveOnly
+        };
     }
     // Legacy AVC: nibble 1 is "keyframe" for sequence-end (AVCPacketType 2)
     // as well as coded IDR (type 1). Only NALU packets are cacheable IDRs.
@@ -72,6 +97,22 @@ fn classify_video(payload: &[u8]) -> CacheFrameKind {
         return CacheFrameKind::VideoKeyframe;
     }
     CacheFrameKind::LiveOnly
+}
+
+const VIDEO_FRAME_TYPE_COMMAND: u8 = 5;
+
+/// True when every sequence-start track in a multitrack video container
+/// carries a structurally valid configuration record.
+fn multitrack_sequence_configs_valid(payload: &[u8]) -> bool {
+    let mut all_valid = true;
+    foreach_track(FrameType::Video, payload, |track| {
+        if track.packet_type == 0
+            && !validate_config_record(ConfigCodec::from_fourcc(&track.fourcc), track.payload)
+        {
+            all_valid = false;
+        }
+    });
+    all_valid
 }
 
 /// Classify an audio payload as a cacheable sequence header or live-only.
@@ -428,6 +469,7 @@ fn read_data_event_name(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::media::codec_config::test_vectors::*;
 
     #[test]
     fn multitrack_video_callback_metadata_uses_track_descriptor() {
@@ -547,7 +589,7 @@ mod tests {
 
     #[test]
     fn enhanced_hevc_sequence_start_is_cached() {
-        let payload = [0x90, b'h', b'v', b'c', b'1', 0x01, 0x02];
+        let payload = hvc_seq(1);
         assert_eq!(
             classify_cache_frame(FrameType::Video, &payload),
             CacheFrameKind::VideoSequenceHeader
@@ -583,9 +625,7 @@ mod tests {
 
     #[test]
     fn multitrack_video_sequence_start_is_cached() {
-        let payload = vec![
-            0x86, 0x10, b'a', b'v', b'c', b'1', 0x00, 0x00, 0x00, 0x03, 0xAA, 0xBB, 0xCC,
-        ];
+        let payload = mt_avc_seq(&[(0, &valid_avc())]);
         assert_eq!(
             classify_cache_frame(FrameType::Video, &payload),
             CacheFrameKind::VideoSequenceHeader
@@ -605,7 +645,7 @@ mod tests {
 
     #[test]
     fn legacy_avc_header_still_cached() {
-        let payload = [0x17, 0x00, 0x01];
+        let payload = avc_seq(1);
         assert_eq!(
             classify_cache_frame(FrameType::Video, &payload),
             CacheFrameKind::VideoSequenceHeader

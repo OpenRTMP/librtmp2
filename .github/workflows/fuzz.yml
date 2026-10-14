@@ -4,6 +4,10 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+    inputs:
+      fuzz_seconds:
+        description: Seconds per target (extended run)
+        default: "45"
   schedule:
     - cron: "0 4 * * 0"
 
@@ -11,7 +15,8 @@ permissions:
   contents: read
 
 env:
-  FUZZ_SECONDS: "45"
+  # Quick on push/PR; the weekly schedule runs a longer campaign.
+  FUZZ_SECONDS: ${{ github.event_name == 'schedule' && '300' || github.event.inputs.fuzz_seconds || '45' }}
 
 jobs:
   libfuzzer:
@@ -26,6 +31,7 @@ jobs:
           - amf0_skip
           - ertmp_parse
           - control_decode
+          - video_config
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -43,7 +49,33 @@ jobs:
 
       - name: Run fuzz target
         run: |
-          cargo fuzz run "${{ matrix.target }}" -- \
+          mkdir -p "fuzz/corpus/${{ matrix.target }}"
+          seeds="fuzz/seeds/${{ matrix.target }}"
+          cargo fuzz run "${{ matrix.target }}" "fuzz/corpus/${{ matrix.target }}" $( [ -d "$seeds" ] && echo "$seeds" ) -- \
             -max_total_time=${{ env.FUZZ_SECONDS }} \
             -reload=0 \
             -print_final_stats=1
+
+  # Extended verification: not run on push/PR (the short churn test already
+  # runs in `cargo test`).
+  churn-stress:
+    name: Malformed-publisher churn (extended)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Run churn stress test
+        env:
+          CHURN_ROUNDS: "5000"
+        run: cargo test --locked --release --test malformed_churn -- --ignored --nocapture

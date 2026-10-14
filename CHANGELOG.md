@@ -11,6 +11,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 While in alpha the project stays on `0.x`; semantic-versioning guarantees only
 begin at `1.0.0`.
 
+## [Unreleased]
+
+### Security / robustness
+
+- The init-frame cache now validates AVC/HEVC (and multitrack) sequence-header
+  configuration records structurally -- bounded, allocation-free, run once per
+  sequence header, never per coded frame -- so a malformed or empty
+  configuration is relayed live but can no longer replace a previously cached
+  valid header for late joiners. Enhanced RTMP command frames are never cached
+  as headers or keyframes.
+- A changed sequence header now drops the cached keyframe of the previous
+  configuration; a repeated identical header keeps it.
+- Added regression tests (cache poisoning, codec switches, control messages,
+  publisher isolation, connection churn), a `video_config` fuzz target with a
+  seed corpus, and an extended churn job in the scheduled fuzz workflow.
+
 ## [0.13.0] — 2026-10-14
 
 ### Changed
