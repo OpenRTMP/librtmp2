@@ -1,6 +1,8 @@
 //! Shared helpers for librtmp2 integration / E2E tests.
 #![allow(dead_code)]
 
+use std::io::{Read, Write};
+use std::net::TcpStream;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -133,4 +135,17 @@ where
     }
 
     client_thread.join().unwrap();
+}
+
+/// Open a raw TCP connection and complete the RTMP handshake by hand.
+pub fn raw_handshake(addr: &str) -> TcpStream {
+    let mut s = TcpStream::connect(addr).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    let mut c0c1 = vec![3u8];
+    c0c1.extend_from_slice(&[0u8; 1536]);
+    s.write_all(&c0c1).unwrap();
+    let mut s0s1s2 = vec![0u8; 1 + 1536 + 1536];
+    s.read_exact(&mut s0s1s2).unwrap();
+    s.write_all(&[0u8; 1536]).unwrap(); // C2
+    s
 }
