@@ -1,3 +1,14 @@
+librtmp2 (0.14.0-1) UNRELEASED; urgency=medium
+
+  * Init-frame cache hardening: a malformed or empty AVC/HEVC (or multitrack)
+    sequence-header configuration is relayed live but no longer cached, so it
+    cannot replace a valid cached header for late joiners; enhanced command
+    frames are never cached; a changed sequence header drops the stale cached
+    keyframe. New Rust-only media::codec_config validators.
+  * New regression, isolation, churn and fuzz coverage.
+
+ -- OpenRTMP <info@openrtmp.org>  Wed, 14 Oct 2026 18:00:00 +0000
+
 librtmp2 (0.13.0-1) UNRELEASED; urgency=medium
 
   * Breaking Rust API: AuthorizationResult::Pending carries a request_id, and
