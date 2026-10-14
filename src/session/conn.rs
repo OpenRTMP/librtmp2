@@ -4388,6 +4388,134 @@ mod tests {
     }
 
     #[test]
+    fn handle_control_rejects_invalid_chunk_sizes_without_changing_state() {
+        let mut conn = Conn::new();
+        let before = conn.chunk_reg.default_chunk_size;
+        for payload in [
+            &[][..],
+            &[0, 0, 0][..],
+            &0u32.to_be_bytes()[..],
+            &127u32.to_be_bytes()[..],
+            &65537u32.to_be_bytes()[..],
+            &0x00FF_FFFFu32.to_be_bytes()[..],
+            // Reserved top bit set: must not be masked into a valid size.
+            &0x8000_0100u32.to_be_bytes()[..],
+            &u32::MAX.to_be_bytes()[..],
+        ] {
+            assert!(
+                conn.handle_control(msg_dispatch::RTMP_MSG_SET_CHUNK_SIZE, payload)
+                    .is_err(),
+                "{payload:?} accepted"
+            );
+            assert_eq!(conn.chunk_reg.default_chunk_size, before);
+        }
+        // A rejected size does not poison later valid updates.
+        conn.handle_control(
+            msg_dispatch::RTMP_MSG_SET_CHUNK_SIZE,
+            &4096u32.to_be_bytes(),
+        )
+        .unwrap();
+        assert_eq!(conn.chunk_reg.default_chunk_size, 4096);
+    }
+
+    #[test]
+    fn handle_control_tolerates_truncated_and_unknown_control_payloads() {
+        let mut conn = Conn::new();
+        for ty in [
+            msg_dispatch::RTMP_MSG_ABORT_MESSAGE,
+            msg_dispatch::RTMP_MSG_ACKNOWLEDGEMENT,
+            msg_dispatch::RTMP_MSG_WINDOW_ACK_SIZE,
+            msg_dispatch::RTMP_MSG_SET_PEER_BANDWIDTH,
+            0x00,
+            0x07,
+            0xFF,
+        ] {
+            for len in 0..4 {
+                assert!(conn.handle_control(ty, &vec![0xFF; len]).is_ok());
+            }
+        }
+        assert_eq!(
+            conn.window_ack_size, 0,
+            "truncated payload must not set a window"
+        );
+    }
+
+    #[test]
+    fn handle_control_window_ack_size_bounds() {
+        let mut conn = Conn::new();
+        let set = |conn: &mut Conn, v: u32| {
+            conn.handle_control(msg_dispatch::RTMP_MSG_WINDOW_ACK_SIZE, &v.to_be_bytes())
+                .unwrap()
+        };
+        set(&mut conn, 2_500_000);
+        // Amplification-prone tiny windows are ignored, not applied.
+        set(&mut conn, 1);
+        assert_eq!(conn.window_ack_size, 2_500_000);
+        // Extreme values are accepted without overflow in later comparisons.
+        set(&mut conn, u32::MAX);
+        assert_eq!(conn.window_ack_size, u32::MAX);
+        set(&mut conn, 0);
+        assert_eq!(conn.window_ack_size, 0);
+    }
+
+    #[test]
+    fn handle_control_abort_of_unknown_or_repeated_csid_is_harmless() {
+        let mut conn = Conn::new();
+        for csid in [0u32, 2, 3, 63, 64, 65599, 65600, u32::MAX] {
+            for _ in 0..3 {
+                conn.handle_control(msg_dispatch::RTMP_MSG_ABORT_MESSAGE, &csid.to_be_bytes())
+                    .unwrap();
+            }
+        }
+        assert_eq!(conn.chunk_reg.reassembly_bytes_in_use(), 0);
+    }
+
+    #[test]
+    fn handle_user_control_ignores_unknown_and_short_events() {
+        let mut conn = Conn::new();
+        conn.client_fd = 0;
+        conn.transport = None;
+        conn.handle_user_control(&[]).unwrap();
+        conn.handle_user_control(&[0, 3, 0, 0, 0]).unwrap();
+        // SetBufferLength without its second parameter leaves state alone.
+        conn.handle_user_control(&[0, 3, 0, 0, 0, 1]).unwrap();
+        assert_eq!(conn.buffer_length_ms, 3000, "default must be unchanged");
+        for event in [5u16, 8, 0x1234, 0xFFFF] {
+            let mut p = event.to_be_bytes().to_vec();
+            p.extend_from_slice(&[0xFF; 8]);
+            conn.handle_user_control(&p).unwrap();
+        }
+        let mut full = vec![0, 3, 0, 0, 0, 1];
+        full.extend_from_slice(&1500u32.to_be_bytes());
+        conn.handle_user_control(&full).unwrap();
+        assert_eq!(conn.buffer_length_ms, 1500);
+    }
+
+    #[test]
+    fn control_message_flood_stays_bounded() {
+        let mut conn = Conn::new();
+        conn.client_fd = 0;
+        conn.transport = None;
+        let start = std::time::Instant::now();
+        for i in 0..50_000u32 {
+            conn.handle_control(
+                msg_dispatch::RTMP_MSG_ABORT_MESSAGE,
+                &(i % 70).to_be_bytes(),
+            )
+            .unwrap();
+            conn.handle_control(msg_dispatch::RTMP_MSG_ACKNOWLEDGEMENT, &i.to_be_bytes())
+                .unwrap();
+            conn.handle_control(
+                msg_dispatch::RTMP_MSG_SET_CHUNK_SIZE,
+                &(128 + i % 4096).to_be_bytes(),
+            )
+            .unwrap();
+        }
+        assert!(start.elapsed() < std::time::Duration::from_secs(5));
+        assert_eq!(conn.chunk_reg.reassembly_bytes_in_use(), 0);
+    }
+
+    #[test]
     fn inbound_ping_requests_are_rate_limited() {
         let mut conn = Conn::new();
         conn.client_fd = 0;

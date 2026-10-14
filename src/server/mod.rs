@@ -2909,6 +2909,23 @@ impl Server {
         if is_avc_header {
             let seq_tracks =
                 Self::multitrack_sequence_track_ids(FrameType::Video, frame.cache_payload());
+            // A keyframe only decodes against the configuration it was
+            // produced with: once the publisher switches configuration (or
+            // codec), the cached keyframe is stale and must not be replayed
+            // behind the new header. A repeated identical header keeps it.
+            let unchanged = match seq_tracks.as_slice() {
+                [track_id] => {
+                    cache.avc_header.is_none()
+                        && cache.video_track_headers.get(track_id) == Some(&frame.payload)
+                }
+                _ => {
+                    cache.avc_header.as_ref() == Some(&frame.payload)
+                        && cache.video_track_headers.is_empty()
+                }
+            };
+            if !unchanged {
+                cache.last_keyframe = None;
+            }
             if seq_tracks.len() > 1 {
                 cache.video_track_headers.clear();
                 cache.avc_header = Some(frame.payload.clone());
@@ -3175,6 +3192,7 @@ impl Drop for Server {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::media::codec_config::test_vectors::*;
 
     #[test]
     fn recv_budget_is_at_least_one_socket_read() {
@@ -3660,7 +3678,9 @@ mod tests {
         server.connections[0].send_buffer.available() - before
     }
 
-    const AVC_SEQ: [u8; 5] = [0x17, 0x00, 0, 0, 0];
+    fn avc_seq_fixture() -> Vec<u8> {
+        avc_seq(1)
+    }
     const AVC_KEY: [u8; 5] = [0x17, 0x01, 0, 0, 0];
     const AVC_INTER: [u8; 5] = [0x27, 0x01, 0, 0, 0];
     const AAC_RAW: [u8; 3] = [0xAF, 0x01, 0x21];
@@ -3674,7 +3694,7 @@ mod tests {
         server.stream_cache.insert(
             ("live".to_string(), "stream".to_string()),
             StreamCache {
-                avc_header: Some(AVC_SEQ.to_vec()),
+                avc_header: Some(avc_seq_fixture()),
                 ..empty_stream_cache()
             },
         );
@@ -3708,7 +3728,12 @@ mod tests {
             0
         );
         // ...but codec headers always go through.
-        assert!(relay_one(&mut server, relay_frame(FrameType::Video, AVC_SEQ.to_vec())) > 0);
+        assert!(
+            relay_one(
+                &mut server,
+                relay_frame(FrameType::Video, avc_seq_fixture())
+            ) > 0
+        );
         assert_eq!(server.connections[0].relay_frames_dropped, 3);
 
         // Drained, but still mid-GOP: keep skipping until a keyframe.
@@ -3762,7 +3787,7 @@ mod tests {
         server.stream_cache.insert(
             ("live".to_string(), "stream".to_string()),
             StreamCache {
-                avc_header: Some(AVC_SEQ.to_vec()),
+                avc_header: Some(avc_seq_fixture()),
                 last_keyframe: Some((0, AVC_KEY.to_vec())),
                 ..empty_stream_cache()
             },
@@ -3791,7 +3816,7 @@ mod tests {
         server.stream_cache.insert(
             ("live".to_string(), "stream".to_string()),
             StreamCache {
-                avc_header: Some(AVC_SEQ.to_vec()),
+                avc_header: Some(avc_seq_fixture()),
                 ..empty_stream_cache()
             },
         );
@@ -3833,7 +3858,7 @@ mod tests {
         server.stream_cache.insert(
             ("live".to_string(), "stream".to_string()),
             StreamCache {
-                avc_header: Some(AVC_SEQ.to_vec()),
+                avc_header: Some(avc_seq_fixture()),
                 ..empty_stream_cache()
             },
         );
@@ -3870,7 +3895,7 @@ mod tests {
             .unwrap();
         let mut closed = Vec::new();
         server.send_and_export_relay_frames(
-            vec![relay_frame(FrameType::Video, AVC_SEQ.to_vec())],
+            vec![relay_frame(FrameType::Video, avc_seq_fixture())],
             &HashSet::new(),
             &mut closed,
         );
@@ -4051,10 +4076,10 @@ mod tests {
     #[test]
     fn multitrack_video_sequence_header_is_cached() {
         let mut server = test_server();
-        let payload = vec![
-            0x86, 0x10, b'a', b'v', b'c', b'1', 0x00, 0x00, 0x00, 0x01, 0xAA, 0x01, 0x00, 0x00,
-            0x01, 0xBB,
-        ];
+        let payload = mt_avc_seq(&[
+            (0, &avc_record(&[&[0x67, 1]], &[&[0x68, 1]])),
+            (1, &avc_record(&[&[0x67, 2]], &[&[0x68, 2]])),
+        ]);
         server.cache_relay_frame(&relay_frame(FrameType::Video, payload));
 
         let key = ("live".to_string(), "stream".to_string());
@@ -4064,10 +4089,10 @@ mod tests {
     #[test]
     fn multitrack_avc_header_marks_route_video_as_multitrack() {
         let mut server = test_server();
-        let payload = vec![
-            0x86, 0x10, b'a', b'v', b'c', b'1', 0x00, 0x00, 0x00, 0x01, 0xAA, 0x01, 0x00, 0x00,
-            0x01, 0xBB,
-        ];
+        let payload = mt_avc_seq(&[
+            (0, &avc_record(&[&[0x67, 1]], &[&[0x68, 1]])),
+            (1, &avc_record(&[&[0x67, 2]], &[&[0x68, 2]])),
+        ]);
         server.cache_relay_frame(&relay_frame(FrameType::Video, payload));
         let key = ("live".to_string(), "stream".to_string());
         assert!(
@@ -4090,12 +4115,8 @@ mod tests {
     #[test]
     fn multitrack_per_track_video_inits_are_retained() {
         let mut server = test_server();
-        let track0 = vec![
-            0x86, 0x10, b'a', b'v', b'c', b'1', 0x00, 0x00, 0x00, 0x01, 0xAA,
-        ];
-        let track1 = vec![
-            0x86, 0x10, b'a', b'v', b'c', b'1', 0x01, 0x00, 0x00, 0x01, 0xBB,
-        ];
+        let track0 = mt_avc_seq(&[(0, &avc_record(&[&[0x67, 1]], &[&[0x68, 1]]))]);
+        let track1 = mt_avc_seq(&[(1, &avc_record(&[&[0x67, 2]], &[&[0x68, 2]]))]);
         server.cache_relay_frame(&relay_frame(FrameType::Video, track0));
         server.cache_relay_frame(&relay_frame(FrameType::Video, track1));
 
@@ -4110,7 +4131,7 @@ mod tests {
     #[test]
     fn enhanced_hevc_sequence_header_is_cached() {
         let mut server = test_server();
-        let payload = vec![0x90, b'h', b'v', b'c', b'1', 0x01, 0x02];
+        let payload = hvc_seq(1);
         server.cache_relay_frame(&relay_frame(FrameType::Video, payload));
 
         let key = ("live".to_string(), "stream".to_string());
@@ -4133,7 +4154,7 @@ mod tests {
     #[test]
     fn stream_cache_eviction_is_scoped_to_publisher() {
         let mut server = test_server();
-        let legit_payload = vec![0x17, 0x00, 0xAA];
+        let legit_payload = avc_seq(0xAA);
         server.cache_relay_frame(&relay_frame_for_publisher(
             1,
             "legit",
@@ -4149,7 +4170,7 @@ mod tests {
                 2,
                 &name,
                 FrameType::Video,
-                vec![0x17, 0x00, 0xBB],
+                avc_seq(0xBB),
             ));
         }
 
@@ -4163,8 +4184,7 @@ mod tests {
     fn oversized_codec_header_is_not_cached() {
         let mut server = test_server();
 
-        let mut payload = vec![0x17, 0x00];
-        payload.resize(MAX_CACHED_INIT_FRAME_BYTES + 1, 0xAA);
+        let payload = avc_seq_len(0xAA, MAX_CACHED_INIT_FRAME_BYTES + 1);
         server.cache_relay_frame(&relay_frame(FrameType::Video, payload));
         assert!(server.stream_cache.is_empty());
     }
@@ -4207,17 +4227,236 @@ mod tests {
         let key = ("live".to_string(), "stream".to_string());
 
         // Cache a normal-sized AVC header first.
-        server.cache_relay_frame(&relay_frame(FrameType::Video, vec![0x17, 0x00, 0xAA]));
+        server.cache_relay_frame(&relay_frame(FrameType::Video, avc_seq(0xAA)));
         assert!(server.stream_cache.get(&key).unwrap().avc_header.is_some());
 
         // A later oversized "header" replacement must drop the stale cached
         // copy instead of leaving late joiners with outdated codec data.
-        let mut oversized = vec![0x17, 0x00];
-        oversized.resize(MAX_CACHED_INIT_FRAME_BYTES + 1, 0xBB);
+        let oversized = avc_seq_len(0xBB, MAX_CACHED_INIT_FRAME_BYTES + 1);
         server.cache_relay_frame(&relay_frame(FrameType::Video, oversized));
 
         // The whole entry is gone since it had no other cached fields.
         assert!(server.stream_cache.get(&key).is_none());
+    }
+
+    fn avc_with_pps(sps: &[&[u8]], pps: &[&[u8]]) -> Vec<u8> {
+        let mut v = vec![0x17, 0x00, 0, 0, 0];
+        v.extend(avc_record(sps, pps));
+        v
+    }
+
+    fn hvc_tag(arrays: &[(u8, &[&[u8]])]) -> Vec<u8> {
+        let mut v = vec![0x90, b'h', b'v', b'c', b'1'];
+        v.extend(hevc_record(arrays));
+        v
+    }
+
+    fn cache_of(server: &Server) -> &StreamCache {
+        server
+            .stream_cache
+            .get(&("live".to_string(), "stream".to_string()))
+            .expect("cache entry")
+    }
+
+    fn malformed_video_configs() -> Vec<(&'static str, Vec<u8>)> {
+        let good = avc_seq(7);
+        let hgood = hvc_seq(7);
+        vec![
+            ("avc: no record", vec![0x17, 0x00, 0, 0, 0]),
+            ("avc: truncated tag header", vec![0x17, 0x00]),
+            ("avc: zero SPS", avc_with_pps(&[], &[&[0x68]])),
+            ("avc: zero PPS", avc_with_pps(&[&[0x67]], &[])),
+            ("avc: zero-length SPS", avc_with_pps(&[&[]], &[&[0x68]])),
+            ("avc: zero-length PPS", avc_with_pps(&[&[0x67]], &[&[]])),
+            ("avc: cut mid-SPS", good[..good.len() - 6].to_vec()),
+            ("hevc: no record", vec![0x90, b'h', b'v', b'c', b'1']),
+            (
+                "hevc: zero-length VPS",
+                hvc_tag(&[(32, &[&[]]), (33, &[&[1]]), (34, &[&[1]])]),
+            ),
+            (
+                "hevc: zero-length SPS",
+                hvc_tag(&[(32, &[&[1]]), (33, &[&[]]), (34, &[&[1]])]),
+            ),
+            (
+                "hevc: zero-length PPS",
+                hvc_tag(&[(32, &[&[1]]), (33, &[&[1]]), (34, &[&[]])]),
+            ),
+            (
+                "hevc: no PPS array",
+                hvc_tag(&[(32, &[&[1]]), (33, &[&[1]])]),
+            ),
+            ("hevc: cut mid-array", hgood[..hgood.len() - 2].to_vec()),
+        ]
+    }
+
+    #[test]
+    fn malformed_video_config_never_creates_a_cache_entry() {
+        for (name, payload) in malformed_video_configs() {
+            let mut server = test_server();
+            server.cache_relay_frame(&relay_frame(FrameType::Video, payload));
+            assert!(server.stream_cache.is_empty(), "{name} was cached");
+        }
+    }
+
+    #[test]
+    fn malformed_video_config_cannot_replace_valid_cached_header() {
+        for (name, payload) in malformed_video_configs() {
+            let mut server = test_server();
+            server.cache_relay_frame(&relay_frame(FrameType::Video, avc_seq(1)));
+            server.cache_relay_frame(&relay_frame(FrameType::Video, vec![0x17, 0x01, 0, 0, 0, 9]));
+            server.cache_relay_frame(&relay_frame(FrameType::Video, payload));
+            let cache = cache_of(&server);
+            assert_eq!(cache.avc_header.as_deref(), Some(&avc_seq(1)[..]), "{name}");
+            assert!(cache.last_keyframe.is_some(), "{name} dropped the keyframe");
+        }
+    }
+
+    #[test]
+    fn valid_header_after_malformed_header_is_cached_normally() {
+        for (name, payload) in malformed_video_configs() {
+            let mut server = test_server();
+            server.cache_relay_frame(&relay_frame(FrameType::Video, payload.clone()));
+            server.cache_relay_frame(&relay_frame(FrameType::Video, payload));
+            server.cache_relay_frame(&relay_frame(FrameType::Video, avc_seq(2)));
+            assert_eq!(
+                cache_of(&server).avc_header.as_deref(),
+                Some(&avc_seq(2)[..]),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn valid_malformed_malformed_valid_ends_on_last_valid_header() {
+        let mut server = test_server();
+        for payload in [
+            avc_seq(1),
+            avc_seq(1)[..7].to_vec(),
+            hvc_seq(1)[..9].to_vec(),
+            hvc_seq(3),
+        ] {
+            server.cache_relay_frame(&relay_frame(FrameType::Video, payload));
+        }
+        assert_eq!(
+            cache_of(&server).avc_header.as_deref(),
+            Some(&hvc_seq(3)[..])
+        );
+    }
+
+    #[test]
+    fn video_command_frame_with_sequence_start_nibble_is_not_cached() {
+        // ExHeader, FrameType=5 (command), low nibble 0: not a packet type.
+        let mut server = test_server();
+        server.cache_relay_frame(&relay_frame(FrameType::Video, hvc_seq(1)));
+        let mut command = hvc_seq(9);
+        command[0] = 0xD0;
+        server.cache_relay_frame(&relay_frame(FrameType::Video, command));
+        assert_eq!(
+            cache_of(&server).avc_header.as_deref(),
+            Some(&hvc_seq(1)[..])
+        );
+    }
+
+    #[test]
+    fn codec_switch_drops_stale_keyframe_and_late_joiner_sees_consistent_state() {
+        let key_h264 = vec![0x17, 0x01, 0, 0, 0, 0xAA];
+        let key_hevc = vec![0x91, b'h', b'v', b'c', b'1', 0, 0, 0, 0xBB];
+        let transitions: [(Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>); 4] = [
+            (avc_seq(1), key_h264.clone(), avc_seq(2), key_h264.clone()), // H.264 A -> B
+            (avc_seq(1), key_h264.clone(), hvc_seq(1), key_hevc.clone()), // H.264 -> H.265
+            (hvc_seq(1), key_hevc.clone(), avc_seq(1), key_h264.clone()), // H.265 -> H.264
+            (hvc_seq(1), key_hevc.clone(), hvc_seq(2), key_hevc.clone()), // H.265 A -> B
+        ];
+        for (hdr_a, key_a, hdr_b, key_b) in transitions {
+            let mut server = test_server();
+            server.cache_relay_frame(&relay_frame(FrameType::Video, hdr_a));
+            server.cache_relay_frame(&relay_frame(FrameType::Video, key_a));
+            server.cache_relay_frame(&relay_frame(FrameType::Video, hdr_b.clone()));
+
+            // Between the switch and the next keyframe, no obsolete keyframe.
+            let snap = server.stream_init_snapshot("live", "stream").unwrap();
+            assert_eq!(snap.avc_header.as_deref(), Some(&hdr_b[..]));
+            assert!(snap.last_keyframe.is_none());
+
+            server.cache_relay_frame(&relay_frame(FrameType::Video, key_b.clone()));
+            let snap = server.stream_init_snapshot("live", "stream").unwrap();
+            assert_eq!(snap.avc_header.as_deref(), Some(&hdr_b[..]));
+            assert_eq!(snap.last_keyframe.map(|(_, p)| p), Some(key_b));
+        }
+    }
+
+    #[test]
+    fn repeated_identical_header_keeps_keyframe_conflicting_one_drops_it() {
+        let mut server = test_server();
+        let key = vec![0x17, 0x01, 0, 0, 0, 0xAA];
+        server.cache_relay_frame(&relay_frame(FrameType::Video, avc_seq(1)));
+        server.cache_relay_frame(&relay_frame(FrameType::Video, key));
+        server.cache_relay_frame(&relay_frame(FrameType::Video, avc_seq(1)));
+        assert!(cache_of(&server).last_keyframe.is_some());
+        for i in 0..16u8 {
+            server.cache_relay_frame(&relay_frame(FrameType::Video, avc_seq(i % 2 + 2)));
+            assert!(cache_of(&server).last_keyframe.is_none());
+        }
+        assert_eq!(
+            cache_of(&server).avc_header.as_deref(),
+            Some(&avc_seq(3)[..])
+        );
+    }
+
+    #[test]
+    fn config_change_on_one_stream_leaves_other_streams_untouched() {
+        let mut server = test_server();
+        let key = vec![0x17, 0x01, 0, 0, 0, 0xAA];
+        for name in ["a", "b"] {
+            for payload in [avc_seq(1), key.clone()] {
+                server.cache_relay_frame(&relay_frame_for_publisher(
+                    if name == "a" { 1 } else { 2 },
+                    name,
+                    FrameType::Video,
+                    payload,
+                ));
+            }
+        }
+        server.cache_relay_frame(&relay_frame_for_publisher(
+            1,
+            "a",
+            FrameType::Video,
+            hvc_seq(1),
+        ));
+        server.cache_relay_frame(&relay_frame_for_publisher(
+            1,
+            "a",
+            FrameType::Video,
+            hvc_seq(1)[..9].to_vec(),
+        ));
+        let b = server.stream_init_snapshot("live", "b").unwrap();
+        assert_eq!(b.avc_header.as_deref(), Some(&avc_seq(1)[..]));
+        assert!(b.last_keyframe.is_some());
+    }
+
+    #[test]
+    fn malformed_multitrack_config_does_not_replace_valid_track_header() {
+        let mut server = test_server();
+        let good = avc_record(&[&[0x67, 1]], &[&[0x68, 1]]);
+        server.cache_relay_frame(&relay_frame(FrameType::Video, mt_avc_seq(&[(0, &good)])));
+        let zero_sps = avc_record(&[&[]], &[&[0x68]]);
+        server.cache_relay_frame(&relay_frame(
+            FrameType::Video,
+            mt_avc_seq(&[(0, &zero_sps)]),
+        ));
+        // One bad track poisons the whole container: nothing from it is cached.
+        server.cache_relay_frame(&relay_frame(
+            FrameType::Video,
+            mt_avc_seq(&[(0, &good), (1, &zero_sps)]),
+        ));
+        let cache = cache_of(&server);
+        assert_eq!(cache.video_track_headers.len(), 1);
+        assert_eq!(
+            cache.video_track_headers.get(&0),
+            Some(&mt_avc_seq(&[(0, &good)]))
+        );
+        assert!(cache.avc_header.is_none());
     }
 
     #[test]
@@ -5317,7 +5556,7 @@ mod tests {
         publisher.pending_relay.extend([
             relay_frame(FrameType::Script, metadata.clone()),
             relay_frame(FrameType::Audio, vec![0xAF, 0x00, 0x11, 0x90]),
-            relay_frame(FrameType::Video, vec![0x17, 0x00, 0x01, 0x02]),
+            relay_frame(FrameType::Video, avc_seq(1)),
             relay_frame(FrameType::Video, vec![0x17, 0x01, 0xDE, 0xAD]),
         ]);
         server.connections = vec![publisher];
@@ -5329,7 +5568,7 @@ mod tests {
         assert_eq!(exported[0].payload, metadata);
         assert_eq!(exported[1].frame_type, FrameType::Audio);
         assert_eq!(exported[2].frame_type, FrameType::Video);
-        assert_eq!(exported[2].payload, vec![0x17, 0x00, 0x01, 0x02]);
+        assert_eq!(exported[2].payload, avc_seq(1));
         assert_eq!(exported[3].frame_type, FrameType::Video);
         assert_eq!(exported[3].payload, vec![0x17, 0x01, 0xDE, 0xAD]);
         assert!(
@@ -5353,7 +5592,7 @@ mod tests {
             // Audio before any video: the route looks audio-only so far.
             relay_frame(FrameType::Audio, vec![0xAF, 0x01, 0x21]),
             relay_frame(FrameType::Script, metadata),
-            relay_frame(FrameType::Video, vec![0x17, 0x00, 0x01, 0x02]),
+            relay_frame(FrameType::Video, avc_seq(1)),
             relay_frame(FrameType::Video, vec![0x17, 0x01, 0xDE, 0xAD]),
             relay_frame(FrameType::Video, vec![0x27, 0x01, 0xDE, 0xAD]),
             relay_frame(FrameType::Audio, vec![0xAF, 0x01, 0x21]),
@@ -5584,7 +5823,7 @@ mod tests {
 
         let mut server = test_server();
         server
-            .inject_relay_frame("live", "stream", FrameType::Video, 0, &[0x17, 0x00, 0x01])
+            .inject_relay_frame("live", "stream", FrameType::Video, 0, &avc_seq(1))
             .unwrap();
         server
             .inject_relay_frame(
@@ -6007,7 +6246,7 @@ mod tests {
         let old_key = ("live".to_string(), "old".to_string());
         let new_key = ("live".to_string(), "new".to_string());
         let mut old_cache = super::empty_stream_cache();
-        old_cache.avc_header = Some(vec![0x17, 0x00, 0x01, 0x02]);
+        old_cache.avc_header = Some(avc_seq(1));
         let old_bytes = Server::stream_cache_entry_bytes(&old_key, &old_cache);
         server.stream_cache.insert(old_key.clone(), old_cache);
         server
@@ -6016,7 +6255,7 @@ mod tests {
         // Cap just above the new reservation but below old+new, so fitting
         // requires same-publisher eviction that the precheck must count.
         server.resource_limits.max_stream_cache_bytes = old_bytes;
-        let incoming = vec![0x17, 0x00, 0xAA];
+        let incoming = avc_seq(0xAA);
         assert!(
             server.reserve_stream_cache_storage(&new_key, incoming.len(), 0, pub_id),
             "precheck must treat same-publisher peer cache as freeable"
@@ -6074,7 +6313,7 @@ mod tests {
     fn inject_claims_route_blocking_socket_registry() {
         let mut server = test_server();
         server
-            .inject_relay_frame("live", "stream", FrameType::Video, 0, &[0x17, 0x00, 0x01])
+            .inject_relay_frame("live", "stream", FrameType::Video, 0, &avc_seq(1))
             .unwrap();
         let external_id = *server
             .external_route_ids
@@ -6110,7 +6349,7 @@ mod tests {
         }
         assert_eq!(server.stream_cache.len(), super::MAX_STREAM_CACHE_ENTRIES);
         server
-            .inject_relay_frame("live", "overflow", FrameType::Video, 0, &[0x17, 0x00, 0x02])
+            .inject_relay_frame("live", "overflow", FrameType::Video, 0, &avc_seq(2))
             .unwrap();
         server.process_connections().unwrap();
         assert!(
@@ -6129,7 +6368,7 @@ mod tests {
     fn prune_empty_external_publisher_cache_keys_after_oversized_evict() {
         let mut server = test_server();
         server
-            .inject_relay_frame("live", "cam", FrameType::Video, 0, &[0x17, 0x00, 0x01])
+            .inject_relay_frame("live", "cam", FrameType::Video, 0, &avc_seq(1))
             .unwrap();
         server.process_connections().unwrap();
         let external_id = *server
@@ -6138,8 +6377,7 @@ mod tests {
             .unwrap();
         assert!(server.publisher_cache_keys.contains_key(&external_id));
         // Oversized AVC sequence header clears the cached field then drops the entry.
-        let mut big = vec![0x17, 0x00];
-        big.extend(std::iter::repeat(0xABu8).take(super::MAX_CACHED_INIT_FRAME_BYTES));
+        let big = avc_seq_len(0xAB, super::MAX_CACHED_INIT_FRAME_BYTES + 1);
         server
             .inject_relay_frame("live", "cam", FrameType::Video, 1, &big)
             .unwrap();
@@ -6270,7 +6508,7 @@ mod tests {
     fn impossible_cache_reservation_does_not_evict_peers() {
         let mut server = test_server();
         server
-            .inject_relay_frame("live", "peer", FrameType::Video, 0, &[0x17, 0x00, 0x01])
+            .inject_relay_frame("live", "peer", FrameType::Video, 0, &avc_seq(1))
             .unwrap();
         server.process_connections().unwrap();
         assert!(
@@ -6282,8 +6520,7 @@ mod tests {
         // Cap below the irreducible size of the incoming field alone so peer
         // eviction cannot make this reservation fit.
         server.resource_limits.max_stream_cache_bytes = 4;
-        let mut huge = vec![0x17, 0x00];
-        huge.extend(std::iter::repeat(0xCDu8).take(64));
+        let huge = avc_seq_len(0xCD, 64);
         server
             .inject_relay_frame("live", "too-big", FrameType::Video, 0, &huge)
             .unwrap();
