@@ -11,21 +11,33 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 While in alpha the project stays on `0.x`; semantic-versioning guarantees only
 begin at `1.0.0`.
 
-## [Unreleased]
+## [0.14.0] — 2026-10-14
 
-### Security / robustness
+### Added
 
-- The init-frame cache now validates AVC/HEVC (and multitrack) sequence-header
-  configuration records structurally -- bounded, allocation-free, run once per
-  sequence header, never per coded frame -- so a malformed or empty
-  configuration is relayed live but can no longer replace a previously cached
-  valid header for late joiners. Enhanced RTMP command frames are never cached
-  as headers or keyframes.
+- `media::codec_config`: structural validators for
+  `AVCDecoderConfigurationRecord` / `HEVCDecoderConfigurationRecord`
+  (`validate_avc_record`, `validate_hevc_record`, `validate_config_record`,
+  `ConfigCodec`). They check that every length field and count stays inside the
+  record and that no parameter set is empty; they never decode video and
+  allocate nothing.
+- A `video_config` fuzz target with a seed corpus, regression tests for cache
+  poisoning, codec switches, RTMP control messages, publisher isolation and
+  malformed-connection churn, and an extended churn job in the scheduled fuzz
+  workflow. See `docs/malformed-input.md`.
+
+### Changed
+
+- **Behaviour change (init-frame cache):** a malformed or empty AVC/HEVC (or
+  multitrack) sequence-header configuration is still relayed live, but is no
+  longer classified as a cacheable sequence header, so it can no longer replace
+  a previously cached valid header for late joiners. Enhanced RTMP command
+  frames (FrameType 5) are never cached as headers or keyframes.
+  `classify_cache_frame` now returns `LiveOnly` for such payloads. Hosts that
+  feed placeholder sequence headers (for example in tests) need valid records.
 - A changed sequence header now drops the cached keyframe of the previous
   configuration; a repeated identical header keeps it.
-- Added regression tests (cache poisoning, codec switches, control messages,
-  publisher isolation, connection churn), a `video_config` fuzz target with a
-  seed corpus, and an extended churn job in the scheduled fuzz workflow.
+- Multitrack containers are walked without collecting the tracks into a `Vec`.
 
 ## [0.13.0] — 2026-10-14
 
@@ -1036,6 +1048,8 @@ and others.
 - Protocol mapping documents for legacy, E-RTMP v1, and E-RTMP v2
 - `CONTRIBUTING.md` guidelines
 
+[0.14.0]: https://github.com/OpenRTMP/librtmp2/compare/v0.13.0...v0.14.0
+[0.13.0]: https://github.com/OpenRTMP/librtmp2/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/OpenRTMP/librtmp2/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/OpenRTMP/librtmp2/compare/v0.10.2...v0.11.0
 [0.10.2]: https://github.com/OpenRTMP/librtmp2/compare/v0.10.1...v0.10.2
