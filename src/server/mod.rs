@@ -2681,7 +2681,11 @@ impl Server {
             && self.publisher_cache_key_count(publisher_conn_id)
                 >= MAX_STREAM_CACHE_KEYS_PER_PUBLISHER
         {
-            if !self.evict_for_stream_cache_pressure(publisher_conn_id, key) {
+            // This cap counts the requesting publisher's own keys, so only an
+            // eviction that removes one of them makes room. The external
+            // fallback in `evict_for_stream_cache_pressure` would free an
+            // unrelated route and leave the count at the cap: reject instead.
+            if !self.evict_stream_cache_for_publisher(publisher_conn_id, key) {
                 return false;
             }
             let add_key_bytes = if !self.stream_cache.contains_key(key) {
@@ -2733,10 +2737,16 @@ impl Server {
     }
 
     /// Bytes freeable by evicting same-publisher peers or other external routes.
+    ///
+    /// Co-tracked keys are excluded: the eviction helpers refuse to evict a
+    /// key another publisher still tracks, so counting it here would let a
+    /// reservation that cannot succeed pass its early check and evict an
+    /// unrelated eligible entry before failing.
     fn stream_cache_freeable_bytes(&self, key: &(String, String), publisher_conn_id: u64) -> usize {
         self.stream_cache
             .iter()
             .filter(|(k, _)| *k != key)
+            .filter(|(k, _)| !self.cache_key_co_tracked(publisher_conn_id, k))
             .filter(|(k, _)| {
                 self.publisher_cache_keys.iter().any(|(pub_id, keys)| {
                     keys.contains(*k)
