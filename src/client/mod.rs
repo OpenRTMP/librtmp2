@@ -525,7 +525,14 @@ impl Client {
         deadline: Instant,
     ) -> Result<()> {
         let scheme = if use_tls { "rtmps" } else { "rtmp" };
-        let tc_url = format!("{scheme}://{host}:{port}/{app}");
+        // `split_host_port` strips the brackets from an IPv6 literal; re-add
+        // them so the authority in `tcUrl` can be split back into host and
+        // port (a bare `::1:1935` is itself one valid IPv6 literal).
+        let tc_url = if host.contains(':') {
+            format!("{scheme}://[{host}]:{port}/{app}")
+        } else {
+            format!("{scheme}://{host}:{port}/{app}")
+        };
         // Only advertise reconnect support when the host has actually wired
         // up on_reconnect_request_cb -- otherwise a spec-compliant server
         // would have no reason to ever send a ReconnectRequest to this
