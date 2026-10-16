@@ -3,6 +3,7 @@
 //! Multitrack containers are relayed opaque; this module extracts per-track
 //! slices and codec metadata for callbacks, authorization, and init caching.
 
+use crate::ertmp::exvideo::VIDEO_FRAME_TYPE_COMMAND;
 use crate::types::FrameType;
 
 pub const ERTMP_AUDIO_PACKET_TYPE_MULTITRACK: u8 = 5;
@@ -37,7 +38,15 @@ pub fn is_multitrack_container(frame_type: FrameType, payload: &[u8]) -> bool {
         return false;
     }
     let expected = match frame_type {
-        FrameType::Video => ERTMP_VIDEO_PACKET_TYPE_MULTITRACK,
+        FrameType::Video => {
+            // FrameType 5 is a VideoCommand: its low nibble is not a packet
+            // type, so it can never be a multitrack container -- whatever the
+            // nibble looks like (including the multitrack one).
+            if (payload[0] >> 4) & 0x07 == VIDEO_FRAME_TYPE_COMMAND {
+                return false;
+            }
+            ERTMP_VIDEO_PACKET_TYPE_MULTITRACK
+        }
         FrameType::Audio => {
             // Genuine E-RTMP enhanced audio uses the reserved ExHeader nibble 9
             // (see `ertmp::exaudio`). Legacy SoundFormat 8/10/11/14 also set

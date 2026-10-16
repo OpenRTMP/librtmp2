@@ -59,8 +59,7 @@ pub fn exvideo_parse(data: &[u8], hdr: &mut VideoHeader) -> Result<()> {
 
     // E-RTMP v2 ExVideoTagBody: a command frame (frame type 5) whose packet
     // type is not Metadata carries a single UI8 videoCommand and no FourCC.
-    if hdr.frame_type == VIDEO_FRAME_TYPE_COMMAND && hdr.packet_type != ERTMP_PACKET_TYPE_METADATA
-    {
+    if hdr.frame_type == VIDEO_FRAME_TYPE_COMMAND && hdr.packet_type != ERTMP_PACKET_TYPE_METADATA {
         if data.len() < 2 {
             return Err(ErrorCode::Io);
         }
@@ -112,8 +111,7 @@ pub fn exvideo_write(hdr: &VideoHeader, buf: &mut [u8]) -> usize {
 
     // E-RTMP v2 ExVideoTagBody: a command frame (frame type 5, non-Metadata
     // packet type) is the tag byte followed by the UI8 videoCommand.
-    if hdr.frame_type == VIDEO_FRAME_TYPE_COMMAND && hdr.packet_type != ERTMP_PACKET_TYPE_METADATA
-    {
+    if hdr.frame_type == VIDEO_FRAME_TYPE_COMMAND && hdr.packet_type != ERTMP_PACKET_TYPE_METADATA {
         if buf.len() < 2 {
             return 0;
         }
