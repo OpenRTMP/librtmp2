@@ -724,11 +724,21 @@ impl Conn {
     /// frame for it is not cached on a later poll. Capped so a peer that
     /// renames many times cannot grow this set without bound: once the cap is
     /// reached the oldest marker is dropped so the newest is always recorded.
+    /// The dropped marker takes any budget-deferred frames still queued for
+    /// its route with it — without the marker, processing one of those later
+    /// would treat the abandoned route as live and recreate the cache entry
+    /// its abandonment evicted.
     pub(crate) fn note_abandoned_relay_route(&mut self, app: String, route: String) {
         self.abandoned_relay_routes
             .retain(|(a, r)| !(a == &app && r == &route));
-        if self.abandoned_relay_routes.len() >= MAX_PENDING_CACHE_EVICTIONS {
-            self.abandoned_relay_routes.pop_front();
+        if self.abandoned_relay_routes.len() >= MAX_PENDING_CACHE_EVICTIONS
+            && let Some((old_app, old_route)) = self.abandoned_relay_routes.pop_front()
+        {
+            // The evicted route's cache is already gone, so discarding its
+            // frames preserves the abandonment invariant instead of letting
+            // one of them resurrect the entry on a later poll.
+            self.pending_relay
+                .retain(|f| !(f.app == old_app && f.stream_name == old_route));
         }
         self.abandoned_relay_routes.push_back((app, route));
     }
