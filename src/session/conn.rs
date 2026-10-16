@@ -3466,6 +3466,14 @@ fn detect_video_codec(payload: &[u8]) -> Option<String> {
         return None;
     }
     if hdr.is_ex_header != 0 {
+        // A VideoCommand frame (frame type 5, non-Metadata packet type) carries
+        // no codec FourCC -- its low nibble is not a packet type. Report a
+        // stable non-`None` label so a media hook cannot auto-deny it.
+        if hdr.frame_type == crate::ertmp::exvideo::VIDEO_FRAME_TYPE_COMMAND
+            && hdr.packet_type != ERTMP_PACKET_TYPE_METADATA
+        {
+            return Some("command".to_string());
+        }
         // Unpeeled ModEx wrappers expose extension metadata at bytes 1..5,
         // not the inner codec FourCC — treat as unknown so deny lists apply.
         if hdr.packet_type == ERTMP_PACKET_TYPE_MODEX {

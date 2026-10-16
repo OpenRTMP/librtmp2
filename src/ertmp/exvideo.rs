@@ -2,7 +2,11 @@
 //!
 //! Mirrors `src/ertmp/exvideo.c`.
 
-use crate::types::{ErrorCode, Result, VideoHeader};
+use crate::types::{ERTMP_PACKET_TYPE_METADATA, ErrorCode, Result, VideoHeader};
+
+/// E-RTMP `VideoFrameType.Command` (frame type 5): the tag body is a single
+/// `UI8` videoCommand, not a FourCC header.
+pub(crate) const VIDEO_FRAME_TYPE_COMMAND: u8 = 5;
 
 /// Parse a FourCC from raw bytes.
 pub fn fourcc_parse(data: &[u8]) -> Result<[u8; 5]> {
@@ -53,6 +57,18 @@ pub fn exvideo_parse(data: &[u8], hdr: &mut VideoHeader) -> Result<()> {
     hdr.frame_type = (b0 >> 4) & 0x07;
     hdr.packet_type = b0 & 0x0F;
 
+    // E-RTMP v2 ExVideoTagBody: a command frame (frame type 5) whose packet
+    // type is not Metadata carries a single UI8 videoCommand and no FourCC.
+    if hdr.frame_type == VIDEO_FRAME_TYPE_COMMAND && hdr.packet_type != ERTMP_PACKET_TYPE_METADATA
+    {
+        if data.len() < 2 {
+            return Err(ErrorCode::Io);
+        }
+        hdr.video_command = data[1];
+        hdr.header_size = 2;
+        return Ok(());
+    }
+
     if data.len() < 5 {
         return Err(ErrorCode::Io);
     }
@@ -92,6 +108,18 @@ pub fn exvideo_parse(data: &[u8], hdr: &mut VideoHeader) -> Result<()> {
 pub fn exvideo_write(hdr: &VideoHeader, buf: &mut [u8]) -> usize {
     if hdr.is_ex_header == 0 {
         return 0;
+    }
+
+    // E-RTMP v2 ExVideoTagBody: a command frame (frame type 5, non-Metadata
+    // packet type) is the tag byte followed by the UI8 videoCommand.
+    if hdr.frame_type == VIDEO_FRAME_TYPE_COMMAND && hdr.packet_type != ERTMP_PACKET_TYPE_METADATA
+    {
+        if buf.len() < 2 {
+            return 0;
+        }
+        buf[0] = 0x80 | ((hdr.frame_type & 0x07) << 4) | (hdr.packet_type & 0x0F);
+        buf[1] = hdr.video_command;
+        return 2;
     }
 
     let needs_ct = hdr.packet_type == 1 && is_composition_time_codec(&hdr.fourcc);
