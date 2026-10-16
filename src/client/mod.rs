@@ -399,11 +399,16 @@ impl Client {
             .checked_add(connect_timeout)
             .ok_or(ErrorCode::Internal)?;
         let addrs = resolve_socket_addrs(&host, port, deadline)?;
+        // Minimum useful per-attempt budget: `connect_timeout` must never be
+        // given a timeout longer than the remaining budget, so below this
+        // floor the loop stops (timeout error) instead of overshooting the
+        // deadline.
+        const MIN_CONNECT_ATTEMPT: Duration = Duration::from_millis(1);
         let mut last_err_was_timeout = false;
         let mut stream = None;
         for (i, addr) in addrs.iter().enumerate() {
             let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
+            if remaining < MIN_CONNECT_ATTEMPT {
                 last_err_was_timeout = true;
                 break;
             }
@@ -412,7 +417,7 @@ impl Client {
             // the others are attempted; the last address still gets the entire
             // remainder.
             let attempts_left = (addrs.len() - i) as u32;
-            let per_attempt = (remaining / attempts_left).max(Duration::from_millis(1));
+            let per_attempt = (remaining / attempts_left).max(MIN_CONNECT_ATTEMPT);
             match TcpStream::connect_timeout(addr, per_attempt) {
                 Ok(s) => {
                     stream = Some(s);
