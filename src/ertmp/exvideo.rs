@@ -63,7 +63,9 @@ pub fn exvideo_parse(data: &[u8], hdr: &mut VideoHeader) -> Result<()> {
         if data.len() < 2 {
             return Err(ErrorCode::Io);
         }
-        hdr.video_command = data[1];
+        // The UI8 videoCommand is body data (`processVideoBody = false`); it
+        // is not retained in `VideoHeader`, which only reports the frame
+        // shape.
         hdr.header_size = 2;
         return Ok(());
     }
@@ -116,7 +118,9 @@ pub fn exvideo_write(hdr: &VideoHeader, buf: &mut [u8]) -> usize {
             return 0;
         }
         buf[0] = 0x80 | ((hdr.frame_type & 0x07) << 4) | (hdr.packet_type & 0x0F);
-        buf[1] = hdr.video_command;
+        // `VideoHeader` does not retain the UI8 videoCommand (body data), so
+        // the writer emits the start-seek command.
+        buf[1] = 0;
         return 2;
     }
 
