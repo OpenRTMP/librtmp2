@@ -95,8 +95,8 @@ pub fn exvideo_parse(data: &[u8], hdr: &mut VideoHeader) -> Result<()> {
 }
 
 /// Write an Enhanced RTMP v1 video tag header. Returns bytes written, or 0 if
-/// `buf` is too small, or on the legacy branch (see below). Mirrors
-/// [`exvideo_parse`] in reverse.
+/// `buf` is too small, or when the header cannot be represented (see below).
+/// Mirrors [`exvideo_parse`] in reverse.
 ///
 /// `VideoHeader` has no field for a legacy (non-ex-header) video codec ID --
 /// `exvideo_parse` never populates one either, since the legacy tag byte's
@@ -106,22 +106,22 @@ pub fn exvideo_parse(data: &[u8], hdr: &mut VideoHeader) -> Result<()> {
 /// defined legacy video codec) and returns 0 instead. Callers that need a
 /// legacy FLV video tag header should build one directly (see
 /// `src/flv/video_tag.rs`) rather than through this enhanced-only writer.
+///
+/// `VideoHeader` does not retain the UI8 videoCommand either (`exvideo_parse`
+/// treats it as body data), so a command frame (frame type 5, non-Metadata
+/// packet type) cannot be written through this helper: the writer would have
+/// to fabricate a command byte, silently turning e.g. an EndSeek into a
+/// StartSeek. The command-frame branch returns 0 instead.
 pub fn exvideo_write(hdr: &VideoHeader, buf: &mut [u8]) -> usize {
     if hdr.is_ex_header == 0 {
         return 0;
     }
 
     // E-RTMP v2 ExVideoTagBody: a command frame (frame type 5, non-Metadata
-    // packet type) is the tag byte followed by the UI8 videoCommand.
+    // packet type) is the tag byte followed by the UI8 videoCommand, which
+    // `VideoHeader` does not retain (see the doc comment above).
     if hdr.frame_type == VIDEO_FRAME_TYPE_COMMAND && hdr.packet_type != ERTMP_PACKET_TYPE_METADATA {
-        if buf.len() < 2 {
-            return 0;
-        }
-        buf[0] = 0x80 | ((hdr.frame_type & 0x07) << 4) | (hdr.packet_type & 0x0F);
-        // `VideoHeader` does not retain the UI8 videoCommand (body data), so
-        // the writer emits the start-seek command.
-        buf[1] = 0;
-        return 2;
+        return 0;
     }
 
     let needs_ct = hdr.packet_type == 1 && is_composition_time_codec(&hdr.fourcc);
