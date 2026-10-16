@@ -174,20 +174,8 @@ impl ChunkRegistry {
             return Err(ErrorCode::Chunk);
         }
 
-        // Reuse a free slot before growing the vec; this prevents the stream
-        // count from monotonically climbing to MAX_CHUNK_STREAMS on connections
-        // that open and close many streams across their lifetime.
-        if let Some(i) = self.streams.iter().position(|s| !s.in_use) {
-            if self.streams[i].in_use {
-                self.release_stream_reassembly(i);
-            }
-            self.streams[i].csid = csid;
-            self.streams[i].in_use = true;
-            self.streams[i].reset(self.default_chunk_size);
-            self.csid_index.insert(csid, i);
-            return Ok(i);
-        }
-
+        // Stream slots are never recycled (`in_use` is never cleared), so the
+        // table only grows; it is bounded by MAX_CHUNK_STREAMS.
         if self.streams.len() >= MAX_CHUNK_STREAMS {
             return Err(ErrorCode::Chunk);
         }
@@ -244,9 +232,6 @@ impl ChunkRegistry {
         }
         if self.active_reassembling() >= self.max_active_csids {
             return false;
-        }
-        if self.streams.iter().any(|s| !s.in_use) {
-            return true;
         }
         self.streams.len() < MAX_CHUNK_STREAMS
     }
