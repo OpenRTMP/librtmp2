@@ -52,6 +52,11 @@ pub struct ChunkStream {
     /// reset/shrunk so callers can read via the returned pointer safely.
     pub last_payload: Vec<u8>,
     /// A message is currently being reassembled on this CSID.
+    ///
+    /// Transitions MUST go through `ChunkRegistry::set_stream_reassembling`
+    /// (all in-crate paths do): the registry caches an O(1) count of streams
+    /// with this flag set to enforce the active-CSID cap, so writing the
+    /// field directly desyncs that count.
     pub reassembling: bool,
     pub in_use: bool,
 }
@@ -100,6 +105,12 @@ impl ChunkStream {
 /// Per-connection chunk-stream registry.
 #[derive(Debug)]
 pub struct ChunkRegistry {
+    /// Per-connection chunk streams.
+    ///
+    /// Each entry's `reassembling` flag participates in the registry's O(1)
+    /// active-reassembling accounting and MUST only be toggled through
+    /// `ChunkRegistry::set_stream_reassembling`; writing it directly (e.g.
+    /// through this vec) desyncs the active-CSID cap count.
     pub streams: Vec<ChunkStream>,
     /// O(1) lookup from CSID to `streams` index.
     csid_index: HashMap<u32, usize>,
@@ -266,6 +277,10 @@ impl ChunkRegistry {
     }
 
     /// Update a stream's `reassembling` flag, keeping the O(1) count in sync.
+    ///
+    /// This is the only supported way to toggle `ChunkStream::reassembling`:
+    /// the count backs the active-CSID cap, so direct field writes (including
+    /// through the public `ChunkRegistry::streams` vec) desync it.
     pub(crate) fn set_stream_reassembling(&mut self, idx: usize, reassembling: bool) {
         if self.streams[idx].reassembling == reassembling {
             return;
