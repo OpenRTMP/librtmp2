@@ -1168,7 +1168,13 @@ impl Conn {
         // telemetry readers.
         match frame_type {
             FrameType::Video if self.detected_video_codec.is_none() => {
-                self.detected_video_codec = current_codec.map(str::to_owned);
+                // A VideoCommand frame has no codec FourCC: `detect_video_codec`
+                // reports the non-`None` command label so a media hook cannot
+                // auto-deny it, but it must not pin the detected codec -- a
+                // later real sequence header still has to fill this in.
+                if current_codec != Some(VIDEO_COMMAND_CODEC_LABEL) {
+                    self.detected_video_codec = current_codec.map(str::to_owned);
+                }
             }
             FrameType::Audio if self.detected_audio_codec.is_none() => {
                 self.detected_audio_codec = current_codec.map(str::to_owned);
@@ -3457,6 +3463,11 @@ fn fourcc_auth_label(fourcc: &[u8; 4]) -> String {
     }
 }
 
+/// Codec label reported for an E-RTMP VideoCommand frame, which carries no
+/// codec FourCC. It exists only so a media hook cannot auto-deny the frame;
+/// it is not a detected codec (see `update_detected_media_metadata`).
+const VIDEO_COMMAND_CODEC_LABEL: &str = "command";
+
 fn detect_video_codec(payload: &[u8]) -> Option<String> {
     if let Some(cc) = first_track_fourcc(FrameType::Video, payload) {
         return media_fourcc_auth_label(&cc);
@@ -3472,7 +3483,7 @@ fn detect_video_codec(payload: &[u8]) -> Option<String> {
         if hdr.frame_type == crate::ertmp::exvideo::VIDEO_FRAME_TYPE_COMMAND
             && hdr.packet_type != ERTMP_PACKET_TYPE_METADATA
         {
-            return Some("command".to_string());
+            return Some(VIDEO_COMMAND_CODEC_LABEL.to_string());
         }
         // Unpeeled ModEx wrappers expose extension metadata at bytes 1..5,
         // not the inner codec FourCC — treat as unknown so deny lists apply.
