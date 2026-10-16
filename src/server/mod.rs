@@ -1746,6 +1746,11 @@ impl Server {
             // cache evictions are applied after it, and until then the
             // cache may still hold the abandoned route's frames.
             evictions_queued |= !conn.pending_cache_evictions.is_empty();
+            // A play-route change suppressed by the init-replay cooldown is
+            // deferred on the connection, not dropped: re-arm it once the
+            // cooldown has elapsed so the new route still receives its cached
+            // init frames.
+            conn.rearm_deferred_init_replay();
             if !conn_closed_this_iteration && !evictions_queued && conn.needs_init_frames {
                 let failed = Self::replay_init_frames_for_conn(conn, &self.stream_cache)
                     || (!conn.needs_init_frames && conn.flush().is_err());
