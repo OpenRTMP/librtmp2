@@ -269,6 +269,10 @@ pub struct Conn {
     pub(crate) relay_congestion: Option<RelayCongestion>,
     /// Last play-route change that requested cached init frames.
     last_init_replay_request: Option<Instant>,
+    /// Set when a play-route change's replay request arrived inside
+    /// [`INIT_REPLAY_COOLDOWN`]. The server's replay gate re-arms it once the
+    /// cooldown elapses instead of dropping the request.
+    init_replay_deferred: bool,
     pub detected_video_codec: Option<String>,
     pub detected_audio_codec: Option<String>,
     pub detected_video_width: Option<u32>,
@@ -443,6 +447,7 @@ impl Conn {
             relay_frames_dropped: 0,
             relay_congestion: None,
             last_init_replay_request: None,
+            init_replay_deferred: false,
             detected_video_codec: None,
             detected_audio_codec: None,
             detected_video_width: None,
@@ -1017,10 +1022,38 @@ impl Conn {
             .last_init_replay_request
             .is_some_and(|last| now.duration_since(last) < INIT_REPLAY_COOLDOWN)
         {
+            // Defer instead of dropping: the server's replay gate re-arms this
+            // once the cooldown elapses, so the new route still receives its
+            // cached init frames.
+            self.init_replay_deferred = true;
+            return;
+        }
+        self.last_init_replay_request = Some(now);
+        self.init_replay_deferred = false;
+        self.needs_init_frames = true;
+    }
+
+    /// Re-arm a replay request that [`INIT_REPLAY_COOLDOWN`] suppressed, once
+    /// the cooldown has elapsed. A replay already pending targets the current
+    /// route, so it serves the deferred request as well.
+    pub(crate) fn rearm_deferred_init_replay(&mut self) {
+        if !self.init_replay_deferred {
+            return;
+        }
+        if self.needs_init_frames {
+            self.init_replay_deferred = false;
+            return;
+        }
+        let now = Instant::now();
+        if self
+            .last_init_replay_request
+            .is_some_and(|last| now.duration_since(last) < INIT_REPLAY_COOLDOWN)
+        {
             return;
         }
         self.last_init_replay_request = Some(now);
         self.needs_init_frames = true;
+        self.init_replay_deferred = false;
     }
 
     /// Whether `msg_stream_id` is this connection's own active publish stream,
