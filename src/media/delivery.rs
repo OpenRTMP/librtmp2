@@ -6,9 +6,12 @@
 //! init cache ([`classify_cache_frame`]), and travels with the frame.
 
 use super::init_cache::{CacheFrameKind, classify_cache_frame};
-use crate::ertmp::exvideo;
 use crate::ertmp::multitrack_media::{is_multitrack_container, multitrack_has_metadata};
-use crate::types::{ERTMP_PACKET_TYPE_METADATA, FrameType, VideoHeader};
+use crate::ertmp::{exaudio, exvideo};
+use crate::types::{
+    AudioHeader, ERTMP_AUDIO_PACKET_TYPE_METADATA, ERTMP_PACKET_TYPE_METADATA, FrameType,
+    VideoHeader,
+};
 
 /// How a live media frame may be treated under congestion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -42,6 +45,12 @@ impl DeliveryHint {
         // script onMetaData. Keep classify_cache_frame's LiveOnly so init-cache
         // does not treat metadata as a sequence header.
         if frame_type == FrameType::Video && is_enhanced_video_metadata(payload) {
+            return Self::Critical;
+        }
+        // Enhanced RTMP Audio Metadata (ExHeader packet type 3) is Critical
+        // for the same reason: nothing replays it later, so a congested
+        // receiver would lose it permanently.
+        if frame_type == FrameType::Audio && is_enhanced_audio_metadata(payload) {
             return Self::Critical;
         }
         match classify_cache_frame(frame_type, payload) {
@@ -95,6 +104,27 @@ fn is_enhanced_video_metadata(payload: &[u8]) -> bool {
         return false;
     }
     hdr.is_ex_header != 0 && hdr.packet_type == ERTMP_PACKET_TYPE_METADATA
+}
+
+fn is_enhanced_audio_metadata(payload: &[u8]) -> bool {
+    // Multitrack outer packet type is 5; metadata lives in the shared inner
+    // track descriptor — check that before a single-track ExHeader parse.
+    if is_multitrack_container(FrameType::Audio, payload) {
+        return multitrack_has_metadata(FrameType::Audio, payload);
+    }
+    // Legacy audio tags are not ExHeader; skip parse so classify_cache_frame
+    // does not re-parse the same ordinary payload on the common path.
+    let Some(&b0) = payload.first() else {
+        return false;
+    };
+    if (b0 >> 4) & 0x0F != 0x09 {
+        return false;
+    }
+    let mut hdr = AudioHeader::default();
+    if exaudio::exaudio_parse(payload, &mut hdr).is_err() {
+        return false;
+    }
+    hdr.is_ex_header != 0 && hdr.packet_type == ERTMP_AUDIO_PACKET_TYPE_METADATA
 }
 
 #[cfg(test)]
