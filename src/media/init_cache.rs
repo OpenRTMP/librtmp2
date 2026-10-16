@@ -66,6 +66,18 @@ fn sequence_header_kind(codec: ConfigCodec, record: &[u8]) -> CacheFrameKind {
     }
 }
 
+/// True when a sequence-start track carries a configuration record the init
+/// cache may store. Mirrors `validate_config_record`, except that an empty
+/// record is accepted for an audio Opus sequence start: the E-RTMP v2 spec
+/// allows an empty Opus payload and falls back to the `MultichannelConfig`
+/// signal when present, otherwise to mono/stereo channel mapping.
+fn sequence_start_config_valid(frame_type: FrameType, fourcc: &[u8], record: &[u8]) -> bool {
+    if frame_type == FrameType::Audio && record.is_empty() && fourcc.get(..4) == Some(b"Opus") {
+        return true;
+    }
+    validate_config_record(ConfigCodec::from_fourcc(fourcc), record)
+}
+
 fn classify_multitrack_video(payload: &[u8]) -> CacheFrameKind {
     if multitrack_has_sequence_start(FrameType::Video, payload) {
         return if multitrack_sequence_configs_valid(FrameType::Video, payload) {
@@ -124,7 +136,7 @@ fn multitrack_sequence_configs_valid(frame_type: FrameType, payload: &[u8]) -> b
     let mut all_valid = true;
     foreach_track(frame_type, payload, |track| {
         if track.packet_type == 0
-            && !validate_config_record(ConfigCodec::from_fourcc(&track.fourcc), track.payload)
+            && !sequence_start_config_valid(frame_type, &track.fourcc, track.payload)
         {
             all_valid = false;
         }
@@ -158,9 +170,12 @@ fn classify_audio(payload: &[u8]) -> CacheFrameKind {
         if hdr.packet_type == 0 {
             // A sequence header is only cacheable when its configuration
             // record is structurally valid; a malformed one is relayed live
-            // but never cached (mirrors `classify_ex_video`).
-            if validate_config_record(
-                ConfigCodec::from_fourcc(&hdr.fourcc),
+            // but never cached (mirrors `classify_ex_video`). An empty Opus
+            // record is valid per the E-RTMP v2 spec
+            // (`sequence_start_config_valid`).
+            if sequence_start_config_valid(
+                FrameType::Audio,
+                &hdr.fourcc,
                 payload.get(hdr.header_size..).unwrap_or(&[]),
             ) {
                 CacheFrameKind::AudioSequenceHeader
@@ -647,9 +662,10 @@ mod tests {
 
     #[test]
     fn enhanced_opus_sequence_start_is_cached() {
-        // A sequence start is only cacheable with a non-empty configuration
-        // record (the OpusHead payload); the header-only form is LiveOnly.
-        let payload = [0x90, b'O', b'p', b'u', b's', 0x01];
+        // An empty Opus sequence-start payload is valid per the E-RTMP v2
+        // spec (fallback to MultichannelConfig / mono-stereo), so the
+        // header-only form is cacheable.
+        let payload = [0x90, b'O', b'p', b'u', b's'];
         assert_eq!(
             classify_cache_frame(FrameType::Audio, &payload),
             CacheFrameKind::AudioSequenceHeader
