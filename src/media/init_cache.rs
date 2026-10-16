@@ -68,7 +68,7 @@ fn sequence_header_kind(codec: ConfigCodec, record: &[u8]) -> CacheFrameKind {
 
 fn classify_multitrack_video(payload: &[u8]) -> CacheFrameKind {
     if multitrack_has_sequence_start(FrameType::Video, payload) {
-        return if multitrack_sequence_configs_valid(payload) {
+        return if multitrack_sequence_configs_valid(FrameType::Video, payload) {
             CacheFrameKind::VideoSequenceHeader
         } else {
             CacheFrameKind::LiveOnly
@@ -118,11 +118,11 @@ fn classify_legacy_video(payload: &[u8]) -> CacheFrameKind {
 
 const VIDEO_FRAME_TYPE_COMMAND: u8 = 5;
 
-/// True when every sequence-start track in a multitrack video container
-/// carries a structurally valid configuration record.
-fn multitrack_sequence_configs_valid(payload: &[u8]) -> bool {
+/// True when every sequence-start track in a multitrack container carries a
+/// structurally valid configuration record.
+fn multitrack_sequence_configs_valid(frame_type: FrameType, payload: &[u8]) -> bool {
     let mut all_valid = true;
-    foreach_track(FrameType::Video, payload, |track| {
+    foreach_track(frame_type, payload, |track| {
         if track.packet_type == 0
             && !validate_config_record(ConfigCodec::from_fourcc(&track.fourcc), track.payload)
         {
@@ -138,7 +138,11 @@ fn classify_audio(payload: &[u8]) -> CacheFrameKind {
     if is_multitrack_container(FrameType::Audio, payload)
         && multitrack_has_sequence_start(FrameType::Audio, payload)
     {
-        return CacheFrameKind::AudioSequenceHeader;
+        return if multitrack_sequence_configs_valid(FrameType::Audio, payload) {
+            CacheFrameKind::AudioSequenceHeader
+        } else {
+            CacheFrameKind::LiveOnly
+        };
     }
     let mut hdr = AudioHeader::default();
     if exaudio::exaudio_parse(payload, &mut hdr).is_err() {
@@ -152,7 +156,17 @@ fn classify_audio(payload: &[u8]) -> CacheFrameKind {
             return CacheFrameKind::LiveOnly;
         }
         if hdr.packet_type == 0 {
-            CacheFrameKind::AudioSequenceHeader
+            // A sequence header is only cacheable when its configuration
+            // record is structurally valid; a malformed one is relayed live
+            // but never cached (mirrors `classify_ex_video`).
+            if validate_config_record(
+                ConfigCodec::from_fourcc(&hdr.fourcc),
+                payload.get(hdr.header_size..).unwrap_or(&[]),
+            ) {
+                CacheFrameKind::AudioSequenceHeader
+            } else {
+                CacheFrameKind::LiveOnly
+            }
         } else {
             CacheFrameKind::LiveOnly
         }
@@ -633,7 +647,9 @@ mod tests {
 
     #[test]
     fn enhanced_opus_sequence_start_is_cached() {
-        let payload = [0x90, b'O', b'p', b'u', b's'];
+        // A sequence start is only cacheable with a non-empty configuration
+        // record (the OpusHead payload); the header-only form is LiveOnly.
+        let payload = [0x90, b'O', b'p', b'u', b's', 0x01];
         assert_eq!(
             classify_cache_frame(FrameType::Audio, &payload),
             CacheFrameKind::AudioSequenceHeader
