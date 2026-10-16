@@ -276,7 +276,12 @@ impl Transport {
                 Err(_) => param.set_host(host).map_err(|_| ErrorCode::Internal)?,
             }
         }
-        ssl.set_hostname(host).map_err(|_| ErrorCode::Internal)?;
+        // An IP literal is not a legal RFC 6066 SNI HostName, and verification
+        // of a literal host is already covered by `set_ip` above, so only a
+        // DNS name is sent as SNI.
+        if host.parse::<std::net::IpAddr>().is_err() {
+            ssl.set_hostname(host).map_err(|_| ErrorCode::Internal)?;
+        }
 
         let mut pending = match ssl.connect(stream) {
             Ok(ssl_stream) => return Transport::new_tls(ssl_stream),
