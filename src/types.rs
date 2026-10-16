@@ -448,6 +448,9 @@ pub struct VideoHeader {
     pub frame_type: u8,
     pub composition_time: u32,
     pub header_size: usize,
+    /// `videoCommand` UI8 of a command frame (frame type 5, non-Metadata
+    /// packet type); 0 for every other frame.
+    pub video_command: u8,
 }
 
 /* ── Parsed audio tag header ── */
