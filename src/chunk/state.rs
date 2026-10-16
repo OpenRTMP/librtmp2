@@ -105,6 +105,8 @@ pub struct ChunkRegistry {
     csid_index: HashMap<u32, usize>,
     /// Running total of `reassembly_buf` bytes across active streams.
     reassembly_bytes_in_use: usize,
+    /// Number of streams currently reassembling an incomplete message.
+    reassembling_count: usize,
     /// Chunk size applied to new streams
     pub default_chunk_size: u32,
     /// Reject message bodies larger than this (bytes).
@@ -129,6 +131,7 @@ impl ChunkRegistry {
             streams: Vec::new(),
             csid_index: HashMap::new(),
             reassembly_bytes_in_use: 0,
+            reassembling_count: 0,
             default_chunk_size: DEFAULT_CHUNK_SIZE,
             max_msg_length: DEFAULT_MAX_MSG_LENGTH,
             max_active_csids: DEFAULT_MAX_ACTIVE_CSIDS,
@@ -219,7 +222,7 @@ impl ChunkRegistry {
 
     /// Number of CSIDs currently reassembling an incomplete message.
     fn active_reassembling(&self) -> usize {
-        self.streams.iter().filter(|s| s.reassembling).count()
+        self.reassembling_count
     }
 
     /// True when [`Self::get_or_create_index`] would succeed without mutating.
@@ -262,6 +265,19 @@ impl ChunkRegistry {
         self.reassembly_bytes_in_use = self.reassembly_bytes_in_use.saturating_add(nbytes);
     }
 
+    /// Update a stream's `reassembling` flag, keeping the O(1) count in sync.
+    pub(crate) fn set_stream_reassembling(&mut self, idx: usize, reassembling: bool) {
+        if self.streams[idx].reassembling == reassembling {
+            return;
+        }
+        self.streams[idx].reassembling = reassembling;
+        if reassembling {
+            self.reassembling_count += 1;
+        } else {
+            self.reassembling_count = self.reassembling_count.saturating_sub(1);
+        }
+    }
+
     /// Set chunk size for all streams. Values outside the RTMP-valid inbound
     /// range are ignored (peers must negotiate via `read_set_chunk_size`).
     pub fn set_all_chunk_size(&mut self, chunk_size: u32) {
@@ -290,6 +306,7 @@ impl ChunkRegistry {
         if let Some(idx) = self.csid_index.get(&csid).copied() {
             if self.streams[idx].in_use && self.streams[idx].csid == csid {
                 self.release_stream_reassembly(idx);
+                self.set_stream_reassembling(idx, false);
                 self.streams[idx].reset(self.default_chunk_size);
             }
         }
@@ -304,10 +321,10 @@ impl ChunkRegistry {
         if let Some(idx) = self.csid_index.get(&csid).copied() {
             if self.streams[idx].in_use && self.streams[idx].csid == csid {
                 self.release_stream_reassembly(idx);
+                self.set_stream_reassembling(idx, false);
                 let stream = &mut self.streams[idx];
                 stream.reassembly_buf.reset();
                 stream.reassembly_bytes_read = 0;
-                stream.reassembling = false;
                 stream.chunk_read_scratch.clear();
             }
         }
@@ -318,6 +335,7 @@ impl ChunkRegistry {
         self.streams.clear();
         self.csid_index.clear();
         self.reassembly_bytes_in_use = 0;
+        self.reassembling_count = 0;
         self.initialized = false;
     }
 }

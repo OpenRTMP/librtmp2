@@ -398,10 +398,9 @@ pub fn chunk_read(
         if stream.chunk_read_scratch.capacity() > crate::buffer::BUFFER_RESET_CAPACITY {
             stream.chunk_read_scratch.shrink_to_fit();
         }
-        let message_complete = stream.reassembly_bytes_read >= effective_length;
-        stream.reassembling = !message_complete;
-        message_complete
+        stream.reassembly_bytes_read >= effective_length
     };
+    reg.set_stream_reassembling(stream_idx, !message_complete);
 
     if message_complete {
         msg.csid = csid;
