@@ -2544,12 +2544,23 @@ impl Server {
             return false;
         };
         for key in keys {
-            if &key != except_key {
-                self.evict_stream_cache_key(&key);
-                return true;
+            if &key == except_key || self.cache_key_co_tracked(publisher_conn_id, &key) {
+                continue;
             }
+            self.evict_stream_cache_key(&key);
+            return true;
         }
         false
+    }
+
+    /// Whether any publisher other than `publisher_conn_id` still tracks
+    /// `key`. A co-tracked entry must not be evicted: dropping it would wipe a
+    /// live route's cached headers/keyframe (mirrors the `still_owned` checks
+    /// in the drain/teardown paths).
+    fn cache_key_co_tracked(&self, publisher_conn_id: u64, key: &(String, String)) -> bool {
+        self.publisher_cache_keys
+            .iter()
+            .any(|(pub_id, tracked)| *pub_id != publisher_conn_id && tracked.contains(key))
     }
 
     /// Evict any external-owned cache route other than `except_key`.
@@ -2562,7 +2573,10 @@ impl Server {
             if !is_external_publisher_id(*pub_id) {
                 continue;
             }
-            if let Some(key) = keys.iter().find(|k| *k != except_key) {
+            if let Some(key) = keys
+                .iter()
+                .find(|k| *k != except_key && !self.cache_key_co_tracked(*pub_id, *k))
+            {
                 victim = Some(key.clone());
                 break;
             }
