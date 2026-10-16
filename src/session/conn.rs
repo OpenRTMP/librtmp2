@@ -365,8 +365,9 @@ pub struct Conn {
     /// The built-in server consults this across poll ticks so an old-route
     /// frame cannot recreate the stream-cache entry its eviction removed.
     /// Entries are cleared when the connection queues fresh media for the
-    /// route again.
-    pub(crate) abandoned_relay_routes: std::collections::HashSet<(String, String)>,
+    /// route again. Bounded FIFO: once the cap is reached the oldest marker
+    /// is dropped so the most recent abandonment is always recorded.
+    pub(crate) abandoned_relay_routes: std::collections::VecDeque<(String, String)>,
     /// Last measured client↔server RTT in milliseconds (RTMP UserControl ping).
     pub rtt_ms: f64,
     pending_pings: HashMap<u32, Instant>,
@@ -478,7 +479,7 @@ impl Conn {
             publish_routes: None,
             claimed_publish_route: None,
             pending_cache_evictions: Vec::new(),
-            abandoned_relay_routes: std::collections::HashSet::new(),
+            abandoned_relay_routes: std::collections::VecDeque::new(),
             rtt_ms: 0.0,
             pending_pings: HashMap::new(),
             send_progress_bytes: 0,
@@ -721,11 +722,15 @@ impl Conn {
 
     /// Record that `route` was abandoned so a still-queued (budget-deferred)
     /// frame for it is not cached on a later poll. Capped so a peer that
-    /// renames many times cannot grow this set without bound.
+    /// renames many times cannot grow this set without bound: once the cap is
+    /// reached the oldest marker is dropped so the newest is always recorded.
     pub(crate) fn note_abandoned_relay_route(&mut self, app: String, route: String) {
-        if self.abandoned_relay_routes.len() < MAX_PENDING_CACHE_EVICTIONS {
-            self.abandoned_relay_routes.insert((app, route));
+        self.abandoned_relay_routes
+            .retain(|(a, r)| !(a == &app && r == &route));
+        if self.abandoned_relay_routes.len() >= MAX_PENDING_CACHE_EVICTIONS {
+            self.abandoned_relay_routes.pop_front();
         }
+        self.abandoned_relay_routes.push_back((app, route));
     }
 
     /// Stop relaying a publish route this connection no longer owns in the
@@ -988,7 +993,7 @@ impl Conn {
         // "abandoned" while no new frames for it are being produced.
         if !self.abandoned_relay_routes.is_empty() {
             self.abandoned_relay_routes
-                .remove(&(app.clone(), stream_name.clone()));
+                .retain(|(a, r)| !(a == &app && r == &stream_name));
         }
         self.pending_relay.push(RelayFrame {
             frame_type,
