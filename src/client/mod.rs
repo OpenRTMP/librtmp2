@@ -401,13 +401,19 @@ impl Client {
         let addrs = resolve_socket_addrs(&host, port, deadline)?;
         let mut last_err_was_timeout = false;
         let mut stream = None;
-        for addr in addrs {
+        for (i, addr) in addrs.iter().enumerate() {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
                 last_err_was_timeout = true;
                 break;
             }
-            match TcpStream::connect_timeout(&addr, remaining) {
+            // Divide the remaining budget across the addresses still to try so
+            // one black-holed address cannot consume the whole deadline before
+            // the others are attempted; the last address still gets the entire
+            // remainder.
+            let attempts_left = (addrs.len() - i) as u32;
+            let per_attempt = (remaining / attempts_left).max(Duration::from_millis(1));
+            match TcpStream::connect_timeout(addr, per_attempt) {
                 Ok(s) => {
                     stream = Some(s);
                     break;
