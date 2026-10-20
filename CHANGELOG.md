@@ -11,7 +11,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 While in alpha the project stays on `0.x`; semantic-versioning guarantees only
 begin at `1.0.0`.
 
-## [Unreleased]
+## [0.15.0] — 2026-10-20
 
 ### Changed
 
@@ -1076,6 +1076,7 @@ and others.
 - Protocol mapping documents for legacy, E-RTMP v1, and E-RTMP v2
 - `CONTRIBUTING.md` guidelines
 
+[0.15.0]: https://github.com/OpenRTMP/librtmp2/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/OpenRTMP/librtmp2/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/OpenRTMP/librtmp2/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/OpenRTMP/librtmp2/compare/v0.11.0...v0.12.0
