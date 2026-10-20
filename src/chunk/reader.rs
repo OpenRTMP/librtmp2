@@ -88,6 +88,19 @@ pub fn chunk_read(
         return Err(ErrorCode::Chunk);
     }
 
+    // Only fmt=3 may continue an in-flight message (RTMP spec 5.3.1.1): fmt=0/1
+    // carry a fresh message header and fmt=2 starts a new message that inherits
+    // length/type/stream id from the previous one. Accepting fmt=2 while a
+    // message is still being reassembled on the same CSID would append its
+    // payload to that message (delivering a byte-level mix of both with the new
+    // delta) and leave the surplus bytes to be parsed as the next chunk header.
+    // Reject before consuming any bytes so the buffer cannot desynchronize;
+    // fmt=0/1 are allowed to restart a message and discard the partial
+    // reassembly in phase 3.
+    if fmt == 2 && reg.get(csid).is_some_and(|s| s.reassembly_bytes_read != 0) {
+        return Err(ErrorCode::Chunk);
+    }
+
     // Peek at the 3-byte timestamp field (for fmt 0/1/2) to decide ext_ts
     // without consuming anything.
     let ext_ts_from_header = if fmt <= 2 {
@@ -279,7 +292,8 @@ pub fn chunk_read(
     let stream_idx = reg.get_or_create_index(csid)?;
 
     // fmt 0/1 start a fresh message on this CSID; discard any partial
-    // reassembly left over from an abandoned prior message.
+    // reassembly left over from an abandoned prior message. (fmt=2 mid-message
+    // was already rejected in phase 1: only fmt=3 may continue a message.)
     if fmt == 0 || fmt == 1 {
         reg.release_stream_reassembly(stream_idx);
         let stream = &mut reg.streams[stream_idx];
@@ -627,6 +641,47 @@ mod tests {
         let mut len = 0;
         let result = chunk_read(&mut next, &mut reg, None, &mut out_msg, &mut ptr, &mut len);
         assert!(matches!(result, Err(ErrorCode::Chunk)));
+    }
+
+    #[test]
+    fn fmt2_mid_message_is_rejected_without_consuming_bytes() {
+        // A fmt=0 header starts a 200-byte message with a 128-byte first chunk.
+        let mut reg = ChunkRegistry::new();
+        let mut wire = Buffer::new();
+        // basic fmt=0/csid=5, ts=0, length=200, type=0x08, stream id=1
+        wire.write(&[0x05, 0, 0, 0, 0, 0, 200, 0x08, 1, 0, 0, 0])
+            .unwrap();
+        wire.write(&[0xAB; 128]).unwrap();
+
+        let mut out_msg = ChunkMessage::default();
+        let mut ptr = std::ptr::null();
+        let mut len = 0;
+        assert_eq!(
+            chunk_read(&mut wire, &mut reg, None, &mut out_msg, &mut ptr, &mut len).unwrap(),
+            0
+        );
+        assert_eq!(reg.get(5).unwrap().reassembly_bytes_read, 128);
+
+        // Only fmt=3 may continue a message: a fmt=2 header arriving now must
+        // be rejected instead of being appended to the in-flight message (which
+        // delivered a mix of both payloads and desynchronized the stream).
+        let mut next = Buffer::new();
+        next.write(&[2 << 6 | 5, 0, 0, 33]).unwrap();
+        next.write(&[0xCD; 128]).unwrap();
+        let available_before = next.available();
+        let result = chunk_read(&mut next, &mut reg, None, &mut out_msg, &mut ptr, &mut len);
+
+        assert!(matches!(result, Err(ErrorCode::Chunk)));
+        assert_eq!(
+            next.available(),
+            available_before,
+            "a rejected fmt=2 chunk must not consume header or payload bytes"
+        );
+        assert_eq!(
+            reg.get(5).unwrap().reassembly_bytes_read,
+            128,
+            "the in-flight message must not absorb any fmt=2 payload"
+        );
     }
 
     #[test]
