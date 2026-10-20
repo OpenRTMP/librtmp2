@@ -283,10 +283,14 @@ pub struct Client {
     /// counter reset.
     bytes_received: u64,
     bytes_at_last_ack: u64,
-    /// An Acknowledgement is already queued in `send_buffer` and not yet
-    /// flushed; further window crossings coalesce into it instead of
-    /// appending acknowledgements a stalled peer could make accumulate.
-    ack_pending: bool,
+    /// Bytes that must still be drained from the front of `send_buffer` before
+    /// the queued Acknowledgement's last byte has been transmitted. `Some`
+    /// while an Acknowledgement is queued, `None` once it has gone out.
+    /// Deliberately *not* the whole buffer length: tying the flag to buffer
+    /// emptiness let a partially written buffer (the acknowledgement already
+    /// sent, a later frame still queued) suppress every later acknowledgement
+    /// for the life of the connection.
+    ack_bytes_remaining: Option<usize>,
     /// Chunk size this client announces with `SetChunkSize` when it starts
     /// publishing, and then uses for media. Larger chunks mean fewer chunk
     /// headers and fewer reassembly steps on the server for every frame.
@@ -341,7 +345,7 @@ impl Client {
             window_ack_size: 0,
             bytes_received: 0,
             bytes_at_last_ack: 0,
-            ack_pending: false,
+            ack_bytes_remaining: None,
         }
     }
 
@@ -378,6 +382,11 @@ impl Client {
     /// legacy C0/C1/C2 handshake, then the `connect` + `createStream` AMF0
     /// command exchange. Call [`Client::set_tls_client_config`] before
     /// `connect()` to trust an additional CA bundle or disable verification.
+    ///
+    /// A server that refuses the connection answers with an AMF0 `_error`
+    /// command (e.g. `NetConnection.Connect.Rejected`); that rejection is
+    /// reported as [`ErrorCode::Auth`] instead of blocking until the command
+    /// deadline and reporting [`ErrorCode::Timeout`].
     pub fn connect(&mut self, url: &str) -> Result<()> {
         // Before any early return below: a failed connect must tear down the
         // previous session, or a later `publish()`/`play()` keeps streaming to
@@ -473,6 +482,10 @@ impl Client {
     }
 
     /// Begin publishing.
+    ///
+    /// Returns [`ErrorCode::Auth`] when the server rejects the request with an
+    /// AMF0 `_error` command or an error-level `onStatus` instead of leaving
+    /// the rejection to surface as a deadline [`ErrorCode::Timeout`].
     pub fn publish(&mut self) -> Result<()> {
         if self.state != ClientState::AppConnected {
             return Err(ErrorCode::Protocol);
@@ -589,6 +602,10 @@ impl Client {
     }
 
     /// Begin playing.
+    ///
+    /// Returns [`ErrorCode::Auth`] when the server rejects the request with an
+    /// AMF0 `_error` command or an error-level `onStatus` instead of leaving
+    /// the rejection to surface as a deadline [`ErrorCode::Timeout`].
     pub fn play(&mut self) -> Result<()> {
         if self.state != ClientState::AppConnected {
             return Err(ErrorCode::Protocol);
@@ -1113,9 +1130,12 @@ impl Client {
     /// At most one acknowledgement is queued at a time: while one is still
     /// waiting to be flushed, further crossings are coalesced into it, so a
     /// peer that streams without reading its socket direction cannot grow
-    /// `send_buffer` by driving acknowledgement after acknowledgement.
+    /// `send_buffer` by driving acknowledgement after acknowledgement. The
+    /// pending state tracks the acknowledgement's own bytes, not
+    /// `send_buffer.available()`: a partially written buffer whose
+    /// acknowledgement has already gone out must be free to queue the next one.
     fn maybe_send_window_ack(&mut self) -> Result<()> {
-        if self.ack_pending {
+        if self.ack_bytes_remaining.is_some() {
             return Ok(());
         }
         if self.window_ack_size > 0
@@ -1126,7 +1146,10 @@ impl Client {
             control::write_acknowledgement(&mut payload, self.bytes_received as u32)?;
             self.queue_control_message(msg_dispatch::RTMP_MSG_ACKNOWLEDGEMENT, payload.as_slice())?;
             self.bytes_at_last_ack = self.bytes_received;
-            self.ack_pending = true;
+            // The acknowledgement is the tail of the buffer, so every byte
+            // currently queued (including older control/media messages ahead
+            // of it) must drain before its last byte leaves.
+            self.ack_bytes_remaining = Some(self.send_buffer.available());
         }
         Ok(())
     }
@@ -1148,7 +1171,7 @@ impl Client {
             }
         }
         self.send_buffer.reset();
-        self.ack_pending = false;
+        self.ack_bytes_remaining = None;
         Ok(())
     }
 
@@ -1172,6 +1195,7 @@ impl Client {
                 break;
             }
             self.send_buffer.drain(n);
+            self.note_outbound_drained(n);
         }
         if self.send_buffer.available() > 0 {
             Ok(poll_again)
@@ -1180,8 +1204,20 @@ impl Client {
             // frame (e.g. a multi-megabyte keyframe) back down instead of
             // pinning that allocation for the rest of the connection.
             self.send_buffer.reset();
-            self.ack_pending = false;
+            self.ack_bytes_remaining = None;
             Ok(None)
+        }
+    }
+
+    /// Retire the queued Acknowledgement once its own bytes (not the whole
+    /// buffer) have been written out, so a frame appended behind it cannot keep
+    /// `ack_bytes_remaining` set and swallow later window crossings.
+    fn note_outbound_drained(&mut self, n: usize) {
+        if let Some(remaining) = self.ack_bytes_remaining.as_mut() {
+            *remaining = remaining.saturating_sub(n);
+            if *remaining == 0 {
+                self.ack_bytes_remaining = None;
+            }
         }
     }
 
@@ -1192,7 +1228,7 @@ impl Client {
             transport.send(&data)?;
         }
         self.send_buffer.reset();
-        self.ack_pending = false;
+        self.ack_bytes_remaining = None;
         Ok(())
     }
 
@@ -1334,7 +1370,7 @@ impl Client {
         self.window_ack_size = 0;
         self.bytes_received = 0;
         self.bytes_at_last_ack = 0;
-        self.ack_pending = false;
+        self.ack_bytes_remaining = None;
         self.out_chunk_size = RTMP_DEFAULT_CHUNK_SIZE;
         self.media_out_headers = MediaHeaderTracker::default();
     }
@@ -1391,7 +1427,7 @@ impl Client {
             }
         }
         self.send_buffer.reset();
-        self.ack_pending = false;
+        self.ack_bytes_remaining = None;
         Ok(())
     }
 
@@ -1413,6 +1449,15 @@ impl Client {
     /// caller-owned byte budget so repeated calls (e.g. skipping transitional
     /// `onStatus` messages while waiting for a terminal one) share a single
     /// per-exchange cap instead of each getting a fresh one.
+    ///
+    /// An AMF0 `_error` command is a terminal rejection of the command this
+    /// waiter is awaiting (a server that refuses `connect`, `createStream`,
+    /// `publish` or `play` answers with `_error`, never with `_result`/
+    /// `onStatus`). It is surfaced as [`ErrorCode::Auth`] -- the same code
+    /// `command::read_onstatus` uses for an error-level status object -- instead
+    /// of being discarded until the caller's deadline expires, so a host can
+    /// tell "the server rejected this request" apart from "the server is
+    /// unreachable".
     fn wait_for_command_with_budget(
         &mut self,
         want: &str,
@@ -1434,6 +1479,9 @@ impl Client {
                 .trim_end_matches('\0');
             if name == want {
                 return Ok(buf);
+            }
+            if name == "_error" {
+                return Err(ErrorCode::Auth);
             }
         }
         Err(ErrorCode::Timeout)
@@ -2726,6 +2774,55 @@ mod tests {
     }
 
     #[test]
+    fn error_reply_is_surfaced_instead_of_timing_out() {
+        use std::time::{Duration, Instant};
+
+        // A server that refuses `connect` answers with AMF0 `_error`
+        // (NetConnection.Connect.Rejected), never with `_result`. The waiter
+        // used to discard it and block until the deadline, reporting Timeout.
+        let mut client = Client::new();
+        let mut error_amf = Buffer::new();
+        command::build_error(
+            &mut error_amf,
+            1.0,
+            "NetConnection.Connect.Rejected",
+            "bad app",
+        )
+        .unwrap();
+
+        let mut wire = Buffer::new();
+        let mut cmsg = ChunkMessage::default();
+        cmsg.csid = 3;
+        cmsg.fmt = 0;
+        cmsg.msg_length = error_amf.available() as u32;
+        cmsg.msg_type_id = msg_dispatch::RTMP_MSG_AMF0_COMMAND;
+        cmsg.msg_stream_id = 0;
+        chunk_write(
+            &mut wire,
+            &cmsg,
+            error_amf.as_slice(),
+            error_amf.available(),
+            128,
+        )
+        .unwrap();
+        client.recv_buffer.write(wire.peek()).unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let started = Instant::now();
+        let err = client.wait_for_command("_result", Some(deadline)).err();
+
+        assert_eq!(
+            err,
+            Some(ErrorCode::Auth),
+            "an _error reply must be reported to the caller, not discarded"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(4),
+            "the rejection must be surfaced without spending the command deadline"
+        );
+    }
+
+    #[test]
     fn learning_window_ack_size_rechecks_accumulated_bytes() {
         let mut client = Client::new();
         client.bytes_received = 5000;
@@ -2745,7 +2842,7 @@ mod tests {
             client.send_buffer.available() > 0,
             "bytes received before the window was learned must trigger the acknowledgement"
         );
-        assert!(client.ack_pending);
+        assert!(client.ack_bytes_remaining.is_some());
     }
 
     #[test]
@@ -2766,13 +2863,48 @@ mod tests {
         );
 
         client.flush_pending_outbound(None).unwrap();
-        assert!(!client.ack_pending);
+        assert!(client.ack_bytes_remaining.is_none());
         assert_eq!(client.send_buffer.available(), 0);
 
         client.maybe_send_window_ack().unwrap();
         assert!(
             client.send_buffer.available() > 0,
             "the next window crossing after a flush must queue again"
+        );
+    }
+
+    #[test]
+    fn flushed_acknowledgement_does_not_suppress_later_acks_while_buffer_holds_a_frame() {
+        let mut client = Client::new();
+        client.window_ack_size = 1024;
+        client.bytes_received = 2048;
+        client.maybe_send_window_ack().unwrap();
+        // The acknowledgement is the tail of the buffer at queue time.
+        let ack_end = client.send_buffer.available();
+        assert_eq!(client.ack_bytes_remaining, Some(ack_end));
+
+        // A media frame queued behind the acknowledgement keeps the buffer
+        // non-empty after the acknowledgement's own bytes have gone out.
+        client.send_buffer.write(&[0xAB; 64]).unwrap();
+        client.note_outbound_drained(ack_end);
+
+        assert!(
+            client.send_buffer.available() > 0,
+            "the media frame is still queued"
+        );
+        assert!(
+            client.ack_bytes_remaining.is_none(),
+            "a flushed acknowledgement must be retired even though the send \
+             buffer is not empty"
+        );
+
+        // The next window crossing must therefore queue a fresh ack.
+        client.bytes_received = client.bytes_received.saturating_add(2048);
+        let before = client.send_buffer.available();
+        client.maybe_send_window_ack().unwrap();
+        assert!(
+            client.send_buffer.available() > before,
+            "later window crossings must not be swallowed by an already flushed acknowledgement"
         );
     }
 

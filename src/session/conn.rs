@@ -216,6 +216,15 @@ pub struct Conn {
     /// Snapshot of `injected_media_bytes_total` taken when the current
     /// publish/idle epoch armed its media deadline (see `media_bytes_at_epoch_start`).
     injected_bytes_at_epoch_start: u64,
+    /// Snapshots of the lifetime media counters consumed by the last
+    /// teardown-grace grant ([`Self::teardown_refreshes_setup_timer`]). Kept
+    /// separate from the publish-media epoch snapshots above: a teardown that
+    /// rebased those would hide the media that flowed during the publish
+    /// session it just ended, so a same-route republish could not tell "new
+    /// media followed by a fresh publish" apart and would inherit the expired
+    /// squat deadline instead of starting a fresh window.
+    teardown_grace_media_bytes_received: u64,
+    teardown_grace_injected_bytes: u64,
     /// Route key for which the publish-media deadline was most recently armed.
     /// Used to avoid re-arming the deadline when a peer cycles
     /// `publish`/`FCUnpublish` for the same route without sending media: only a
@@ -427,6 +436,8 @@ impl Conn {
             injected_media_bytes_total: 0,
             media_bytes_at_epoch_start: 0,
             injected_bytes_at_epoch_start: 0,
+            teardown_grace_media_bytes_received: 0,
+            teardown_grace_injected_bytes: 0,
             publish_media_deadline_route: None,
             media_bytes_sent: 0,
             pause_grace_media_bytes_sent: 0,
@@ -1094,14 +1105,23 @@ impl Conn {
     }
 
     /// Grant teardown grace only for media not consumed by an earlier reset.
+    ///
+    /// Rebases only the teardown-grace snapshots: `media_bytes_at_epoch_start`
+    /// and `injected_bytes_at_epoch_start` are owned by
+    /// [`Self::complete_publish_authorized`] and must keep describing the media
+    /// that flowed during the publish session this teardown ends. Rebasing them
+    /// here made `media_flowed_since_arm()` false, so a same-route republish
+    /// after media could not start a fresh publish-media window and inherited
+    /// the teardown-instant squat deadline.
     fn teardown_refreshes_setup_timer(&mut self) -> bool {
-        if !self.media_flowed_since_arm()
-            && self.media_bytes_sent <= self.pause_grace_media_bytes_sent
-        {
+        let media_since_last_grant = self.media_bytes_received
+            > self.teardown_grace_media_bytes_received
+            || self.injected_media_bytes_total > self.teardown_grace_injected_bytes;
+        if !media_since_last_grant && self.media_bytes_sent <= self.pause_grace_media_bytes_sent {
             return false;
         }
-        self.media_bytes_at_epoch_start = self.media_bytes_received;
-        self.injected_bytes_at_epoch_start = self.injected_media_bytes_total;
+        self.teardown_grace_media_bytes_received = self.media_bytes_received;
+        self.teardown_grace_injected_bytes = self.injected_media_bytes_total;
         self.pause_grace_media_bytes_sent = self.media_bytes_sent;
         true
     }
@@ -3490,8 +3510,12 @@ fn detect_video_codec(payload: &[u8]) -> Option<String> {
         // A VideoCommand frame (frame type 5, non-Metadata packet type) carries
         // no codec FourCC -- its low nibble is not a packet type. Report a
         // stable non-`None` label so a media hook cannot auto-deny it.
+        // ModEx wrappers are excluded: an unpeeled chain's frame type describes
+        // the inner packet, so classifying it as a command would let a wrapper
+        // around a disallowed codec pass a codec deny list.
         if hdr.frame_type == crate::ertmp::exvideo::VIDEO_FRAME_TYPE_COMMAND
             && hdr.packet_type != ERTMP_PACKET_TYPE_METADATA
+            && hdr.packet_type != ERTMP_PACKET_TYPE_MODEX
         {
             return Some(VIDEO_COMMAND_CODEC_LABEL.to_string());
         }
@@ -5059,13 +5083,48 @@ mod tests {
         command::build_fcunpublish(&mut unpublish, "s").unwrap();
         conn.handle_command(unpublish.as_slice()).unwrap();
         assert!(!conn.session_setup_timed_out());
-        assert_eq!(conn.media_bytes_at_epoch_start, 1);
+        assert_eq!(
+            conn.media_bytes_at_epoch_start, 0,
+            "teardown must not rebase the publish-media epoch snapshot: it is \
+             what proves the publish session being torn down carried media"
+        );
 
         conn.handle_command(publish_buf("s").as_slice()).unwrap();
         conn.set_session_setup_started_for_test(Instant::now() - Duration::from_secs(3));
         conn.handle_command(unpublish.as_slice()).unwrap();
         conn.handle_command(publish_buf("s").as_slice()).unwrap();
         assert!(conn.session_setup_timed_out());
+    }
+
+    #[test]
+    fn same_route_republish_after_published_media_rearms_media_deadline() {
+        use std::time::{Duration, Instant};
+
+        // A publisher that sends media, unpublishes, idles past
+        // PUBLISH_MEDIA_REQUIRED_TIMEOUT, and then republishes the same route
+        // must get a fresh publish-media window: the teardown grants setup
+        // grace, but that grace expires long before the 10 s setup timeout, so
+        // without re-arming the squat timer the first frame after
+        // NetStream.Publish.Start is never read and the session dies silently.
+        let mut conn = app_conn();
+        conn.handle_command(publish_buf("s").as_slice()).unwrap();
+        conn.media_bytes_received = 1;
+
+        let mut unpublish = Buffer::with_capacity(128);
+        command::build_fcunpublish(&mut unpublish, "s").unwrap();
+        conn.handle_command(unpublish.as_slice()).unwrap();
+        assert!(!conn.current_stream.as_ref().unwrap().is_publishing);
+
+        // The peer idles for 3 s (past the 2 s squat window) before republishing.
+        conn.set_session_setup_started_for_test(Instant::now() - Duration::from_secs(3));
+        conn.handle_command(publish_buf("s").as_slice()).unwrap();
+        assert!(conn.current_stream.as_ref().unwrap().is_publishing);
+
+        assert!(
+            !conn.session_setup_timed_out(),
+            "a same-route republish after media flowed during the previous \
+             publish session must start a fresh publish-media window"
+        );
     }
 
     #[test]
@@ -5843,6 +5902,41 @@ mod tests {
             conn.handle_media_frame(1, FrameType::Video, 0, &payload, None),
             Err(ErrorCode::Auth),
             "unpeelable ModEx chains must not bypass codec-specific deny lists"
+        );
+        assert!(conn.pending_relay.is_empty());
+    }
+
+    #[test]
+    fn modex_video_command_frame_cannot_bypass_codec_deny_list() {
+        fn deny_hevc_and_av1(_: u64, frame_type: FrameType, codec: Option<&str>) -> bool {
+            if frame_type == FrameType::Video {
+                return !matches!(codec, Some("hvc1") | Some("av01"));
+            }
+            true
+        }
+
+        let mut conn = Conn::new();
+        conn.relay_enabled = true;
+        conn.negotiated_caps.has_caps_ex = true;
+        conn.negotiated_caps.caps_ex_mask = CAPS_EX_MASK_MODEX;
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+        conn.current_stream.as_mut().unwrap().is_publishing = true;
+        conn.on_media_cb = Some(deny_hevc_and_av1);
+
+        // 0xD7 = IsExHeader | frame type 5 (VideoCommand) | packet type 7
+        // (ModEx). The wrapper cannot be peeled here, so the frame type still
+        // describes the *inner* packet: classifying it as an always-allowed
+        // command frame would let the wrapped hvc1 pass the deny list.
+        let mut payload = vec![0xD7, b'a', b'v', b'c', b'1'];
+        for _ in 0..40 {
+            payload.extend_from_slice(&[0x00, 0x00, 0x07]);
+        }
+        payload.extend_from_slice(&[0x90, b'h', b'v', b'c', b'1', 0xAA]);
+        assert_eq!(
+            conn.handle_media_frame(1, FrameType::Video, 0, &payload, None),
+            Err(ErrorCode::Auth),
+            "a ModEx wrapper carrying frame type 5 must not be classified as \
+             a command frame and bypass a codec deny list"
         );
         assert!(conn.pending_relay.is_empty());
     }

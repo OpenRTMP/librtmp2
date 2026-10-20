@@ -2,6 +2,7 @@
 //!
 //! Mirrors `src/ertmp/exvideo.c`.
 
+use crate::media::modex::ERTMP_PACKET_TYPE_MODEX;
 use crate::types::{ERTMP_PACKET_TYPE_METADATA, ErrorCode, Result, VideoHeader};
 
 /// E-RTMP `VideoFrameType.Command` (frame type 5): the tag body is a single
@@ -59,7 +60,15 @@ pub fn exvideo_parse(data: &[u8], hdr: &mut VideoHeader) -> Result<()> {
 
     // E-RTMP v2 ExVideoTagBody: a command frame (frame type 5) whose packet
     // type is not Metadata carries a single UI8 videoCommand and no FourCC.
-    if hdr.frame_type == VIDEO_FRAME_TYPE_COMMAND && hdr.packet_type != ERTMP_PACKET_TYPE_METADATA {
+    // A ModEx wrapper (packet type 7) is excluded: its low nibble selects the
+    // wrapper, and the frame type describes the *inner* packet only after the
+    // chain is peeled. Treating an unpeeled ModEx wrapper as a VideoCommand
+    // would hand `detect_video_codec` a non-`None` label for a payload that may
+    // wrap a disallowed codec, defeating codec deny lists.
+    if hdr.frame_type == VIDEO_FRAME_TYPE_COMMAND
+        && hdr.packet_type != ERTMP_PACKET_TYPE_METADATA
+        && hdr.packet_type != ERTMP_PACKET_TYPE_MODEX
+    {
         if data.len() < 2 {
             return Err(ErrorCode::Io);
         }
@@ -178,6 +187,34 @@ mod tests {
         assert!(exvideo_parse(&[0x91, b'a', b'v'], &mut hdr).is_err());
         assert_eq!(hdr.composition_time, 0);
         assert_eq!(hdr.is_ex_header, 1);
+    }
+
+    #[test]
+    fn modex_video_command_frame_is_not_parsed_as_a_command() {
+        // 0xD7 = IsExHeader | frame type 5 | packet type 7 (ModEx). The low
+        // nibble selects a wrapper, not a videoCommand: taking the command fast
+        // path would report a 2-byte header with no FourCC and let codec
+        // authorization see an always-allowed "command" label.
+        let payload = [0xD7, 0x00, 0x00, 0x07, 0x01, 0x90, b'h', b'v', b'c', b'1'];
+        let mut hdr = VideoHeader::default();
+        exvideo_parse(&payload, &mut hdr).unwrap();
+        assert_eq!(hdr.frame_type, VIDEO_FRAME_TYPE_COMMAND);
+        assert_eq!(hdr.packet_type, ERTMP_PACKET_TYPE_MODEX);
+        assert_eq!(
+            hdr.header_size, 5,
+            "a ModEx wrapper keeps the FourCC layout instead of the command header"
+        );
+        assert_eq!(&hdr.fourcc[..4], &[0x00, 0x00, 0x07, 0x01]);
+
+        // A ModEx wrapper without room for the FourCC layout is not a valid
+        // 2-byte command header either.
+        assert!(exvideo_parse(&[0xD7, 0x00], &mut hdr).is_err());
+
+        // A genuine command frame (packet type 0) still takes the fast path.
+        let mut cmd = VideoHeader::default();
+        exvideo_parse(&[0xD0, 0x00], &mut cmd).unwrap();
+        assert_eq!(cmd.header_size, 2);
+        assert_eq!(cmd.packet_type, 0);
     }
 
     #[test]
