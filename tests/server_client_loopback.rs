@@ -45,7 +45,7 @@ fn plain_config() -> ServerConfig {
 fn server_client_publish_over_real_sockets() {
     FRAMES_RECEIVED.store(0, Ordering::SeqCst);
 
-    let mut server = Server::new(plain_config()).unwrap();
+    let mut server = Server::from_config(plain_config(), None).unwrap();
     server.listen("127.0.0.1:19661").unwrap();
     server.on_frame_cb = Some(on_frame);
     server.on_publish_cb = Some(allow_publish);
@@ -117,7 +117,7 @@ fn set_conn_id_base_offsets_first_assigned_conn_id() {
     OBSERVED_CONN_ID.store(0, Ordering::SeqCst);
     const BASE: u64 = 1 << 40;
 
-    let mut server = Server::new(plain_config()).unwrap();
+    let mut server = Server::from_config(plain_config(), None).unwrap();
     server.set_conn_id_base(BASE);
     server.listen("127.0.0.1:19662").unwrap();
     server.on_publish_cb = Some(record_conn_id);
@@ -157,20 +157,20 @@ fn set_conn_id_base_offsets_first_assigned_conn_id() {
 #[test]
 #[should_panic(expected = "conn_id base must be non-zero")]
 fn set_conn_id_base_rejects_zero() {
-    let mut server = Server::new(plain_config()).unwrap();
+    let mut server = Server::from_config(plain_config(), None).unwrap();
     server.set_conn_id_base(0);
 }
 
 #[test]
 #[should_panic(expected = "external publisher id range")]
 fn set_conn_id_base_rejects_high_bit() {
-    let mut server = Server::new(plain_config()).unwrap();
+    let mut server = Server::from_config(plain_config(), None).unwrap();
     server.set_conn_id_base(1u64 << 63);
 }
 
 #[test]
 fn listener_fds_exposes_every_bound_listener_and_stop_clears_them() {
-    let mut server = Server::new(plain_config()).unwrap();
+    let mut server = Server::from_config(plain_config(), None).unwrap();
     assert!(server.tls_ctx.is_none());
 
     server.listen("127.0.0.1:0").unwrap();
@@ -206,7 +206,7 @@ fn on_player_frame(frame: &Frame) {
 fn publisher_and_player_relay_across_different_listeners() {
     PLAYER_FRAMES_RECEIVED.store(0, Ordering::SeqCst);
 
-    let mut server = Server::new(plain_config()).unwrap();
+    let mut server = Server::from_config(plain_config(), None).unwrap();
     server.listen("127.0.0.1:19663").unwrap();
     server.listen("127.0.0.1:19664").unwrap();
 
@@ -302,7 +302,7 @@ fn server_request_reconnect_reaches_client_callback() {
     *RECONNECT_TC_URL.lock().unwrap() = None;
     *RECONNECT_DESCRIPTION.lock().unwrap() = None;
 
-    let mut server = Server::new(plain_config()).unwrap();
+    let mut server = Server::from_config(plain_config(), None).unwrap();
     server.listen("127.0.0.1:19665").unwrap();
     server.on_play_cb = Some(record_play_conn_id);
 
@@ -425,7 +425,7 @@ fn connect_and_wait(
 /// no reason to ever send it a `ReconnectRequest`.
 #[test]
 fn client_with_reconnect_callback_advertises_reconnect_capability() {
-    let mut server = Server::new(plain_config()).unwrap();
+    let mut server = Server::from_config(plain_config(), None).unwrap();
     server.listen("127.0.0.1:19666").unwrap();
     let caps = connect_and_wait(&mut server, 19666, "live/with_cb", true);
     assert!(caps.has_reconnect);
@@ -439,7 +439,7 @@ fn client_with_reconnect_callback_advertises_reconnect_capability() {
 /// can handle a reconnect request.
 #[test]
 fn client_without_reconnect_callback_does_not_advertise_reconnect_capability() {
-    let mut server = Server::new(plain_config()).unwrap();
+    let mut server = Server::from_config(plain_config(), None).unwrap();
     server.listen("127.0.0.1:19667").unwrap();
     let caps = connect_and_wait(&mut server, 19667, "live/without_cb", false);
     assert!(

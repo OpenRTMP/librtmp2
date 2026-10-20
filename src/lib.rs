@@ -209,7 +209,7 @@ mod ffi_tests {
             max_pending_tls_per_addr: 0,
             max_connections_per_addr: 0,
         };
-        let server = Server::new(config).unwrap();
+        let server = Server::from_config(config, None).unwrap();
         assert_eq!(server.config.max_connections, 0);
     }
 
@@ -269,6 +269,13 @@ use std::ffi::c_int;
 const DEFAULT_FFI_MAX_CONNECTIONS: c_int = 256;
 
 /// Create a server (FFI-compatible).
+///
+/// # Safety
+///
+/// `config` must point to a readable [`ServerConfig`]. When
+/// `(*config).tls_enabled != 0`, `tls_cert_file` and `tls_key_file` must each be
+/// a pointer to a NUL-terminated C string (valid UTF-8) that stays alive for
+/// the duration of this call; see [`server::Server::new`].
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn lrtmp2_server_create(config: *const ServerConfig) -> *mut server::Server {
     if config.is_null() {
@@ -278,7 +285,9 @@ pub unsafe extern "C" fn lrtmp2_server_create(config: *const ServerConfig) -> *m
     if cfg.max_connections == 0 {
         cfg.max_connections = DEFAULT_FFI_MAX_CONNECTIONS;
     }
-    match server::Server::new(cfg) {
+    // SAFETY: the caller guarantees the pointers in `cfg` are valid, NUL-
+    // terminated C strings (see this function's `# Safety` section).
+    match unsafe { server::Server::new(cfg) } {
         Ok(s) => Box::into_raw(Box::new(s)),
         Err(_) => std::ptr::null_mut(),
     }

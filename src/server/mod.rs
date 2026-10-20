@@ -4,6 +4,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::TcpListener;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -601,12 +602,41 @@ pub struct Server {
 }
 
 impl Server {
-    /// Create a new server.
-    pub fn new(config: ServerConfig) -> Result<Self> {
+    /// Create a new server from a raw [`ServerConfig`].
+    ///
+    /// Prefer [`Server::from_config`] from Rust: it takes the TLS certificate
+    /// and key as `&Path` and never dereferences the raw pointer fields of
+    /// `config`. This function remains the raw-config entry point used by the
+    /// C ABI ([`crate::lrtmp2_server_create`]).
+    ///
+    /// # Safety
+    ///
+    /// If `config.tls_enabled != 0`, both `config.tls_cert_file` and
+    /// `config.tls_key_file` must be non-null pointers to NUL-terminated byte
+    /// strings containing valid UTF-8, and the pointed-to memory must stay
+    /// alive and unmodified for the duration of this call. A buffer without a
+    /// terminating NUL byte makes the internal `CStr::from_ptr` read past the
+    /// end of the allocation, which is undefined behaviour. Null pointers are
+    /// rejected with [`ErrorCode::Internal`]. When `config.tls_enabled == 0`
+    /// the pointers are never dereferenced.
+    ///
+    /// # Examples
+    ///
+    /// Calling the raw constructor from safe code does not compile:
+    ///
+    /// ```compile_fail
+    /// use librtmp2::server::Server;
+    /// use librtmp2::ServerConfig;
+    ///
+    /// let _server = Server::new(ServerConfig::default());
+    /// ```
+    pub unsafe fn new(config: ServerConfig) -> Result<Self> {
         let tls_ctx = if config.tls_enabled != 0 {
             if config.tls_cert_file.is_null() || config.tls_key_file.is_null() {
                 return Err(ErrorCode::Internal);
             }
+            // SAFETY: the caller guarantees both pointers reference
+            // NUL-terminated C strings (see `# Safety` above).
             let cert = unsafe {
                 std::ffi::CStr::from_ptr(config.tls_cert_file as *const std::ffi::c_char)
             };
@@ -622,7 +652,60 @@ impl Server {
             None
         };
 
-        Ok(Self {
+        Ok(Self::with_tls_ctx(config, tls_ctx))
+    }
+
+    /// Create a new server without any raw-pointer input.
+    ///
+    /// Safe counterpart to [`Server::new`]: the TLS certificate and key are
+    /// given as filesystem paths, so no NUL-termination contract applies and
+    /// no raw pointer is ever dereferenced.
+    ///
+    /// `tls` is `Some((cert_file, key_file))` to accept RTMPS connections
+    /// (requires the `tls` Cargo feature; without it this returns
+    /// [`ErrorCode::Unsupported`]) or `None` for a plaintext server. The
+    /// `tls_enabled`, `tls_cert_file` and `tls_key_file` fields of `config` are
+    /// overwritten; `tls_ca_file` / `tls_insecure` are client-side settings and
+    /// are ignored by the server either way. Additional listeners with their
+    /// own certificate can be added later with [`Server::listen_tls`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use librtmp2::server::Server;
+    /// use librtmp2::ServerConfig;
+    ///
+    /// let server = Server::from_config(ServerConfig::default(), None)?;
+    /// assert!(!server.running);
+    /// # Ok::<(), librtmp2::ErrorCode>(())
+    /// ```
+    pub fn from_config(config: ServerConfig, tls: Option<(&Path, &Path)>) -> Result<Self> {
+        let mut config = config;
+        let tls_ctx = match tls {
+            None => {
+                config.tls_enabled = 0;
+                None
+            }
+            Some((cert_file, key_file)) => {
+                let cert_str = cert_file.to_str().ok_or(ErrorCode::Internal)?;
+                let key_str = key_file.to_str().ok_or(ErrorCode::Internal)?;
+                if cert_str.is_empty() || key_str.is_empty() {
+                    return Err(ErrorCode::Internal);
+                }
+                let ctx = TlsCtx::new_server(cert_str, key_str)?;
+                config.tls_enabled = 1;
+                Some(ctx)
+            }
+        };
+        // Never retain caller-owned raw pointers on the safe path.
+        config.tls_cert_file = std::ptr::null();
+        config.tls_key_file = std::ptr::null();
+        Ok(Self::with_tls_ctx(config, tls_ctx))
+    }
+
+    /// Build the server value once TLS has been resolved.
+    fn with_tls_ctx(config: ServerConfig, tls_ctx: Option<TlsCtx>) -> Self {
+        Self {
             config,
             resource_limits: ResourceLimits::default(),
             max_relay_sends_per_poll: DEFAULT_MAX_RELAY_SENDS_PER_POLL,
@@ -663,7 +746,7 @@ impl Server {
             external_route_ids: HashMap::new(),
             external_route_seq: 1,
             inject_route_last_seen: HashMap::new(),
-        })
+        }
     }
 
     fn release_all_publish_routes(&self, conn_id: u64) {
@@ -3077,7 +3160,14 @@ impl Server {
     ) -> std::collections::HashSet<(String, String, u64)> {
         let mut abandoned = std::collections::HashSet::new();
         for conn in &mut self.connections {
-            let pending: Vec<(String, String)> = conn.pending_cache_evictions.drain(..).collect();
+            let mut pending: Vec<(String, String)> =
+                conn.pending_cache_evictions.drain(..).collect();
+            // An overflowed eviction queue records a displaced key as
+            // "abandoned" instead of dropping it outright. Include those
+            // markers here so the displaced route's cache entry and ownership
+            // are actually removed; the markers themselves stay in place so a
+            // still-deferred frame cannot recreate the entry.
+            pending.extend(conn.abandoned_relay_routes.iter().cloned());
             for key in pending {
                 // Record the raw request regardless of ownership outcome
                 // below: a connection's own frame, queued under this key
@@ -3505,7 +3595,7 @@ mod tests {
     }
 
     fn test_server() -> Server {
-        Server::new(ServerConfig {
+        test_server_from(ServerConfig {
             max_connections: 4,
             chunk_size: 128,
             tls_enabled: 0,
@@ -3517,6 +3607,93 @@ mod tests {
             max_connections_per_addr: 0,
         })
         .unwrap()
+    }
+
+    /// Test-side wrapper for the safe constructor. The raw-pointer
+    /// [`Server::new`] is `unsafe`; tests build plaintext servers through the
+    /// path-based safe API and cover the raw boundary explicitly in
+    /// `raw_config_constructor_*` below.
+    fn test_server_from(config: ServerConfig) -> Result<Server> {
+        Server::from_config(config, None)
+    }
+
+    /// The raw-pointer constructor rejects null TLS paths before dereferencing
+    /// anything, so a caller that enables TLS without paths gets an error
+    /// rather than an out-of-bounds read.
+    #[test]
+    fn raw_config_constructor_rejects_null_tls_paths() {
+        let config = ServerConfig {
+            tls_enabled: 1,
+            ..ServerConfig::default()
+        };
+        // SAFETY: TLS is requested but both path pointers are null, which
+        // `Server::new` rejects before dereferencing them.
+        let result = unsafe { Server::new(config) };
+        assert!(matches!(result, Err(ErrorCode::Internal)));
+    }
+
+    /// The safe constructor must never dereference the raw TLS pointers left
+    /// in `config` — not even when `tls_enabled` is set. The pointers here are
+    /// invalid (dangling, non-null), so a dereference would abort the test.
+    #[test]
+    fn from_config_ignores_raw_tls_pointers() {
+        let config = ServerConfig {
+            tls_enabled: 1,
+            tls_cert_file: std::ptr::NonNull::<u8>::dangling().as_ptr(),
+            tls_key_file: std::ptr::NonNull::<u8>::dangling().as_ptr(),
+            ..ServerConfig::default()
+        };
+        let server = Server::from_config(config, None).unwrap();
+        assert_eq!(server.config.tls_enabled, 0);
+        assert!(server.config.tls_cert_file.is_null());
+        assert!(server.config.tls_key_file.is_null());
+    }
+
+    /// Both constructors load the same PEM material: the raw one from
+    /// NUL-terminated C strings, the safe one from `&Path`.
+    #[cfg(feature = "tls")]
+    #[test]
+    fn raw_and_safe_constructors_load_tls_paths() {
+        let (cert_path, key_path) = self_signed_cert_files("ctor-tls.test");
+        let cert_c = std::ffi::CString::new(cert_path.to_str().unwrap()).unwrap();
+        let key_c = std::ffi::CString::new(key_path.to_str().unwrap()).unwrap();
+
+        // SAFETY: both pointers come from live `CString`s, so they are
+        // NUL-terminated and unchanged for the duration of the call.
+        let raw = unsafe {
+            Server::new(ServerConfig {
+                tls_enabled: 1,
+                tls_cert_file: cert_c.as_ptr() as *const u8,
+                tls_key_file: key_c.as_ptr() as *const u8,
+                ..ServerConfig::default()
+            })
+        }
+        .expect("raw constructor should accept NUL-terminated paths");
+        assert!(raw.tls_ctx.is_some());
+        assert_eq!(raw.config.tls_enabled, 1);
+
+        let safe = Server::from_config(
+            ServerConfig::default(),
+            Some((cert_path.as_path(), key_path.as_path())),
+        )
+        .expect("safe constructor should accept paths");
+        assert!(safe.tls_ctx.is_some());
+        assert_eq!(safe.config.tls_enabled, 1);
+
+        let _ = std::fs::remove_file(cert_path);
+        let _ = std::fs::remove_file(key_path);
+    }
+
+    /// Without the `tls` feature there is no TLS backend, so asking the safe
+    /// constructor for RTMPS reports `Unsupported` instead of failing later.
+    #[cfg(not(feature = "tls"))]
+    #[test]
+    fn from_config_without_tls_feature_reports_unsupported() {
+        let result = Server::from_config(
+            ServerConfig::default(),
+            Some((Path::new("cert.pem"), Path::new("key.pem"))),
+        );
+        assert!(matches!(result, Err(ErrorCode::Unsupported)));
     }
 
     #[cfg(windows)]
@@ -4563,7 +4740,7 @@ mod tests {
             max_pending_tls_per_addr: 0,
             max_connections_per_addr: 0,
         };
-        let mut server = Server::new(config).unwrap();
+        let mut server = test_server_from(config).unwrap();
         server.listen("127.0.0.1:0").unwrap();
 
         let port = { crate::net::testing::local_port(server.server_fd) };
@@ -4599,7 +4776,7 @@ mod tests {
             max_pending_tls_per_addr: 0,
             max_connections_per_addr: 0,
         };
-        let mut server = Server::new(config).unwrap();
+        let mut server = test_server_from(config).unwrap();
         server.listen("127.0.0.1:0").unwrap();
         server
             .listen_tls(
@@ -4672,7 +4849,7 @@ mod tests {
             max_pending_tls_per_addr: 0,
             max_connections_per_addr: 2,
         };
-        let mut server = Server::new(config).unwrap();
+        let mut server = test_server_from(config).unwrap();
         server.listen("127.0.0.1:0").unwrap();
 
         let port = { crate::net::testing::local_port(server.server_fd) };
@@ -4716,7 +4893,7 @@ mod tests {
             max_pending_tls_per_addr: 0,
             max_connections_per_addr: 1,
         };
-        let mut server = Server::new(config).unwrap();
+        let mut server = test_server_from(config).unwrap();
         server.listen("127.0.0.1:0").unwrap();
 
         let port = { crate::net::testing::local_port(server.server_fd) };
@@ -4768,7 +4945,7 @@ mod tests {
             max_pending_tls_per_addr: 64,
             max_connections_per_addr: 0,
         };
-        let mut server = Server::new(config).unwrap();
+        let mut server = test_server_from(config).unwrap();
         server.listen("127.0.0.1:0").unwrap();
 
         let port = { crate::net::testing::local_port(server.server_fd) };
@@ -4801,7 +4978,7 @@ mod tests {
             max_pending_tls_per_addr: 0,
             max_connections_per_addr: 0,
         };
-        let mut server = Server::new(config).unwrap();
+        let mut server = test_server_from(config).unwrap();
         server.listen("127.0.0.1:0").unwrap();
 
         let port = { crate::net::testing::local_port(server.server_fd) };
@@ -4833,7 +5010,7 @@ mod tests {
             max_pending_tls_per_addr: 0,
             max_connections_per_addr: 0,
         };
-        let mut server = Server::new(config).unwrap();
+        let mut server = test_server_from(config).unwrap();
         server.listen("127.0.0.1:0").unwrap();
 
         let port = { crate::net::testing::local_port(server.server_fd) };
@@ -4865,7 +5042,7 @@ mod tests {
             max_pending_tls_per_addr: 0,
             max_connections_per_addr: 0,
         };
-        let mut server = Server::new(config).unwrap();
+        let mut server = test_server_from(config).unwrap();
         server.listen("127.0.0.1:0").unwrap();
 
         let port = { crate::net::testing::local_port(server.server_fd) };
@@ -4920,7 +5097,7 @@ mod tests {
             max_pending_tls_per_addr: 0,
             max_connections_per_addr: 0,
         };
-        let mut server = Server::new(config).unwrap();
+        let mut server = test_server_from(config).unwrap();
         server.listen("127.0.0.1:0").unwrap();
 
         let port = { crate::net::testing::local_port(server.server_fd) };
@@ -5502,7 +5679,7 @@ mod tests {
     fn pending_tls_per_addr_cap_is_configurable() {
         const CUSTOM_CAP: usize = 2;
         let (cert_path, key_path) = self_signed_cert_files("pending-tls-custom-cap.test");
-        let mut server = Server::new(ServerConfig {
+        let mut server = test_server_from(ServerConfig {
             max_connections: 8,
             chunk_size: 128,
             tls_enabled: 0,

@@ -41,16 +41,30 @@ Internal struct: `Multitrack` (`src/types.rs`).
 
 | Spec element | Implementation |
 |--------------|----------------|
-| Marker byte `0x80 \| type` + payload | `modex_parse()` / `modex_write()` in `src/ertmp/modex.rs` |
-| `NOP` (type 0) — 1 byte | `ModexType::Nop` in `src/types.rs`, handled in `src/ertmp/modex.rs` |
-| `TIMESTAMP` (type 1) — 9 bytes (8-byte ns offset) | `ModexType::Timestamp` in `src/types.rs`, handled in `src/ertmp/modex.rs` |
-| **Graceful degradation:** unknown types fall back to NOP | `modex_parse()` in `src/ertmp/modex.rs` |
+| `modExDataSize` — `UI8 + 1`, with `0xFF` switching to the extended `UI16 + 1` form | `modex_parse()` / `modex_parse_prefix()` / `modex_write()` in `src/ertmp/modex.rs`; the framing is shared with the live relay path via `media::modex::parse_modex_layer` |
+| `modExData` — at least one byte | parsed as a slice; `TimestampOffsetNano` reads its first three bytes |
+| Option byte `modExType:UB[4] \| nextPacketType:UB[4]` | `Modex::modex_type` + `Modex::next_packet_type` in `src/types.rs` |
+| `TimestampOffsetNano` (`modExType` 0) — UI24 nanosecond offset | `ModexType::TimestampOffsetNano`, `Modex::offset` in `src/types.rs` |
+| **Graceful degradation:** unknown/reserved `modExType` values are ignored | `modex_parse()` surfaces them as `ModexType::Nop` with a zero offset |
 
 Internal struct: `Modex` (`src/types.rs`).
+
+`modex_parse()` takes the wrapper body (it starts at `modExDataSize`, i.e.
+immediately after the enhanced packet-type nibble) and parses one layer;
+`modex_parse_prefix()` additionally returns the consumed length, which is how a
+caller follows chained wrappers (`nextPacketType == 7`).
+`ModexType::Nop` has no wire representation, so `modex_write()` emits nothing
+for it.
 
 This is the key "graceful degradation" requirement from the concept: an unknown
 ModEx type or capability field never aborts the connection — it is ignored
 protocol-compliantly.
+
+> **Rust API note:** `ModexType::Timestamp` was renamed to
+> `ModexType::TimestampOffsetNano` (the v2 wire type 0, a UI24 rather than an
+> eight-byte offset), and `Modex` gained `next_packet_type`. A deprecated
+> `ModexType::Timestamp` alias is kept. Neither type is part of the
+> `extern "C"` surface.
 
 ## Tests
 

@@ -43,11 +43,14 @@ fn raw_garbage_session(addr: &str, seed: u32) {
 }
 
 fn run_churn(addr: &'static str, warmup: u32, measured: u32) -> (u64, u64) {
-    let mut server = Server::new(ServerConfig {
-        max_connections: 64,
-        max_connections_per_addr: 32,
-        ..plain_config()
-    })
+    let mut server = Server::from_config(
+        ServerConfig {
+            max_connections: 64,
+            max_connections_per_addr: 32,
+            ..plain_config()
+        },
+        None,
+    )
     .unwrap();
     server.listen(addr).unwrap();
     server.on_publish_cb = Some(allow_publish);

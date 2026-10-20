@@ -126,6 +126,33 @@ Without TLS:
 librtmp2 = { path = "../librtmp2", default-features = false }
 ```
 
+### Constructing a server (Rust)
+
+Use the safe constructor — TLS material is given as filesystem paths, so no
+raw pointers or NUL termination are involved:
+
+```rust
+use librtmp2::server::Server;
+use librtmp2::ServerConfig;
+
+// Plaintext server (no TLS).
+let mut server = Server::from_config(ServerConfig::default(), None)?;
+server.listen("127.0.0.1:1935")?;
+
+// RTMPS, when built with the `tls` feature.
+// let server = Server::from_config(
+//     ServerConfig::default(),
+//     Some((
+//         std::path::Path::new("cert.pem"),
+//         std::path::Path::new("key.pem"),
+//     )),
+// )?;
+```
+
+`Server::new(config: ServerConfig)` still exists for C-ABI parity, but it is
+`unsafe`: with `tls_enabled != 0` it reads `tls_cert_file` / `tls_key_file` as
+NUL-terminated C strings. Prefer `Server::from_config` in Rust.
+
 ### External media export / inject (Rust)
 
 Integrators can observe or feed the same local relay path used by publishers

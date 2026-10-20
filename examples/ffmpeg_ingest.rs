@@ -60,7 +60,7 @@ fn main() -> ExitCode {
         max_connections_per_addr: 0,
     };
 
-    let Ok(mut server) = Server::new(config) else {
+    let Ok(mut server) = Server::from_config(config, None) else {
         eprintln!("[interop] server_create failed");
         return ExitCode::from(1);
     };

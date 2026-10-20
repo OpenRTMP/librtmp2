@@ -26,17 +26,20 @@ fn allow(_: u64, _: &str, _: &str) -> bool {
 fn relay_n_frames(frame_count: u32) {
     RECEIVED.store(0, Ordering::SeqCst);
 
-    let mut server = Server::new(ServerConfig {
-        max_connections: 8,
-        chunk_size: 128,
-        tls_enabled: 0,
-        tls_cert_file: std::ptr::null(),
-        tls_key_file: std::ptr::null(),
-        tls_ca_file: std::ptr::null(),
-        tls_insecure: 0,
-        max_pending_tls_per_addr: 0,
-        max_connections_per_addr: 0,
-    })
+    let mut server = Server::from_config(
+        ServerConfig {
+            max_connections: 8,
+            chunk_size: 128,
+            tls_enabled: 0,
+            tls_cert_file: std::ptr::null(),
+            tls_key_file: std::ptr::null(),
+            tls_ca_file: std::ptr::null(),
+            tls_insecure: 0,
+            max_pending_tls_per_addr: 0,
+            max_connections_per_addr: 0,
+        },
+        None,
+    )
     .unwrap();
     server.listen(&format!("127.0.0.1:{RTMP_PORT}")).unwrap();
     server.on_publish_cb = Some(allow);
