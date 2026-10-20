@@ -128,8 +128,14 @@ pub fn exvideo_write(hdr: &VideoHeader, buf: &mut [u8]) -> usize {
 
     // E-RTMP v2 ExVideoTagBody: a command frame (frame type 5, non-Metadata
     // packet type) is the tag byte followed by the UI8 videoCommand, which
-    // `VideoHeader` does not retain (see the doc comment above).
-    if hdr.frame_type == VIDEO_FRAME_TYPE_COMMAND && hdr.packet_type != ERTMP_PACKET_TYPE_METADATA {
+    // `VideoHeader` does not retain (see the doc comment above). A ModEx
+    // wrapper is not a videoCommand: its payload starts with the FourCC-style
+    // wrapper bytes that `exvideo_parse` stores in `fourcc`, so it can be
+    // written back symmetrically.
+    if hdr.frame_type == VIDEO_FRAME_TYPE_COMMAND
+        && hdr.packet_type != ERTMP_PACKET_TYPE_METADATA
+        && hdr.packet_type != ERTMP_PACKET_TYPE_MODEX
+    {
         return 0;
     }
 
@@ -215,6 +221,21 @@ mod tests {
         exvideo_parse(&[0xD0, 0x00], &mut cmd).unwrap();
         assert_eq!(cmd.header_size, 2);
         assert_eq!(cmd.packet_type, 0);
+    }
+
+    #[test]
+    fn write_round_trips_modex_wrapper() {
+        // ModEx headers keep the FourCC layout, so a parsed wrapper can be
+        // written back instead of being rejected as an unrepresentable
+        // videoCommand.
+        let payload = [0xD7, 0x00, 0x00, 0x07, 0x01, 0x90, b'h', b'v', b'c', b'1'];
+        let mut hdr = VideoHeader::default();
+        exvideo_parse(&payload, &mut hdr).unwrap();
+
+        let mut buf = [0u8; 8];
+        let written = exvideo_write(&hdr, &mut buf);
+        assert_eq!(written, 5);
+        assert_eq!(&buf[..written], &payload[..5]);
     }
 
     #[test]
