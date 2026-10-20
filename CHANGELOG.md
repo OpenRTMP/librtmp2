@@ -11,7 +11,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 While in alpha the project stays on `0.x`; semantic-versioning guarantees only
 begin at `1.0.0`.
 
-## [0.15.0] — 2026-10-20
+## [0.15.0] — 2026-10-21
 
 ### Changed
 
