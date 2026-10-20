@@ -348,6 +348,30 @@ typedef enum VideoCodec {
 } VideoCodec;
 
 /**
+ * ModEx extension type (E-RTMP v2 `VideoPacketModExType` /
+ * `AudioPacketModExType`).
+ *
+ * Only `TimestampOffsetNano` (wire `modExType` 0) is defined by the v2 spec;
+ * every other wire value is surfaced as [`ModexType::Nop`] so callers degrade
+ * gracefully instead of rejecting the frame. The discriminants below are an
+ * internal Rust representation, not the wire values — use
+ * `ertmp::modex::modex_write` to serialize.
+ */
+typedef enum ModexType {
+  /**
+   * v2 `TimestampOffsetNano` (`modExType` 0). [`Modex::offset`] carries the
+   * UI24 nanosecond offset from `modExData`.
+   */
+  TimestampOffsetNano = 0,
+  /**
+   * No recognized ModEx extension (reserved/unknown `modExType`, or a
+   * consumer-side "ignore this extension"). Ignored per the spec's
+   * graceful-degradation rule; it has no v2 wire representation.
+   */
+  Nop = 1,
+} ModexType;
+
+/**
  * Opaque server handle
  */
 typedef struct lrtmp2_server_t {
@@ -476,6 +500,14 @@ typedef struct lrtmp2_frame_t {
 typedef struct lrtmp2_conn_t {
   uint8_t _private[0];
 } lrtmp2_conn_t;
+
+/**
+ * Deprecated alias for [`ModexType::TimestampOffsetNano`].
+ *
+ * The pre-v2 API called this `Timestamp` and encoded an eight-byte
+ * offset; the v2 wire format uses a UI24 `TimestampOffsetNano` instead.
+ */
+#define ModexType_Timestamp TimestampOffsetNano
 
 #ifdef __cplusplus
 extern "C" {
