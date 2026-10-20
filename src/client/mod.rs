@@ -1166,7 +1166,12 @@ impl Client {
         let data = self.send_buffer.peek().to_vec();
         if let Some(ref mut transport) = self.transport {
             match deadline {
-                Some(deadline) => send_bounded(transport, &mut self.send_buffer, deadline)?,
+                Some(deadline) => send_bounded(
+                    transport,
+                    &mut self.send_buffer,
+                    deadline,
+                    Some(&mut self.ack_bytes_remaining),
+                )?,
                 None => transport.send(&data)?,
             }
         }
@@ -1379,7 +1384,7 @@ impl Client {
     fn do_handshake(&mut self, transport: &mut Transport, deadline: Instant) -> Result<()> {
         handshake::client_init(&mut self.handshake);
         handshake::client_generate_c0c1(&mut self.handshake)?;
-        send_bounded(transport, &mut self.handshake.out, deadline)?;
+        send_bounded(transport, &mut self.handshake.out, deadline, None)?;
         self.handshake.out.reset();
 
         let s0s1 = read_exact_bounded(transport, 1 + HANDSHAKE_SIZE, deadline)?;
@@ -1388,7 +1393,7 @@ impl Client {
         handshake::client_read_s0(&mut self.handshake, &mut buf)?;
         handshake::client_read_s1(&mut self.handshake, &mut buf)?;
 
-        send_bounded(transport, &mut self.handshake.out, deadline)?;
+        send_bounded(transport, &mut self.handshake.out, deadline, None)?;
         self.handshake.out.reset();
 
         let s2 = read_exact_bounded(transport, HANDSHAKE_SIZE, deadline)?;
@@ -1422,7 +1427,12 @@ impl Client {
         let data = self.send_buffer.peek().to_vec();
         if let Some(ref mut transport) = self.transport {
             match deadline {
-                Some(deadline) => send_bounded(transport, &mut self.send_buffer, deadline)?,
+                Some(deadline) => send_bounded(
+                    transport,
+                    &mut self.send_buffer,
+                    deadline,
+                    Some(&mut self.ack_bytes_remaining),
+                )?,
                 None => transport.send(&data)?,
             }
         }
@@ -1653,7 +1663,12 @@ fn read_exact_bounded(transport: &mut Transport, n: usize, deadline: Instant) ->
 /// retries. Each transmitted prefix is drained from `buffer` as it goes, so a
 /// failed send leaves only the untransmitted tail queued: a retry resumes
 /// instead of replaying bytes the peer already received.
-fn send_bounded(transport: &mut Transport, buffer: &mut Buffer, deadline: Instant) -> Result<()> {
+fn send_bounded(
+    transport: &mut Transport,
+    buffer: &mut Buffer,
+    deadline: Instant,
+    mut ack_bytes_remaining: Option<&mut Option<usize>>,
+) -> Result<()> {
     while buffer.available() > 0 {
         if Instant::now() >= deadline {
             return Err(ErrorCode::Timeout);
@@ -1666,6 +1681,14 @@ fn send_bounded(transport: &mut Transport, buffer: &mut Buffer, deadline: Instan
             continue;
         }
         buffer.drain(n);
+        if let Some(state) = ack_bytes_remaining.as_deref_mut()
+            && let Some(remaining) = state.as_mut()
+        {
+            *remaining = remaining.saturating_sub(n);
+            if *remaining == 0 {
+                *state = None;
+            }
+        }
     }
     Ok(())
 }
