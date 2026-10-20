@@ -13,6 +13,32 @@ begin at `1.0.0`.
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking (Rust API, not part of the `extern "C"` surface):**
+  `ertmp::modex::modex_parse()` / `modex_write()` now implement the E-RTMP v2
+  ModEx framing (`modExDataSize` UI8/UI16+1, `modExData`, then one
+  `modExType:UB[4] | nextPacketType:UB[4]` byte) instead of the fabricated
+  `0x80 | type` marker layout with an eight-byte offset. `ModexType::Timestamp`
+  is renamed to `ModexType::TimestampOffsetNano` (wire type 0, a UI24 offset in
+  `Modex::offset`); a deprecated `ModexType::Timestamp` alias remains.
+  `Modex` gains `next_packet_type`, `modex_write()` emits nothing for
+  `ModexType::Nop`, and a new `modex_parse_prefix()` returns the consumed
+  length. Framing is now shared with the live relay path
+  (`media::modex::parse_modex_layer`), so there is a single ModEx parser.
+  Struct-literal users of `Modex` need to set `next_packet_type`.
+- **Breaking (Rust API, not part of the `extern "C"` surface):**
+  `Server::new` is now `unsafe fn`. It dereferences the raw
+  `ServerConfig::tls_cert_file` / `tls_key_file` pointers as C strings, so its
+  `# Safety` section now requires both to be NUL-terminated (valid UTF-8) or
+  null when TLS is enabled. Safe Rust should use the new
+  `Server::from_config(config, tls: Option<(&Path, &Path)>)`, which takes TLS
+  filesystem paths and never touches the raw pointer fields.
+- `ServerConfig` now implements `Default` (plaintext, null TLS pointers), and
+  its TLS path fields document the NUL-termination requirement. The C ABI and
+  the layout of `lrtmp2_server_config_t` are unchanged; the header comments now
+  state the NUL-termination contract.
+
 ## [0.14.0] — 2026-10-14
 
 ### Added

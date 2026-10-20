@@ -19,7 +19,7 @@ use common::{
 fn publisher_and_player_relay_on_same_listener() {
     FRAMES_RECEIVED.store(0, Ordering::SeqCst);
 
-    let mut server = Server::new(plain_config()).unwrap();
+    let mut server = Server::from_config(plain_config(), None).unwrap();
     server.listen("127.0.0.1:19665").unwrap();
     server.on_publish_cb = Some(allow_publish);
     server.on_play_cb = Some(allow_play);

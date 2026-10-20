@@ -23,7 +23,7 @@ fn count_server_frames(frame: &librtmp2::types::Frame) {
 fn publish_rejected_by_callback_does_not_deliver_frames() {
     SERVER_FRAMES.store(0, Ordering::SeqCst);
 
-    let mut server = Server::new(plain_config()).unwrap();
+    let mut server = Server::from_config(plain_config(), None).unwrap();
     server.listen("127.0.0.1:19666").unwrap();
     server.on_publish_cb = Some(deny_publish);
     server.on_frame_cb = Some(count_server_frames);

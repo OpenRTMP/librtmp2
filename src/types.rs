@@ -317,6 +317,13 @@ impl Default for ResourceLimits {
 }
 
 /// Server configuration struct.
+///
+/// The `tls_*_file` fields are raw C string pointers. Passing this struct to
+/// the raw constructor ([`crate::server::Server::new`]) or to the C ABI entry
+/// point requires each non-null pointer to reference a NUL-terminated C string;
+/// see that function's `# Safety` section. Rust callers should prefer
+/// [`crate::server::Server::from_config`], which takes TLS paths as `&Path`
+/// and never dereferences these fields.
 #[derive(Clone, Copy)]
 #[repr(C)]
 pub struct ServerConfig {
@@ -324,9 +331,13 @@ pub struct ServerConfig {
     pub chunk_size: c_int,
     /// TLS / RTMPS fields
     pub tls_enabled: c_int,
-    /// Server: PEM certificate chain file
+    /// Server: PEM certificate chain file.
+    ///
+    /// `null` or a pointer to a NUL-terminated C string (valid UTF-8).
     pub tls_cert_file: *const u8,
-    /// Server: PEM private key file
+    /// Server: PEM private key file.
+    ///
+    /// `null` or a pointer to a NUL-terminated C string (valid UTF-8).
     pub tls_key_file: *const u8,
     /// Client: CA bundle for verification (or NULL)
     pub tls_ca_file: *const u8,
@@ -345,6 +356,31 @@ pub struct ServerConfig {
     /// they defend different resources (the connection table vs. the
     /// pending-handshake queue). Appended field: see `docs/abi-policy.md`.
     pub max_connections_per_addr: c_int,
+}
+
+impl Default for ServerConfig {
+    /// Plaintext (no TLS), library defaults for every limit.
+    ///
+    /// The raw TLS path pointers are null, so the config is safe to pass to
+    /// [`crate::server::Server::new`] from inside an `unsafe` block or to
+    /// [`crate::server::Server::from_config`].
+    fn default() -> Self {
+        Self {
+            // Match the C ABI's documented default: 0 means "use the library
+            // default" (256), not "unlimited". Safe Rust callers get the same
+            // behaviour as a zero-initialised `ServerConfig` passed through
+            // `lrtmp2_server_create`.
+            max_connections: 256,
+            chunk_size: 128,
+            tls_enabled: 0,
+            tls_cert_file: std::ptr::null(),
+            tls_key_file: std::ptr::null(),
+            tls_ca_file: std::ptr::null(),
+            tls_insecure: 0,
+            max_pending_tls_per_addr: 0,
+            max_connections_per_addr: 0,
+        }
+    }
 }
 
 /* ── Callback types ── */
@@ -564,12 +600,24 @@ impl Default for Multitrack {
 
 /* ── E-RTMP v2 ModEx ── */
 
-/// ModEx type.
+/// ModEx extension type (E-RTMP v2 `VideoPacketModExType` /
+/// `AudioPacketModExType`).
+///
+/// Only `TimestampOffsetNano` (wire `modExType` 0) is defined by the v2 spec;
+/// every other wire value is surfaced as [`ModexType::Nop`] so callers degrade
+/// gracefully instead of rejecting the frame. The discriminants below are an
+/// internal Rust representation, not the wire values — use
+/// `ertmp::modex::modex_write` to serialize.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
 pub enum ModexType {
-    Nop = 0,
-    Timestamp = 1,
+    /// v2 `TimestampOffsetNano` (`modExType` 0). [`Modex::offset`] carries the
+    /// UI24 nanosecond offset from `modExData`.
+    TimestampOffsetNano = 0,
+    /// No recognized ModEx extension (reserved/unknown `modExType`, or a
+    /// consumer-side "ignore this extension"). Ignored per the spec's
+    /// graceful-degradation rule; it has no v2 wire representation.
+    Nop = 1,
 }
 
 impl Default for ModexType {
@@ -578,12 +626,31 @@ impl Default for ModexType {
     }
 }
 
-/// ModEx extension.
+impl ModexType {
+    /// Deprecated alias for [`ModexType::TimestampOffsetNano`].
+    ///
+    /// The pre-v2 API called this `Timestamp` and encoded an eight-byte
+    /// offset; the v2 wire format uses a UI24 `TimestampOffsetNano` instead.
+    #[deprecated(note = "renamed to `ModexType::TimestampOffsetNano`; v2 encodes a UI24 offset")]
+    #[allow(non_upper_case_globals)]
+    pub const Timestamp: ModexType = ModexType::TimestampOffsetNano;
+}
+
+/// ModEx extension wrapper (E-RTMP v2 ModEx signalling).
+///
+/// A wrapper is `sizeMinusOne` + `modExData` + one option byte holding
+/// `modExType:UB[4] | nextPacketType:UB[4]`; see `ertmp::modex`.
 #[derive(Debug, Clone, Copy, Default)]
 #[repr(C)]
 pub struct Modex {
     pub modex_type: ModexType,
+    /// `TimestampOffsetNano` value. Only the low 24 bits are written, matching
+    /// the spec's UI24.
     pub offset: u64,
+    /// Low nibble of the option byte: the packet type that follows this
+    /// wrapper. [`crate::media::modex::ERTMP_PACKET_TYPE_MODEX`] (7) chains
+    /// another ModEx wrapper.
+    pub next_packet_type: u8,
 }
 
 /* ── FLV tag types ── */

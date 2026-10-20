@@ -22,7 +22,7 @@ fn on_audio_frame(frame: &librtmp2::types::Frame) {
 fn server_observes_published_audio_frames() {
     AUDIO_FRAMES.store(0, Ordering::SeqCst);
 
-    let mut server = Server::new(plain_config()).unwrap();
+    let mut server = Server::from_config(plain_config(), None).unwrap();
     server.listen("127.0.0.1:19668").unwrap();
     server.on_frame_cb = Some(on_audio_frame);
     server.on_publish_cb = Some(allow_publish);

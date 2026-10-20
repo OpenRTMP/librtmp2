@@ -718,9 +718,20 @@ impl Conn {
     }
 
     fn try_push_pending_cache_eviction(&mut self, app: String, route_key: String) {
-        if self.pending_cache_evictions.len() < MAX_PENDING_CACHE_EVICTIONS {
-            self.pending_cache_evictions.push((app, route_key));
+        if self.pending_cache_evictions.len() >= MAX_PENDING_CACHE_EVICTIONS {
+            // The queue is bounded, so one entry has to go. Drop the oldest
+            // queued key rather than this newest one: a peer that renames many
+            // times inside a single poll must never be able to suppress the
+            // eviction of the route it abandons last, which would leave its
+            // cached init frames behind for the next publisher of that route.
+            // The displaced key is recorded as abandoned so frames still
+            // queued for it cannot recreate the cache entry in a later poll.
+            if let Some((old_app, old_route)) = self.pending_cache_evictions.first().cloned() {
+                self.pending_cache_evictions.remove(0);
+                self.note_abandoned_relay_route(old_app, old_route);
+            }
         }
+        self.pending_cache_evictions.push((app, route_key));
     }
 
     fn push_pending_cache_eviction(&mut self, app: String, route_key: String) -> Result<()> {
@@ -2162,14 +2173,6 @@ impl Conn {
     /// immediately (synchronous `Allow`) or later from
     /// [`Self::complete_publish_authorization`] (`Pending` -> `Allow`).
     fn complete_publish_authorized(&mut self, name_str: String) -> Result<()> {
-        // `publish` supersedes any in-flight `play` decision on this
-        // connection: the grant below claims the session, so a late play
-        // completion must become the documented no-op instead of calling
-        // `complete_play_authorized`, which would evict this publish route and
-        // flip the connection into Playing. The request is dropped and its id
-        // remembered, so the decision still owed for it resolves nothing while
-        // the slot stays free for a later play request.
-        self.drop_pending_play_auth();
         // Use current_stream.is_publishing rather than self.state here:
         // conn_transition() only allows forward moves through ConnState, so
         // a play-then-publish sequence leaves self.state stuck at Playing
@@ -2227,6 +2230,17 @@ impl Conn {
                 );
             }
         }
+        // Only once the publish grant is certain (the claim succeeded and its
+        // eviction was queued) withdraw the opposite role's in-flight request:
+        // `publish` supersedes a pending `play` decision on this connection, so
+        // a late play completion must become the documented no-op instead of
+        // calling `complete_play_authorized`, which would evict this publish
+        // route and flip the connection into Playing. The peer still expects a
+        // terminal answer for the play transaction, so deny it explicitly; the
+        // request id is remembered so that later completion resolves nothing
+        // while the slot stays free for a later play request. A failed publish
+        // grant above leaves the play pending for the host to resolve.
+        self.deny_pending_play_auth()?;
         // Keep the deadline across duplicate active publishes and empty
         // unpublish/republish cycles. A route change, a transition from play,
         // or new media followed by a fresh publish starts a new window.
@@ -2288,11 +2302,13 @@ impl Conn {
     /// `Allow`) or later from [`Self::complete_play_authorization`]
     /// (`Pending` -> `Allow`).
     fn complete_play_authorized(&mut self, name_str: String) -> Result<()> {
-        // Mirror of the drop in `complete_publish_authorized`: this grant takes
-        // the session over for play, so an in-flight publish decision on the
-        // same connection must not be able to flip it back into Publishing when
-        // its completion arrives.
-        self.drop_pending_publish_auth();
+        // Mirror of the withdrawal in `complete_publish_authorized`: this grant
+        // takes the session over for play, so an in-flight publish decision on
+        // the same connection must not be able to flip it back into Publishing
+        // when its completion arrives. Deny it so the peer's publish
+        // transaction terminates instead of waiting for a decision that can no
+        // longer change anything.
+        self.deny_pending_publish_auth()?;
         if !self.defer_media_relay {
             self.relay_enabled = true;
         }
@@ -2455,22 +2471,28 @@ impl Conn {
         }
     }
 
-    /// Drop the opposite role's in-flight request when this role is granted the
-    /// session: the grant takes the connection over, so a decision for that
-    /// request must not be able to flip it back.
-    /// Drop the opposite role's in-flight request when this role is granted the
-    /// session: the grant takes the connection over, so a decision for that
-    /// request must not be able to flip it back.
-    fn drop_pending_publish_auth(&mut self) {
+    /// Withdraw the opposite role's in-flight request when this role was just
+    /// granted the session: the grant takes the connection over, so a decision
+    /// for that request must not be able to flip it back. Unlike a teardown
+    /// drop, the peer is still waiting for an answer to that transaction, so
+    /// send its terminal denial (`NetStream.Play.Failed` /
+    /// `NetStream.Publish.BadName`) before forgetting it. The id is remembered
+    /// so the host's later completion is the documented no-op and the slot
+    /// stays free for the next request of that role.
+    fn deny_pending_publish_auth(&mut self) -> Result<()> {
         if let Some(pending) = self.pending_publish_auth.take() {
             self.remember_publish_auth_id(pending.request_id);
+            return self.send_publish_denied();
         }
+        Ok(())
     }
 
-    fn drop_pending_play_auth(&mut self) {
+    fn deny_pending_play_auth(&mut self) -> Result<()> {
         if let Some(pending) = self.pending_play_auth.take() {
             self.remember_play_auth_id(pending.request_id);
+            return self.send_play_denied();
         }
+        Ok(())
     }
 
     /// True while this connection is waiting on `complete_publish_authorization`
@@ -2478,9 +2500,10 @@ impl Conn {
     /// direction: `is_active_publisher_stream`/relay delivery both stay gated
     /// on `stream.is_publishing`/`stream.is_playing`, which are only set once
     /// the authorization completes as `Allow`. A request dropped by a stream
-    /// teardown or by the opposite role being granted keeps its id remembered
-    /// but not its slot, so the stale completion resolves nothing and the role
-    /// stays free for a new request.
+    /// teardown, or withdrawn because the opposite role was granted, keeps its
+    /// id remembered but not its slot: the withdrawn request was already
+    /// answered with a terminal denial, so the stale completion resolves
+    /// nothing and the role stays free for a new request.
     pub fn has_pending_authorization(&self) -> bool {
         self.pending_publish_auth.is_some() || self.pending_play_auth.is_some()
     }
@@ -6516,6 +6539,72 @@ mod tests {
     }
 
     #[test]
+    fn abandoned_relay_route_markers_keep_the_newest_at_capacity() {
+        let mut conn = Conn::new();
+        for i in 0..MAX_PENDING_CACHE_EVICTIONS {
+            conn.note_abandoned_relay_route("live".to_string(), format!("old-{i}"));
+        }
+        conn.note_abandoned_relay_route("live".to_string(), "newest".to_string());
+
+        assert_eq!(
+            conn.abandoned_relay_routes.len(),
+            MAX_PENDING_CACHE_EVICTIONS,
+            "the marker set must stay bounded"
+        );
+        assert!(
+            conn.relay_route_abandoned("live", "newest"),
+            "the most recent abandonment must survive a full marker set"
+        );
+        assert!(
+            !conn.relay_route_abandoned("live", "old-0"),
+            "the oldest marker must be the one evicted"
+        );
+        assert!(conn.relay_route_abandoned("live", "old-1"));
+
+        // Re-noting a route already marked must move it to the newest slot
+        // instead of growing the set or leaving a duplicate behind.
+        conn.note_abandoned_relay_route("live".to_string(), "old-1".to_string());
+        assert_eq!(
+            conn.abandoned_relay_routes.len(),
+            MAX_PENDING_CACHE_EVICTIONS
+        );
+        assert_eq!(
+            conn.abandoned_relay_routes
+                .back()
+                .map(|(_, route)| route.as_str()),
+            Some("old-1")
+        );
+    }
+
+    #[test]
+    fn cache_eviction_at_capacity_evicts_the_oldest_queued_key() {
+        let mut conn = Conn::new();
+        conn.pending_cache_evictions = (0..MAX_PENDING_CACHE_EVICTIONS)
+            .map(|i| ("live".to_string(), format!("stale-{i}")))
+            .collect();
+
+        conn.try_push_pending_cache_eviction("live".to_string(), "final".to_string());
+
+        assert_eq!(
+            conn.pending_cache_evictions.len(),
+            MAX_PENDING_CACHE_EVICTIONS,
+            "the eviction queue must stay bounded"
+        );
+        assert_eq!(
+            conn.pending_cache_evictions
+                .last()
+                .map(|(_, route)| route.as_str()),
+            Some("final"),
+            "the newest eviction must always be queued"
+        );
+        assert!(
+            conn.relay_route_abandoned("live", "stale-0"),
+            "the displaced oldest eviction must be marked abandoned"
+        );
+        assert!(!conn.relay_route_abandoned("live", "final"));
+    }
+
+    #[test]
     fn aggregate_subtag_dispatches_consume_message_budget() {
         let mut conn = Conn::new();
         conn.relay_enabled = true;
@@ -7765,6 +7854,74 @@ mod tests {
             "a stale play completion must not evict a live publish into Playing"
         );
         assert_eq!(conn.state, ConnState::Publishing);
+    }
+
+    /// True if any decoded outbound command payload carries `code` (onStatus
+    /// codes travel as an AMF0 string inside the command message).
+    fn outbound_has_status_code(decoded: &[(u8, u32, u32, Vec<u8>)], code: &str) -> bool {
+        decoded
+            .iter()
+            .any(|(_, _, _, payload)| payload.windows(code.len()).any(|w| w == code.as_bytes()))
+    }
+
+    #[test]
+    fn publish_grant_answers_a_withdrawn_play_request() {
+        let mut conn = app_conn();
+        conn.on_play_auth_cb = Some(|_, _, _| AuthorizationResult::Pending { request_id: 7 });
+        conn.handle_command(play_buf("cam").as_slice()).unwrap();
+        assert!(conn.has_pending_play_authorization());
+
+        // Granting publish takes the session over and withdraws the pending
+        // play request. The peer is waiting for an answer to its play
+        // transaction, so it must receive a terminal rejection instead of
+        // being left blocked forever.
+        conn.on_publish_auth_cb = Some(|_, _, _| AuthorizationResult::Allow);
+        conn.handle_command(publish_buf("cam").as_slice()).unwrap();
+        assert!(conn.current_stream.as_ref().unwrap().is_publishing);
+        assert!(!conn.has_pending_authorization());
+
+        let decoded = decode_wire(&mut conn.send_buffer);
+        assert!(
+            outbound_has_status_code(&decoded, "NetStream.Play.Failed"),
+            "the withdrawn play request must be answered with a rejection"
+        );
+        assert!(outbound_has_status_code(
+            &decoded,
+            "NetStream.Publish.Start"
+        ));
+
+        // The host's later completion for the withdrawn transaction is the
+        // documented no-op: it neither flips the connection into Playing nor
+        // evicts the live publish route.
+        conn.complete_play_authorization(7, true).unwrap();
+        assert!(conn.current_stream.as_ref().unwrap().is_publishing);
+        assert!(!conn.current_stream.as_ref().unwrap().is_playing);
+        assert_eq!(conn.state, ConnState::Publishing);
+    }
+
+    #[test]
+    fn play_grant_answers_a_withdrawn_publish_request() {
+        let mut conn = app_conn();
+        conn.on_publish_auth_cb = Some(|_, _, _| AuthorizationResult::Pending { request_id: 9 });
+        conn.handle_command(publish_buf("cam").as_slice()).unwrap();
+        assert!(conn.has_pending_publish_authorization());
+
+        conn.on_play_auth_cb = Some(|_, _, _| AuthorizationResult::Allow);
+        conn.handle_command(play_buf("cam").as_slice()).unwrap();
+        assert!(conn.current_stream.as_ref().unwrap().is_playing);
+        assert!(!conn.has_pending_authorization());
+
+        let decoded = decode_wire(&mut conn.send_buffer);
+        assert!(
+            outbound_has_status_code(&decoded, "NetStream.Publish.BadName"),
+            "the withdrawn publish request must be answered with a rejection"
+        );
+        assert!(outbound_has_status_code(&decoded, "NetStream.Play.Start"));
+
+        conn.complete_publish_authorization(9, true).unwrap();
+        assert!(conn.current_stream.as_ref().unwrap().is_playing);
+        assert!(!conn.current_stream.as_ref().unwrap().is_publishing);
+        assert_eq!(conn.state, ConnState::Playing);
     }
 
     #[test]

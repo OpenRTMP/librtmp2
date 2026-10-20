@@ -12,6 +12,58 @@ pub const ERTMP_PACKET_TYPE_MODEX: u8 = 7;
 /// and force O(payload) normalization work on every frame.
 const MAX_MODEX_CHAIN_LAYERS: usize = 32;
 
+/// One `modExDataSize` / `modExData` / option-byte triple parsed from an
+/// E-RTMP v2 ModEx wrapper (spec: the `ExAudioTagHeader` / `ExVideoTagHeader`
+/// pseudocode).
+///
+/// This is the single source of truth for ModEx framing in the crate: the live
+/// relay path ([`normalize_modex_payload_with_frame_type`]) and the public
+/// [`crate::ertmp::modex`] parse/write API both go through it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ModexLayer {
+    /// `modExType` — the high nibble of the byte that follows `modExData`.
+    /// 0 is `TimestampOffsetNano`; every other value is reserved.
+    pub(crate) modex_type: u8,
+    /// `nextPacketType` — the low nibble of the same byte. 7 means another
+    /// ModEx layer follows immediately.
+    pub(crate) next_packet_type: u8,
+    /// Start of `modExData` in the parsed payload.
+    pub(crate) data_start: usize,
+    /// End (exclusive) of `modExData` in the parsed payload.
+    pub(crate) data_end: usize,
+    /// Offset of the byte after the option byte (next layer or packet body).
+    pub(crate) next_pos: usize,
+}
+
+/// Parse one ModEx wrapper layer starting at `pos`, which must point at the
+/// `modExDataSize` UI8.
+///
+/// Returns `None` when the layer is truncated. The size field is
+/// `UI8 + 1`, with `0xFF` selecting the extended `UI16 + 1` form; `modExData`
+/// is therefore always at least one byte long.
+pub(crate) fn parse_modex_layer(payload: &[u8], pos: usize) -> Option<ModexLayer> {
+    let size_minus_one = *payload.get(pos)?;
+    let mut cursor = pos + 1;
+    let modex_size = if size_minus_one == u8::MAX {
+        let hi = *payload.get(cursor)?;
+        let lo = *payload.get(cursor + 1)?;
+        cursor += 2;
+        (u16::from_be_bytes([hi, lo]) as usize).checked_add(1)?
+    } else {
+        size_minus_one as usize + 1
+    };
+
+    let data_end = cursor.checked_add(modex_size)?;
+    let option = *payload.get(data_end)?;
+    Some(ModexLayer {
+        modex_type: option >> 4,
+        next_packet_type: option & 0x0F,
+        data_start: cursor,
+        data_end,
+        next_pos: data_end.checked_add(1)?,
+    })
+}
+
 /// Peels chained ModEx wrappers so codec/multitrack detection sees the
 /// underlying packet type. When a chain exceeds `MAX_MODEX_CHAIN_LAYERS` the
 /// payload is intentionally left wrapped and opaque: codec/multitrack
@@ -62,31 +114,13 @@ pub fn normalize_modex_payload_with_frame_type<'a>(
             return Cow::Borrowed(payload);
         }
         layers += 1;
-        if pos >= payload.len() {
-            return Cow::Borrowed(payload);
-        }
-        let size_minus_one = payload[pos];
-        pos += 1;
-        let modex_size = if size_minus_one == u8::MAX {
-            if pos + 2 > payload.len() {
-                return Cow::Borrowed(payload);
-            }
-            let size = u16::from_be_bytes([payload[pos], payload[pos + 1]]) as usize + 1;
-            pos += 2;
-            size
-        } else {
-            size_minus_one as usize + 1
+        let layer = match parse_modex_layer(payload, pos) {
+            Some(layer) => layer,
+            None => return Cow::Borrowed(payload),
         };
-
-        if pos + modex_size + 1 > payload.len() {
-            return Cow::Borrowed(payload);
-        }
-        pos += modex_size;
-        let option_and_next_packet = payload[pos];
-        pos += 1;
-        let next_packet_type = option_and_next_packet & 0x0F;
-        reconstructed_header = (reconstructed_header & 0xF0) | next_packet_type;
-        if next_packet_type != ERTMP_PACKET_TYPE_MODEX {
+        pos = layer.next_pos;
+        reconstructed_header = (reconstructed_header & 0xF0) | layer.next_packet_type;
+        if layer.next_packet_type != ERTMP_PACKET_TYPE_MODEX {
             break;
         }
     }
@@ -179,5 +213,55 @@ mod tests {
             normalize_modex_payload_with_frame_type(&payload, CAPS_EX_MASK_MODEX, FrameType::Video),
             Cow::Borrowed(_)
         ));
+    }
+
+    #[test]
+    fn parses_short_size_mod_ex_layer() {
+        // sizeMinusOne = 0x02 => 3-byte modExData, option byte 0x15 => type 1, next 5.
+        let payload = [0x02, 0xAA, 0xBB, 0xCC, 0x15];
+        let layer = parse_modex_layer(&payload, 0).unwrap();
+        assert_eq!(layer.modex_type, 1);
+        assert_eq!(layer.next_packet_type, 5);
+        assert_eq!(
+            &payload[layer.data_start..layer.data_end],
+            &[0xAA, 0xBB, 0xCC]
+        );
+        assert_eq!(
+            (layer.data_start, layer.data_end, layer.next_pos),
+            (1, 4, 5)
+        );
+    }
+
+    #[test]
+    fn parses_extended_size_mod_ex_layer() {
+        // sizeMinusOne = 0xFF, UI16 = 0x0002 => 3-byte modExData.
+        let layer = parse_modex_layer(&[0xFF, 0x00, 0x02, 0x0A, 0x0B, 0x0C, 0x03], 0).unwrap();
+        assert_eq!(layer.modex_type, 0);
+        assert_eq!(layer.next_packet_type, 3);
+        assert_eq!(
+            (layer.data_start, layer.data_end, layer.next_pos),
+            (3, 6, 7)
+        );
+
+        // UI16 = 0x00FF => 256-byte modExData, the largest extended form the
+        // spec's "1..=256 bytes" note describes before another size prefix.
+        let mut payload = vec![0xFF, 0x00, 0xFF];
+        payload.extend(std::iter::repeat_n(0x5A, 256));
+        payload.push(0x07);
+        let layer = parse_modex_layer(&payload, 0).unwrap();
+        assert_eq!(
+            (layer.data_start, layer.data_end, layer.next_pos),
+            (3, 259, 260)
+        );
+    }
+
+    #[test]
+    fn rejects_truncated_mod_ex_layers() {
+        assert!(parse_modex_layer(&[], 0).is_none());
+        assert!(parse_modex_layer(&[0x02, 0xAA], 0).is_none());
+        assert!(parse_modex_layer(&[0x02, 0xAA, 0xBB, 0xCC], 0).is_none());
+        assert!(parse_modex_layer(&[0xFF], 0).is_none());
+        assert!(parse_modex_layer(&[0xFF, 0x00], 0).is_none());
+        assert!(parse_modex_layer(&[0xFF, 0x00, 0x02, 0xAA], 0).is_none());
     }
 }

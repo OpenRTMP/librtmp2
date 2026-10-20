@@ -188,7 +188,7 @@ fn relay_round_trip(
 
 #[test]
 fn plain_rtmp_relay_delivers_every_frame_in_order_to_concurrent_players() {
-    let mut server = Server::new(plain_config()).unwrap();
+    let mut server = Server::from_config(plain_config(), None).unwrap();
     server.listen("127.0.0.1:19681").unwrap();
     relay_round_trip(
         &mut server,
@@ -202,7 +202,7 @@ fn plain_rtmp_relay_delivers_every_frame_in_order_to_concurrent_players() {
 
 #[test]
 fn closed_and_reset_connections_are_reaped() {
-    let mut server = Server::new(plain_config()).unwrap();
+    let mut server = Server::from_config(plain_config(), None).unwrap();
     server.listen("127.0.0.1:19682").unwrap();
 
     // A clean close mid-handshake...
@@ -262,7 +262,7 @@ fn a_stalled_player_does_not_block_a_fast_player() {
     // more than the stalled player's socket buffers can hold. The fast
     // player must still get the newest frame, in order, and the server
     // must stay responsive throughout.
-    let mut server = Server::new(plain_config()).unwrap();
+    let mut server = Server::from_config(plain_config(), None).unwrap();
     server.listen("127.0.0.1:19683").unwrap();
     const URL: &str = "rtmp://127.0.0.1:19683/live/slow";
     const FRAMES: u32 = 600;
@@ -407,7 +407,7 @@ mod rtmps {
 
     fn tls_server(port: u16) -> Server {
         let (cert, key) = cert_files();
-        let mut server = Server::new(plain_config()).unwrap();
+        let mut server = Server::from_config(plain_config(), None).unwrap();
         server
             .listen_tls(
                 &format!("127.0.0.1:{port}"),
@@ -474,7 +474,7 @@ mod rtmps {
         // Trusted CA, wrong name: 127.0.0.2 is not in the certificate's
         // SANs, so hostname/IP verification must fail.
         let (cert, key) = cert_files();
-        let mut server = Server::new(plain_config()).unwrap();
+        let mut server = Server::from_config(plain_config(), None).unwrap();
         server
             .listen_tls(
                 "0.0.0.0:19693",

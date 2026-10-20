@@ -46,7 +46,7 @@ fn main() {
         max_connections_per_addr: 0,
     };
 
-    let mut server = Server::new(config).expect("failed to create server");
+    let mut server = Server::from_config(config, None).expect("failed to create server");
     server.on_frame_cb = Some(on_frame);
     server.on_publish_cb = Some(|_conn_id: u64, _app: &str, _stream_name: &str| true);
     server.on_play_cb = Some(|_conn_id: u64, _app: &str, _stream_name: &str| true);

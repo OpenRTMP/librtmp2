@@ -356,6 +356,13 @@ typedef struct lrtmp2_server_t {
 
 /**
  * Server configuration struct.
+ *
+ * The `tls_*_file` fields are raw C string pointers. Passing this struct to
+ * the raw constructor ([`crate::server::Server::new`]) or to the C ABI entry
+ * point requires each non-null pointer to reference a NUL-terminated C string;
+ * see that function's `# Safety` section. Rust callers should prefer
+ * [`crate::server::Server::from_config`], which takes TLS paths as `&Path`
+ * and never dereferences these fields.
  */
 typedef struct lrtmp2_server_config_t {
   int max_connections;
@@ -365,11 +372,15 @@ typedef struct lrtmp2_server_config_t {
    */
   int tls_enabled;
   /**
-   * Server: PEM certificate chain file
+   * Server: PEM certificate chain file.
+   *
+   * `null` or a pointer to a NUL-terminated C string (valid UTF-8).
    */
   const uint8_t *tls_cert_file;
   /**
-   * Server: PEM private key file
+   * Server: PEM private key file.
+   *
+   * `null` or a pointer to a NUL-terminated C string (valid UTF-8).
    */
   const uint8_t *tls_key_file;
   /**
@@ -472,6 +483,13 @@ extern "C" {
 
 /**
  * Create a server (FFI-compatible).
+ *
+ * # Safety
+ *
+ * `config` must point to a readable [`ServerConfig`]. When
+ * `(*config).tls_enabled != 0`, `tls_cert_file` and `tls_key_file` must each be
+ * a pointer to a NUL-terminated C string (valid UTF-8) that stays alive for
+ * the duration of this call; see [`server::Server::new`].
  */
 struct lrtmp2_server_t *lrtmp2_server_create(const struct lrtmp2_server_config_t *config);
 

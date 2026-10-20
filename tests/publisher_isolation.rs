@@ -291,11 +291,14 @@ fn assert_late_joiner_saw_only_valid_state() {
 
 #[test]
 fn malformed_publisher_does_not_disrupt_unrelated_stream() {
-    let mut server = Server::new(ServerConfig {
-        max_connections: 64,
-        max_connections_per_addr: 32,
-        ..plain_config()
-    })
+    let mut server = Server::from_config(
+        ServerConfig {
+            max_connections: 64,
+            max_connections_per_addr: 32,
+            ..plain_config()
+        },
+        None,
+    )
     .unwrap();
     server.listen(ADDR).unwrap();
     server.on_publish_cb = Some(allow_publish);
