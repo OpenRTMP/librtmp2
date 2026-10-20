@@ -39,6 +39,43 @@ begin at `1.0.0`.
   the layout of `lrtmp2_server_config_t` are unchanged; the header comments now
   state the NUL-termination contract.
 
+### Security
+- Hardened enhanced-RTMP parsing and classification: video command and ModEx
+  wrappers cannot bypass codec deny lists, video command frames are rejected as
+  multitrack containers, malformed or empty AVC/HEVC and multitrack
+  sequence-header records are rejected before caching, enhanced audio metadata
+  is classified as critical, and the spec-legal empty Opus sequence-start
+  payload remains cacheable. A changed sequence header drops the stale cached
+  keyframe.
+- Hardened connection and send accounting: the TCP connect budget is split
+  across resolved addresses, transmitted prefixes are drained from the send
+  buffer after a failed blocking send, IPv6 literals keep their brackets in
+  `tcUrl` and skip IP-literal SNI, and the active-CSID reassembly cap is O(1)
+  instead of a per-chunk registry scan.
+- The raw `Server` constructor is now explicitly unsafe (see above); safe Rust
+  uses `Server::from_config` and never dereferences caller-owned TLS pointers.
+
+### Fixed
+- Chunk parsing rejects a `fmt=2` chunk that interrupts an in-flight message
+  without consuming bytes, and abandoned relay-route/cache-eviction markers are
+  bounded FIFOs that keep the newest route and drain displaced entries.
+- Session/auth handling re-arms the publish-media deadline after a same-route
+  republish that follows real media, answers a withdrawn cross-role
+  authorization request with a terminal `onStatus`, and releases superseded
+  roles without leaving the peer waiting.
+- The client surfaces a server `_error` reply instead of waiting for the
+  connect/publish timeout, and acknowledgement state tracks the Ack bytes
+  rather than the whole send buffer, so flow control keeps working under
+  backpressure.
+- Stream-cache pressure eviction skips co-tracked entries, the freeable-byte
+  estimate matches the actual eviction rule, and reassembling transitions use
+  the registry setter so the O(1) count cannot drift.
+- Public ModEx parsing/writing now shares the live E-RTMP v2 parser, and the
+  `exvideo_write` path can round-trip the wrapper headers that `exvideo_parse`
+  accepts.
+- Audio/video sequence-header validation covers malformed multitrack configs,
+  and a VideoCommand frame is kept out of detected codec state.
+
 ## [0.14.0] — 2026-10-14
 
 ### Added
