@@ -119,8 +119,10 @@ jobs:
 
       - name: Resolve version
         id: ver
+        env:
+          RELEASE_REF: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
-          REF="${{ github.event.inputs.tag || github.ref_name }}"
+          REF="$RELEASE_REF"
           VERSION="${REF#v}"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "tag=$REF" >> "$GITHUB_OUTPUT"
@@ -238,7 +240,10 @@ jobs:
     uses: ./.github/workflows/publish-ppa.yml
     with:
       tag: ${{ github.event.inputs.tag || github.ref_name }}
-    secrets: inherit
+    secrets:
+      PPA_GPG_PRIVATE_KEY: ${{ secrets.PPA_GPG_PRIVATE_KEY }}
+      PPA_GPG_KEY_ID: ${{ secrets.PPA_GPG_KEY_ID }}
+      PPA_GPG_PASSPHRASE: ${{ secrets.PPA_GPG_PASSPHRASE }}
 
   publish-crates-io:
     name: publish to crates.io
@@ -246,7 +251,8 @@ jobs:
     uses: ./.github/workflows/publish-crates-io.yml
     with:
       tag: ${{ github.event.inputs.tag || github.ref_name }}
-    secrets: inherit
+    secrets:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
   # Benchmarks run after the release exists and are attached to it afterwards;
   # PPA and crates.io publishing above do not wait for them.
