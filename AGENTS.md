@@ -6,7 +6,7 @@
 
 Non-obvious notes for this environment:
 
-- **Toolchain:** requires a recent stable Rust (`edition = "2024"`, `rust-version = "1.93"` in `Cargo.toml`). The VM snapshot ships stable Rust 1.97 as the default `rustup` toolchain; the system default Rust (1.83) is too old, so do not switch back to it.
+- **Toolchain:** requires a recent stable Rust (`edition = "2024"`, `rust-version = "1.95"` in `Cargo.toml`). The VM snapshot ships stable Rust 1.97 as the default `rustup` toolchain; the system default Rust (1.83) is too old, so do not switch back to it.
 - **TLS/OpenSSL:** the default `tls` feature links system OpenSSL via `openssl-sys`, which needs `pkg-config` + `libssl-dev` (already installed in the snapshot). For a zero-system-dependency build use `cargo build --no-default-features`.
 - `Cargo.lock` is committed so CI builds and releases are reproducible (all `cargo build` steps run with `--locked`).
 - **Interop scripts** under `tests/interop/` are standalone (not part of `cargo test`) and need a real `ffmpeg` (present in the snapshot).

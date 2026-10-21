@@ -52,27 +52,32 @@ value the workflow uploads to via `dput ppa:<owner>/<ppa-name>`.
 If the PPA is team-owned, make sure your user is a member of that team
 with upload rights.
 
-### 4. Rust toolchain availability (no extra setup currently needed)
+### 4. Rust toolchain availability (Rust 1.95 required)
 
-`debian/control` declares `Build-Depends: rustc (>= 1.93)`, matching this
-crate's actual MSRV (`rust-version` in `Cargo.toml`) rather than whatever
-toolchain happened to be installed in CI. `resolute` (26.04, the current
-Ubuntu LTS) ships `rustc` up to `1.93` in its own archive as of this
-writing, so Launchpad's build chroot can satisfy this Build-Depends
-natively — no PPA dependency configuration is required right now.
+`Cargo.toml` declares `rust-version = "1.95"` because
+`parking_lot 0.13` and its `lock_api` / `parking_lot_core` dependencies
+require at least Rust 1.95. `debian/control` therefore requires
+`rustc (>= 1.95)` as well, matching the actual crate MSRV.
 
-This is worth re-checking whenever this crate's MSRV moves again (edition
-2024 itself already requires `rustc >= 1.85`, so anything below that is
-never an option without dropping the edition): if `rust-version` in
-`Cargo.toml` is bumped past what `resolute`'s archive offers, uploads will
-sit as "Dependency wait" on Launchpad until you either wait for Ubuntu to
-backport a newer `rustc` into the series (Ubuntu has been doing this
-periodically for `resolute`, per its multiple parallel `rustc` versions),
-add a trusted third-party Rust-toolchain PPA as a **PPA dependency** (PPA's
-Launchpad page -> **Admin -> Change details** -> **"PPA dependencies"**),
-or self-host one by repackaging the official prebuilt `rustc`/`cargo`
-tarballs from `https://static.rust-lang.org/dist/` as a small Debian source
-package with a version/epoch high enough that apt prefers it.
+**Ubuntu 26.04 (resolute) PPA limitation:** the official Ubuntu 26.04
+archive currently provides `rustc` 1.93, not 1.95. Launchpad builds the
+uploaded Debian source package using that series' package repositories,
+not the Rust toolchain installed by GitHub Actions. Without an available
+`rustc >= 1.95` package, the PPA build will remain in **Dependency wait**.
+
+Before publishing a release targeting `resolute`, either wait until
+Ubuntu provides a compatible Rust toolchain or configure a trusted
+additional PPA dependency that publishes a compatible `rustc` (and
+matching `cargo`) package for that Ubuntu series. You can configure
+this from the Launchpad PPA page under **Admin -> Change details ->
+PPA dependencies**. Alternatively, maintain your own source-package
+build of the official Rust toolchain for that series. Do not lower
+`debian/control`'s minimum solely to make dependency resolution pass:
+the vendored crate dependencies would still fail with Rust 1.93.
+
+Re-check the archive and PPA dependency availability on future releases.
+The local GitHub Actions source-package verification uses `rustup` and
+does not establish toolchain availability inside Launchpad's builders.
 
 ### 5. GitHub repository secrets/variables
 
