@@ -26,6 +26,40 @@ begin at `1.0.0`.
   of being read from the field that is advanced after every `accept()`, which
   could starve a listener's `accept()` entirely once three or more listeners
   were bound.
+- A local pending-relay overflow is no longer reported to the host as a peer
+  protocol violation; the accurate internal-error code is propagated instead.
+- A publish grant that failed because the local cache-eviction queue was full
+  is no longer answered with "Route already publishing"; the conflict and the
+  local-limit case now report different reasons.
+- `Server::stop()` is a full teardown: established connections are
+  disconnected, their publish-route claims are released and the cached init
+  frames are dropped, so a later `listen()` cannot resurrect the old sessions
+  or keep their routes locked.
+- One poll tick no longer runs the connection pipeline twice over every
+  connection; only the sockets accepted in that tick get their first pass,
+  and the relay-send budget is spent once per tick rather than once per pass.
+- The chunk writer rejects the reserved chunk-stream ids 0 and 1 instead of
+  emitting a frame that desynchronizes the receiver.
+- The client's command wait is bounded by the receive budget and the
+  deadline instead of an undocumented message count, so a peer that answers
+  with a few extra status messages is no longer reported as unreachable.
+- Enhanced (E-RTMP) audio metadata frames are marked as metadata, matching
+  the enhanced-video and multitrack-audio paths.
+- An empty or undefined `colorInfo` value now resets the HDR metadata in
+  every encoding, not only in the leading-key string form.
+- The client handshake stays in the "waiting for the server hello" state
+  after sending C0/C1, so a state-driven caller cannot skip the server's
+  version byte and desynchronize the handshake.
+- Per-chunk-stream reassembly buffers are allocated lazily and their
+  allocation is released when a chunk stream goes dormant, so a peer that
+  opens many chunk-stream ids no longer pins a buffer for each of them.
+- The `ffmpeg_ingest` example rejects a non-positive minimum frame count
+  instead of reporting success without receiving any media.
+- The relay benchmark no longer reports a negative average join latency.
+- The ABI baseline script compares against the requested ref instead of the
+  nearest tag, and finds the built library in the configured cargo target
+  directory.
+- The benchmark report no longer aborts on a zero throughput estimate.
 
 ## [0.15.0] — 2026-10-21
 
