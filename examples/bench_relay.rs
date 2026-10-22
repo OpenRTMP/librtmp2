@@ -278,7 +278,7 @@ fn main() -> ExitCode {
     );
     println!(
         "join latency ms (connect -> first frame): avg={:.2} p50={:.2} p95={:.2} p99={:.2} max={:.2}",
-        join_ms.iter().sum::<f64>() / join_ms.len().max(1) as f64,
+        join_ms.iter().copied().fold(0.0, |acc, v| acc + v) / join_ms.len().max(1) as f64,
         bench_common::percentile(&join_ms, 0.50),
         bench_common::percentile(&join_ms, 0.95),
         bench_common::percentile(&join_ms, 0.99),
