@@ -11,6 +11,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 While in alpha the project stays on `0.x`; semantic-versioning guarantees only
 begin at `1.0.0`.
 
+## [Unreleased]
+
+### Fixed
+- An E-RTMP v2 multitrack `ManyTracks` container holding a zero-length
+  sub-track — e.g. the spec-legal empty Opus sequence-start payload — is no
+  longer rejected as malformed. The whole container used to fail parsing, so
+  the frame was refused with a protocol error and the Opus sequence header
+  was never cached for late joiners. The per-container sub-track cap
+  (`MAX_MULTITRACK_SUBTRACKS`) still bounds the work a container packed with
+  empty tracks can cost.
+- The server's per-listener accept rotation now visits every bound listener
+  once per sweep. The rotation origin is snapshotted before the sweep instead
+  of being read from the field that is advanced after every `accept()`, which
+  could starve a listener's `accept()` entirely once three or more listeners
+  were bound.
+
 ## [0.15.0] — 2026-10-21
 
 ### Changed
