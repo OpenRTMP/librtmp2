@@ -199,7 +199,11 @@ pub fn client_generate_c0c1(hs: &mut Handshake) -> Result<()> {
 
     hs.out.reset();
     hs.out.write(&c0c1).map_err(|_| ErrorCode::Internal)?;
-    hs.state = HandshakeState::ClientWaitS1;
+    // The client has only *sent* C0+C1: the server's S0 has not been read
+    // yet, so the state stays ClientWaitS0 until `client_read_s0` consumes
+    // the version byte. Advancing it here would make a state-driven caller
+    // skip S0 and desynchronize the handshake by one byte.
+    hs.state = HandshakeState::ClientWaitS0;
     Ok(())
 }
 
