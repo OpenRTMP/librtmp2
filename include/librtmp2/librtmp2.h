@@ -205,7 +205,7 @@
 
 /**
  * Default cap on relay sends issued while fanning publisher media out to
- * players in one `process_connections` pass. Integrators can tune the active
+ * players in one poll tick. Integrators can tune the active
  * value through [`Server::max_relay_sends_per_poll`].
  */
 #define DEFAULT_MAX_RELAY_SENDS_PER_POLL 4096

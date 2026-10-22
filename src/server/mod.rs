@@ -157,7 +157,7 @@ const MAX_ACCEPTS_PER_POLL: usize = 256;
 const MAX_BUDGET_DRAIN_PASSES_PER_CONN_PER_POLL: usize = 3;
 
 /// Default cap on relay sends issued while fanning publisher media out to
-/// players in one `process_connections` pass. Integrators can tune the active
+/// players in one poll tick. Integrators can tune the active
 /// value through [`Server::max_relay_sends_per_poll`].
 pub const DEFAULT_MAX_RELAY_SENDS_PER_POLL: usize = 4096;
 
@@ -484,13 +484,16 @@ struct PendingTlsConnection {
 pub struct Server {
     pub config: ServerConfig,
     pub resource_limits: ResourceLimits,
-    /// Maximum relay send operations allowed in one `process_connections` pass.
+    /// Maximum relay send operations allowed in one poll tick.
     ///
-    /// The first eligible frame in a pass is always relayed even when its fan-out
+    /// The budget is shared by every processing pass a poll tick runs, so a
+    /// tick never fans out more than this many sends in total. The first
+    /// eligible frame in a tick is always relayed even when its fan-out
     /// exceeds this value, which guarantees forward progress instead of
-    /// perpetually re-queueing an oversized frame. Later frames are deferred once
-    /// the accumulated send count would exceed the configured budget. Frames
-    /// that per-player flow control skips for a congested player don't count.
+    /// perpetually re-queueing an oversized frame. Later frames are deferred
+    /// once the accumulated send count would exceed the configured budget.
+    /// Frames that per-player flow control skips for a congested player don't
+    /// count.
     pub max_relay_sends_per_poll: usize,
     /// Outbound backlog (bytes queued for a player but not yet accepted by
     /// its socket) above which live relay stops queueing audio/video for
@@ -1291,35 +1294,38 @@ impl Server {
         if !self.running {
             return Err(ErrorCode::Internal);
         }
+        // The relay-send budget is spent once per poll tick, not once per
+        // processing pass: the tick runs the pipeline twice (once for the
+        // connections that already existed, once for the ones accepted
+        // below), and a per-pass budget would let a single tick fan out
+        // twice the configured number of relay sends.
+        let mut relay_sends = 0usize;
         // Reap stale/timed-out connections before enforcing per-IP/global
         // admission caps below -- otherwise a peer reconnecting from the
         // same source IP right as its old sockets die can be rejected by
         // `max_connections_per_addr` for connections that are about to be
         // removed in this very tick anyway.
-        self.process_connections_impl(readable)?;
-        let before_accept: Option<HashSet<u64>> = readable
-            .is_some()
-            .then(|| self.connections.iter().map(|c| c.conn_id).collect());
+        self.process_connections_impl(readable, &mut relay_sends)?;
+        // Connection ids are handed out in increasing order, so every
+        // connection whose id is at or above this snapshot was accepted
+        // after it.
+        let next_conn_id_before_accept = self.next_conn_id;
         self.accept_new_connections();
         // Give sockets accepted just above their first processing pass in
         // this same poll() call, rather than leaving them untouched through
         // the sleep below until the next call -- otherwise every new
-        // connection's handshake is delayed by a full poll cycle. A caller-
-        // supplied `readable` set was computed before these connections
-        // existed, so union in whichever conn_ids are new since just above.
-        match (readable, before_accept) {
-            (Some(readable), Some(before_accept)) => {
-                let mut readable_with_new = readable.clone();
-                readable_with_new.extend(
-                    self.connections
-                        .iter()
-                        .map(|c| c.conn_id)
-                        .filter(|id| !before_accept.contains(id)),
-                );
-                self.process_connections_impl(Some(&readable_with_new))?;
-            }
-            _ => self.process_connections_impl(None)?,
-        }
+        // connection's handshake is delayed by a full poll cycle. Only the
+        // newly accepted connections are processed in this second pass: the
+        // ones that already existed were served by the pass above, and
+        // running them through the pipeline again would recv every socket
+        // (and rebuild the relay batch) twice per poll tick.
+        let new_conns: HashSet<u64> = self
+            .connections
+            .iter()
+            .map(|c| c.conn_id)
+            .filter(|id| *id >= next_conn_id_before_accept)
+            .collect();
+        self.process_connections_impl(Some(&new_conns), &mut relay_sends)?;
         if timeout_ms > 0 {
             std::thread::sleep(std::time::Duration::from_millis(timeout_ms as u64));
         }
@@ -1410,6 +1416,23 @@ impl Server {
         // later listen() call after stop() must see it reset here or it
         // would keep exposing the now-closed fd from before this stop().
         self.server_fd = net::INVALID_SOCKET;
+        // Tear down every established connection and release the publish
+        // routes it claimed: a stop() is followed by a later listen() (see
+        // above), and that restart must not resurrect the old sessions --
+        // their sockets stay open and their route claims stay locked against
+        // a new publisher of the same app/stream.
+        for conn in self.connections.iter_mut() {
+            conn.disconnect_transport();
+        }
+        let conn_ids: Vec<u64> = self.connections.iter().map(|c| c.conn_id).collect();
+        for conn_id in conn_ids {
+            self.release_all_publish_routes(conn_id);
+        }
+        self.connections.clear();
+        // The cached init frames belong to the publishers that just went
+        // away, so drop them along with the per-publisher ownership records.
+        self.publisher_cache_keys.clear();
+        self.stream_cache.clear();
     }
 
     fn total_connection_slots_in_use(&self) -> usize {
@@ -1695,7 +1718,8 @@ impl Server {
     /// protocol state machine, relay frames from publishers to players,
     /// flush pending writes, and reap closed peers.
     pub fn process_connections(&mut self) -> Result<()> {
-        self.process_connections_impl(None)
+        let mut relay_sends = 0usize;
+        self.process_connections_impl(None, &mut relay_sends)
     }
 
     /// Like [`Self::process_connections`], but skips attempting to `recv()`
@@ -1709,14 +1733,23 @@ impl Server {
     /// every connection regardless of `readable`, since those aren't
     /// contingent on new bytes having arrived.
     pub fn process_connections_ready(&mut self, readable: &HashSet<u64>) -> Result<()> {
-        self.process_connections_impl(Some(readable))
+        let mut relay_sends = 0usize;
+        self.process_connections_impl(Some(readable), &mut relay_sends)
     }
 
     /// Drive one poll tick: recv/timeout reaping, then relay-frame batching,
     /// init-frame replay, relay send/export, flush, and teardown of whatever
     /// closed along the way. Split into focused per-phase helpers below --
     /// see each one's doc comment for what it covers.
-    fn process_connections_impl(&mut self, readable: Option<&HashSet<u64>>) -> Result<()> {
+    ///
+    /// `relay_sends` carries the poll tick's relay-send budget across the
+    /// passes of that tick, so the fan-out bound is spent once per tick
+    /// rather than once per pass.
+    fn process_connections_impl(
+        &mut self,
+        readable: Option<&HashSet<u64>>,
+        relay_sends: &mut usize,
+    ) -> Result<()> {
         let mut closed = Vec::new();
 
         // Drive recv/processing for every connection.
@@ -1759,7 +1792,12 @@ impl Server {
         self.drop_stale_pending_relay_for_abandoned_routes(&abandoned_this_batch);
         let relay_frames = self.build_relay_frame_batch();
         self.replay_init_frames_for_new_players(&mut closed);
-        self.send_and_export_relay_frames(relay_frames, &abandoned_this_batch, &mut closed);
+        self.send_and_export_relay_frames(
+            relay_frames,
+            &abandoned_this_batch,
+            &mut closed,
+            relay_sends,
+        );
         self.flush_connections(&mut closed);
         self.remove_closed_connections(closed);
         Ok(())
@@ -2110,13 +2148,17 @@ impl Server {
     /// export the frames that completed this poll (not requeued -- injected
     /// frames stay off the export path to avoid remote→local echo loops) and
     /// requeue whatever the send budget deferred to a later poll.
+    ///
+    /// `relay_sends` is the poll tick's shared send counter: it is spent
+    /// across every pass of the tick, so one tick cannot fan out more than
+    /// `max_relay_sends_per_poll` sends in total.
     fn send_and_export_relay_frames(
         &mut self,
         mut relay_frames: Vec<RelayFrame>,
         abandoned_this_batch: &HashSet<(String, String, u64)>,
         closed: &mut Vec<usize>,
+        relay_sends: &mut usize,
     ) {
-        let mut relay_sends = 0usize;
         let mut relay_processed = 0usize;
         // Reused across frames: indices of this frame's receiving players.
         let mut players: Vec<usize> = Vec::new();
@@ -2142,8 +2184,8 @@ impl Server {
             );
             let player_count = players.len();
             if player_count > 0
-                && relay_sends > 0
-                && relay_sends.saturating_add(player_count) > self.max_relay_sends_per_poll
+                && *relay_sends > 0
+                && (*relay_sends).saturating_add(player_count) > self.max_relay_sends_per_poll
             {
                 break;
             }
@@ -2183,7 +2225,7 @@ impl Server {
                 }
             }
             staged.release_unstaged_bodies();
-            relay_sends += delivered;
+            *relay_sends += delivered;
             relay_processed += 1;
         }
         staged.send(&mut self.connections, closed);
@@ -3852,7 +3894,8 @@ mod tests {
             })
             .collect();
         let mut closed = Vec::new();
-        server.send_and_export_relay_frames(frames, &HashSet::new(), &mut closed);
+        let mut relay_sends = 0usize;
+        server.send_and_export_relay_frames(frames, &HashSet::new(), &mut closed, &mut relay_sends);
         assert!(closed.is_empty());
 
         let mut streams = Vec::new();
@@ -3915,7 +3958,13 @@ mod tests {
     fn relay_one(server: &mut Server, frame: crate::session::conn::RelayFrame) -> usize {
         let before = server.connections[0].send_buffer.available();
         let mut closed = Vec::new();
-        server.send_and_export_relay_frames(vec![frame], &HashSet::new(), &mut closed);
+        let mut relay_sends = 0usize;
+        server.send_and_export_relay_frames(
+            vec![frame],
+            &HashSet::new(),
+            &mut closed,
+            &mut relay_sends,
+        );
         assert!(closed.is_empty(), "player must not be disconnected");
         server.connections[0].send_buffer.available() - before
     }
@@ -4110,6 +4159,7 @@ mod tests {
         // Both players are congested and skip both frames, so no socket
         // work happens and the second frame must not be deferred.
         let mut closed = Vec::new();
+        let mut relay_sends = 0usize;
         server.send_and_export_relay_frames(
             vec![
                 relay_frame(FrameType::Video, AVC_INTER.to_vec()),
@@ -4117,6 +4167,7 @@ mod tests {
             ],
             &HashSet::new(),
             &mut closed,
+            &mut relay_sends,
         );
         assert!(closed.is_empty());
         for conn in &server.connections {
@@ -4136,10 +4187,12 @@ mod tests {
             .write(&[0u8; 1000])
             .unwrap();
         let mut closed = Vec::new();
+        let mut relay_sends = 0usize;
         server.send_and_export_relay_frames(
             vec![relay_frame(FrameType::Video, avc_seq_fixture())],
             &HashSet::new(),
             &mut closed,
+            &mut relay_sends,
         );
         assert_eq!(closed, vec![0], "hard limit drops even for codec headers");
 
@@ -4170,10 +4223,12 @@ mod tests {
         );
         // No progress since: dropped.
         let mut closed = Vec::new();
+        let mut relay_sends = 0usize;
         server.send_and_export_relay_frames(
             vec![relay_frame(FrameType::Video, AVC_INTER.to_vec())],
             &HashSet::new(),
             &mut closed,
+            &mut relay_sends,
         );
         assert_eq!(closed, vec![0], "a player that stopped reading is dropped");
     }
