@@ -1474,7 +1474,13 @@ impl Client {
         deadline: Option<Instant>,
         recv_budget: &mut usize,
     ) -> Result<Buffer> {
-        for _ in 0..64 {
+        // The wait is bounded by the caller's byte budget and deadline, not
+        // by a fixed number of inbound messages: a peer that answers with
+        // more than a handful of non-matching commands (transitional
+        // `onStatus` messages, for instance) must not be mistaken for an
+        // unreachable server. `recv_message` returns [`ErrorCode::Timeout`]
+        // once the budget is exhausted or the deadline has passed.
+        while *recv_budget > 0 {
             let (msg, payload) = self.recv_message(recv_budget, deadline)?;
             if msg.msg_type_id != msg_dispatch::RTMP_MSG_AMF0_COMMAND {
                 continue;
