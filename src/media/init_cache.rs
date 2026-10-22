@@ -7,8 +7,8 @@ use crate::ertmp::{exaudio, exvideo, fourcc};
 use crate::media::codec_config::{ConfigCodec, validate_config_record};
 use crate::media::modex::ERTMP_PACKET_TYPE_MODEX;
 use crate::types::{
-    AudioCodec, AudioHeader, ERTMP_PACKET_TYPE_METADATA, FourCc, Frame, FrameType, VideoCodec,
-    VideoHeader,
+    AudioCodec, AudioHeader, ERTMP_AUDIO_PACKET_TYPE_METADATA, ERTMP_PACKET_TYPE_METADATA, FourCc,
+    Frame, FrameType, VideoCodec, VideoHeader,
 };
 
 /// How a relayed media frame should be treated by the init-frame cache.
@@ -365,6 +365,18 @@ fn scan_object_for_color_info(
         let key_str = std::str::from_utf8(&key[..key_len]).unwrap_or("");
         let ty = amf0::read_type(buf).ok()?;
 
+        // A `colorInfo` value of undefined or an empty object resets the HDR
+        // metadata, in the bare top-level-object encoding as well as in the
+        // leading-"colorInfo"-string one.
+        if key_str == "colorInfo" {
+            if ty == Amf0Type::Undefined {
+                return Some(reset_hdr_info());
+            }
+            if ty == Amf0Type::Object && amf0::is_object_end(buf) {
+                return Some(reset_hdr_info());
+            }
+        }
+
         if ty == Amf0Type::Number
             && matches!(
                 key_str,
@@ -425,6 +437,10 @@ fn populate_audio_frame(frame: &mut Frame, payload: &[u8]) {
         }
     } else {
         frame.audio_codec = hdr.audio_codec;
+    }
+
+    if hdr.is_ex_header != 0 && hdr.packet_type == ERTMP_AUDIO_PACKET_TYPE_METADATA {
+        frame.is_metadata = 1;
     }
 }
 
