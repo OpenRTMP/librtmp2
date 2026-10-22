@@ -156,6 +156,18 @@ struct PendingAuth {
     request_id: u64,
 }
 
+/// Outcome of a publish-route claim attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PublishRouteClaimOutcome {
+    /// The route is claimed by this connection.
+    Claimed,
+    /// Another connection already owns the route.
+    Contended,
+    /// The route was free, but the local cache-eviction queue was full, so the
+    /// claim was rolled back and the previously claimed route was re-claimed.
+    EvictionQueueFull,
+}
+
 impl RelayFrame {
     /// Bytes used for codec parsing and cache classification.
     pub fn cache_payload(&self) -> &[u8] {
@@ -794,16 +806,16 @@ impl Conn {
             .any(|(a, r)| a == app && r == route)
     }
 
-    fn claim_publish_route(&mut self, stream: &str) -> bool {
+    fn claim_publish_route(&mut self, stream: &str) -> PublishRouteClaimOutcome {
         let claimed = match self.publish_routes.as_ref() {
             Some(routes) => routes.claim(self.conn_id, &self.app, stream),
             None => {
                 self.claimed_publish_route = Some(stream.to_string());
-                return true;
+                return PublishRouteClaimOutcome::Claimed;
             }
         };
         if !claimed {
-            return false;
+            return PublishRouteClaimOutcome::Contended;
         }
         match self.claimed_publish_route.take() {
             Some(prev) if prev == stream => self.claimed_publish_route = Some(prev),
@@ -824,13 +836,13 @@ impl Conn {
                         let _ = routes.claim(self.conn_id, &self.app, &prev);
                     }
                     self.claimed_publish_route = Some(prev);
-                    return false;
+                    return PublishRouteClaimOutcome::EvictionQueueFull;
                 }
                 self.claimed_publish_route = Some(stream.to_string());
             }
             None => self.claimed_publish_route = Some(stream.to_string()),
         }
-        true
+        PublishRouteClaimOutcome::Claimed
     }
 
     fn clear_detected_stream_metadata(&mut self) {
@@ -932,7 +944,7 @@ impl Conn {
         let eviction_len_before = self.pending_cache_evictions.len();
         let already_owned_route =
             self.claimed_publish_route.as_deref() == Some(stream_name.as_str());
-        if !self.claim_publish_route(&stream_name) {
+        if self.claim_publish_route(&stream_name) != PublishRouteClaimOutcome::Claimed {
             // `relay_route_key()` prefers `relay_key`. If an integrator pointed
             // it at a contended route, restore it to the still-held claim so
             // later socket media cannot snapshot an unclaimed key.
@@ -1615,6 +1627,12 @@ impl Conn {
                         if let Err(e) = self.handle_message(&msg, &payload_owned, messages_budget) {
                             return match e {
                                 ErrorCode::Auth => -8,
+                                // A local resource limit (e.g. the pending-relay
+                                // budget) is not a peer protocol violation:
+                                // keep the accurate code so the host sees a
+                                // server-side overload instead of blaming the
+                                // peer for a protocol error.
+                                ErrorCode::Internal => -9,
                                 _ => -3,
                             };
                         }
@@ -2200,13 +2218,27 @@ impl Conn {
         // same eviction a second time and burn two slots of
         // MAX_PENDING_CACHE_EVICTIONS for one rename.
         let eviction_len_before_claim = self.pending_cache_evictions.len();
-        if !self.claim_publish_route(&next_route_key) {
-            return self.send_onstatus(
-                0,
-                "error",
-                "NetStream.Publish.BadName",
-                "Route already publishing",
-            );
+        match self.claim_publish_route(&next_route_key) {
+            PublishRouteClaimOutcome::Claimed => {}
+            PublishRouteClaimOutcome::Contended => {
+                return self.send_onstatus(
+                    0,
+                    "error",
+                    "NetStream.Publish.BadName",
+                    "Route already publishing",
+                );
+            }
+            PublishRouteClaimOutcome::EvictionQueueFull => {
+                // The route was free: the claim was rolled back because the
+                // local cache-eviction queue is full, so report that local
+                // limit instead of blaming another publisher for the route.
+                return self.send_onstatus(
+                    0,
+                    "error",
+                    "NetStream.Publish.BadName",
+                    "Publish not authorized",
+                );
+            }
         }
         let claim_queued_prev_eviction = self
             .pending_cache_evictions
