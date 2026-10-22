@@ -1300,6 +1300,14 @@ impl Server {
         // below), and a per-pass budget would let a single tick fan out
         // twice the configured number of relay sends.
         let mut relay_sends = 0usize;
+        // The relay-source priority (injected media first vs. local media
+        // first) rotates once per tick, not once per processing pass: the
+        // second pass below would flip it a second time, which cancels the
+        // rotation out and leaves the same source first on every tick --
+        // letting injected media starve local routes under a tight send
+        // budget. Remember the tick's priority so the second pass can order
+        // its batch the same way the first one did.
+        let relay_inject_first = self.relay_interleave_inject_first;
         // Reap stale/timed-out connections before enforcing per-IP/global
         // admission caps below -- otherwise a peer reconnecting from the
         // same source IP right as its old sockets die can be rejected by
@@ -1325,7 +1333,17 @@ impl Server {
             .map(|c| c.conn_id)
             .filter(|id| *id >= next_conn_id_before_accept)
             .collect();
-        self.process_connections_impl(Some(&new_conns), &mut relay_sends)?;
+        // The second pass exists to serve the sockets accepted above. With
+        // none accepted there is nothing new to serve, and the tick's
+        // relay/flush/reap work has already been done by the first pass --
+        // running it again would rebuild the relay batch a second time.
+        if !new_conns.is_empty() {
+            // Restore the tick's priority before the second pass: the flip
+            // inside the batch builder then counts as this tick's single
+            // rotation, instead of undoing the first pass' flip.
+            self.relay_interleave_inject_first = relay_inject_first;
+            self.process_connections_impl(Some(&new_conns), &mut relay_sends)?;
+        }
         if timeout_ms > 0 {
             std::thread::sleep(std::time::Duration::from_millis(timeout_ms as u64));
         }
