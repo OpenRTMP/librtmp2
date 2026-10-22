@@ -1620,6 +1620,11 @@ impl Server {
         let mut accepts_serviced = 0usize;
         loop {
             let mut accepted_any = false;
+            // Snapshot the rotation origin for this sweep: the field is
+            // advanced after every accept(), so deriving the listener index
+            // from it would move the origin mid-sweep and skip listeners
+            // (their accept() would never run and their backlog would starve).
+            let start = self.next_listener_accept;
 
             for offset in 0..listener_count {
                 if self.max_connections_reached() {
@@ -1628,7 +1633,7 @@ impl Server {
                 if accepts_serviced >= MAX_ACCEPTS_PER_POLL {
                     return;
                 }
-                let i = (self.next_listener_accept + offset) % listener_count;
+                let i = (start + offset) % listener_count;
                 match self.listeners[i].tcp.accept() {
                     Ok((stream, addr)) => {
                         accepted_any = true;
