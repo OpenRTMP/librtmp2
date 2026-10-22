@@ -1479,8 +1479,11 @@ impl Client {
         // more than a handful of non-matching commands (transitional
         // `onStatus` messages, for instance) must not be mistaken for an
         // unreachable server. `recv_message` returns [`ErrorCode::Timeout`]
-        // once the budget is exhausted or the deadline has passed.
-        while *recv_budget > 0 {
+        // once the budget is exhausted or the deadline has passed, so the
+        // loop runs unconditionally: a wanted command that was staged by the
+        // last read must still be delivered after that read consumed the
+        // remaining budget.
+        loop {
             let (msg, payload) = self.recv_message(recv_budget, deadline)?;
             if msg.msg_type_id != msg_dispatch::RTMP_MSG_AMF0_COMMAND {
                 continue;
@@ -1500,7 +1503,6 @@ impl Client {
                 return Err(ErrorCode::Auth);
             }
         }
-        Err(ErrorCode::Timeout)
     }
 
     /// Block until one fully-reassembled chunk message is available.
