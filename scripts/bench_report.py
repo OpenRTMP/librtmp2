@@ -329,11 +329,16 @@ def fmt_time(ns: float) -> str:
 
 
 def fmt_throughput(b: dict) -> str:
+    # A zero estimate has no throughput to report (the collector stores
+    # ns = 0.0 for it) and dividing by it would abort the whole report.
+    ns = b.get("ns") or 0.0
+    if not ns:
+        return "—"
     if b.get("bytes"):
-        mib = b["bytes"] / (b["ns"] * 1e-9) / 1048576
+        mib = b["bytes"] / (ns * 1e-9) / 1048576
         return f"~{mib:.0f} MiB/s"
     if b.get("elements"):
-        return f"~{b['elements'] / (b['ns'] * 1e-9):.0f} elem/s"
+        return f"~{b['elements'] / (ns * 1e-9):.0f} elem/s"
     return "—"
 
 
