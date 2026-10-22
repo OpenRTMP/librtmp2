@@ -24,9 +24,19 @@ build_and_dump() {
     cargo clean --release
     cargo build --release --all-features
 
+    # `cargo build` honours CARGO_TARGET_DIR, so the cdylib does not
+    # necessarily land in $PROJECT_DIR/target. Ask cargo where it actually
+    # wrote its artifacts instead of assuming the default layout.
+    local target_dir
+    target_dir=$(cargo metadata --format-version 1 --no-deps 2>/dev/null \
+        | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p' || true)
+    if [[ -z "$target_dir" ]]; then
+        target_dir="${CARGO_TARGET_DIR:-$PROJECT_DIR/target}"
+    fi
+
     echo "=== Generating ABI dump ($label) ==="
     abidw \
-        "$PROJECT_DIR/target/release/liblibrtmp2.so" \
+        "$target_dir/release/liblibrtmp2.so" \
         --out-file "$ABI_DIR/librtmp2-${label}.xml"
 
     echo "✅ Dump saved: $ABI_DIR/librtmp2-${label}.xml"
