@@ -32,9 +32,10 @@ begin at `1.0.0`.
   is no longer answered with "Route already publishing"; the conflict and the
   local-limit case now report different reasons.
 - `Server::stop()` is a full teardown: established connections are
-  disconnected, their publish-route claims are released and the cached init
-  frames are dropped, so a later `listen()` cannot resurrect the old sessions
-  or keep their routes locked.
+  disconnected, their publish-route claims and the socket-less inject claims
+  are released, the queued relay media is dropped and the cached init frames
+  are cleared, so a later `listen()` cannot resurrect the old sessions or
+  keep their routes locked.
 - One poll tick no longer runs the connection pipeline twice over every
   connection; only the sockets accepted in that tick get their first pass,
   and the relay-send budget is spent once per tick rather than once per pass.
