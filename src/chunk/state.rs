@@ -73,7 +73,14 @@ impl Default for ChunkStream {
             type0_ext_ts: false,
             last_delta: 0,
             reassembly_bytes_read: 0,
-            reassembly_buf: Buffer::new(),
+            // Allocated lazily: a peer can open thousands of chunk-stream ids
+            // on one connection, and an eager per-CSID buffer would pin
+            // BUFFER_INITIAL_SIZE bytes each -- memory that neither
+            // `max_active_csids` (which only counts streams with a message in
+            // flight) nor `max_reassembly_bytes` (which only counts the bytes
+            // actually written) accounts for. A dormant CSID now holds no
+            // reassembly buffer at all.
+            reassembly_buf: Buffer::with_capacity(0),
             chunk_read_scratch: Vec::new(),
             last_payload: Vec::new(),
             reassembling: false,
@@ -92,7 +99,9 @@ impl ChunkStream {
         self.type0_ext_ts = false;
         self.last_delta = 0;
         self.reassembly_bytes_read = 0;
-        self.reassembly_buf.reset();
+        // Discard the partial reassembly *and* free its allocation: a stream
+        // that goes dormant must not keep a preallocated buffer alive.
+        drop(self.reassembly_buf.take());
         self.chunk_read_scratch.clear();
         self.chunk_read_scratch.shrink_to_fit();
         self.last_payload.clear();
@@ -338,7 +347,10 @@ impl ChunkRegistry {
                 self.release_stream_reassembly(idx);
                 self.set_stream_reassembling(idx, false);
                 let stream = &mut self.streams[idx];
-                stream.reassembly_buf.reset();
+                // Discard the partial reassembly and free its allocation: the
+                // stream goes dormant here, and a dormant CSID must not keep
+                // a preallocated buffer alive.
+                drop(stream.reassembly_buf.take());
                 stream.reassembly_bytes_read = 0;
                 stream.chunk_read_scratch.clear();
             }
