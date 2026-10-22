@@ -48,19 +48,23 @@ case "${1:-}" in
         ;;
     compare)
         BASELINE_REF="${2:-HEAD}"
-        BASELINE_TAG=$(git -C "$PROJECT_DIR" describe --tags --abbrev=0 "$BASELINE_REF" 2>/dev/null || echo "")
+        # Resolve the requested ref itself. `git describe --tags` always yields
+        # the nearest *tag* reachable from the ref, never the ref, so
+        # `compare HEAD` used to diff against the last release instead of the
+        # commit the caller asked for.
+        BASELINE=$(git -C "$PROJECT_DIR" rev-parse --verify --quiet "${BASELINE_REF}^{commit}" || echo "")
 
-        if [[ -z "$BASELINE_TAG" ]]; then
-            echo "No tag found for $BASELINE_REF, using HEAD"
-            BASELINE_TAG="HEAD~1"
+        if [[ -z "$BASELINE" ]]; then
+            echo "Cannot resolve baseline ref: $BASELINE_REF"
+            exit 1
         fi
 
-        echo "Baseline: $BASELINE_TAG"
+        echo "Baseline: $BASELINE ($BASELINE_REF)"
 
         # Build baseline
         cd "$PROJECT_DIR"
         git stash || true
-        git checkout "$BASELINE_TAG"
+        git checkout "$BASELINE"
         build_and_dump "baseline"
         git checkout - || git checkout main
         git stash pop || true
