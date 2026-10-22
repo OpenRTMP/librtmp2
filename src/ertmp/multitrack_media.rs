@@ -78,14 +78,15 @@ fn read_track_header(payload: &[u8], pos: usize, one_track: bool) -> Option<(u8,
     } else {
         let size = read_u24(payload.get(body..body + 3)?);
         body += 3;
-        // ManyTracks / ManyTracksManyCodecs allow up to 4096 sub-tracks in a
-        // single ~16 KiB message. Zero-length sub-tracks pack the maximum
-        // track count into the smallest wire footprint and force per-track
-        // authorization and on_frame callbacks with no payload work to
-        // amortize the cost -- reject them as malformed.
-        if size == 0 {
-            return None;
-        }
+        // A zero-length sub-track is a legal empty track, not a malformed
+        // one: the E-RTMP v2 spec allows an empty Opus sequence-start
+        // payload (the channel mapping then comes from the
+        // `MultichannelConfig` signal, or defaults to mono/stereo), and the
+        // OneTrack multitrack form -- which has no size field -- already
+        // accepts an empty body. ManyTracks / ManyTracksManyCodecs allow up
+        // to 4096 sub-tracks in a single ~16 KiB message, so the per-container
+        // sub-track cap (`MAX_MULTITRACK_SUBTRACKS`) is what bounds the work
+        // a container packed with empty tracks can cost.
         size
     };
     (body + len <= payload.len()).then_some((track_id, body, len))
@@ -324,12 +325,23 @@ mod tests {
     }
 
     #[test]
-    fn rejects_multitrack_messages_with_zero_size_subtracks() {
+    fn accepts_multitrack_messages_with_zero_size_subtracks() {
+        // A zero-length sub-track is a legal empty track (an Opus sequence
+        // start may carry no payload), so the container is not malformed.
         let zero_payload = build_many_tracks_zero_payload_message(2);
-        let mut calls = 0;
-        assert!(!foreach_track(FrameType::Video, &zero_payload, |_| {
-            calls += 1
+        let mut seen = Vec::new();
+        assert!(foreach_track(FrameType::Video, &zero_payload, |track| {
+            seen.push((track.track_id, track.payload.len()));
         }));
-        assert_eq!(calls, 0);
+        assert_eq!(seen, vec![(0, 0), (1, 0)]);
+
+        // The sub-track cap -- not the empty body -- is what bounds the work
+        // a container packed with empty tracks can cost.
+        let over_limit = build_many_tracks_zero_payload_message(MAX_MULTITRACK_SUBTRACKS + 1);
+        let mut over_calls = 0;
+        assert!(!foreach_track(FrameType::Video, &over_limit, |_| {
+            over_calls += 1
+        }));
+        assert_eq!(over_calls, 0);
     }
 }
