@@ -26,6 +26,12 @@ pub fn chunk_write(
         return Err(ErrorCode::Chunk);
     }
 
+    // CSIDs 0 and 1 are reserved by the basic-header encoding (see
+    // `RTMP_MIN_CSID`): emitting them desynchronizes the far end.
+    if msg.csid < RTMP_MIN_CSID {
+        return Err(ErrorCode::Chunk);
+    }
+
     // Only fmt=0 is safe for this stateless writer:
     // - fmt=1/2 carry a timestamp *delta* on the wire (RTMP spec 5.3.1.1),
     //   which the reader adds to the running per-CSID timestamp; this writer
@@ -85,6 +91,13 @@ pub(crate) const EXTENDED_TIMESTAMP_MARKER: u32 = 0xFFFFFF;
 /// Maximum chunk-stream id representable in an RTMP basic header (spec 5.3.1.1).
 pub(crate) const RTMP_MAX_CSID: u32 = 65599;
 
+/// Lowest chunk-stream id that can be carried by an RTMP basic header
+/// (spec 5.3.1.1). The basic header's low-bits value selects the header's
+/// own length: 0 means the 2-byte form and 1 the 3-byte form, so csid 0 and
+/// 1 cannot be encoded in a 1-byte header at all. A peer reading such a
+/// header decodes a different header length and loses sync with the stream.
+pub(crate) const RTMP_MIN_CSID: u32 = 2;
+
 /// Encoded size of a first-chunk header written by [`write_first_header`].
 pub fn first_header_len(csid: u32, fmt: u8, ts_field: u32) -> usize {
     let (_, basic_len) = basic_header(csid, fmt);
@@ -122,6 +135,9 @@ pub fn write_first_header(
         return Err(ErrorCode::Internal);
     }
     if csid > RTMP_MAX_CSID {
+        return Err(ErrorCode::Chunk);
+    }
+    if csid < RTMP_MIN_CSID {
         return Err(ErrorCode::Chunk);
     }
     let ext_ts = ts_field >= EXTENDED_TIMESTAMP_MARKER;
@@ -184,6 +200,9 @@ pub fn write_chunk_body(
     ext_ts: Option<u32>,
 ) -> Result<()> {
     if csid > RTMP_MAX_CSID {
+        return Err(ErrorCode::Chunk);
+    }
+    if csid < RTMP_MIN_CSID {
         return Err(ErrorCode::Chunk);
     }
     let chunk_size = if chunk_size == 0 { 128 } else { chunk_size };
