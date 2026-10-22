@@ -1429,6 +1429,14 @@ impl Server {
             self.release_all_publish_routes(conn_id);
         }
         self.connections.clear();
+        // The socket-less inject claims are server-level state as well: a
+        // stop() must release them, or a later listen() keeps the injected
+        // route locked against a new publisher of the same app/stream.
+        self.release_all_injected_routes();
+        // Media that was queued before the stop must not be fanned out to the
+        // players that connect after the restart.
+        self.pending_injected_relay.clear();
+        self.orphaned_relay.clear();
         // The cached init frames belong to the publishers that just went
         // away, so drop them along with the per-publisher ownership records.
         self.publisher_cache_keys.clear();
