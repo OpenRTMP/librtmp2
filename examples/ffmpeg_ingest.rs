@@ -48,6 +48,13 @@ fn main() -> ExitCode {
     let min_frames: i64 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(1);
     let min_large: usize = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(0);
 
+    // A non-positive minimum makes the pass condition vacuously true: the
+    // run would report success without a single frame ever having arrived.
+    if min_frames < 1 {
+        eprintln!("[interop] min_frames must be >= 1 (got {min_frames})");
+        return ExitCode::from(1);
+    }
+
     let config = ServerConfig {
         max_connections: 4,
         chunk_size: 4096,
