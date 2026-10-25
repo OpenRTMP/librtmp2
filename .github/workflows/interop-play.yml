@@ -22,10 +22,13 @@ jobs:
 
     - name: Download mediamtx (real RTMP server)
       run: |
-        ver=v1.9.3
-        curl -fsSL --proto '=https' --proto-redir '=https' \
-          "https://github.com/bluenviron/mediamtx/releases/download/${ver}/mediamtx_${ver}_linux_amd64.tar.gz" \
-          | tar xz -C "$RUNNER_TEMP" mediamtx
+        ver=v1.21.3
+        base="https://github.com/bluenviron/mediamtx/releases/download/${ver}"
+        cd "$RUNNER_TEMP"
+        curl -fsSLO --proto '=https' --proto-redir '=https' "$base/mediamtx_${ver}_linux_amd64.tar.gz"
+        curl -fsSLO --proto '=https' --proto-redir '=https' "$base/checksums.sha256"
+        grep "[ *]mediamtx_${ver}_linux_amd64.tar.gz\$" checksums.sha256 | sha256sum -c -
+        tar xzf "mediamtx_${ver}_linux_amd64.tar.gz" mediamtx
         echo "MEDIAMTX=$RUNNER_TEMP/mediamtx" >> "$GITHUB_ENV"
 
     - name: Interop — play (pull) from real server

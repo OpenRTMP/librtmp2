@@ -13,6 +13,10 @@ begin at `1.0.0`.
 
 ## [Unreleased]
 
+### Changed
+- The play interop CI test runs the librtmp2 client against MediaMTX v1.21.3
+  (was v1.9.3).
+
 ### Fixed
 - An E-RTMP v2 multitrack `ManyTracks` container holding a zero-length
   sub-track — e.g. the spec-legal empty Opus sequence-start payload — is no
