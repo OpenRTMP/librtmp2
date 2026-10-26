@@ -25,8 +25,12 @@ jobs:
         ver=v1.21.3
         base="https://github.com/bluenviron/mediamtx/releases/download/${ver}"
         cd "$RUNNER_TEMP"
-        curl -fsSLO --proto '=https' --proto-redir '=https' "$base/mediamtx_${ver}_linux_amd64.tar.gz"
-        curl -fsSLO --proto '=https' --proto-redir '=https' "$base/checksums.sha256"
+        curl -fsSLO --retry 5 --retry-delay 3 --retry-max-time 180 \
+          --connect-timeout 15 --max-time 90 \
+          --proto '=https' --proto-redir '=https' "$base/mediamtx_${ver}_linux_amd64.tar.gz"
+        curl -fsSLO --retry 5 --retry-delay 3 --retry-max-time 180 \
+          --connect-timeout 15 --max-time 90 \
+          --proto '=https' --proto-redir '=https' "$base/checksums.sha256"
         grep "[ *]mediamtx_${ver}_linux_amd64.tar.gz\$" checksums.sha256 | sha256sum -c -
         tar xzf "mediamtx_${ver}_linux_amd64.tar.gz" mediamtx
         echo "MEDIAMTX=$RUNNER_TEMP/mediamtx" >> "$GITHUB_ENV"
