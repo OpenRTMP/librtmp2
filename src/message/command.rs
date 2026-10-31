@@ -325,78 +325,8 @@ pub(crate) fn read_connect_with_encoding(buf: &mut Buffer, info: &mut ConnectInf
         let key_len = amf0::read_object_key(buf, &mut key)?;
         let key_str = std::str::from_utf8(&key[..key_len]).unwrap_or("");
 
-        if key_str == "fourCcList" {
-            let type_pos = buf.read_pos();
-            if connect_amf::read_four_cc_list_amf(buf, &mut info.four_cc_list).is_ok() {
-                info.has_four_cc_list = true;
-            } else {
-                buf.set_read_pos(type_pos);
-                amf0::skip_value(buf)?;
-            }
-            continue;
-        }
-        if key_str == "capsEx" {
-            let type_pos = buf.read_pos();
-            if connect_amf::read_caps_ex_amf(buf, &mut info.caps_ex, &mut info.caps_ex_mask).is_ok()
-            {
-                info.has_caps_ex = true;
-            } else {
-                buf.set_read_pos(type_pos);
-                amf0::skip_value(buf)?;
-            }
-            continue;
-        }
-        if key_str == "videoFourCcInfoMap" {
-            let type_pos = buf.read_pos();
-            if connect_amf::read_video_fourcc_info_map_amf(buf, &mut info.video_four_cc_info_map)
-                .is_ok()
-            {
-                info.has_video_four_cc_info_map = true;
-            } else {
-                buf.set_read_pos(type_pos);
-                amf0::skip_value(buf)?;
-            }
-            continue;
-        }
-        if key_str == "reconnect" {
-            let type_pos = buf.read_pos();
-            if connect_amf::read_reconnect_amf(buf, &mut info.reconnect).is_ok() {
-                info.has_reconnect = true;
-            } else {
-                buf.set_read_pos(type_pos);
-                amf0::skip_value(buf)?;
-            }
-            continue;
-        }
-
-        // Peek value type
-        let type_pos = buf.read_pos();
-        let value_type = amf0::read_type(buf)?;
-        buf.set_read_pos(type_pos); // restore
-
-        match value_type {
-            amf0::Amf0Type::String => match key_str {
-                "app" => read_string_checked(buf, &mut info.app)?,
-                "tcUrl" => read_string_checked(buf, &mut info.tc_url)?,
-                "pageUrl" => read_string_checked(buf, &mut info.page_url)?,
-                "swfUrl" => read_string_checked(buf, &mut info.swf_url)?,
-                "flashVer" => read_string_checked(buf, &mut info.flash_ver)?,
-                _ => {
-                    amf0::skip_value(buf)?;
-                }
-            },
-            amf0::Amf0Type::Number => {
-                let value = read_number_value(buf)?;
-                match key_str {
-                    "audioCodecs" => info.audio_codecs = value as i32,
-                    "videoCodecs" => info.video_codecs = value as i32,
-                    "objectEncoding" => object_encoding = value,
-                    _ => {}
-                }
-            }
-            _ => {
-                amf0::skip_value(buf)?;
-            }
+        if !read_connect_ertmp_field(buf, info, key_str)? {
+            read_connect_plain_field(buf, info, key_str, &mut object_encoding)?;
         }
     }
 
@@ -405,6 +335,66 @@ pub(crate) fn read_connect_with_encoding(buf: &mut Buffer, info: &mut ConnectInf
     buf.read(&mut end).map_err(|_| ErrorCode::Amf)?;
 
     Ok(object_encoding)
+}
+
+/// Parse an E-RTMP capability field of the connect object. Returns `false`
+/// when `key` is not one; a malformed capability value is skipped, not fatal.
+fn read_connect_ertmp_field(buf: &mut Buffer, info: &mut ConnectInfo, key: &str) -> Result<bool> {
+    let type_pos = buf.read_pos();
+    let parsed = match key {
+        "fourCcList" => connect_amf::read_four_cc_list_amf(buf, &mut info.four_cc_list)
+            .map(|_| info.has_four_cc_list = true),
+        "capsEx" => connect_amf::read_caps_ex_amf(buf, &mut info.caps_ex, &mut info.caps_ex_mask)
+            .map(|_| info.has_caps_ex = true),
+        "videoFourCcInfoMap" => {
+            connect_amf::read_video_fourcc_info_map_amf(buf, &mut info.video_four_cc_info_map)
+                .map(|_| info.has_video_four_cc_info_map = true)
+        }
+        "reconnect" => connect_amf::read_reconnect_amf(buf, &mut info.reconnect)
+            .map(|_| info.has_reconnect = true),
+        _ => return Ok(false),
+    };
+    if parsed.is_err() {
+        buf.set_read_pos(type_pos);
+        amf0::skip_value(buf)?;
+    }
+    Ok(true)
+}
+
+/// Parse a plain (string/number) connect object field; unknown keys and
+/// other value types are skipped.
+fn read_connect_plain_field(
+    buf: &mut Buffer,
+    info: &mut ConnectInfo,
+    key: &str,
+    object_encoding: &mut f64,
+) -> Result<()> {
+    // Peek value type
+    let type_pos = buf.read_pos();
+    let value_type = amf0::read_type(buf)?;
+    buf.set_read_pos(type_pos); // restore
+
+    match value_type {
+        amf0::Amf0Type::String => match key {
+            "app" => read_string_checked(buf, &mut info.app),
+            "tcUrl" => read_string_checked(buf, &mut info.tc_url),
+            "pageUrl" => read_string_checked(buf, &mut info.page_url),
+            "swfUrl" => read_string_checked(buf, &mut info.swf_url),
+            "flashVer" => read_string_checked(buf, &mut info.flash_ver),
+            _ => amf0::skip_value(buf),
+        },
+        amf0::Amf0Type::Number => {
+            let value = read_number_value(buf)?;
+            match key {
+                "audioCodecs" => info.audio_codecs = value as i32,
+                "videoCodecs" => info.video_codecs = value as i32,
+                "objectEncoding" => *object_encoding = value,
+                _ => {}
+            }
+            Ok(())
+        }
+        _ => amf0::skip_value(buf),
+    }
 }
 
 /// Read a createStream command. `transaction_id` is set as soon as the
@@ -843,6 +833,26 @@ mod tests {
         assert!(info.has_four_cc_list);
         assert_eq!(info.four_cc_list.count, 1);
         assert_eq!(&info.four_cc_list.entries[0].cc[..4], b"av01");
+    }
+
+    #[test]
+    fn read_connect_with_encoding_returns_object_encoding() {
+        let mut buf = Buffer::new();
+        amf0::write_string(&mut buf, "connect").unwrap();
+        amf0::write_number(&mut buf, 1.0).unwrap();
+        amf0::write_object_begin(&mut buf).unwrap();
+        amf0::write_object_key(&mut buf, "app").unwrap();
+        amf0::write_string(&mut buf, "live").unwrap();
+        amf0::write_object_key(&mut buf, "objectEncoding").unwrap();
+        amf0::write_number(&mut buf, 3.0).unwrap();
+        amf0::write_object_key(&mut buf, "fourCcList").unwrap();
+        amf0::write_number(&mut buf, 7.0).unwrap(); // malformed: skipped
+        amf0::write_object_end(&mut buf).unwrap();
+        let mut info = ConnectInfo::default();
+        assert_eq!(read_connect_with_encoding(&mut buf, &mut info).unwrap(), 3.0);
+        assert_eq!(cstr(&info.app), "live");
+        assert!(!info.has_four_cc_list);
+        assert_eq!(buf.available(), 0);
     }
 
     #[test]
