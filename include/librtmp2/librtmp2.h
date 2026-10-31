@@ -41,6 +41,13 @@
 #define BUFFER_RESET_CAPACITY BUFFER_INITIAL_SIZE
 
 /**
+ * Capacity a receive buffer may keep between reads. It covers normal socket
+ * reads (64 KiB on the server, up to 256 KiB per client poll) plus a partial
+ * chunk, so only a buffer that grew for one large chunk is shrunk.
+ */
+#define RECV_BUFFER_KEEP_CAPACITY (512 * 1024)
+
+/**
  * Default chunk size per RTMP spec
  */
 #define DEFAULT_CHUNK_SIZE 128
@@ -129,9 +136,18 @@
 #define UCTRL_PING_RESPONSE 7
 
 /**
- * Upper bound for peer-requested inbound chunk sizes (memory churn protection).
+ * Upper bound for the chunk size a server announces to its peers.
  */
 #define MAX_INBOUND_CHUNK_SIZE 65536
+
+/**
+ * Largest chunk size that changes chunk parsing. RTMP allows peers to
+ * announce up to 0x7FFFFFFF, but no message is longer than 0xFFFFFF bytes, so
+ * any larger chunk size reads every message in a single chunk exactly like
+ * this one does. Chunk size only bounds how much of an already
+ * length-checked message is read per chunk; it sizes no buffer.
+ */
+#define MAX_PEER_CHUNK_SIZE 16777215
 
 /**
  * Reject peer WindowAckSize values below this to prevent ACK-per-byte amplification.
