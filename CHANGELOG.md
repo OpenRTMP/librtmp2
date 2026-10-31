@@ -33,7 +33,11 @@ begin at `1.0.0`.
 
 ### Changed
 - The play interop CI test runs the librtmp2 client against MediaMTX v1.21.3
-  (was v1.9.3).
+  (was v1.9.3) and retries transient release downloads.
+- The release workflows pass only the secrets each job needs (PPA signing
+  key, crates.io token) instead of `secrets: inherit`, and read the release
+  tag through an environment variable.
+- Build dependency update: cc 1.10.
 - The connect `_result` carries server properties (`fmsVer`, `capabilities`,
   `mode`) instead of `null` and echoes the client's `objectEncoding` in the
   info object, matching what FMS, nginx-rtmp, SRS and MediaMTX send.
@@ -75,11 +79,18 @@ begin at `1.0.0`.
 - One poll tick no longer runs the connection pipeline twice over every
   connection; only the sockets accepted in that tick get their first pass,
   and the relay-send budget is spent once per tick rather than once per pass.
+- The relay-source priority (injected media vs. local media first) rotates
+  once per poll tick. The second processing pass flipped it back, so the same
+  source always went first and injected media could starve local routes
+  under a tight send budget.
+- The C header declares `ModexType` and the deprecated `ModexType_Timestamp`
+  alias, matching the 0.15.0 Rust API.
 - The chunk writer rejects the reserved chunk-stream ids 0 and 1 instead of
   emitting a frame that desynchronizes the receiver.
 - The client's command wait is bounded by the receive budget and the
   deadline instead of an undocumented message count, so a peer that answers
-  with a few extra status messages is no longer reported as unreachable.
+  with a few extra status messages is no longer reported as unreachable. A
+  reply staged by the read that used up the budget is still delivered.
 - Enhanced (E-RTMP) audio metadata frames are marked as metadata, matching
   the enhanced-video and multitrack-audio paths.
 - An empty or undefined `colorInfo` value now resets the HDR metadata in
