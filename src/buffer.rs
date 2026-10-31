@@ -12,6 +12,10 @@ pub const BUFFER_INITIAL_SIZE: usize = 4096;
 /// Capacity retained after [`Buffer::reset`] so short-lived large messages
 /// cannot leave multi-megabyte `Vec` allocations pinned for the connection.
 pub const BUFFER_RESET_CAPACITY: usize = BUFFER_INITIAL_SIZE;
+/// Capacity a receive buffer may keep between reads. It covers normal socket
+/// reads (64 KiB on the server, up to 256 KiB per client poll) plus a partial
+/// chunk, so only a buffer that grew for one large chunk is shrunk.
+pub const RECV_BUFFER_KEEP_CAPACITY: usize = 512 * 1024;
 /// Growth factor
 const BUFFER_GROW_FACTOR: usize = 2;
 
@@ -133,6 +137,18 @@ impl Buffer {
             self.data.truncate(BUFFER_RESET_CAPACITY);
             self.data.shrink_to_fit();
         }
+    }
+
+    /// Shrink an allocation that grew past `keep` bytes once most of it has
+    /// been read. Unread bytes move to the front and are kept, so this is safe
+    /// to call with a partial chunk still buffered.
+    pub fn release_excess(&mut self, keep: usize) {
+        if !self.owned || self.data.len() <= keep || self.available() > keep / 2 {
+            return;
+        }
+        self.compact();
+        self.data.truncate(self.size.max(BUFFER_INITIAL_SIZE));
+        self.data.shrink_to_fit();
     }
 
     /// Drain (skip) `len` bytes from the read position.
@@ -358,6 +374,36 @@ mod tests {
         buf.reset();
         assert_eq!(buf.available(), 0);
         assert!(buf.capacity() <= BUFFER_RESET_CAPACITY);
+    }
+
+    #[test]
+    fn release_excess_shrinks_a_mostly_read_buffer_and_keeps_unread_bytes() {
+        let mut buf = Buffer::new();
+        buf.write(&vec![7u8; 4 * 1024 * 1024]).unwrap();
+        buf.write(b"tail").unwrap();
+        buf.drain(4 * 1024 * 1024);
+        buf.release_excess(RECV_BUFFER_KEEP_CAPACITY);
+        assert_eq!(buf.peek(), b"tail");
+        assert!(buf.capacity() <= BUFFER_INITIAL_SIZE);
+        buf.write(b"more").unwrap();
+        assert_eq!(buf.peek(), b"tailmore");
+    }
+
+    #[test]
+    fn release_excess_leaves_small_or_still_full_buffers_alone() {
+        let mut small = Buffer::new();
+        small.write(&vec![0u8; 100 * 1024]).unwrap();
+        small.drain(100 * 1024);
+        let cap = small.capacity();
+        small.release_excess(RECV_BUFFER_KEEP_CAPACITY);
+        assert_eq!(small.capacity(), cap);
+
+        let mut full = Buffer::new();
+        full.write(&vec![0u8; 2 * 1024 * 1024]).unwrap();
+        let cap = full.capacity();
+        full.release_excess(RECV_BUFFER_KEEP_CAPACITY);
+        assert_eq!(full.capacity(), cap);
+        assert_eq!(full.available(), 2 * 1024 * 1024);
     }
 
     #[test]

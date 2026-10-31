@@ -43,7 +43,8 @@ begin at `1.0.0`.
   info object, matching what FMS, nginx-rtmp, SRS and MediaMTX send.
 - A peer SetChunkSize above 65536 is accepted (RTMP allows up to
   0x7FFFFFFF; sizes beyond the 0xFFFFFF max message length behave the same).
-  It used to close the connection. Sizes below 128 are still refused.
+  It used to close the connection. Sizes below 128 are still refused. The
+  receive buffer gives back the memory of a large chunk once it is read.
 - A fmt=1 chunk header on a chunk stream id the peer has not used yet opens
   that stream with message stream id 0 instead of closing the connection.
   fmt=2/3 on an unknown chunk stream id are still rejected.
