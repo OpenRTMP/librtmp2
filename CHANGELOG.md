@@ -28,7 +28,6 @@ begin at `1.0.0`.
   objectEncoding). Handshake flavour, every received command, peer
   SetChunkSize/WindowAckSize, `_error` replies and error `onStatus` are
   logged at DEBUG/WARN. Media paths do not log.
-- `ConnectInfo::object_encoding` exposes the client's `objectEncoding`.
 
 ### Changed
 - The play interop CI test runs the librtmp2 client against MediaMTX v1.21.3
