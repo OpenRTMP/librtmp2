@@ -13,6 +13,8 @@ begin at `1.0.0`.
 
 ## [Unreleased]
 
+## [0.16.0] — 2026-11-01
+
 ### Added
 - The server answers the Adobe digest ("complex") handshake. A C1 that carries
   a valid Flash Player digest now gets a digest S1 and a signed S2, as from
@@ -1198,6 +1200,7 @@ and others.
 - Protocol mapping documents for legacy, E-RTMP v1, and E-RTMP v2
 - `CONTRIBUTING.md` guidelines
 
+[0.16.0]: https://github.com/OpenRTMP/librtmp2/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/OpenRTMP/librtmp2/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/OpenRTMP/librtmp2/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/OpenRTMP/librtmp2/compare/v0.12.0...v0.13.0
