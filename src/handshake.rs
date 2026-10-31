@@ -104,10 +104,100 @@ fn get_time() -> u32 {
         .as_secs() as u32
 }
 
+/* ── Adobe digest ("complex") handshake ── */
+
+/// Size of the HMAC-SHA256 digest embedded in C1/S1/S2.
+const DIGEST_LEN: usize = 32;
+
+/// Shared 32-byte tail of the Flash Player / FMS handshake keys.
+const HANDSHAKE_KEY_TAIL: [u8; 32] = [
+    0xF0, 0xEE, 0xC2, 0x4A, 0x80, 0x68, 0xBE, 0xE8, 0x2E, 0x00, 0xD0, 0xD1, 0x02, 0x9E, 0x7E, 0x57,
+    0x6E, 0xEC, 0x5D, 0x2D, 0x29, 0x80, 0x6F, 0xAB, 0x93, 0xB8, 0xE6, 0x36, 0xCF, 0xEB, 0x31, 0xAE,
+];
+/// Text prefix of the client (Flash Player) key; C1's digest is keyed with it alone.
+const FP_KEY_TEXT: &[u8] = b"Genuine Adobe Flash Player 001";
+/// Text prefix of the server (FMS) key; S1's digest is keyed with it alone.
+const FMS_KEY_TEXT: &[u8] = b"Genuine Adobe Flash Media Server 001";
+
+/// Version field the server advertises in a digest S1 (any non-zero value
+/// tells the client the server speaks the digest handshake).
+const SERVER_DIGEST_VERSION: [u8; 4] = [0x04, 0x05, 0x00, 0x01];
+
+/// The digest block offsets of the two C1/S1 layouts: schema 0 puts the key
+/// block first (digest block at 772), schema 1 the digest block first (at 8).
+const DIGEST_BLOCK_BASES: [usize; 2] = [772, 8];
+
+/// How the server answered a client's C1.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HandshakeMode {
+    /// Plain RTMP handshake: S1 is random, S2 echoes C1.
+    Simple,
+    /// C1 advertised a Flash version but carried no valid digest; answered
+    /// with the plain handshake.
+    SimpleFallback,
+    /// Adobe digest handshake; the value is the digest block base (772 or 8).
+    Digest(usize),
+}
+
 /// True when C1 advertises the Adobe digest/complex handshake schema.
-#[allow(dead_code)]
 fn c1_requests_complex_handshake(c1: &[u8]) -> bool {
     c1.len() >= HANDSHAKE_SIZE && (c1[4] != 0 || c1[5] != 0 || c1[6] != 0 || c1[7] != 0)
+}
+
+/// Offset of the 32-byte digest inside a 1536-byte C1/S1 whose digest block
+/// starts at `base`: the first four bytes of the block pick the position.
+fn digest_offset(buf: &[u8], base: usize) -> usize {
+    let sum: usize = buf[base..base + 4].iter().map(|&b| b as usize).sum();
+    base + 4 + sum % 728
+}
+
+/// HMAC-SHA256 over `buf` with the 32 bytes at `offset` left out.
+fn digest_without(buf: &[u8], offset: usize, key: &[u8]) -> [u8; DIGEST_LEN] {
+    crate::sha256::hmac_sha256(key, &[&buf[..offset], &buf[offset + DIGEST_LEN..]])
+}
+
+/// Find a valid client digest in C1. Returns the digest block base and the
+/// digest itself.
+fn find_c1_digest(c1: &[u8]) -> Option<(usize, [u8; DIGEST_LEN])> {
+    DIGEST_BLOCK_BASES.into_iter().find_map(|base| {
+        let off = digest_offset(c1, base);
+        let expected = digest_without(c1, off, FP_KEY_TEXT);
+        let mut found = [0u8; DIGEST_LEN];
+        found.copy_from_slice(&c1[off..off + DIGEST_LEN]);
+        (expected == found).then_some((base, found))
+    })
+}
+
+/// Full FMS key (text + shared tail), used to derive the S2 signing key.
+fn fms_full_key() -> [u8; 68] {
+    let mut key = [0u8; 68];
+    key[..FMS_KEY_TEXT.len()].copy_from_slice(FMS_KEY_TEXT);
+    key[FMS_KEY_TEXT.len()..].copy_from_slice(&HANDSHAKE_KEY_TAIL);
+    key
+}
+
+/// Build the digest S1 and S2 answering a C1 whose digest block sits at
+/// `base` and whose digest is `c1_digest`.
+fn build_digest_s1s2(
+    base: usize,
+    c1_digest: &[u8; DIGEST_LEN],
+    server_time: u32,
+) -> (Vec<u8>, Vec<u8>) {
+    let mut s1 = vec![0u8; HANDSHAKE_SIZE];
+    fill_random(&mut s1[8..]);
+    s1[..4].copy_from_slice(&server_time.to_be_bytes());
+    s1[4..8].copy_from_slice(&SERVER_DIGEST_VERSION);
+    let off = digest_offset(&s1, base);
+    let digest = digest_without(&s1, off, FMS_KEY_TEXT);
+    s1[off..off + DIGEST_LEN].copy_from_slice(&digest);
+
+    let mut s2 = vec![0u8; HANDSHAKE_SIZE];
+    fill_random(&mut s2);
+    let sign_key = crate::sha256::hmac_sha256(&fms_full_key(), &[c1_digest]);
+    let sig_at = HANDSHAKE_SIZE - DIGEST_LEN;
+    let signature = crate::sha256::hmac_sha256(&sign_key, &[&s2[..sig_at]]);
+    s2[sig_at..].copy_from_slice(&signature);
+    (s1, s2)
 }
 
 /* ── Server-side handshake ── */
@@ -135,6 +225,15 @@ pub fn server_read_c0(hs: &mut Handshake, buf: &mut Buffer) -> Result<()> {
 
 /// Read C1 (1536-byte handshake) from the client and queue S1+S2.
 pub fn server_read_c1(hs: &mut Handshake, buf: &mut Buffer) -> Result<()> {
+    server_read_c1_mode(hs, buf).map(|_| ())
+}
+
+/// [`server_read_c1`], also reporting which handshake flavour was answered.
+///
+/// A C1 that carries a valid Adobe digest gets a digest S1/S2 (some hardware
+/// encoders verify the server's digest and hang up on a plain S1); any other
+/// C1 gets the plain handshake.
+pub fn server_read_c1_mode(hs: &mut Handshake, buf: &mut Buffer) -> Result<HandshakeMode> {
     if buf.available() < HANDSHAKE_SIZE {
         return Err(ErrorCode::Io);
     }
@@ -143,25 +242,38 @@ pub fn server_read_c1(hs: &mut Handshake, buf: &mut Buffer) -> Result<()> {
     buf.read(&mut c1).map_err(|_| ErrorCode::Io)?;
 
     hs.peer_time = ntoh32(&c1[..4]);
-
-    // Build S1
-    let mut s1 = vec![0u8; HANDSHAKE_SIZE];
     let server_time = get_time();
-    s1[..4].copy_from_slice(&server_time.to_be_bytes());
-    // bytes 4-7 = 0
-    fill_random(&mut s1[8..]);
 
-    // S2 echoes C1's time1 (bytes 0..4) and random; time2 (bytes 4..8) is the
-    // server's own time, per RTMP spec 5.2.4.
-    let mut s2 = c1.clone();
-    s2[4..8].copy_from_slice(&server_time.to_be_bytes());
+    let complex = c1_requests_complex_handshake(&c1);
+    let (s1, s2, mode) = match complex.then(|| find_c1_digest(&c1)).flatten() {
+        Some((base, c1_digest)) => {
+            let (s1, s2) = build_digest_s1s2(base, &c1_digest, server_time);
+            (s1, s2, HandshakeMode::Digest(base))
+        }
+        None => {
+            let mut s1 = vec![0u8; HANDSHAKE_SIZE];
+            s1[..4].copy_from_slice(&server_time.to_be_bytes());
+            // bytes 4-7 = 0
+            fill_random(&mut s1[8..]);
+            // S2 echoes C1's time1 (bytes 0..4) and random; time2 (bytes 4..8)
+            // is the server's own time, per RTMP spec 5.2.4.
+            let mut s2 = c1;
+            s2[4..8].copy_from_slice(&server_time.to_be_bytes());
+            let mode = if complex {
+                HandshakeMode::SimpleFallback
+            } else {
+                HandshakeMode::Simple
+            };
+            (s1, s2, mode)
+        }
+    };
 
     hs.out.reset();
     hs.out.write(&s1).map_err(|_| ErrorCode::Internal)?;
     hs.out.write(&s2).map_err(|_| ErrorCode::Internal)?;
 
     hs.state = HandshakeState::ServerWaitC2;
-    Ok(())
+    Ok(mode)
 }
 
 /// Read C2 from the client, completing the handshake.
@@ -360,7 +472,7 @@ mod tests {
     }
 
     #[test]
-    fn complex_c1_still_gets_simple_s1s2_response() {
+    fn complex_c1_without_valid_digest_falls_back_to_simple() {
         let mut hs = Handshake::default();
         server_init(&mut hs);
         let mut c1 = vec![0u8; HANDSHAKE_SIZE];
@@ -368,9 +480,72 @@ mod tests {
         c1[4..8].copy_from_slice(&1u32.to_be_bytes());
         let mut buf = Buffer::new();
         buf.write(&c1).unwrap();
-        server_read_c1(&mut hs, &mut buf).unwrap();
+        let mode = server_read_c1_mode(&mut hs, &mut buf).unwrap();
+        assert_eq!(mode, HandshakeMode::SimpleFallback);
         assert_eq!(hs.state, HandshakeState::ServerWaitC2);
-        assert!(hs.out.available() >= HANDSHAKE_SIZE * 2);
+        let out = hs.out.peek();
+        assert_eq!(out.len(), HANDSHAKE_SIZE * 2);
+        assert_eq!(&out[HANDSHAKE_SIZE + 8..], &c1[8..], "S2 echoes C1");
+    }
+
+    /// Build a C1 the way a Flash-style client does: version set, digest
+    /// keyed with the Flash Player key at the schema's offset.
+    fn digest_c1(base: usize) -> Vec<u8> {
+        let mut c1 = vec![0u8; HANDSHAKE_SIZE];
+        fill_random(&mut c1);
+        c1[..4].copy_from_slice(&0u32.to_be_bytes());
+        c1[4..8].copy_from_slice(&[0x80, 0x00, 0x07, 0x02]);
+        let off = digest_offset(&c1, base);
+        let d = digest_without(&c1, off, FP_KEY_TEXT);
+        c1[off..off + DIGEST_LEN].copy_from_slice(&d);
+        c1
+    }
+
+    #[test]
+    fn digest_c1_gets_verifiable_digest_s1_and_signed_s2() {
+        for base in DIGEST_BLOCK_BASES {
+            let c1 = digest_c1(base);
+            let (_, c1_digest) = find_c1_digest(&c1).expect("client digest found");
+            let mut hs = Handshake::default();
+            server_init(&mut hs);
+            let mut buf = Buffer::new();
+            buf.write(&c1).unwrap();
+            let mode = server_read_c1_mode(&mut hs, &mut buf).unwrap();
+            assert_eq!(mode, HandshakeMode::Digest(base));
+            let out = hs.out.peek().to_vec();
+            let (s1, s2) = out.split_at(HANDSHAKE_SIZE);
+
+            // Client-side S1 check: digest keyed with the FMS key text.
+            assert_ne!(&s1[4..8], &[0, 0, 0, 0]);
+            let off = digest_offset(s1, base);
+            assert_eq!(
+                &s1[off..off + DIGEST_LEN],
+                &digest_without(s1, off, FMS_KEY_TEXT)
+            );
+
+            // Client-side S2 check: last 32 bytes signed with a key derived
+            // from the client's own C1 digest.
+            let key = crate::sha256::hmac_sha256(&fms_full_key(), &[&c1_digest]);
+            let sig_at = HANDSHAKE_SIZE - DIGEST_LEN;
+            assert_eq!(
+                &s2[sig_at..],
+                &crate::sha256::hmac_sha256(&key, &[&s2[..sig_at]])
+            );
+        }
+    }
+
+    #[test]
+    fn digest_handshake_is_not_used_for_zero_version_c1() {
+        let mut c1 = digest_c1(8);
+        c1[4..8].copy_from_slice(&[0, 0, 0, 0]);
+        let mut hs = Handshake::default();
+        server_init(&mut hs);
+        let mut buf = Buffer::new();
+        buf.write(&c1).unwrap();
+        assert_eq!(
+            server_read_c1_mode(&mut hs, &mut buf).unwrap(),
+            HandshakeMode::Simple
+        );
     }
 
     #[test]

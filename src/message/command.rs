@@ -382,6 +382,7 @@ pub fn read_connect(buf: &mut Buffer, info: &mut ConnectInfo) -> Result<()> {
                 match key_str {
                     "audioCodecs" => info.audio_codecs = value as i32,
                     "videoCodecs" => info.video_codecs = value as i32,
+                    "objectEncoding" => info.object_encoding = value,
                     _ => {}
                 }
             }

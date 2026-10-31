@@ -29,8 +29,14 @@ pub const UCTRL_PING_RESPONSE: u16 = 0x07;
 /// message reassembly (a 4 MiB message becomes millions of chunk iterations).
 const MIN_CHUNK_SIZE: u32 = 128;
 const MAX_CHUNK_SIZE: u32 = 0xFFFFFF;
-/// Upper bound for peer-requested inbound chunk sizes (memory churn protection).
+/// Upper bound for the chunk size a server announces to its peers.
 pub const MAX_INBOUND_CHUNK_SIZE: u32 = 65536;
+/// Largest chunk size that changes chunk parsing. RTMP allows peers to
+/// announce up to 0x7FFFFFFF, but no message is longer than 0xFFFFFF bytes, so
+/// any larger chunk size reads every message in a single chunk exactly like
+/// this one does. Chunk size only bounds how much of an already
+/// length-checked message is read per chunk; it sizes no buffer.
+pub const MAX_PEER_CHUNK_SIZE: u32 = 0x00FF_FFFF;
 /// Reject peer WindowAckSize values below this to prevent ACK-per-byte amplification.
 pub const MIN_WINDOW_ACK_SIZE: u32 = 1024;
 
@@ -147,10 +153,12 @@ pub fn read_set_chunk_size(data: &[u8]) -> Result<u32> {
         return Err(ErrorCode::Protocol);
     }
     let cs = ntoh32(data);
-    if cs < MIN_CHUNK_SIZE || cs > MAX_INBOUND_CHUNK_SIZE {
+    // The top bit is reserved and must be zero. Sizes under 128 are refused:
+    // they only multiply per-chunk work, and no real encoder sends them.
+    if cs < MIN_CHUNK_SIZE || cs & 0x8000_0000 != 0 {
         return Err(ErrorCode::Protocol);
     }
-    Ok(cs)
+    Ok(cs.min(MAX_PEER_CHUNK_SIZE))
 }
 
 /// Read an AbortMessage.
@@ -222,6 +230,16 @@ mod tests {
         assert!(read_set_chunk_size(&1u32.to_be_bytes()).is_err());
         assert_eq!(read_set_chunk_size(&128u32.to_be_bytes()).unwrap(), 128);
         assert!(read_set_chunk_size(&[0xFF, 0xFF, 0xFF, 0xFF]).is_err());
+        // Spec-legal sizes above 64 KiB are accepted (some encoders announce
+        // huge sizes); anything past the max message length is equivalent.
+        assert_eq!(
+            read_set_chunk_size(&1_000_000u32.to_be_bytes()).unwrap(),
+            1_000_000
+        );
+        assert_eq!(
+            read_set_chunk_size(&0x7FFF_FFFFu32.to_be_bytes()).unwrap(),
+            MAX_PEER_CHUNK_SIZE
+        );
         assert_eq!(
             read_set_chunk_size(&MAX_INBOUND_CHUNK_SIZE.to_be_bytes()).unwrap(),
             MAX_INBOUND_CHUNK_SIZE

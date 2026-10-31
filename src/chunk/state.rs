@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 
 use crate::buffer::Buffer;
-use crate::message::control::MAX_INBOUND_CHUNK_SIZE;
+use crate::message::control::MAX_PEER_CHUNK_SIZE;
 use crate::types::ErrorCode;
 use crate::types::Result;
 
@@ -305,7 +305,7 @@ impl ChunkRegistry {
     /// Set chunk size for all streams. Values outside the RTMP-valid inbound
     /// range are ignored (peers must negotiate via `read_set_chunk_size`).
     pub fn set_all_chunk_size(&mut self, chunk_size: u32) {
-        if chunk_size < DEFAULT_CHUNK_SIZE || chunk_size > MAX_INBOUND_CHUNK_SIZE {
+        if chunk_size < DEFAULT_CHUNK_SIZE || chunk_size > MAX_PEER_CHUNK_SIZE {
             return;
         }
         self.default_chunk_size = chunk_size;
@@ -376,7 +376,7 @@ mod tests {
         let mut reg = ChunkRegistry::new();
         reg.set_all_chunk_size(1);
         assert_eq!(reg.default_chunk_size, DEFAULT_CHUNK_SIZE);
-        reg.set_all_chunk_size(MAX_INBOUND_CHUNK_SIZE + 1);
+        reg.set_all_chunk_size(MAX_PEER_CHUNK_SIZE + 1);
         assert_eq!(reg.default_chunk_size, DEFAULT_CHUNK_SIZE);
         reg.set_all_chunk_size(256);
         assert_eq!(reg.default_chunk_size, 256);

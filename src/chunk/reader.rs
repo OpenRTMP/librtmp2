@@ -82,9 +82,11 @@ pub fn chunk_read(
         return Ok(0);
     }
 
-    // Compressed headers (fmt 1/2/3) inherit fields from prior stream state.
-    // A compressed chunk on an unknown CSID is a protocol error.
-    if fmt != 0 && reg.get(csid).is_none() {
+    // Compressed headers inherit fields from prior stream state. fmt=1 only
+    // lacks the message stream id, so on an unknown CSID it opens the stream
+    // with id 0 -- some encoders start a CSID that way, and nginx-rtmp/SRS
+    // accept it. fmt=2/3 lack the message length and cannot start a CSID.
+    if fmt >= 2 && reg.get(csid).is_none() {
         return Err(ErrorCode::Chunk);
     }
 
@@ -625,6 +627,40 @@ mod tests {
             out_msg.timestamp, 1099,
             "fmt=3 new-message start must repeat the previous delta"
         );
+    }
+
+    #[test]
+    fn fmt1_on_unknown_csid_opens_stream_with_message_stream_id_zero() {
+        let mut reg = ChunkRegistry::new();
+        // basic fmt=1/csid=3, ts delta=0, length=4, type=0x14 (AMF0 command)
+        let mut wire = Buffer::new();
+        wire.write(&[1 << 6 | 3, 0, 0, 0, 0, 0, 4, 0x14]).unwrap();
+        wire.write(b"conn").unwrap();
+        let mut out_msg = ChunkMessage::default();
+        let mut ptr = std::ptr::null();
+        let mut len = 0;
+        assert_eq!(
+            chunk_read(&mut wire, &mut reg, None, &mut out_msg, &mut ptr, &mut len).unwrap(),
+            1
+        );
+        assert!(out_msg.is_complete);
+        assert_eq!(out_msg.msg_type_id, 0x14);
+        assert_eq!(out_msg.msg_stream_id, 0);
+        assert_eq!(wire.available(), 0);
+    }
+
+    #[test]
+    fn fmt2_and_fmt3_on_unknown_csid_are_rejected() {
+        for fmt in [2u8, 3] {
+            let mut reg = ChunkRegistry::new();
+            let mut wire = Buffer::new();
+            wire.write(&[fmt << 6 | 3, 0, 0, 0]).unwrap();
+            let mut out_msg = ChunkMessage::default();
+            let mut ptr = std::ptr::null();
+            let mut len = 0;
+            let result = chunk_read(&mut wire, &mut reg, None, &mut out_msg, &mut ptr, &mut len);
+            assert!(matches!(result, Err(ErrorCode::Chunk)), "fmt={fmt}");
+        }
     }
 
     #[test]
