@@ -789,6 +789,10 @@ impl Client {
         }
 
         self.drain_ready_messages(&mut messages_processed)?;
+        // A large peer chunk size can grow recv_buffer to a whole message;
+        // give that memory back once it is read.
+        self.recv_buffer
+            .release_excess(crate::buffer::RECV_BUFFER_KEEP_CAPACITY);
 
         self.maybe_send_window_ack()?;
         self.try_flush_send_buffer()?;

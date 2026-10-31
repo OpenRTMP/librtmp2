@@ -1592,6 +1592,10 @@ impl Conn {
                 break;
             }
         }
+        // A peer chunk size up to 16 MiB lets one chunk grow this buffer to
+        // the full message size; give that memory back once it is read.
+        self.recv_buffer
+            .release_excess(crate::buffer::RECV_BUFFER_KEEP_CAPACITY);
         if self.window_ack_size > 0
             && self.bytes_received.saturating_sub(self.bytes_at_last_ack)
                 >= self.window_ack_size as u64
@@ -2744,7 +2748,7 @@ impl Conn {
             .unwrap_or("")
             .trim_end_matches('\0');
         crate::log_debug!(
-            "{}: command '{name}' in state {:?}",
+            "{}: command {name:?} in state {:?}",
             self.log_peer(),
             self.state
         );
@@ -2805,7 +2809,7 @@ impl Conn {
                 };
                 self.connect_object_encoding = object_encoding;
                 crate::log_info!(
-                    "{}: connect app='{}' tcUrl='{}' flashVer='{}' objectEncoding={} e-rtmp={}",
+                    "{}: connect app={:?} tcUrl={:?} flashVer={:?} objectEncoding={} e-rtmp={}",
                     self.log_peer(),
                     redact_url_query(&self.app),
                     redact_url_query(&cstr_lossy(&info.tc_url)),
