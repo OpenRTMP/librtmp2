@@ -390,6 +390,7 @@ impl StagedRelayMedia {
                 continue;
             }
             if conn.send_staged_media(&parts).is_err() {
+                conn.set_close_reason(crate::log::LogLevel::Info, "relay send failed (peer gone)");
                 Server::stop_relay_player(conn);
                 closed.push(conn_index);
             }
@@ -1417,6 +1418,10 @@ impl Server {
             // peer still sees a protocol answer for its request.
             let _ = conn.flush();
             if reaped {
+                conn.set_close_reason(
+                    crate::log::LogLevel::Warn,
+                    "publish/play authorization timed out",
+                );
                 conn.disconnect_transport();
                 closed.push(i);
             }
@@ -1612,6 +1617,7 @@ impl Server {
         conn.publish_routes = Some(PublishRouteRegistry::new(Arc::clone(
             &self.active_publish_routes,
         )));
+        crate::log_debug!("{}: accepted", conn.log_peer());
         self.connections.push(conn);
         true
     }
@@ -1853,6 +1859,10 @@ impl Server {
         for (i, conn) in self.connections.iter_mut().enumerate() {
             let mut conn_closed_this_iteration = false;
             if conn.session_setup_timed_out() {
+                conn.set_close_reason(
+                    crate::log::LogLevel::Warn,
+                    "session setup timeout: no publish/play started, or a publisher sent no media in time",
+                );
                 conn.disconnect_transport();
                 closed.push(i);
                 conn_closed_this_iteration = true;
@@ -1863,6 +1873,7 @@ impl Server {
             // reappears in a caller's readable set -- its fd is already gone,
             // so an epoll-based caller has nothing left to report ready on.
             if !conn_closed_this_iteration && conn.transport.is_none() {
+                conn.set_close_reason(crate::log::LogLevel::Info, "transport already closed");
                 closed.push(i);
                 conn_closed_this_iteration = true;
             }
@@ -1907,6 +1918,10 @@ impl Server {
                 let failed = Self::replay_init_frames_for_conn(conn, &self.stream_cache)
                     || (!conn.needs_init_frames && conn.flush().is_err());
                 if failed {
+                    conn.set_close_reason(
+                        crate::log::LogLevel::Info,
+                        "sending init frames to player failed",
+                    );
                     closed.push(i);
                     conn_closed_this_iteration = true;
                 }
@@ -1947,10 +1962,22 @@ impl Server {
                 }
                 bytes_drained += chunk_len;
             } else if n == 0 {
+                // A peer hanging up before it ever published or played is
+                // the interesting case when debugging client interop.
+                let level = if conn.state < ConnState::StreamCreated {
+                    crate::log::LogLevel::Info
+                } else {
+                    crate::log::LogLevel::Debug
+                };
+                conn.set_close_reason(level, "peer closed the connection");
                 return true;
             } else if again != 0 {
                 return false;
             } else {
+                conn.set_close_reason(
+                    crate::log::LogLevel::Info,
+                    format!("socket receive error: {}", std::io::Error::last_os_error()),
+                );
                 return true;
             }
         }
@@ -2245,9 +2272,19 @@ impl Server {
                     PlayerOutcome::Delivered => delivered += 1,
                     PlayerOutcome::DeliveryFailed => {
                         delivered += 1;
+                        conn.set_close_reason(
+                            crate::log::LogLevel::Info,
+                            "relay delivery failed (peer gone)",
+                        );
                         closed.push(i);
                     }
-                    PlayerOutcome::Dropped => closed.push(i),
+                    PlayerOutcome::Dropped => {
+                        conn.set_close_reason(
+                            crate::log::LogLevel::Warn,
+                            "player dropped: send queue congested past the timeout",
+                        );
+                        closed.push(i);
+                    }
                 }
             }
             staged.release_unstaged_bodies();
@@ -2469,14 +2506,17 @@ impl Server {
     fn flush_connections(&mut self, closed: &mut Vec<usize>) {
         for (i, conn) in self.connections.iter_mut().enumerate() {
             if conn.transport.is_none() {
+                conn.set_close_reason(crate::log::LogLevel::Info, "transport already closed");
                 closed.push(i);
                 continue;
             }
             if conn.maybe_send_ping().is_err() {
+                conn.set_close_reason(crate::log::LogLevel::Info, "ping send failed (peer gone)");
                 closed.push(i);
                 continue;
             }
             if conn.flush().is_err() {
+                conn.set_close_reason(crate::log::LogLevel::Info, "send failed (peer gone)");
                 closed.push(i);
             }
         }
@@ -2519,6 +2559,7 @@ impl Server {
                     }
                 }
             }
+            self.connections[i].log_close();
             self.connections.remove(i);
         }
     }

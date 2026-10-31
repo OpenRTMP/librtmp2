@@ -23,6 +23,7 @@ pub mod message;
 pub mod net;
 pub mod server;
 pub mod session;
+pub(crate) mod sha256;
 pub mod transport;
 pub mod types;
 

@@ -1518,6 +1518,7 @@ impl Client {
             // abandoned in favour of Timeout. Mirrors poll()'s
             // drain-staged-first ordering.
             let mut msg = ChunkMessage::default();
+            let staged_before = self.recv_buffer.available();
             match chunk_read_owned(&mut self.recv_buffer, &mut self.chunk_reg, &mut msg) {
                 Ok((1, payload)) if msg.is_complete => {
                     if self.consume_protocol_control_message(&msg, &payload)? {
@@ -1526,6 +1527,10 @@ impl Client {
                     }
                     return Ok((msg, payload));
                 }
+                // One chunk of a longer message was consumed: the rest of it
+                // may already be staged, so keep parsing before blocking on
+                // the socket for bytes that have already arrived.
+                Ok(_) if self.recv_buffer.available() < staged_before => continue,
                 Ok(_) => {}
                 Err(_) => return Err(ErrorCode::Chunk),
             }

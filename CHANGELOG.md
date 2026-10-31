@@ -13,11 +13,42 @@ begin at `1.0.0`.
 
 ## [Unreleased]
 
+### Added
+- The server answers the Adobe digest ("complex") handshake. A C1 that carries
+  a valid Flash Player digest now gets a digest S1 and a signed S2, as from
+  FMS, nginx-rtmp and SRS; any other C1 still gets the plain handshake.
+  Hardware encoders that verify the server's digest (reported for the DJI
+  Osmo Pocket 3) hung up right after the handshake. SHA-256/HMAC are
+  implemented in-crate, so `--no-default-features` stays dependency-free.
+- Connection logging. Every server connection logs one line when it is torn
+  down, with its state, lifetime and the close reason (peer hang-up,
+  malformed chunk header with fmt/csid, unsupported C0 byte, invalid
+  SetChunkSize, setup/auth timeout, congested player, send failure).
+  `connect` is logged at INFO (app, tcUrl with the query redacted, flashVer,
+  objectEncoding). Handshake flavour, every received command, peer
+  SetChunkSize/WindowAckSize, `_error` replies and error `onStatus` are
+  logged at DEBUG/WARN. Media paths do not log.
+- `ConnectInfo::object_encoding` exposes the client's `objectEncoding`.
+
 ### Changed
 - The play interop CI test runs the librtmp2 client against MediaMTX v1.21.3
   (was v1.9.3).
+- The connect `_result` carries server properties (`fmsVer`, `capabilities`,
+  `mode`) instead of `null` and echoes the client's `objectEncoding` in the
+  info object, matching what FMS, nginx-rtmp, SRS and MediaMTX send.
+- A peer SetChunkSize above 65536 is accepted (RTMP allows up to
+  0x7FFFFFFF; sizes beyond the 0xFFFFFF max message length behave the same).
+  It used to close the connection. Sizes below 128 are still refused.
+- A fmt=1 chunk header on a chunk stream id the peer has not used yet opens
+  that stream with message stream id 0 instead of closing the connection.
+  fmt=2/3 on an unknown chunk stream id are still rejected.
 
 ### Fixed
+- The client no longer stalls on a command reply that spans several chunks.
+  `recv_message` parsed one chunk and then blocked on the socket even when
+  the rest of the message was already buffered, so e.g. a connect `_result`
+  larger than the peer's chunk size only completed once more bytes arrived
+  (or the command deadline hit).
 - An E-RTMP v2 multitrack `ManyTracks` container holding a zero-length
   sub-track — e.g. the spec-legal empty Opus sequence-start payload — is no
   longer rejected as malformed. The whole container used to fail parsing, so

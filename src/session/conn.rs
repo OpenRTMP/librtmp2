@@ -56,6 +56,10 @@ const MAX_RECV_BUFFER_BYTES: usize = 2 * DEFAULT_MAX_MSG_LENGTH as usize;
 const MAX_PENDING_CACHE_EVICTIONS: usize = 64;
 
 const SERVER_WINDOW_ACK_SIZE: u32 = 2_500_000;
+/// `fmsVer` advertised in the connect `_result` server properties.
+const CONNECT_FMS_VERSION: &str = "FMS/3,0,1,123";
+/// `capabilities` advertised in the connect `_result` server properties.
+const CONNECT_CAPABILITIES: f64 = 31.0;
 const SERVER_PEER_BANDWIDTH: u32 = 2_500_000;
 const PEER_BANDWIDTH_DYNAMIC: u8 = 2;
 const PING_INTERVAL: Duration = Duration::from_secs(5);
@@ -426,6 +430,13 @@ pub struct Conn {
     pub negotiated_caps: NegotiatedCaps,
     /// Player-side buffer length from SetBufferLength user control (ms).
     pub buffer_length_ms: u32,
+    /// `objectEncoding` from the client's connect, echoed in the `_result`.
+    connect_object_encoding: f64,
+    /// When this connection object was created (for close logging).
+    created_at: Instant,
+    /// Why the connection is being torn down; the first reason recorded wins
+    /// and is logged once when the server reaps the connection.
+    pub(crate) close_reason: Option<(crate::log::LogLevel, String)>,
 }
 
 impl Conn {
@@ -517,6 +528,9 @@ impl Conn {
             budget_exhausted: false,
             session_setup_started: Instant::now(),
             negotiated_caps: NegotiatedCaps::default(),
+            connect_object_encoding: 0.0,
+            created_at: Instant::now(),
+            close_reason: None,
             buffer_length_ms: 3000,
         }
     }
@@ -1467,6 +1481,43 @@ impl Conn {
         Ok(())
     }
 
+    /// `conn <id> [<addr>]` prefix for log lines about this connection.
+    pub(crate) fn log_peer(&self) -> String {
+        format!("RTMP conn {} [{}]", self.conn_id, self.remote_addr)
+    }
+
+    /// Record why this connection is closing. The first reason wins, so the
+    /// root cause is not overwritten by follow-up failures during teardown.
+    pub(crate) fn set_close_reason(
+        &mut self,
+        level: crate::log::LogLevel,
+        reason: impl Into<String>,
+    ) {
+        if self.close_reason.is_none() {
+            self.close_reason = Some((level, reason.into()));
+        }
+    }
+
+    /// Log the connection teardown once, with the recorded close reason.
+    pub(crate) fn log_close(&mut self) {
+        let (level, reason) = self
+            .close_reason
+            .take()
+            .unwrap_or((crate::log::LogLevel::Debug, "closed by server".to_string()));
+        crate::log::log(
+            level,
+            file!(),
+            line!(),
+            format_args!(
+                "{}: closed in state {:?} after {} ms: {}",
+                self.log_peer(),
+                self.state,
+                self.created_at.elapsed().as_millis(),
+                reason
+            ),
+        );
+    }
+
     pub fn get_fd(&self) -> crate::net::RawSocket {
         self.client_fd
     }
@@ -1475,6 +1526,13 @@ impl Conn {
         if !data.is_empty()
             && self.recv_buffer.available().saturating_add(data.len()) > MAX_RECV_BUFFER_BYTES
         {
+            self.set_close_reason(
+                crate::log::LogLevel::Warn,
+                format!(
+                    "receive buffer limit exceeded ({} bytes unprocessed)",
+                    self.recv_buffer.available()
+                ),
+            );
             return Err(ErrorCode::Protocol);
         }
         self.recv_buffer
@@ -1498,7 +1556,7 @@ impl Conn {
             let before = avail;
             let rc = self.process(&mut messages_budget);
             if rc < 0 {
-                return Err(match rc {
+                let err = match rc {
                     -1 => ErrorCode::Io,
                     -2 => ErrorCode::Timeout,
                     -3 => ErrorCode::Protocol,
@@ -1509,7 +1567,14 @@ impl Conn {
                     -8 => ErrorCode::Auth,
                     -9 => ErrorCode::Internal,
                     _ => ErrorCode::Internal,
-                });
+                };
+                // Specific failure sites record a more precise reason first;
+                // this is the catch-all.
+                self.set_close_reason(
+                    crate::log::LogLevel::Warn,
+                    format!("{} in state {:?}", err.as_str(), self.state),
+                );
+                return Err(err);
             }
             // Drive the no-progress guard from bytes consumed, not from `rc`:
             // `read_messages` always returns 1, so keying off `rc == 0` left
@@ -1554,13 +1619,27 @@ impl Conn {
         match self.handshake.state {
             HandshakeState::ServerWaitC0 => {
                 handshake::server_init(&mut self.handshake);
+                let c0 = self.recv_buffer.peek().first().copied();
                 match handshake::server_read_c0(&mut self.handshake, &mut self.recv_buffer) {
                     Ok(()) => {
                         self.state = ConnState::Handshake;
                         self.do_handshake_recurse()
                     }
                     Err(ErrorCode::Io) => 0,
-                    Err(e) => e as i32,
+                    Err(e) => {
+                        let c0 = c0.unwrap_or(0);
+                        let hint = match c0 {
+                            0x06 | 0x08 => " (RTMPE encrypted handshake, not supported)",
+                            0x16 => " (TLS ClientHello: RTMPS client on a plain RTMP port)",
+                            b'G' | b'P' | b'H' => " (HTTP request on the RTMP port)",
+                            _ => "",
+                        };
+                        self.set_close_reason(
+                            crate::log::LogLevel::Warn,
+                            format!("handshake: unsupported C0 version byte 0x{c0:02x}{hint}"),
+                        );
+                        e as i32
+                    }
                 }
             }
             HandshakeState::ServerWaitC1 => self.do_handshake_recurse(),
@@ -1568,6 +1647,7 @@ impl Conn {
                 match handshake::server_read_c2(&mut self.handshake, &mut self.recv_buffer) {
                     Ok(()) => {
                         self.state = ConnState::Connected;
+                        crate::log_debug!("{}: handshake complete", self.log_peer());
                         1
                     }
                     Err(ErrorCode::Io) => 0,
@@ -1583,8 +1663,30 @@ impl Conn {
     }
 
     fn do_handshake_recurse(&mut self) -> i32 {
-        match handshake::server_read_c1(&mut self.handshake, &mut self.recv_buffer) {
-            Ok(()) => {
+        let c1_version = self
+            .recv_buffer
+            .peek()
+            .get(4..8)
+            .map(|v| format!("{}.{}.{}.{}", v[0], v[1], v[2], v[3]))
+            .unwrap_or_default();
+        match handshake::server_read_c1_mode(&mut self.handshake, &mut self.recv_buffer) {
+            Ok(mode) => {
+                match mode {
+                    handshake::HandshakeMode::Simple => crate::log_debug!(
+                        "{}: plain handshake (C1 version {c1_version})",
+                        self.log_peer()
+                    ),
+                    handshake::HandshakeMode::Digest(base) => crate::log_debug!(
+                        "{}: digest handshake, schema {} (C1 version {c1_version})",
+                        self.log_peer(),
+                        if base == 8 { 1 } else { 0 }
+                    ),
+                    handshake::HandshakeMode::SimpleFallback => crate::log_info!(
+                        "{}: C1 advertises version {c1_version} but carries no valid digest; \
+                         answering with the plain handshake",
+                        self.log_peer()
+                    ),
+                }
                 if self.client_fd != crate::net::INVALID_SOCKET {
                     let s0 = [0x03u8];
                     if self.send_buffer.write(&s0).is_err() {
@@ -1614,6 +1716,7 @@ impl Conn {
                 break;
             }
             let before = self.recv_buffer.available();
+            let header_byte = self.recv_buffer.peek().first().copied();
             let mut msg = ChunkMessage::default();
             match chunk_read_owned(&mut self.recv_buffer, &mut self.chunk_reg, &mut msg) {
                 Ok((0, _)) => {
@@ -1625,6 +1728,16 @@ impl Conn {
                     if msg.is_complete {
                         processed += 1;
                         if let Err(e) = self.handle_message(&msg, &payload_owned, messages_budget) {
+                            self.set_close_reason(
+                                crate::log::LogLevel::Warn,
+                                format!(
+                                    "failed to handle message type 0x{:02x} ({} bytes) on stream {}: {}",
+                                    msg.msg_type_id,
+                                    payload_owned.len(),
+                                    msg.msg_stream_id,
+                                    e.as_str()
+                                ),
+                            );
                             return match e {
                                 ErrorCode::Auth => -8,
                                 // A local resource limit (e.g. the pending-relay
@@ -1655,8 +1768,26 @@ impl Conn {
                         break;
                     }
                 }
-                Err(ErrorCode::Chunk) => return -5,
-                Err(_) => return -1,
+                Err(ErrorCode::Chunk) => {
+                    let b = header_byte.unwrap_or(0);
+                    self.set_close_reason(
+                        crate::log::LogLevel::Warn,
+                        format!(
+                            "malformed or unsupported chunk header (fmt {}, csid {}) in state {:?}",
+                            b >> 6,
+                            b & 0x3f,
+                            self.state
+                        ),
+                    );
+                    return -5;
+                }
+                Err(e) => {
+                    self.set_close_reason(
+                        crate::log::LogLevel::Warn,
+                        format!("chunk read failed: {}", e.as_str()),
+                    );
+                    return -1;
+                }
             }
         }
         1
@@ -1989,7 +2120,18 @@ impl Conn {
     fn handle_control(&mut self, msg_type_id: u8, payload: &[u8]) -> Result<()> {
         match msg_type_id {
             msg_dispatch::RTMP_MSG_SET_CHUNK_SIZE => {
-                let cs = control::read_set_chunk_size(payload)?;
+                let cs = match control::read_set_chunk_size(payload) {
+                    Ok(cs) => cs,
+                    Err(e) => {
+                        let raw = payload.get(..4).map(crate::bytes::ntoh32);
+                        self.set_close_reason(
+                            crate::log::LogLevel::Warn,
+                            format!("invalid SetChunkSize {raw:?} from peer"),
+                        );
+                        return Err(e);
+                    }
+                };
+                crate::log_debug!("{}: peer SetChunkSize {cs}", self.log_peer());
                 self.chunk_reg.set_all_chunk_size(cs);
             }
             msg_dispatch::RTMP_MSG_ABORT_MESSAGE => {
@@ -2002,6 +2144,7 @@ impl Conn {
             msg_dispatch::RTMP_MSG_WINDOW_ACK_SIZE => {
                 if payload.len() >= 4 {
                     if let Ok(win) = control::read_window_ack_size(payload) {
+                        crate::log_debug!("{}: peer WindowAckSize {win}", self.log_peer());
                         self.window_ack_size = win;
                     }
                 }
@@ -2600,6 +2743,11 @@ impl Conn {
         let name = std::str::from_utf8(&name_buf)
             .unwrap_or("")
             .trim_end_matches('\0');
+        crate::log_debug!(
+            "{}: command '{name}' in state {:?}",
+            self.log_peer(),
+            self.state
+        );
         match name {
             "connect" => {
                 // A connection may only negotiate its app namespace once. Without
@@ -2654,6 +2802,16 @@ impl Conn {
                 } else {
                     None
                 };
+                self.connect_object_encoding = info.object_encoding;
+                crate::log_info!(
+                    "{}: connect app='{}' tcUrl='{}' flashVer='{}' objectEncoding={} e-rtmp={}",
+                    self.log_peer(),
+                    self.app,
+                    redact_url_query(&cstr_lossy(&info.tc_url)),
+                    cstr_lossy(&info.flash_ver),
+                    info.object_encoding,
+                    needs_caps
+                );
                 let _ = state_machine::conn_transition(&mut self.state, ConnState::AppConnected);
                 self.send_connect_response(info.transaction_id, negotiated.as_ref())?;
                 if !self.connect_cb_fired {
@@ -3049,7 +3207,16 @@ impl Conn {
         let mut amf_buf = Buffer::with_capacity(512);
         crate::amf::amf0::write_string(&mut amf_buf, "_result")?;
         crate::amf::amf0::write_number(&mut amf_buf, transaction_id)?;
-        crate::amf::amf0::write_null(&mut amf_buf)?;
+        // Server properties, as FMS/nginx-rtmp/SRS send them. Some hardware
+        // encoders expect an object here and hang up on `null`.
+        crate::amf::amf0::write_object_begin(&mut amf_buf)?;
+        crate::amf::amf0::write_object_key(&mut amf_buf, "fmsVer")?;
+        crate::amf::amf0::write_string(&mut amf_buf, CONNECT_FMS_VERSION)?;
+        crate::amf::amf0::write_object_key(&mut amf_buf, "capabilities")?;
+        crate::amf::amf0::write_number(&mut amf_buf, CONNECT_CAPABILITIES)?;
+        crate::amf::amf0::write_object_key(&mut amf_buf, "mode")?;
+        crate::amf::amf0::write_number(&mut amf_buf, 1.0)?;
+        crate::amf::amf0::write_object_end(&mut amf_buf)?;
         crate::amf::amf0::write_object_begin(&mut amf_buf)?;
         crate::amf::amf0::write_object_key(&mut amf_buf, "level")?;
         crate::amf::amf0::write_string(&mut amf_buf, "status")?;
@@ -3057,6 +3224,8 @@ impl Conn {
         crate::amf::amf0::write_string(&mut amf_buf, "NetConnection.Connect.Success")?;
         crate::amf::amf0::write_object_key(&mut amf_buf, "description")?;
         crate::amf::amf0::write_string(&mut amf_buf, "Connection succeeded.")?;
+        crate::amf::amf0::write_object_key(&mut amf_buf, "objectEncoding")?;
+        crate::amf::amf0::write_number(&mut amf_buf, self.connect_object_encoding)?;
         if let Some(caps) = caps {
             write_negotiated_caps(&mut amf_buf, caps)?;
         }
@@ -3070,6 +3239,10 @@ impl Conn {
         code: &str,
         description: &str,
     ) -> Result<()> {
+        crate::log_warn!(
+            "{}: answering command (txn {transaction_id}) with _error {code}: {description}",
+            self.log_peer()
+        );
         let mut amf_buf = Buffer::with_capacity(256);
         command::build_error(&mut amf_buf, transaction_id, code, description)?;
         self.send_command(0, amf_buf.as_slice())
@@ -3092,6 +3265,14 @@ impl Conn {
         code: &str,
         description: &str,
     ) -> Result<()> {
+        if level == "error" {
+            crate::log_warn!(
+                "{}: onStatus error {code} on stream {stream_id}: {description}",
+                self.log_peer()
+            );
+        } else {
+            crate::log_debug!("{}: onStatus {code} on stream {stream_id}", self.log_peer());
+        }
         let mut amf_buf = Buffer::with_capacity(512);
         command::build_onstatus(&mut amf_buf, level, code, description)?;
         self.send_command(stream_id, amf_buf.as_slice())
@@ -3618,6 +3799,21 @@ fn detect_audio_codec(payload: &[u8]) -> Option<String> {
 }
 
 pub(crate) use crate::chunk::media_out::encode_media_body;
+
+/// NUL-terminated byte buffer to a lossy `String`.
+fn cstr_lossy(buf: &[u8]) -> String {
+    let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    String::from_utf8_lossy(&buf[..end]).into_owned()
+}
+
+/// Drop the query string of a URL before logging it: RTMP tcUrls can carry
+/// tokens or stream keys there.
+fn redact_url_query(url: &str) -> String {
+    match url.split_once('?') {
+        Some((base, _)) => format!("{base}?<redacted>"),
+        None => url.to_string(),
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -4542,8 +4738,6 @@ mod tests {
             &[0, 0, 0][..],
             &0u32.to_be_bytes()[..],
             &127u32.to_be_bytes()[..],
-            &65537u32.to_be_bytes()[..],
-            &0x00FF_FFFFu32.to_be_bytes()[..],
             // Reserved top bit set: must not be masked into a valid size.
             &0x8000_0100u32.to_be_bytes()[..],
             &u32::MAX.to_be_bytes()[..],
