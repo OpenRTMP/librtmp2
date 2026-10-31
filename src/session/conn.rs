@@ -2760,14 +2760,15 @@ impl Conn {
                     return Ok(());
                 }
                 let mut info = ConnectInfo::default();
-                if command::read_connect(&mut buf, &mut info).is_err() {
+                let Ok(object_encoding) = command::read_connect_with_encoding(&mut buf, &mut info)
+                else {
                     self.send_command_error(
                         info.transaction_id,
                         "NetConnection.Connect.Rejected",
                         "Invalid connect command or capability negotiation.",
                     )?;
                     return Ok(());
-                }
+                };
                 self.app = match command::decode_route_amf_string(&info.app) {
                     Ok(app) => app,
                     Err(_) => {
@@ -2802,14 +2803,14 @@ impl Conn {
                 } else {
                     None
                 };
-                self.connect_object_encoding = info.object_encoding;
+                self.connect_object_encoding = object_encoding;
                 crate::log_info!(
                     "{}: connect app='{}' tcUrl='{}' flashVer='{}' objectEncoding={} e-rtmp={}",
                     self.log_peer(),
                     self.app,
                     redact_url_query(&cstr_lossy(&info.tc_url)),
                     cstr_lossy(&info.flash_ver),
-                    info.object_encoding,
+                    object_encoding,
                     needs_caps
                 );
                 let _ = state_machine::conn_transition(&mut self.state, ConnState::AppConnected);

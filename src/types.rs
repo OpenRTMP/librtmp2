@@ -756,8 +756,6 @@ pub struct ConnectInfo {
     pub flash_ver: [u8; 64],
     pub audio_codecs: i32,
     pub video_codecs: i32,
-    /// AMF encoding the client asked for (`objectEncoding`: 0 = AMF0, 3 = AMF3).
-    pub object_encoding: f64,
     pub four_cc_list: FourCcList,
     pub caps_ex: CapsExit,
     pub video_four_cc_info_map: VideoFourCcInfoMap,
@@ -781,7 +779,6 @@ impl Default for ConnectInfo {
             flash_ver: [0; 64],
             audio_codecs: 0,
             video_codecs: 0,
-            object_encoding: 0.0,
             four_cc_list: FourCcList::default(),
             caps_ex: CapsExit::default(),
             video_four_cc_info_map: VideoFourCcInfoMap::default(),

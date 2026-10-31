@@ -289,6 +289,14 @@ pub fn peek_name(buf: &mut Buffer, out: &mut [u8]) -> Result<usize> {
 
 /// Read a connect command.
 pub fn read_connect(buf: &mut Buffer, info: &mut ConnectInfo) -> Result<()> {
+    read_connect_with_encoding(buf, info).map(|_| ())
+}
+
+/// [`read_connect`], also returning the client's `objectEncoding` (0 when
+/// absent). Kept out of [`ConnectInfo`] so that `#[repr(C)]` struct's layout
+/// does not change.
+pub(crate) fn read_connect_with_encoding(buf: &mut Buffer, info: &mut ConnectInfo) -> Result<f64> {
+    let mut object_encoding = 0.0;
     // Caller-owned output: a second parse on the same `ConnectInfo` must not
     // inherit optional fields (pageUrl, fourCcList, capsEx, …) omitted on the
     // later wire object.
@@ -382,7 +390,7 @@ pub fn read_connect(buf: &mut Buffer, info: &mut ConnectInfo) -> Result<()> {
                 match key_str {
                     "audioCodecs" => info.audio_codecs = value as i32,
                     "videoCodecs" => info.video_codecs = value as i32,
-                    "objectEncoding" => info.object_encoding = value,
+                    "objectEncoding" => object_encoding = value,
                     _ => {}
                 }
             }
@@ -396,7 +404,7 @@ pub fn read_connect(buf: &mut Buffer, info: &mut ConnectInfo) -> Result<()> {
     let mut end = [0u8; 3];
     buf.read(&mut end).map_err(|_| ErrorCode::Amf)?;
 
-    Ok(())
+    Ok(object_encoding)
 }
 
 /// Read a createStream command. `transaction_id` is set as soon as the
