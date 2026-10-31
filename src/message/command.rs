@@ -849,7 +849,10 @@ mod tests {
         amf0::write_number(&mut buf, 7.0).unwrap(); // malformed: skipped
         amf0::write_object_end(&mut buf).unwrap();
         let mut info = ConnectInfo::default();
-        assert_eq!(read_connect_with_encoding(&mut buf, &mut info).unwrap(), 3.0);
+        assert_eq!(
+            read_connect_with_encoding(&mut buf, &mut info).unwrap(),
+            3.0
+        );
         assert_eq!(cstr(&info.app), "live");
         assert!(!info.has_four_cc_list);
         assert_eq!(buf.available(), 0);

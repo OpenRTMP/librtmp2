@@ -2807,7 +2807,7 @@ impl Conn {
                 crate::log_info!(
                     "{}: connect app='{}' tcUrl='{}' flashVer='{}' objectEncoding={} e-rtmp={}",
                     self.log_peer(),
-                    self.app,
+                    redact_url_query(&self.app),
                     redact_url_query(&cstr_lossy(&info.tc_url)),
                     cstr_lossy(&info.flash_ver),
                     object_encoding,
@@ -8758,5 +8758,15 @@ mod tests {
         conn.on_publish_auth_cb = Some(|_, _, _| AuthorizationResult::Allow);
         conn.handle_command(publish_buf("s").as_slice()).unwrap();
         assert!(conn.current_stream.as_ref().unwrap().is_publishing);
+    }
+
+    #[test]
+    fn redact_url_query_hides_credentials_in_app_and_tc_url() {
+        assert_eq!(redact_url_query("live?token=secret"), "live?<redacted>");
+        assert_eq!(
+            redact_url_query("rtmp://host/live?token=secret"),
+            "rtmp://host/live?<redacted>"
+        );
+        assert_eq!(redact_url_query("live"), "live");
     }
 }
