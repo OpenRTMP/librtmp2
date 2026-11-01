@@ -2258,7 +2258,16 @@ impl Conn {
         // buffer has filled). Likewise a publisher that keeps sending is
         // alive even if it never answers pings (some hardware encoders,
         // e.g. DJI cameras, don't).
-        let draining = self.peer_is_draining(now) || self.peer_is_sending(now);
+        let media_to_peer = self.peer_is_draining(now);
+        let data_from_peer = self.peer_is_sending(now);
+        let draining = media_to_peer || data_from_peer;
+        if data_from_peer && !media_to_peer {
+            // No backlog delays this peer's pong, so a ping it has not
+            // answered within PING_TIMEOUT never will be. Drop it so a later
+            // ping can still measure RTT if the peer starts answering.
+            self.pending_pings
+                .retain(|_, sent| now.duration_since(*sent) < PING_TIMEOUT);
+        }
         if let Some(queued) = &self.queued_ping {
             if !draining && now.duration_since(queued.queued_at) >= PING_TIMEOUT {
                 return Err(ErrorCode::Protocol);
@@ -5653,9 +5662,15 @@ mod tests {
         // Media keeps arriving from the encoder, which never answers pings.
         conn.last_recv_progress = Some(Instant::now());
         conn.maybe_send_ping().unwrap();
-        assert_eq!(conn.pending_pings.len(), 1, "no extra pings piled up");
+        assert!(
+            conn.pending_pings.is_empty(),
+            "the unanswered ping is dropped instead of blocking later probes"
+        );
+        let queued = conn.queued_ping.as_mut().expect("a new probe is sent");
+        assert_ne!(queued.token, 42);
 
         // Once the encoder goes quiet too, the unanswered ping counts.
+        queued.queued_at = stale;
         conn.last_recv_progress = Some(stale);
         assert!(matches!(conn.maybe_send_ping(), Err(ErrorCode::Protocol)));
     }
