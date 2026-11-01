@@ -402,6 +402,8 @@ pub struct Conn {
     staged_media_bytes: usize,
     /// Last time at least [`SEND_PROGRESS_BYTES`] reached the peer.
     last_send_progress: Option<Instant>,
+    /// Last time the peer sent us any bytes.
+    last_recv_progress: Option<Instant>,
     /// Ping queued in `send_buffer` but not yet fully flushed.
     queued_ping: Option<QueuedPing>,
     last_ping_sent: Option<Instant>,
@@ -519,6 +521,7 @@ impl Conn {
             send_progress_bytes: 0,
             staged_media_bytes: 0,
             last_send_progress: None,
+            last_recv_progress: None,
             queued_ping: None,
             last_ping_sent: None,
             next_ping_token: 1,
@@ -1539,6 +1542,9 @@ impl Conn {
             .write(data)
             .map_err(|_| ErrorCode::Internal)?;
         self.bytes_received = self.bytes_received.saturating_add(data.len() as u64);
+        if !data.is_empty() {
+            self.last_recv_progress = Some(Instant::now());
+        }
         self.budget_exhausted = false;
         let mut max_iter = 256;
         let mut no_progress = 0;
@@ -2249,8 +2255,10 @@ impl Conn {
         // ping, so its pong comes back late even though it is reading. Media
         // visibly flowing to the peer proves liveness on its own; judge
         // pings by it only once that stops (e.g. a dead host whose socket
-        // buffer has filled).
-        let draining = self.peer_is_draining(now);
+        // buffer has filled). Likewise a publisher that keeps sending is
+        // alive even if it never answers pings (some hardware encoders,
+        // e.g. DJI cameras, don't).
+        let draining = self.peer_is_draining(now) || self.peer_is_sending(now);
         if let Some(queued) = &self.queued_ping {
             if !draining && now.duration_since(queued.queued_at) >= PING_TIMEOUT {
                 return Err(ErrorCode::Protocol);
@@ -2294,6 +2302,12 @@ impl Conn {
     /// messages) reached the peer within the last [`PING_TIMEOUT`].
     fn peer_is_draining(&self, now: Instant) -> bool {
         self.last_send_progress
+            .is_some_and(|t| now.duration_since(t) < PING_TIMEOUT)
+    }
+
+    /// Whether the peer sent us anything within the last [`PING_TIMEOUT`].
+    fn peer_is_sending(&self, now: Instant) -> bool {
+        self.last_recv_progress
             .is_some_and(|t| now.duration_since(t) < PING_TIMEOUT)
     }
 
@@ -5624,6 +5638,25 @@ mod tests {
 
         // Once media stops flowing, the stale ping counts again.
         conn.last_send_progress = Some(stale);
+        assert!(matches!(conn.maybe_send_ping(), Err(ErrorCode::Protocol)));
+    }
+
+    #[test]
+    fn publisher_that_keeps_sending_survives_unanswered_pings() {
+        let mut conn = Conn::new();
+        conn.client_fd = 0;
+        conn.transport = None;
+        conn.state = ConnState::Publishing;
+        let stale = Instant::now() - PING_TIMEOUT - Duration::from_secs(1);
+        conn.last_ping_sent = Some(stale);
+        conn.pending_pings.insert(42, stale);
+        // Media keeps arriving from the encoder, which never answers pings.
+        conn.last_recv_progress = Some(Instant::now());
+        conn.maybe_send_ping().unwrap();
+        assert_eq!(conn.pending_pings.len(), 1, "no extra pings piled up");
+
+        // Once the encoder goes quiet too, the unanswered ping counts.
+        conn.last_recv_progress = Some(stale);
         assert!(matches!(conn.maybe_send_ping(), Err(ErrorCode::Protocol)));
     }
 

@@ -2511,7 +2511,10 @@ impl Server {
                 continue;
             }
             if conn.maybe_send_ping().is_err() {
-                conn.set_close_reason(crate::log::LogLevel::Info, "ping send failed (peer gone)");
+                conn.set_close_reason(
+                    crate::log::LogLevel::Info,
+                    "ping timeout (no ping response and no data from peer for 10 s)",
+                );
                 closed.push(i);
                 continue;
             }

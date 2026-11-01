@@ -13,6 +13,13 @@ begin at `1.0.0`.
 
 ## [Unreleased]
 
+### Fixed
+- A publisher that keeps sending media is no longer closed for not answering
+  RTMP pings. Some hardware encoders (seen with a DJI Osmo Pocket 3) never
+  send a ping response, so the server dropped them after about 15 seconds.
+  The close reason for a real ping timeout now says so, instead of reporting
+  a failed send.
+
 ## [0.16.0] — 2026-11-01
 
 ### Added
