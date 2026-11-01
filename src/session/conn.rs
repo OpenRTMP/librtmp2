@@ -64,6 +64,9 @@ const SERVER_PEER_BANDWIDTH: u32 = 2_500_000;
 const PEER_BANDWIDTH_DYNAMIC: u8 = 2;
 const PING_INTERVAL: Duration = Duration::from_secs(5);
 const PING_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long queued output may wait without a single byte reaching the
+/// socket before the peer counts as dead, whatever else it still sends.
+const WRITE_STALL_TIMEOUT: Duration = PING_TIMEOUT;
 const MAX_PENDING_PINGS: usize = 4;
 /// Outbound bytes the peer must accept before that counts as proof it is
 /// alive and reading (see [`Conn::peer_is_draining`]). Well above what
@@ -404,6 +407,8 @@ pub struct Conn {
     last_send_progress: Option<Instant>,
     /// Last time the peer sent us any bytes.
     last_recv_progress: Option<Instant>,
+    /// Since when queued output has waited with no byte reaching the socket.
+    send_stalled_since: Option<Instant>,
     /// Ping queued in `send_buffer` but not yet fully flushed.
     queued_ping: Option<QueuedPing>,
     last_ping_sent: Option<Instant>,
@@ -522,6 +527,7 @@ impl Conn {
             staged_media_bytes: 0,
             last_send_progress: None,
             last_recv_progress: None,
+            send_stalled_since: None,
             queued_ping: None,
             last_ping_sent: None,
             next_ping_token: 1,
@@ -2245,6 +2251,14 @@ impl Conn {
             return Ok(());
         }
         let now = Instant::now();
+        // A peer that keeps sending but stopped reading stays "alive" by
+        // the checks below, so a full socket alone must end it.
+        if self
+            .send_stalled_since
+            .is_some_and(|t| now.duration_since(t) >= WRITE_STALL_TIMEOUT)
+        {
+            return Err(ErrorCode::Protocol);
+        }
         if self
             .last_ping_sent
             .is_some_and(|t| now.duration_since(t) < PING_INTERVAL)
@@ -3406,6 +3420,9 @@ impl Conn {
             // Fully flushed: release capacity a keyframe burst grew the
             // buffer to, instead of pinning it for the life of the player.
             self.send_buffer.reset();
+            self.send_stalled_since = None;
+        } else if self.transport.is_some() && self.send_stalled_since.is_none() {
+            self.send_stalled_since = Some(Instant::now());
         }
         self.commit_flushed_ping();
         Ok(())
@@ -3413,6 +3430,9 @@ impl Conn {
 
     /// Account `n` bytes that reached the socket, in queue order.
     fn note_bytes_sent(&mut self, n: usize) {
+        if n > 0 {
+            self.send_stalled_since = None;
+        }
         self.send_progress_bytes = self.send_progress_bytes.saturating_add(n);
         if self.send_progress_bytes >= SEND_PROGRESS_BYTES {
             self.send_progress_bytes = 0;
@@ -5673,6 +5693,39 @@ mod tests {
         queued.queued_at = stale;
         conn.last_recv_progress = Some(stale);
         assert!(matches!(conn.maybe_send_ping(), Err(ErrorCode::Protocol)));
+    }
+
+    #[test]
+    fn publisher_that_stops_reading_is_closed_after_write_stall() {
+        use crate::net::testing::stream_pair;
+
+        let (end, _peer) = stream_pair().unwrap();
+        end.set_nonblocking(true).unwrap();
+        let mut conn = Conn::new();
+        conn.client_fd = 0;
+        conn.transport = Some(crate::net::testing::transport_from(end));
+        conn.state = ConnState::Publishing;
+        // The encoder keeps sending but never reads: fill its socket.
+        let chunk = [0u8; 64 * 1024];
+        while conn.send_stalled_since.is_none() {
+            conn.send_buffer.write(&chunk).unwrap();
+            conn.flush().unwrap();
+        }
+        conn.last_recv_progress = Some(Instant::now());
+        conn.last_ping_sent = Some(Instant::now());
+        conn.maybe_send_ping().unwrap();
+
+        conn.send_stalled_since =
+            Some(Instant::now() - WRITE_STALL_TIMEOUT - Duration::from_secs(1));
+        assert!(matches!(conn.maybe_send_ping(), Err(ErrorCode::Protocol)));
+    }
+
+    #[test]
+    fn any_flushed_byte_clears_the_write_stall() {
+        let mut conn = Conn::new();
+        conn.send_stalled_since = Some(Instant::now() - WRITE_STALL_TIMEOUT);
+        conn.note_bytes_sent(1);
+        assert!(conn.send_stalled_since.is_none());
     }
 
     #[test]

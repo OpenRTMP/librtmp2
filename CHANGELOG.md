@@ -21,6 +21,9 @@ begin at `1.0.0`.
   send a ping response, so the server dropped them after about 15 seconds.
   The close reason for a real ping timeout now says so, instead of reporting
   a failed send.
+- A peer that keeps sending but stops reading what the server sends is
+  closed once no byte of its queued output has reached the socket for
+  10 seconds.
 - The client delivers media it already received when the peer closes or
   resets the connection, instead of dropping it with the error.
 - A compressed (fmt 2/3) chunk header after a zero-length message is
