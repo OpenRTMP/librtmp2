@@ -3087,11 +3087,13 @@ impl Conn {
                                     // An integrator may pin `relay_key` to a
                                     // different route (librtmp2-server uses the
                                     // database stream id), and the claimed route
-                                    // then lives under that key. Release both so
-                                    // a reconnect that reaches this handler is
-                                    // not blocked by its own stale claim.
-                                    let pinned = self.relay_route_key().to_string();
-                                    if pinned != name_str {
+                                    // then lives under that key. Only the
+                                    // explicitly pinned key is released here:
+                                    // the fallback used for media routing may be
+                                    // the currently played stream, which this
+                                    // callback was not authorized to evict.
+                                    let pinned = self.relay_key.clone();
+                                    if !pinned.is_empty() && pinned != name_str {
                                         routes.force_release(&self.app, &pinned);
                                     }
                                 }
