@@ -258,6 +258,12 @@ pub struct Client {
     /// application, which can keep streaming through the next media boundary
     /// before doing so.
     pub on_reconnect_request_cb: Option<fn(tc_url: Option<&str>, description: Option<&str>)>,
+    /// Terminal I/O error deferred until already-staged messages have been
+    /// delivered (internal; set when a peer closes or resets the connection).
+    pub terminal_io_error: Option<ErrorCode>,
+    /// True while draining staged messages after a terminal transport error;
+    /// outbound control writes (pong) are suppressed during that drain.
+    pub terminal_drain: bool,
     /// Retains the last frame payload delivered through `on_frame_cb` so
     /// `Frame.data` stays valid until the next callback on this connection
     /// (mirrors `Conn::frame_cb_scratch` on the server side).
@@ -331,6 +337,8 @@ impl Client {
             stream_key: String::new(),
             on_frame_cb: None,
             on_reconnect_request_cb: None,
+            terminal_io_error: None,
+            terminal_drain: false,
             frame_cb_scratch: Vec::new(),
             tls_ca_file: None,
             tls_insecure: false,
@@ -721,6 +729,19 @@ impl Client {
         };
 
         let mut messages_processed = 0usize;
+        // A terminal transport error was deferred because the previous read
+        // staged more messages than one poll may deliver. Drain the backlog
+        // first; only report the error once it is exhausted.
+        if self.terminal_io_error.is_some() {
+            self.terminal_drain = true;
+            let drained = self.drain_ready_messages(&mut messages_processed);
+            self.terminal_drain = false;
+            drained?;
+            if messages_processed >= MAX_MESSAGES_PER_POLL {
+                return Ok(());
+            }
+            return Err(self.terminal_io_error.take().unwrap_or(ErrorCode::Io));
+        }
         // Drain any complete messages a prior poll() left staged in
         // recv_buffer (it may have stopped at MAX_MESSAGES_PER_POLL) before
         // reading more off the socket or blocking on socket readiness below.
@@ -773,8 +794,16 @@ impl Client {
             } else if n == 0 {
                 // A clean EOF must not discard media that was already read into
                 // recv_buffer during this call: drain the complete messages
-                // before surfacing the closed connection to the caller.
-                self.drain_ready_messages(&mut messages_processed)?;
+                // before surfacing the closed connection to the caller. If the
+                // drain budget is exhausted, defer the error to a later poll.
+                self.terminal_drain = true;
+                let drained = self.drain_ready_messages(&mut messages_processed);
+                self.terminal_drain = false;
+                drained?;
+                if messages_processed >= MAX_MESSAGES_PER_POLL {
+                    self.terminal_io_error = Some(ErrorCode::Io);
+                    return Ok(());
+                }
                 return Err(ErrorCode::Io);
             } else if again == 2 && Self::wait_writable_once(poll_fd, timeout_ms) {
                 // TLS renegotiation can need write-readiness during a read; the
@@ -787,7 +816,14 @@ impl Client {
                 // for a retry: treating it like would-block would spin on a
                 // reset socket forever, so deliver what was already staged and
                 // then surface the error instead of looping.
-                self.drain_ready_messages(&mut messages_processed)?;
+                self.terminal_drain = true;
+                let drained = self.drain_ready_messages(&mut messages_processed);
+                self.terminal_drain = false;
+                drained?;
+                if messages_processed >= MAX_MESSAGES_PER_POLL {
+                    self.terminal_io_error = Some(ErrorCode::Io);
+                    return Ok(());
+                }
                 return Err(ErrorCode::Io);
             } else {
                 break;
@@ -1279,9 +1315,11 @@ impl Client {
                     return Err(ErrorCode::Protocol);
                 }
                 self.inbound_ping_responses += 1;
-                let mut buf = Buffer::with_capacity(6);
-                control::write_user_control_ping_response(&mut buf, param1)?;
-                self.send_user_control_message_nonblocking(buf.as_slice())?;
+                if !self.terminal_drain {
+                    let mut buf = Buffer::with_capacity(6);
+                    control::write_user_control_ping_response(&mut buf, param1)?;
+                    self.send_user_control_message_nonblocking(buf.as_slice())?;
+                }
             }
             control::UCTRL_STREAM_BEGIN | control::UCTRL_STREAM_EOF => {}
             control::UCTRL_SET_BUFFER_LENGTH => {

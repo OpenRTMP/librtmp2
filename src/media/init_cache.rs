@@ -189,7 +189,7 @@ fn classify_audio(payload: &[u8]) -> CacheFrameKind {
         // Legacy AAC sequence header: the AudioSpecificConfig after the
         // 1-byte tag header and 1-byte AACPacketType must still be structurally
         // valid before it may replace a previously cached header.
-        if validate_config_record(ConfigCodec::Opaque, &payload[2..]) {
+        if validate_config_record(ConfigCodec::Aac, &payload[2..]) {
             CacheFrameKind::AudioSequenceHeader
         } else {
             CacheFrameKind::LiveOnly
