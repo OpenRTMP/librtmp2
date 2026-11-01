@@ -42,6 +42,9 @@ begin at `1.0.0`.
   reject invalid arguments, and the ABI baseline script restores the
   checkout when the baseline build fails.
 
+### Changed
+- Dependency update: openssl 0.10.82 (openssl-sys 0.9.118).
+
 ## [0.16.0] — 2026-11-01
 
 ### Added
