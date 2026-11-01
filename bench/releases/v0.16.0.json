@@ -1,0 +1,74 @@
+{
+ "schema": 1,
+ "repo": "OpenRTMP/librtmp2",
+ "kind": "release",
+ "version": "0.16.0",
+ "tag": "v0.16.0",
+ "commit": "b107c9422e22e77a07591f53fe3791d19aeafc70",
+ "date": "2026-11-01T00:02:01Z",
+ "run_url": "https://github.com/OpenRTMP/librtmp2/actions/runs/41253908636",
+ "deps": {},
+ "environment": {
+  "cpu": "INTEL(R) XEON(R) PLATINUM 8573C",
+  "vcpus": 4,
+  "ram_gib": 15.6,
+  "kernel": "Linux 7.0.0-1017-azure x86_64",
+  "rustc": "1.99.1",
+  "runner": "GitHub-hosted ubuntu24 (image 20261026.354.1)",
+  "shared_vm": true
+ },
+ "suites": {
+  "protocol": {
+   "amf0_build_connect": {
+    "ns": 230.7816421880836,
+    "ci_rel": 0.0010736484702847913,
+    "bytes": null,
+    "elements": null
+   },
+   "chunk/write_read_roundtrip": {
+    "ns": 4283.146849667921,
+    "ci_rel": 0.004523272974247713,
+    "bytes": 4096,
+    "elements": null
+   },
+   "flv/audio_tag_aac": {
+    "ns": 1.0367503061057726,
+    "ci_rel": 0.007905398654203437,
+    "bytes": null,
+    "elements": null
+   },
+   "flv/video_tag_h264": {
+    "ns": 1.016186465043758,
+    "ci_rel": 0.0042398067919339226,
+    "bytes": null,
+    "elements": null
+   },
+   "fourcc_to_video_codec_avc1": {
+    "ns": 1.6549510426531442,
+    "ci_rel": 0.00935806168847555,
+    "bytes": null,
+    "elements": null
+   },
+   "server_read_c1": {
+    "ns": 929.890042036536,
+    "ci_rel": 0.0012424553872849738,
+    "bytes": null,
+    "elements": null
+   }
+  },
+  "relay": {
+   "relay/publish_to_player/100": {
+    "ns": 97111534.6025974,
+    "ci_rel": 0.00019757749998783726,
+    "bytes": null,
+    "elements": 100
+   },
+   "relay/publish_to_player/500": {
+    "ns": 98591635.8987013,
+    "ci_rel": 0.00018045684239551685,
+    "bytes": null,
+    "elements": 500
+   }
+  }
+ }
+}
