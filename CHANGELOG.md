@@ -13,6 +13,8 @@ begin at `1.0.0`.
 
 ## [Unreleased]
 
+## [0.16.1] — 2026-11-01
+
 ### Fixed
 - A publisher that keeps sending media is no longer closed for not answering
   RTMP pings. Some hardware encoders (seen with a DJI Osmo Pocket 3) never
@@ -1219,6 +1221,7 @@ and others.
 - Protocol mapping documents for legacy, E-RTMP v1, and E-RTMP v2
 - `CONTRIBUTING.md` guidelines
 
+[0.16.1]: https://github.com/OpenRTMP/librtmp2/compare/v0.16.0...v0.16.1
 [0.16.0]: https://github.com/OpenRTMP/librtmp2/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/OpenRTMP/librtmp2/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/OpenRTMP/librtmp2/compare/v0.13.0...v0.14.0
