@@ -733,14 +733,7 @@ impl Client {
         // staged more messages than one poll may deliver. Drain the backlog
         // first; only report the error once it is exhausted.
         if self.terminal_io_error.is_some() {
-            self.terminal_drain = true;
-            let drained = self.drain_ready_messages(&mut messages_processed);
-            self.terminal_drain = false;
-            drained?;
-            if messages_processed >= MAX_MESSAGES_PER_POLL {
-                return Ok(());
-            }
-            return Err(self.terminal_io_error.take().unwrap_or(ErrorCode::Io));
+            return self.drain_then_fail(&mut messages_processed);
         }
         // Drain any complete messages a prior poll() left staged in
         // recv_buffer (it may have stopped at MAX_MESSAGES_PER_POLL) before
@@ -791,40 +784,20 @@ impl Client {
                     .write(&buf[..chunk_len])
                     .map_err(|_| ErrorCode::Internal)?;
                 bytes_drained += chunk_len;
-            } else if n == 0 {
-                // A clean EOF must not discard media that was already read into
-                // recv_buffer during this call: drain the complete messages
-                // before surfacing the closed connection to the caller. If the
-                // drain budget is exhausted, defer the error to a later poll.
-                self.terminal_drain = true;
-                let drained = self.drain_ready_messages(&mut messages_processed);
-                self.terminal_drain = false;
-                drained?;
-                if messages_processed >= MAX_MESSAGES_PER_POLL {
-                    self.terminal_io_error = Some(ErrorCode::Io);
-                    return Ok(());
-                }
-                return Err(ErrorCode::Io);
+            } else if n == 0 || again == 0 {
+                // A clean EOF (n == 0) or a fatal recv error the transport
+                // reported without asking for a retry (again == 0). Treating
+                // the latter like would-block would spin on a reset socket
+                // forever. Either way, media already read into recv_buffer
+                // during this call must still be delivered before the closed
+                // connection is surfaced.
+                return self.drain_then_fail(&mut messages_processed);
             } else if again == 2 && Self::wait_writable_once(poll_fd, timeout_ms) {
                 // TLS renegotiation can need write-readiness during a read; the
                 // POLLIN wait above cannot detect that on its own. Wait for
                 // POLLOUT once, bounded by the same timeout, then retry the read
                 // instead of giving up on a writable socket.
                 continue;
-            } else if again == 0 {
-                // A fatal recv error that the transport reported without asking
-                // for a retry: treating it like would-block would spin on a
-                // reset socket forever, so deliver what was already staged and
-                // then surface the error instead of looping.
-                self.terminal_drain = true;
-                let drained = self.drain_ready_messages(&mut messages_processed);
-                self.terminal_drain = false;
-                drained?;
-                if messages_processed >= MAX_MESSAGES_PER_POLL {
-                    self.terminal_io_error = Some(ErrorCode::Io);
-                    return Ok(());
-                }
-                return Err(ErrorCode::Io);
             } else {
                 break;
             }
@@ -839,6 +812,23 @@ impl Client {
         self.maybe_send_window_ack()?;
         self.try_flush_send_buffer()?;
         Ok(())
+    }
+
+    /// Deliver the complete messages already staged in `recv_buffer` after a
+    /// terminal transport error, then report the error. If the per-poll
+    /// message budget runs out first, the error is kept in
+    /// `terminal_io_error` and reported by a later `poll()` once the backlog
+    /// is drained.
+    fn drain_then_fail(&mut self, messages_processed: &mut usize) -> Result<()> {
+        self.terminal_drain = true;
+        let drained = self.drain_ready_messages(messages_processed);
+        self.terminal_drain = false;
+        drained?;
+        if *messages_processed >= MAX_MESSAGES_PER_POLL {
+            self.terminal_io_error.get_or_insert(ErrorCode::Io);
+            return Ok(());
+        }
+        Err(self.terminal_io_error.take().unwrap_or(ErrorCode::Io))
     }
 
     /// Process fully-reassembled messages already staged in `recv_buffer`,
