@@ -4,7 +4,7 @@ use crate::ertmp::multitrack_media::{
     foreach_track, is_multitrack_container, multitrack_has_keyframe, multitrack_has_sequence_start,
 };
 use crate::ertmp::{exaudio, exvideo, fourcc};
-use crate::media::codec_config::{ConfigCodec, validate_config_record};
+use crate::media::codec_config::{ConfigCodec, validate_aac_config, validate_config_record};
 use crate::media::modex::ERTMP_PACKET_TYPE_MODEX;
 use crate::types::{
     AudioCodec, AudioHeader, ERTMP_AUDIO_PACKET_TYPE_METADATA, ERTMP_PACKET_TYPE_METADATA, FourCc,
@@ -189,7 +189,7 @@ fn classify_audio(payload: &[u8]) -> CacheFrameKind {
         // Legacy AAC sequence header: the AudioSpecificConfig after the
         // 1-byte tag header and 1-byte AACPacketType must still be structurally
         // valid before it may replace a previously cached header.
-        if validate_config_record(ConfigCodec::Aac, &payload[2..]) {
+        if validate_aac_config(&payload[2..]) {
             CacheFrameKind::AudioSequenceHeader
         } else {
             CacheFrameKind::LiveOnly

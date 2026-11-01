@@ -13,7 +13,6 @@
 pub enum ConfigCodec {
     Avc,
     Hevc,
-    Aac,
     /// Any other codec: only a non-empty record is required.
     Opaque,
 }
@@ -23,7 +22,6 @@ impl ConfigCodec {
         match fourcc.get(..4) {
             Some(b"avc1") => Self::Avc,
             Some(b"hvc1") => Self::Hevc,
-            Some(b"mp4a") => Self::Aac,
             _ => Self::Opaque,
         }
     }
@@ -35,7 +33,6 @@ pub fn validate_config_record(codec: ConfigCodec, record: &[u8]) -> bool {
     match codec {
         ConfigCodec::Avc => validate_avc_record(record),
         ConfigCodec::Hevc => validate_hevc_record(record),
-        ConfigCodec::Aac => validate_aac_record(record),
         ConfigCodec::Opaque => !record.is_empty(),
     }
 }
@@ -43,7 +40,7 @@ pub fn validate_config_record(codec: ConfigCodec, record: &[u8]) -> bool {
 /// Minimal structural check for an ISO/IEC 14496-3 AudioSpecificConfig: the
 /// audio object type, sampling-frequency index (or explicit frequency) and
 /// channel configuration must all be present. A one-byte `0x12` is rejected.
-fn validate_aac_record(record: &[u8]) -> bool {
+pub fn validate_aac_config(record: &[u8]) -> bool {
     let mut bit_pos = 0usize;
     let mut read_bits = |count: usize| -> Option<u32> {
         if bit_pos + count > record.len() * 8 {
