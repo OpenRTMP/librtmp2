@@ -236,6 +236,20 @@ pub fn read_string(buf: &mut Buffer, out: &mut [u8]) -> Result<usize> {
     Ok(str_len)
 }
 
+/// Read an AMF0 string with the wire length limit (u16) and return it as a
+/// freshly allocated `String`. Used where a fixed-size staging buffer would
+/// otherwise impose a smaller, unrelated cap than the writer accepts.
+pub fn read_string_alloc(buf: &mut Buffer) -> Result<String> {
+    let ty = read_u8(buf)?;
+    if ty != Amf0Type::String as u8 {
+        return Err(ErrorCode::Amf);
+    }
+    let len = read_u16(buf)? as usize;
+    let mut bytes = vec![0u8; len];
+    buf.read(&mut bytes).map_err(|_| ErrorCode::Amf)?;
+    String::from_utf8(bytes).map_err(|_| ErrorCode::Amf)
+}
+
 /// Read an AMF0 long string.
 pub fn read_long_string(buf: &mut Buffer, out: &mut [u8]) -> Result<usize> {
     let ty = read_u8(buf)?;

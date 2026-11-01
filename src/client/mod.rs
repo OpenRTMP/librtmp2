@@ -771,6 +771,10 @@ impl Client {
                     .map_err(|_| ErrorCode::Internal)?;
                 bytes_drained += chunk_len;
             } else if n == 0 {
+                // A clean EOF must not discard media that was already read into
+                // recv_buffer during this call: drain the complete messages
+                // before surfacing the closed connection to the caller.
+                self.drain_ready_messages(&mut messages_processed)?;
                 return Err(ErrorCode::Io);
             } else if again == 2 && Self::wait_writable_once(poll_fd, timeout_ms) {
                 // TLS renegotiation can need write-readiness during a read; the
@@ -781,7 +785,9 @@ impl Client {
             } else if again == 0 {
                 // A fatal recv error that the transport reported without asking
                 // for a retry: treating it like would-block would spin on a
-                // reset socket forever, so surface it instead of looping.
+                // reset socket forever, so deliver what was already staged and
+                // then surface the error instead of looping.
+                self.drain_ready_messages(&mut messages_processed)?;
                 return Err(ErrorCode::Io);
             } else {
                 break;

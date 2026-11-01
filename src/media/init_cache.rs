@@ -186,7 +186,14 @@ fn classify_audio(payload: &[u8]) -> CacheFrameKind {
             CacheFrameKind::LiveOnly
         }
     } else if hdr.audio_codec == AudioCodec::Aac && hdr.aac_packet_type == 0 && payload.len() >= 2 {
-        CacheFrameKind::AudioSequenceHeader
+        // Legacy AAC sequence header: the AudioSpecificConfig after the
+        // 1-byte tag header and 1-byte AACPacketType must still be structurally
+        // valid before it may replace a previously cached header.
+        if validate_config_record(ConfigCodec::Opaque, &payload[2..]) {
+            CacheFrameKind::AudioSequenceHeader
+        } else {
+            CacheFrameKind::LiveOnly
+        }
     } else {
         CacheFrameKind::LiveOnly
     }
@@ -427,9 +434,19 @@ fn populate_audio_frame(frame: &mut Frame, payload: &[u8]) {
     if hdr.is_ex_header != 0 && hdr.packet_type == ERTMP_PACKET_TYPE_MODEX {
         return;
     }
-    frame.audio_sample_rate = hdr.sample_rate as u32;
-    frame.audio_channels = hdr.channels;
-    frame.audio_bit_depth = if hdr.sample_size != 0 { 16 } else { 8 };
+    if hdr.is_ex_header != 0 {
+        // The ExAudioTagHeader has no legacy SoundRate/SoundSize/SoundType
+        // fields: those bit positions are part of AudioPacketType. Leave the
+        // sample properties unknown (0) instead of reporting the tag bits as
+        // a bogus 5.5 kHz mono/8-bit stream.
+        frame.audio_sample_rate = 0;
+        frame.audio_channels = 0;
+        frame.audio_bit_depth = 0;
+    } else {
+        frame.audio_sample_rate = hdr.sample_rate as u32;
+        frame.audio_channels = hdr.channels;
+        frame.audio_bit_depth = if hdr.sample_size != 0 { 16 } else { 8 };
+    }
     frame.audio_fourcc = FourCc { cc: hdr.fourcc };
     if hdr.is_ex_header != 0 {
         if let Ok(codec) = fourcc::fourcc_to_audio_codec(&hdr.fourcc) {

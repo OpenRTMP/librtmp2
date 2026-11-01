@@ -29,6 +29,10 @@ pub struct ChunkStream {
     pub csid: u32,
     /// peer's chunk size (SetChunkSize)
     pub chunk_size: u32,
+    /// At least one fmt=0/1 header has been received on this CSID. Needed to
+    /// tell "no prior header" apart from "the previous message legitimately
+    /// had length 0", which both leave `type0_msg_length == 0`.
+    pub has_message_header: bool,
     /// running timestamp for this chunk stream
     pub type0_timestamp: u32,
     pub type0_msg_length: u32,
@@ -66,6 +70,7 @@ impl Default for ChunkStream {
         Self {
             csid: 0,
             chunk_size: DEFAULT_CHUNK_SIZE,
+            has_message_header: false,
             type0_timestamp: 0,
             type0_msg_length: 0,
             type0_msg_type_id: 0,
@@ -92,6 +97,7 @@ impl Default for ChunkStream {
 impl ChunkStream {
     /// Reset stream state and release retained payload/reassembly allocations.
     pub fn reset(&mut self, default_chunk_size: u32) {
+        self.has_message_header = false;
         self.type0_timestamp = 0;
         self.type0_msg_length = 0;
         self.type0_msg_type_id = 0;

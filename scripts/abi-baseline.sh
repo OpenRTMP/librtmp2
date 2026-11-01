@@ -63,11 +63,44 @@ case "${1:-}" in
 
         # Build baseline
         cd "$PROJECT_DIR"
-        git stash || true
-        git checkout "$BASELINE"
+        ORIG_REF=$(git -C "$PROJECT_DIR" symbolic-ref --quiet --short HEAD \
+            || git -C "$PROJECT_DIR" rev-parse HEAD)
+        STASHED=0
+        restore_worktree() {
+            local status=$?
+            cd "$PROJECT_DIR" 2>/dev/null || return "$status"
+            if ! git checkout --quiet "$ORIG_REF"; then
+                echo "error: could not restore $ORIG_REF after the baseline build" >&2
+                status=1
+            fi
+            if (( STASHED )); then
+                if ! git stash pop --quiet; then
+                    echo "error: local changes are still in the stash; restore them manually" >&2
+                    status=1
+                fi
+                STASHED=0
+            fi
+            exit "$status"
+        }
+        trap restore_worktree EXIT
+        if [[ -n "$(git status --porcelain)" ]]; then
+            git stash push --quiet -m "abi-baseline" || {
+                echo "error: could not stash local changes" >&2
+                exit 1
+            }
+            STASHED=1
+        fi
+        git checkout --quiet "$BASELINE"
         build_and_dump "baseline"
-        git checkout - || git checkout main
-        git stash pop || true
+        git checkout --quiet "$ORIG_REF"
+        if (( STASHED )); then
+            git stash pop --quiet || {
+                echo "error: could not restore the stashed local changes" >&2
+                exit 1
+            }
+            STASHED=0
+        fi
+        trap - EXIT
 
         # Build current
         build_and_dump "current"
