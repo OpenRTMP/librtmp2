@@ -21,6 +21,26 @@ begin at `1.0.0`.
   send a ping response, so the server dropped them after about 15 seconds.
   The close reason for a real ping timeout now says so, instead of reporting
   a failed send.
+- The client delivers media it already received when the peer closes or
+  resets the connection, instead of dropping it with the error.
+- A compressed (fmt 2/3) chunk header after a zero-length message is
+  accepted.
+- `releaseStream` also releases a publish route pinned to a different key
+  (librtmp2-server pins the database stream id). A playing connection
+  cannot release it.
+- Reconnect requests accept the same `tcUrl` and description lengths the
+  writer produces; an empty `tcUrl` means reconnect to the current URL.
+- A legacy AAC sequence header must carry a valid AudioSpecificConfig
+  before it replaces the cached one.
+- The AVC packet type is read from video tags shorter than five bytes.
+- Enhanced audio frames no longer report the legacy sample rate, channel
+  and bit-depth bits, which are part of the packet type there.
+- Enhanced RTMP video commands and multichannel audio configs, including
+  inside multitrack containers, are never dropped under congestion.
+- Benchmark tooling: an empty benchmark report fails instead of replacing
+  the published one, the relay benchmarks check that frames arrived and
+  reject invalid arguments, and the ABI baseline script restores the
+  checkout when the baseline build fails.
 
 ## [0.16.0] — 2026-11-01
 
