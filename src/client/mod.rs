@@ -258,6 +258,12 @@ pub struct Client {
     /// application, which can keep streaming through the next media boundary
     /// before doing so.
     pub on_reconnect_request_cb: Option<fn(tc_url: Option<&str>, description: Option<&str>)>,
+    /// Terminal I/O error deferred until already-staged messages have been
+    /// delivered (internal; set when a peer closes or resets the connection).
+    pub terminal_io_error: Option<ErrorCode>,
+    /// True while draining staged messages after a terminal transport error;
+    /// outbound control writes (pong) are suppressed during that drain.
+    pub terminal_drain: bool,
     /// Retains the last frame payload delivered through `on_frame_cb` so
     /// `Frame.data` stays valid until the next callback on this connection
     /// (mirrors `Conn::frame_cb_scratch` on the server side).
@@ -331,6 +337,8 @@ impl Client {
             stream_key: String::new(),
             on_frame_cb: None,
             on_reconnect_request_cb: None,
+            terminal_io_error: None,
+            terminal_drain: false,
             frame_cb_scratch: Vec::new(),
             tls_ca_file: None,
             tls_insecure: false,
@@ -721,6 +729,12 @@ impl Client {
         };
 
         let mut messages_processed = 0usize;
+        // A terminal transport error was deferred because the previous read
+        // staged more messages than one poll may deliver. Drain the backlog
+        // first; only report the error once it is exhausted.
+        if self.terminal_io_error.is_some() {
+            return self.drain_then_fail(&mut messages_processed);
+        }
         // Drain any complete messages a prior poll() left staged in
         // recv_buffer (it may have stopped at MAX_MESSAGES_PER_POLL) before
         // reading more off the socket or blocking on socket readiness below.
@@ -770,19 +784,20 @@ impl Client {
                     .write(&buf[..chunk_len])
                     .map_err(|_| ErrorCode::Internal)?;
                 bytes_drained += chunk_len;
-            } else if n == 0 {
-                return Err(ErrorCode::Io);
+            } else if n == 0 || again == 0 {
+                // A clean EOF (n == 0) or a fatal recv error the transport
+                // reported without asking for a retry (again == 0). Treating
+                // the latter like would-block would spin on a reset socket
+                // forever. Either way, media already read into recv_buffer
+                // during this call must still be delivered before the closed
+                // connection is surfaced.
+                return self.drain_then_fail(&mut messages_processed);
             } else if again == 2 && Self::wait_writable_once(poll_fd, timeout_ms) {
                 // TLS renegotiation can need write-readiness during a read; the
                 // POLLIN wait above cannot detect that on its own. Wait for
                 // POLLOUT once, bounded by the same timeout, then retry the read
                 // instead of giving up on a writable socket.
                 continue;
-            } else if again == 0 {
-                // A fatal recv error that the transport reported without asking
-                // for a retry: treating it like would-block would spin on a
-                // reset socket forever, so surface it instead of looping.
-                return Err(ErrorCode::Io);
             } else {
                 break;
             }
@@ -797,6 +812,23 @@ impl Client {
         self.maybe_send_window_ack()?;
         self.try_flush_send_buffer()?;
         Ok(())
+    }
+
+    /// Deliver the complete messages already staged in `recv_buffer` after a
+    /// terminal transport error, then report the error. If the per-poll
+    /// message budget runs out first, the error is kept in
+    /// `terminal_io_error` and reported by a later `poll()` once the backlog
+    /// is drained.
+    fn drain_then_fail(&mut self, messages_processed: &mut usize) -> Result<()> {
+        self.terminal_drain = true;
+        let drained = self.drain_ready_messages(messages_processed);
+        self.terminal_drain = false;
+        drained?;
+        if *messages_processed >= MAX_MESSAGES_PER_POLL {
+            self.terminal_io_error.get_or_insert(ErrorCode::Io);
+            return Ok(());
+        }
+        Err(self.terminal_io_error.take().unwrap_or(ErrorCode::Io))
     }
 
     /// Process fully-reassembled messages already staged in `recv_buffer`,
@@ -1273,9 +1305,11 @@ impl Client {
                     return Err(ErrorCode::Protocol);
                 }
                 self.inbound_ping_responses += 1;
-                let mut buf = Buffer::with_capacity(6);
-                control::write_user_control_ping_response(&mut buf, param1)?;
-                self.send_user_control_message_nonblocking(buf.as_slice())?;
+                if !self.terminal_drain {
+                    let mut buf = Buffer::with_capacity(6);
+                    control::write_user_control_ping_response(&mut buf, param1)?;
+                    self.send_user_control_message_nonblocking(buf.as_slice())?;
+                }
             }
             control::UCTRL_STREAM_BEGIN | control::UCTRL_STREAM_EOF => {}
             control::UCTRL_SET_BUFFER_LENGTH => {

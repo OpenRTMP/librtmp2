@@ -37,6 +37,50 @@ pub fn validate_config_record(codec: ConfigCodec, record: &[u8]) -> bool {
     }
 }
 
+/// Minimal structural check for an ISO/IEC 14496-3 AudioSpecificConfig: the
+/// audio object type, sampling-frequency index (or explicit frequency) and
+/// channel configuration must all be present. A one-byte `0x12` is rejected.
+pub fn validate_aac_config(record: &[u8]) -> bool {
+    let mut bit_pos = 0usize;
+    let mut read_bits = |count: usize| -> Option<u32> {
+        if bit_pos + count > record.len() * 8 {
+            return None;
+        }
+        let mut value = 0u32;
+        for _ in 0..count {
+            let byte = record[bit_pos / 8];
+            let bit = (byte >> (7 - (bit_pos % 8))) & 1;
+            value = (value << 1) | bit as u32;
+            bit_pos += 1;
+        }
+        Some(value)
+    };
+    let Some(audio_object_type) = read_bits(5) else {
+        return false;
+    };
+    if audio_object_type == 0 {
+        return false;
+    }
+    if audio_object_type == 31 && read_bits(6).is_none() {
+        return false;
+    }
+    let Some(frequency_index) = read_bits(4) else {
+        return false;
+    };
+    match frequency_index {
+        13 | 14 => return false,
+        15 => {
+            if read_bits(24).is_none() {
+                return false;
+            }
+        }
+        _ => {}
+    }
+    // `channelConfiguration` 0 (explicit program config) is legal but needs
+    // more data; require the 4 bits themselves to be present.
+    read_bits(4).is_some()
+}
+
 /// Read a `u16`-prefixed, non-empty parameter set at `pos`; returns the new
 /// position.
 fn skip_param_set(record: &[u8], pos: usize) -> Option<usize> {

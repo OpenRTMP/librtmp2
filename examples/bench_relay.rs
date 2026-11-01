@@ -90,6 +90,13 @@ fn parse_args() -> Option<Args> {
                 i += 2;
             }
             other => {
+                // Only one positional argument (the RTMP URL) is valid; an
+                // unknown flag must not silently become the URL, which made
+                // `--warmup 3000` connect to the literal host "3000".
+                if other.starts_with('-') || url.is_some() {
+                    eprintln!("unknown or unexpected argument: {other}");
+                    return None;
+                }
                 url = Some(other.to_string());
                 i += 1;
             }
@@ -223,6 +230,13 @@ fn main() -> ExitCode {
         }
     };
 
+    // Validate before spawning players: a warmup that covers the run would
+    // otherwise burn the whole window before being reported.
+    if args.warmup_ms >= args.run_secs.saturating_mul(1000) {
+        eprintln!("error: --warmup-ms must be shorter than --run-secs");
+        return ExitCode::from(2);
+    }
+
     let epoch = Instant::now();
     let warmup = Duration::from_millis(args.warmup_ms);
     let results: Mutex<Vec<PlayerResult>> = Mutex::new(Vec::with_capacity(args.players));
@@ -307,7 +321,14 @@ fn main() -> ExitCode {
         avg_steady_window,
     );
 
-    if received_any == 0 {
+    // A run whose warmup consumes the whole window has no steady-state sample,
+    // and a run where most viewers never received a frame is not a measurement
+    // of the server: both must fail so the sweep does not publish them.
+    if received_any == 0
+        || steady_players == 0
+        || sum_frames_steady == 0
+        || received_any * 2 < total
+    {
         ExitCode::from(2)
     } else {
         ExitCode::SUCCESS
