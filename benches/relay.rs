@@ -59,7 +59,6 @@ fn relay_n_frames(frame_count: u32) {
             .connect(&format!("rtmp://127.0.0.1:{port}/live/bench"))
             .unwrap();
         player.play().unwrap();
-        thread::sleep(Duration::from_millis(50));
 
         let data = [0x17u8; FRAME_LEN];
         for ts in 0..frame_count {
@@ -94,6 +93,11 @@ fn relay_n_frames(frame_count: u32) {
         server.poll(5).unwrap();
     }
     client.join().unwrap();
+    let received = RECEIVED.load(Ordering::SeqCst);
+    assert!(
+        received >= frame_count as usize,
+        "relay benchmark delivered only {received} of {frame_count} frames; the measurement is invalid"
+    );
 }
 
 fn bench_relay_throughput(c: &mut Criterion) {

@@ -240,10 +240,8 @@ pub fn read_reconnect_request(buf: &mut Buffer) -> Result<Option<ReconnectReques
     amf0::read_object_begin(buf)?;
     let mut code = [0u8; 128];
     let mut code_len = 0usize;
-    let mut description = [0u8; 256];
-    let mut description_len = 0usize;
-    let mut tc_url = [0u8; 512];
-    let mut tc_url_len: Option<usize> = None;
+    let mut description: Option<String> = None;
+    let mut tc_url: Option<String> = None;
     let mut keys = 0usize;
     while !amf0::is_object_end(buf) {
         keys += 1;
@@ -255,8 +253,8 @@ pub fn read_reconnect_request(buf: &mut Buffer) -> Result<Option<ReconnectReques
         let key_str = std::str::from_utf8(&key[..key_len]).unwrap_or("");
         match key_str {
             "code" => code_len = amf0::read_string(buf, &mut code)?,
-            "description" => description_len = amf0::read_string(buf, &mut description)?,
-            "tcUrl" => tc_url_len = Some(amf0::read_string(buf, &mut tc_url)?),
+            "description" => description = Some(amf0::read_string_alloc(buf)?),
+            "tcUrl" => tc_url = Some(amf0::read_string_alloc(buf)?),
             _ => amf0::skip_value(buf)?,
         }
     }
@@ -268,12 +266,10 @@ pub fn read_reconnect_request(buf: &mut Buffer) -> Result<Option<ReconnectReques
     }
 
     Ok(Some(ReconnectRequest {
-        tc_url: tc_url_len.map(|len| String::from_utf8_lossy(&tc_url[..len]).into_owned()),
-        description: if description_len > 0 {
-            Some(String::from_utf8_lossy(&description[..description_len]).into_owned())
-        } else {
-            None
-        },
+        // An empty tcUrl cannot be a usable reconnect target; treat it like
+        // an omitted value and reuse the current connection URL.
+        tc_url: tc_url.filter(|url| !url.is_empty()),
+        description: description.filter(|value| !value.is_empty()),
     }))
 }
 

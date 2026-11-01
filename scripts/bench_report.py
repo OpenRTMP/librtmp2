@@ -224,6 +224,12 @@ def lock_version(cargo_lock: Path, package: str) -> str | None:
 
 
 def cmd_collect(args: argparse.Namespace) -> None:
+    if not args.suite:
+        print(
+            "error: no --suite selected; refusing to write an empty benchmark report",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
     suites = {}
     for name, directory in SUITE_DIRS.items():
         if name not in args.suite:
@@ -231,6 +237,16 @@ def cmd_collect(args: argparse.Namespace) -> None:
         suites[name] = read_criterion(directory)
         if not suites[name]:
             print(f"warning: no Criterion results under {directory}", file=sys.stderr)
+    empty = sorted(name for name, benches in suites.items() if not benches)
+    if not suites or empty:
+        # An empty report would silently replace the published CI block and
+        # turn every future delta into "—"; fail instead of publishing it.
+        print(
+            "error: no Criterion results for suite(s): "
+            + (", ".join(empty) or "<none selected>"),
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
     repo = os.environ.get("GITHUB_REPOSITORY", args.repo)
     server = os.environ.get("GITHUB_SERVER_URL", "https://github.com")
     run_id = os.environ.get("GITHUB_RUN_ID")

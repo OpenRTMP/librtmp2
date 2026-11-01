@@ -190,11 +190,7 @@ pub fn chunk_read(
 
     // fmt=2/3 with zero prior message length: reject before header drain so
     // Err(Chunk) never leaves the cursor past the basic/message header.
-    if (fmt == 2 || fmt == 3)
-        && reg
-            .get(csid)
-            .is_some_and(|s| s.reassembly_bytes_read == 0 && s.type0_msg_length == 0)
-    {
+    if (fmt == 2 || fmt == 3) && reg.get(csid).is_some_and(|s| !s.has_message_header) {
         return Err(ErrorCode::Chunk);
     }
 
@@ -310,9 +306,7 @@ pub fn chunk_read(
         // After a complete message, reassembly_bytes_read is 0 but inherited
         // header fields remain — that is valid for the next constant-size frame
         // (common for AAC) or a fmt=3 header reuse per RTMP spec.
-        if (fmt == 2 || fmt == 3)
-            && stream.reassembly_bytes_read == 0
-            && stream.type0_msg_length == 0
+        if (fmt == 2 || fmt == 3) && stream.reassembly_bytes_read == 0 && !stream.has_message_header
         {
             return Err(ErrorCode::Chunk);
         }
@@ -332,6 +326,7 @@ pub fn chunk_read(
 
         match fmt {
             0 => {
+                stream.has_message_header = true;
                 stream.type0_timestamp = final_timestamp;
                 stream.type0_msg_length = msg_length;
                 stream.type0_msg_type_id = msg_type_id;
@@ -343,6 +338,7 @@ pub fn chunk_read(
                 stream.last_delta = final_timestamp;
             }
             1 => {
+                stream.has_message_header = true;
                 // fmt=1 carries a timestamp DELTA (RTMP spec 5.3.1.1), not an
                 // absolute value -- it must be added to the running timestamp.
                 stream.type0_timestamp = stream.type0_timestamp.wrapping_add(final_timestamp);

@@ -33,8 +33,13 @@ pub fn parse(data: &[u8], tag: &mut VideoTag) -> Result<()> {
         _ => return Err(ErrorCode::Unsupported),
     };
 
-    if data.len() >= 5 && tag.codec == VideoCodec::H264 {
+    if data.len() >= 2 && tag.codec == VideoCodec::H264 {
+        // AVCPacketType is present as soon as byte 1 is, independent of the
+        // optional SI24 CompositionTime (which legacy AVC always includes but
+        // a truncated tag may not).
         tag.avc_packet_type = data[1];
+    }
+    if data.len() >= 5 && tag.codec == VideoCodec::H264 {
         // CompositionTime is a signed 24-bit integer (SI24); sign-extend so
         // negative B-frame offsets do not read back as ~16.7M.
         let ct = ((data[2] as i32) << 16) | ((data[3] as i32) << 8) | (data[4] as i32);

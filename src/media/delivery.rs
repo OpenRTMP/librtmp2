@@ -9,8 +9,8 @@ use super::init_cache::{CacheFrameKind, classify_cache_frame};
 use crate::ertmp::multitrack_media::{is_multitrack_container, multitrack_has_metadata};
 use crate::ertmp::{exaudio, exvideo};
 use crate::types::{
-    AudioHeader, ERTMP_AUDIO_PACKET_TYPE_METADATA, ERTMP_PACKET_TYPE_METADATA, FrameType,
-    VideoHeader,
+    AudioHeader, ERTMP_AUDIO_PACKET_TYPE_METADATA, ERTMP_AUDIO_PACKET_TYPE_MULTICHANNEL,
+    ERTMP_PACKET_TYPE_METADATA, FrameType, VideoHeader,
 };
 
 /// How a live media frame may be treated under congestion.
@@ -49,8 +49,17 @@ impl DeliveryHint {
         }
         // Enhanced RTMP Audio Metadata (ExHeader packet type 3) is Critical
         // for the same reason: nothing replays it later, so a congested
-        // receiver would lose it permanently.
+        // receiver would lose it permanently. VideoCommand (StartSeek /
+        // EndSeek) and MultichannelConfig are equally one-shot decoder state:
+        // dropping them leaves a receiver stuck in seek or on the wrong
+        // channel map.
         if frame_type == FrameType::Audio && is_enhanced_audio_metadata(payload) {
+            return Self::Critical;
+        }
+        if frame_type == FrameType::Video && is_enhanced_video_command(payload) {
+            return Self::Critical;
+        }
+        if frame_type == FrameType::Audio && is_enhanced_audio_multichannel(payload) {
             return Self::Critical;
         }
         match classify_cache_frame(frame_type, payload) {
@@ -125,6 +134,28 @@ fn is_enhanced_audio_metadata(payload: &[u8]) -> bool {
         return false;
     }
     hdr.is_ex_header != 0 && hdr.packet_type == ERTMP_AUDIO_PACKET_TYPE_METADATA
+}
+
+fn is_enhanced_audio_multichannel(payload: &[u8]) -> bool {
+    let Some(&b0) = payload.first() else {
+        return false;
+    };
+    if (b0 >> 4) & 0x0F != 0x09 {
+        return false;
+    }
+    let mut hdr = AudioHeader::default();
+    if exaudio::exaudio_parse(payload, &mut hdr).is_err() {
+        return false;
+    }
+    hdr.is_ex_header != 0 && hdr.packet_type == ERTMP_AUDIO_PACKET_TYPE_MULTICHANNEL
+}
+
+fn is_enhanced_video_command(payload: &[u8]) -> bool {
+    // VideoCommand is an ExVideo frame type (5), not a packet type: its low
+    // nibble carries the command (StartSeek/EndSeek), not a codec packet type.
+    payload
+        .first()
+        .is_some_and(|b| b & 0x80 != 0 && (b >> 4) & 0x07 == 5)
 }
 
 #[cfg(test)]
