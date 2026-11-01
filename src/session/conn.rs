@@ -3093,7 +3093,13 @@ impl Conn {
                                     // the currently played stream, which this
                                     // callback was not authorized to evict.
                                     let pinned = self.relay_key.clone();
-                                    if !pinned.is_empty() && pinned != name_str {
+                                    if !pinned.is_empty()
+                                        && pinned != name_str
+                                        && !self
+                                            .current_stream
+                                            .as_ref()
+                                            .is_some_and(|s| s.is_playing)
+                                    {
                                         routes.force_release(&self.app, &pinned);
                                     }
                                 }

@@ -83,11 +83,15 @@ case "${1:-}" in
             exit "$status"
         }
         trap restore_worktree EXIT
-        if [[ -n "$(git status --porcelain)" ]]; then
+        STASH_BEFORE=$(git rev-parse --quiet --verify refs/stash || true)
+        if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then
             git stash push --quiet -m "abi-baseline" || {
                 echo "error: could not stash local changes" >&2
                 exit 1
             }
+        fi
+        STASH_AFTER=$(git rev-parse --quiet --verify refs/stash || true)
+        if [[ "$STASH_AFTER" != "$STASH_BEFORE" ]]; then
             STASHED=1
         fi
         git checkout --quiet "$BASELINE"

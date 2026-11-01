@@ -6,7 +6,9 @@
 //! init cache ([`classify_cache_frame`]), and travels with the frame.
 
 use super::init_cache::{CacheFrameKind, classify_cache_frame};
-use crate::ertmp::multitrack_media::{is_multitrack_container, multitrack_has_metadata};
+use crate::ertmp::multitrack_media::{
+    foreach_track, is_multitrack_container, multitrack_has_metadata,
+};
 use crate::ertmp::{exaudio, exvideo};
 use crate::types::{
     AudioHeader, ERTMP_AUDIO_PACKET_TYPE_METADATA, ERTMP_AUDIO_PACKET_TYPE_MULTICHANNEL,
@@ -137,6 +139,15 @@ fn is_enhanced_audio_metadata(payload: &[u8]) -> bool {
 }
 
 fn is_enhanced_audio_multichannel(payload: &[u8]) -> bool {
+    // Multitrack containers carry the inner packet type in their track
+    // descriptors; the outer ExHeader only says "multitrack".
+    if is_multitrack_container(FrameType::Audio, payload) {
+        let mut found = false;
+        let valid = foreach_track(FrameType::Audio, payload, |track| {
+            found |= track.packet_type == ERTMP_AUDIO_PACKET_TYPE_MULTICHANNEL;
+        });
+        return valid && found;
+    }
     let Some(&b0) = payload.first() else {
         return false;
     };
