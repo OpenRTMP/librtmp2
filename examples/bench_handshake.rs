@@ -74,47 +74,23 @@ fn parse_args_from(raw: &[String]) -> Option<Args> {
     while i < raw.len() {
         match raw[i].as_str() {
             "--count" => {
-                if seen_count {
-                    return None;
-                }
-                seen_count = true;
-                let value = raw.get(i + 1)?;
-                if value.starts_with('-') {
-                    return None;
-                }
-                count = value.parse().ok()?;
+                seen_count = take_flag_once(seen_count)?;
+                count = take_numeric_value(raw, i)?;
                 i += 2;
             }
             "--concurrency" => {
-                if seen_concurrency {
-                    return None;
-                }
-                seen_concurrency = true;
-                let value = raw.get(i + 1)?;
-                if value.starts_with('-') {
-                    return None;
-                }
-                concurrency = value.parse().ok()?;
+                seen_concurrency = take_flag_once(seen_concurrency)?;
+                concurrency = take_numeric_value(raw, i)?;
                 i += 2;
             }
             "--play" => {
-                if seen_play {
-                    return None;
-                }
-                seen_play = true;
+                seen_play = take_flag_once(seen_play)?;
                 play = true;
                 i += 1;
             }
             "--url-list" => {
-                if seen_url_list {
-                    return None;
-                }
-                seen_url_list = true;
-                let value = raw.get(i + 1)?;
-                if value.starts_with('-') {
-                    return None;
-                }
-                url_list_path = Some(value.clone());
+                seen_url_list = take_flag_once(seen_url_list)?;
+                url_list_path = Some(take_text_value(raw, i)?.to_string());
                 i += 2;
             }
             other => {
@@ -154,6 +130,22 @@ fn parse_args_from(raw: &[String]) -> Option<Args> {
         concurrency,
         play,
     })
+}
+
+/// Mark a flag as supplied; `None` means it was already seen.
+fn take_flag_once(seen: bool) -> Option<bool> {
+    (!seen).then_some(true)
+}
+
+/// Return the token after `i` when it is a value rather than another flag.
+fn take_text_value(raw: &[String], i: usize) -> Option<&str> {
+    let value = raw.get(i + 1)?;
+    (!value.starts_with('-')).then_some(value.as_str())
+}
+
+/// Parse the numeric token after `i`, rejecting a missing or flag-like value.
+fn take_numeric_value(raw: &[String], i: usize) -> Option<usize> {
+    take_text_value(raw, i)?.parse().ok()
 }
 
 /// URL for attempt `n`: prefix mode appends `-<n>` for publishes and reuses
