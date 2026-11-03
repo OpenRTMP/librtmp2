@@ -41,6 +41,13 @@ const MAX_MESSAGES_PER_READ: usize = 256;
 /// single `recv` call. Without this, the outer `recv` loop (256 iterations)
 /// multiplies the per-pass cap into 65,536 message parses per recv batch.
 const MAX_MESSAGES_PER_RECV: usize = 256;
+/// Hard cap on sub-track work (authorization + callback dispatch) across one
+/// `recv` batch. An aggregate can carry up to 256 containers of up to 4096
+/// tracks each, so without a separate bound a single read could run over a
+/// million track iterations on the poll thread. When the budget is exhausted
+/// the message already being processed is finished and the remaining
+/// aggregate sub-tags are dropped like any other budget stop.
+const MAX_TRACKS_PER_RECV: usize = 65536;
 /// Maximum bytes retained in the per-connection inbound staging buffer. When
 /// the per-call message budget stops draining faster than the peer sends,
 /// complete wire data can otherwise accumulate here up to `BUFFER_MAX_SIZE`
@@ -425,6 +432,9 @@ pub struct Conn {
     /// `recv(&[])`) until this clears, or a batch that exceeds the budget can
     /// sit unprocessed until the peer happens to send more bytes.
     budget_exhausted: bool,
+    /// Remaining sub-track work for the current `recv` batch (see
+    /// [`MAX_TRACKS_PER_RECV`]).
+    recv_track_budget: usize,
     /// Start of the current "must become active" grace window: set when
     /// this inbound TCP session was accepted, and reset every time the
     /// session goes idle after publishing/playing (`FCUnpublish`,
@@ -535,6 +545,7 @@ impl Conn {
             inbound_ping_window_start: None,
             frame_cb_scratch: Vec::new(),
             budget_exhausted: false,
+            recv_track_budget: MAX_TRACKS_PER_RECV,
             session_setup_started: Instant::now(),
             negotiated_caps: NegotiatedCaps::default(),
             connect_object_encoding: 0.0,
@@ -1178,15 +1189,16 @@ impl Conn {
         parse_payload: &[u8],
         current_codec: Option<&str>,
         is_multitrack: bool,
-    ) -> Result<()> {
-        // Without an authorization callback there is no per-track auth work.
+    ) -> Result<usize> {
+        // Without an authorization callback there is no per-track auth work,
+        // but the frame still counts against the per-recv track budget.
         if self.on_media_cb.is_none() {
-            return Ok(());
+            return Ok(1);
         }
 
         if !is_multitrack {
             return if self.media_allowed(frame_type, current_codec) {
-                Ok(())
+                Ok(1)
             } else {
                 Err(ErrorCode::Auth)
             };
@@ -1195,15 +1207,16 @@ impl Conn {
         // A `ManyTracksManyCodecs` container can carry a different codec per
         // track; checking only the first codec would allow a later disallowed
         // codec to bypass authorization. Every track of a message that already
-        // arrived is authorized; the per-recv message budget is charged once
-        // per message by `handle_message`, never per sub-track, so a wide
-        // container can neither fail the connection nor make the aggregate
-        // loop skip the following sub-tags.
+        // arrived is authorized; the per-recv *message* budget is charged once
+        // per message by `handle_message`, while the *track* work is bounded by
+        // `MAX_TRACKS_PER_RECV` after this frame completes.
         let mut auth_denied = false;
+        let mut tracks = 0usize;
         let tracks_valid = foreach_track(frame_type, parse_payload, |track| {
             if auth_denied {
                 return;
             }
+            tracks += 1;
             let track_codec = media_fourcc_auth_label(&track.fourcc);
             if !self.media_allowed(frame_type, track_codec.as_deref()) {
                 auth_denied = true;
@@ -1215,7 +1228,7 @@ impl Conn {
         if auth_denied {
             return Err(ErrorCode::Auth);
         }
-        Ok(())
+        Ok(tracks.max(1))
     }
 
     fn update_detected_media_metadata(
@@ -1328,12 +1341,13 @@ impl Conn {
         };
         let is_multitrack = is_multitrack_container(frame_type, parse_payload);
 
-        self.authorize_media_frame(
+        let track_work = self.authorize_media_frame(
             frame_type,
             parse_payload,
             current_codec.as_deref(),
             is_multitrack,
         )?;
+        self.recv_track_budget = self.recv_track_budget.saturating_sub(track_work);
         self.update_detected_media_metadata(
             frame_type,
             current_codec.as_deref(),
@@ -1401,7 +1415,7 @@ impl Conn {
             if data_size == 0 {
                 return Err(ErrorCode::Protocol);
             }
-            if *messages_budget == 0 {
+            if *messages_budget == 0 || self.recv_track_budget == 0 {
                 return Ok(());
             }
             *messages_budget = messages_budget.saturating_sub(1);
@@ -1522,8 +1536,9 @@ impl Conn {
         let mut max_iter = 256;
         let mut no_progress = 0;
         let mut messages_budget = MAX_MESSAGES_PER_RECV;
+        self.recv_track_budget = MAX_TRACKS_PER_RECV;
         while max_iter > 0 {
-            if messages_budget == 0 {
+            if messages_budget == 0 || self.recv_track_budget == 0 {
                 self.budget_exhausted = true;
                 break;
             }
@@ -1691,7 +1706,10 @@ impl Conn {
     pub fn read_messages(&mut self, messages_budget: &mut usize) -> i32 {
         let mut processed = 0usize;
         loop {
-            if processed >= MAX_MESSAGES_PER_READ || *messages_budget == 0 {
+            if processed >= MAX_MESSAGES_PER_READ
+                || *messages_budget == 0
+                || self.recv_track_budget == 0
+            {
                 // Stopped because the budget ran out, not because the buffer
                 // is empty -- there may still be complete messages sitting in
                 // `recv_buffer` that the caller needs to keep draining.
@@ -6911,6 +6929,21 @@ mod tests {
         );
         assert_eq!(messages_budget, MAX_MESSAGES_PER_RECV);
         assert_eq!(*CALLBACKS.lock().unwrap(), tracks as usize);
+        // The frame's track work is charged against the separate per-recv
+        // bound, not the message budget.
+        assert_eq!(
+            conn.recv_track_budget,
+            MAX_TRACKS_PER_RECV - tracks as usize
+        );
+    }
+
+    #[test]
+    fn read_messages_stops_when_track_budget_is_exhausted() {
+        let mut conn = Conn::new();
+        conn.recv_track_budget = 0;
+        let mut budget = MAX_MESSAGES_PER_RECV;
+        let _ = conn.read_messages(&mut budget);
+        assert!(conn.budget_exhausted);
     }
 
     #[test]
