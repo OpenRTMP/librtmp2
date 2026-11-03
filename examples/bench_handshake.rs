@@ -66,10 +66,18 @@ fn parse_args_from(raw: &[String]) -> Option<Args> {
     let mut count = 200usize;
     let mut concurrency = 50usize;
     let mut play = false;
+    let mut seen_count = false;
+    let mut seen_concurrency = false;
+    let mut seen_play = false;
+    let mut seen_url_list = false;
     let mut i = 0;
     while i < raw.len() {
         match raw[i].as_str() {
             "--count" => {
+                if seen_count {
+                    return None;
+                }
+                seen_count = true;
                 let value = raw.get(i + 1)?;
                 if value.starts_with('-') {
                     return None;
@@ -78,6 +86,10 @@ fn parse_args_from(raw: &[String]) -> Option<Args> {
                 i += 2;
             }
             "--concurrency" => {
+                if seen_concurrency {
+                    return None;
+                }
+                seen_concurrency = true;
                 let value = raw.get(i + 1)?;
                 if value.starts_with('-') {
                     return None;
@@ -86,10 +98,18 @@ fn parse_args_from(raw: &[String]) -> Option<Args> {
                 i += 2;
             }
             "--play" => {
+                if seen_play {
+                    return None;
+                }
+                seen_play = true;
                 play = true;
                 i += 1;
             }
             "--url-list" => {
+                if seen_url_list {
+                    return None;
+                }
+                seen_url_list = true;
                 let value = raw.get(i + 1)?;
                 if value.starts_with('-') {
                     return None;
@@ -109,6 +129,11 @@ fn parse_args_from(raw: &[String]) -> Option<Args> {
                 i += 1;
             }
         }
+    }
+
+    if url_prefix.is_some() && url_list_path.is_some() {
+        eprintln!("a positional URL cannot be combined with --url-list");
+        return None;
     }
 
     // A degenerate `--count`/`--concurrency` runs zero handshakes, which made
@@ -269,6 +294,23 @@ mod tests {
     #[test]
     fn flag_value_must_not_be_parsed_as_another_flag() {
         assert!(args(&["--count", "--play", "rtmp://a/live"]).is_none());
+    }
+
+    #[test]
+    fn repeated_options_are_rejected() {
+        assert!(args(&["--count", "10", "--count", "100", "rtmp://a/live"]).is_none());
+        assert!(args(&["--concurrency", "2", "--concurrency", "3", "rtmp://a/live"]).is_none());
+        assert!(args(&["--play", "--play", "rtmp://a/live"]).is_none());
+    }
+
+    #[test]
+    fn positional_url_and_url_list_cannot_be_combined() {
+        let listed_path = std::env::temp_dir().join("bench_handshake_conflict_urls.txt");
+        std::fs::write(&listed_path, "rtmp://a/live-1\n").expect("write url list");
+        let path = listed_path.to_str().expect("utf-8 temp path");
+        assert!(args(&["rtmp://a/live", "--url-list", path]).is_none());
+        assert!(args(&["--url-list", path, "rtmp://a/live"]).is_none());
+        let _ = std::fs::remove_file(&listed_path);
     }
 
     #[test]
