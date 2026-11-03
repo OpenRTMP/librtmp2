@@ -5502,8 +5502,14 @@ mod tests {
         command::build_create_stream(&mut create, 2.0).unwrap();
         conn.handle_command(create.as_slice()).unwrap();
         let stream = conn.current_stream.as_ref().unwrap();
-        assert_eq!(stream.stream_id, 2, "createStream must replace the active stream");
-        assert!(!stream.is_publishing, "the old publish role must be abandoned");
+        assert_eq!(
+            stream.stream_id, 2,
+            "createStream must replace the active stream"
+        );
+        assert!(
+            !stream.is_publishing,
+            "the old publish role must be abandoned"
+        );
 
         assert!(
             conn.session_setup_timed_out(),
