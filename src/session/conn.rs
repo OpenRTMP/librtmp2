@@ -2912,10 +2912,6 @@ impl Conn {
                     // that route is being abandoned and must be evicted now
                     // rather than left as a dangling cache-key tracking
                     // entry until this connection eventually disconnects.
-                    let was_active = self
-                        .current_stream
-                        .as_ref()
-                        .is_some_and(|s| s.is_publishing || s.is_playing);
                     self.evict_active_publish_route();
                     // Mirror FCUnpublish/deleteStream/closeStream: a fresh
                     // createStream abandons the current publish/play role but
@@ -2932,9 +2928,10 @@ impl Conn {
                     self.next_stream_id += 1;
                     let stream_id = self.next_stream_id;
                     self.current_stream = Some(Box::new(Stream::new(stream_id)));
-                    if was_active && self.teardown_refreshes_setup_timer() {
-                        self.session_setup_started = Instant::now();
-                    }
+                    // Unlike FCUnpublish/deleteStream/closeStream, createStream
+                    // is not an idle teardown: refreshing the setup timer here
+                    // let publish→createStream cycles reset the reaper with
+                    // minimal inbound media (connection-slot squatting).
                     let _ =
                         state_machine::conn_transition(&mut self.state, ConnState::StreamCreated);
                     self.send_create_stream_response(txn, stream_id)?;
@@ -5478,6 +5475,30 @@ mod tests {
             !conn.session_setup_timed_out(),
             "unpublishing must grant a fresh setup-timeout window, not reap \
              immediately using up whatever remained of the original window"
+        );
+    }
+
+    #[test]
+    fn publish_createStream_cycling_cannot_reset_setup_timer() {
+        use std::time::{Duration, Instant};
+
+        let mut conn = Conn::new();
+        conn.app = "live".to_string();
+        conn.current_stream = Some(Box::new(Stream {
+            is_publishing: true,
+            ..Stream::new(1)
+        }));
+        conn.media_bytes_received = 1;
+        conn.set_session_setup_started_for_test(Instant::now() - Duration::from_secs(11));
+
+        let mut create = Buffer::with_capacity(128);
+        command::build_create_stream(&mut create, 2.0).unwrap();
+        conn.handle_command(create.as_slice()).unwrap();
+
+        assert!(
+            conn.session_setup_timed_out(),
+            "createStream must not refresh the setup timer; publish→createStream cycling \
+             would otherwise dodge the reaper with minimal inbound media"
         );
     }
 
