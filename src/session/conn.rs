@@ -6884,8 +6884,10 @@ mod tests {
         conn.on_media_cb = Some(allow_all);
         *CALLBACKS.lock().unwrap() = 0;
 
-        // One valid container with 300 tracks (limit MAX_MULTITRACK_SUBTRACKS)
-        // exhausts a fresh per-recv budget on its own.
+        // One valid container with 300 tracks (well under the 4096
+        // MAX_MULTITRACK_SUBTRACKS cap, but more track charges than a fresh
+        // per-recv MAX_MESSAGES_PER_RECV budget) exhausts that budget on its
+        // own.
         let tracks = 300u16;
         let mut payload = vec![0x86, 0x10, b'a', b'v', b'c', b'1'];
         for id in 0..tracks {
