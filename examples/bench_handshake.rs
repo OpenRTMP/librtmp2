@@ -57,6 +57,10 @@ struct Args {
 
 fn parse_args() -> Option<Args> {
     let raw: Vec<String> = env::args().skip(1).collect();
+    parse_args_from(&raw)
+}
+
+fn parse_args_from(raw: &[String]) -> Option<Args> {
     let mut url_prefix = None;
     let mut url_list_path = None;
     let mut count = 200usize;
@@ -66,11 +70,19 @@ fn parse_args() -> Option<Args> {
     while i < raw.len() {
         match raw[i].as_str() {
             "--count" => {
-                count = raw.get(i + 1)?.parse().ok()?;
+                let value = raw.get(i + 1)?;
+                if value.starts_with('-') {
+                    return None;
+                }
+                count = value.parse().ok()?;
                 i += 2;
             }
             "--concurrency" => {
-                concurrency = raw.get(i + 1)?.parse().ok()?;
+                let value = raw.get(i + 1)?;
+                if value.starts_with('-') {
+                    return None;
+                }
+                concurrency = value.parse().ok()?;
                 i += 2;
             }
             "--play" => {
@@ -78,10 +90,21 @@ fn parse_args() -> Option<Args> {
                 i += 1;
             }
             "--url-list" => {
-                url_list_path = Some(raw.get(i + 1)?.clone());
+                let value = raw.get(i + 1)?;
+                if value.starts_with('-') {
+                    return None;
+                }
+                url_list_path = Some(value.clone());
                 i += 2;
             }
             other => {
+                // Only one positional argument (the RTMP URL prefix) is
+                // valid; an unknown flag must not silently become the URL,
+                // which made `--duration 5` benchmark the literal host "5".
+                if other.starts_with('-') || url_prefix.is_some() {
+                    eprintln!("unknown or unexpected argument: {other}");
+                    return None;
+                }
                 url_prefix = Some(other.to_string());
                 i += 1;
             }
@@ -221,5 +244,54 @@ fn main() -> ExitCode {
         ExitCode::from(2)
     } else {
         ExitCode::SUCCESS
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(raw: &[&str]) -> Option<Args> {
+        parse_args_from(&raw.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+    }
+
+    #[test]
+    fn unknown_flag_is_rejected_instead_of_becoming_the_url() {
+        assert!(args(&["--duration", "5", "rtmp://127.0.0.1/live"]).is_none());
+        assert!(args(&["--concurrency=5"]).is_none());
+    }
+
+    #[test]
+    fn second_positional_is_rejected() {
+        assert!(args(&["rtmp://a/live", "rtmp://b/live"]).is_none());
+    }
+
+    #[test]
+    fn flag_value_must_not_be_parsed_as_another_flag() {
+        assert!(args(&["--count", "--play", "rtmp://a/live"]).is_none());
+    }
+
+    #[test]
+    fn documented_forms_still_parse() {
+        let parsed = args(&[
+            "--count",
+            "10",
+            "--concurrency",
+            "2",
+            "--play",
+            "rtmp://a/live",
+        ])
+        .expect("documented arguments must parse");
+        assert_eq!(parsed.count, 10);
+        assert_eq!(parsed.concurrency, 2);
+        assert!(parsed.play);
+        assert!(matches!(parsed.source, UrlSource::Prefix(ref p) if p == "rtmp://a/live"));
+
+        let listed_path = std::env::temp_dir().join("bench_handshake_test_urls.txt");
+        std::fs::write(&listed_path, "rtmp://a/live-1\n").expect("write url list");
+        let listed = args(&["--url-list", listed_path.to_str().expect("utf-8 temp path")])
+            .expect("url-list must parse");
+        assert!(matches!(listed.source, UrlSource::List(_)));
+        let _ = std::fs::remove_file(&listed_path);
     }
 }

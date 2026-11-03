@@ -1416,6 +1416,10 @@ impl Client {
         self.ack_bytes_remaining = None;
         self.out_chunk_size = RTMP_DEFAULT_CHUNK_SIZE;
         self.media_out_headers = MediaHeaderTracker::default();
+        // A deferred terminal transport error belongs to the old session: the
+        // first poll() of the next connect() must not replay it.
+        self.terminal_io_error = None;
+        self.terminal_drain = false;
     }
 
     /// Drive the legacy C0/C1/C2 client handshake to completion over `transport`.
@@ -3085,5 +3089,20 @@ mod tests {
             parse_rtmp_url("rtmp://example.com/live"),
             Err(ErrorCode::Internal)
         );
+    }
+
+    #[test]
+    fn reset_session_state_clears_deferred_terminal_io_error() {
+        let mut client = Client::new();
+        client.terminal_io_error = Some(ErrorCode::Io);
+        client.terminal_drain = true;
+
+        client.reset_session_state();
+
+        assert!(
+            client.terminal_io_error.is_none(),
+            "a deferred error from the previous session must not fail the new one"
+        );
+        assert!(!client.terminal_drain);
     }
 }
