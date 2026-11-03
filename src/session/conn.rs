@@ -1178,11 +1178,8 @@ impl Conn {
         parse_payload: &[u8],
         current_codec: Option<&str>,
         is_multitrack: bool,
-        mut messages_budget: Option<&mut usize>,
     ) -> Result<()> {
-        // Without an authorization callback there is no per-track auth work
-        // to budget here. The frame-callback path applies its own sub-track
-        // budget independently below.
+        // Without an authorization callback there is no per-track auth work.
         if self.on_media_cb.is_none() {
             return Ok(());
         }
@@ -1197,26 +1194,16 @@ impl Conn {
 
         // A `ManyTracksManyCodecs` container can carry a different codec per
         // track; checking only the first codec would allow a later disallowed
-        // codec to bypass authorization.
+        // codec to bypass authorization. Every track of a message that already
+        // arrived is authorized; the per-recv message budget is charged once
+        // per message by `handle_message`, never per sub-track, so a wide
+        // container can neither fail the connection nor make the aggregate
+        // loop skip the following sub-tags.
         let mut auth_denied = false;
-        let mut track_index = 0usize;
         let tracks_valid = foreach_track(frame_type, parse_payload, |track| {
             if auth_denied {
                 return;
             }
-            if track_index > 0 {
-                if let Some(budget) = messages_budget.as_deref_mut() {
-                    // Charge the shared per-recv budget, but never abort a
-                    // message that has already arrived: exhausting a local
-                    // work bound is not a peer protocol error, and every
-                    // track of this frame still has to be authorized before
-                    // it may be relayed. The saturating charge stops the
-                    // outer read loop at the next message boundary
-                    // (`read_messages` sets its resumable `budget_exhausted`).
-                    *budget = budget.saturating_sub(1);
-                }
-            }
-            track_index += 1;
             let track_codec = media_fourcc_auth_label(&track.fourcc);
             if !self.media_allowed(frame_type, track_codec.as_deref()) {
                 auth_denied = true;
@@ -1270,20 +1257,9 @@ impl Conn {
         timestamp: u32,
         parse_payload: &[u8],
         is_multitrack: bool,
-        mut messages_budget: Option<&mut usize>,
     ) -> Result<()> {
         let cb = self.on_frame_cb;
-        let mut track_index = 0usize;
         let parsed_multitrack = foreach_track(frame_type, parse_payload, |track| {
-            if track_index > 0 {
-                if let Some(budget) = messages_budget.as_deref_mut() {
-                    // Soft-cap the per-track charge: a frame that already
-                    // arrived still runs its callbacks for every track. The
-                    // outer read loop pauses at the next message boundary.
-                    *budget = budget.saturating_sub(1);
-                }
-            }
-            track_index += 1;
             if let Some(cb) = cb {
                 self.invoke_multitrack_on_frame_cb(
                     cb,
@@ -1317,7 +1293,11 @@ impl Conn {
         frame_type: FrameType,
         timestamp: u32,
         payload: &[u8],
-        mut messages_budget: Option<&mut usize>,
+        // Kept for the call-site contract; per-sub-track work is no longer
+        // charged against the per-recv message budget, so a wide container can
+        // neither fail the connection nor truncate a following aggregate
+        // sub-tag.
+        _messages_budget: Option<&mut usize>,
     ) -> Result<()> {
         if !self.is_active_publisher_stream(msg_stream_id) {
             // A publisher whose relay is still deferred (`relay_enabled` is
@@ -1353,7 +1333,6 @@ impl Conn {
             parse_payload,
             current_codec.as_deref(),
             is_multitrack,
-            messages_budget.as_deref_mut(),
         )?;
         self.update_detected_media_metadata(
             frame_type,
@@ -1365,13 +1344,7 @@ impl Conn {
         self.media_bytes_received = self
             .media_bytes_received
             .saturating_add(payload.len() as u64);
-        self.dispatch_media_frame_callbacks(
-            frame_type,
-            timestamp,
-            parse_payload,
-            is_multitrack,
-            messages_budget,
-        )?;
+        self.dispatch_media_frame_callbacks(frame_type, timestamp, parse_payload, is_multitrack)?;
 
         if self
             .queue_relay_frame(frame_type, timestamp, payload, parse_payload)
@@ -6824,7 +6797,7 @@ mod tests {
     }
 
     #[test]
-    fn multitrack_subtracks_consume_message_budget() {
+    fn multitrack_subtracks_do_not_consume_message_budget() {
         use std::sync::{LazyLock, Mutex};
 
         static CALLBACKS: LazyLock<Mutex<usize>> = LazyLock::new(|| Mutex::new(0));
@@ -6848,20 +6821,19 @@ mod tests {
             payload.push(0xAA);
         }
 
-        // `handle_message()` already charges one unit for the outer RTMP message.
-        // This direct helper call therefore starts with the remaining budget.
+        // `handle_message()` charges one unit for the outer RTMP message; its
+        // sub-tracks are not charged, so a wide container cannot exhaust the
+        // per-recv budget.
         let mut messages_budget = 2;
         conn.handle_media_frame(1, FrameType::Video, 0, &payload, Some(&mut messages_budget))
             .unwrap();
 
-        // The charge saturates at zero but every track of the message that
-        // already arrived still runs its callback.
-        assert_eq!(messages_budget, 0);
+        assert_eq!(messages_budget, 2);
         assert_eq!(*CALLBACKS.lock().unwrap(), 8);
     }
 
     #[test]
-    fn multitrack_on_media_cb_authorization_soft_caps_message_budget() {
+    fn multitrack_on_media_cb_authorization_leaves_message_budget_untouched() {
         use std::sync::{LazyLock, Mutex};
 
         static CALLBACKS: LazyLock<Mutex<usize>> = LazyLock::new(|| Mutex::new(0));
@@ -6893,11 +6865,10 @@ mod tests {
             Ok(())
         );
 
-        // Exhausting a local work budget is not a peer protocol error: the
-        // frame that already arrived is authorized in full, the charge
-        // saturates at zero, and the outer read loop pauses at the next
-        // message boundary.
-        assert_eq!(messages_budget, 0);
+        // Authorization completes for every track and never touches the
+        // per-recv message budget (the outer message is charged once), so a
+        // wide container cannot abort the connection.
+        assert_eq!(messages_budget, 2);
         assert_eq!(*CALLBACKS.lock().unwrap(), 8);
     }
 
@@ -6938,7 +6909,7 @@ mod tests {
             conn.handle_media_frame(1, FrameType::Video, 0, &payload, Some(&mut messages_budget)),
             Ok(())
         );
-        assert_eq!(messages_budget, 0);
+        assert_eq!(messages_budget, MAX_MESSAGES_PER_RECV);
         assert_eq!(*CALLBACKS.lock().unwrap(), tracks as usize);
     }
 
