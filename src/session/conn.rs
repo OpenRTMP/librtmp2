@@ -5479,21 +5479,31 @@ mod tests {
     }
 
     #[test]
-    fn publish_createStream_cycling_cannot_reset_setup_timer() {
+    fn publish_create_stream_cycling_cannot_reset_setup_timer() {
         use std::time::{Duration, Instant};
 
         let mut conn = Conn::new();
+        conn.state = ConnState::Publishing;
         conn.app = "live".to_string();
+        conn.next_stream_id = 1;
+        conn.active_stream_count = 1;
         conn.current_stream = Some(Box::new(Stream {
             is_publishing: true,
             ..Stream::new(1)
         }));
         conn.media_bytes_received = 1;
         conn.set_session_setup_started_for_test(Instant::now() - Duration::from_secs(11));
+        assert!(
+            !conn.session_setup_timed_out(),
+            "an active publisher with media must be exempt from the setup timeout"
+        );
 
         let mut create = Buffer::with_capacity(128);
         command::build_create_stream(&mut create, 2.0).unwrap();
         conn.handle_command(create.as_slice()).unwrap();
+        let stream = conn.current_stream.as_ref().unwrap();
+        assert_eq!(stream.stream_id, 2, "createStream must replace the active stream");
+        assert!(!stream.is_publishing, "the old publish role must be abandoned");
 
         assert!(
             conn.session_setup_timed_out(),
