@@ -1270,9 +1270,16 @@ impl Conn {
         timestamp: u32,
         parse_payload: &[u8],
         is_multitrack: bool,
-    ) -> Result<()> {
+    ) -> Result<usize> {
         let cb = self.on_frame_cb;
+        // Count the tracks actually visited: with `on_media_cb` unset the
+        // authorization pass charges one unit per *message*, while this pass
+        // still walks (and dispatches) every track of a multi-track container.
+        // The caller charges the difference so the per-recv track budget bounds
+        // the real work instead of only the auth path.
+        let mut tracks = 0usize;
         let parsed_multitrack = foreach_track(frame_type, parse_payload, |track| {
+            tracks += 1;
             if let Some(cb) = cb {
                 self.invoke_multitrack_on_frame_cb(
                     cb,
@@ -1291,13 +1298,13 @@ impl Conn {
             if !parsed_multitrack {
                 return Err(ErrorCode::Protocol);
             }
-            return Ok(());
+            return Ok(tracks.max(1));
         }
 
         if let Some(cb) = cb {
             self.invoke_on_frame_cb(cb, frame_type, timestamp, u8::MAX, parse_payload);
         }
-        Ok(())
+        Ok(1)
     }
 
     fn handle_media_frame(
@@ -1358,7 +1365,18 @@ impl Conn {
         self.media_bytes_received = self
             .media_bytes_received
             .saturating_add(payload.len() as u64);
-        self.dispatch_media_frame_callbacks(frame_type, timestamp, parse_payload, is_multitrack)?;
+        let dispatched = self.dispatch_media_frame_callbacks(
+            frame_type,
+            timestamp,
+            parse_payload,
+            is_multitrack,
+        )?;
+        // The authorization pass already charged `track_work` (one unit when
+        // no auth callback is installed). Charge whatever the dispatch pass
+        // visited on top of that, so a wide container without an auth callback
+        // cannot perform a million track callbacks per recv batch.
+        let extra_work = dispatched.saturating_sub(track_work);
+        self.recv_track_budget = self.recv_track_budget.saturating_sub(extra_work);
 
         if self
             .queue_relay_frame(frame_type, timestamp, payload, parse_payload)
@@ -1704,6 +1722,16 @@ impl Conn {
     }
 
     pub fn read_messages(&mut self, messages_budget: &mut usize) -> i32 {
+        // `recv` re-arms the per-batch track budget, but this public entry
+        // point can also be driven directly by an embedding host (and is the
+        // state-machine step `process` dispatches to). Treat every direct call
+        // as a new batch: otherwise a depleted budget stops all inbound
+        // processing for good, with no error and an open connection. Inside
+        // `recv` the loop never calls back in after the budget hits zero, so
+        // the per-recv bound is unchanged.
+        if self.recv_track_budget == 0 {
+            self.recv_track_budget = MAX_TRACKS_PER_RECV;
+        }
         let mut processed = 0usize;
         loop {
             if processed >= MAX_MESSAGES_PER_READ
@@ -2897,6 +2925,10 @@ impl Conn {
                     // that route is being abandoned and must be evicted now
                     // rather than left as a dangling cache-key tracking
                     // entry until this connection eventually disconnects.
+                    let was_active = self
+                        .current_stream
+                        .as_ref()
+                        .is_some_and(|s| s.is_publishing || s.is_playing);
                     self.evict_active_publish_route();
                     // Mirror FCUnpublish/deleteStream/closeStream: a fresh
                     // createStream abandons the current publish/play role but
@@ -2913,10 +2945,17 @@ impl Conn {
                     self.next_stream_id += 1;
                     let stream_id = self.next_stream_id;
                     self.current_stream = Some(Box::new(Stream::new(stream_id)));
-                    // Unlike FCUnpublish/deleteStream/closeStream, createStream
-                    // is not an idle teardown: refreshing the setup timer here
-                    // let publish→createStream cycles reset the reaper with
-                    // minimal inbound media (connection-slot squatting).
+                    // Replacing a live play/publish role is a role switch, not
+                    // an idle teardown: without a fresh window the reaper sees
+                    // an idle stream on a long-lived connection and closes it
+                    // before the client's publish/play on the new stream is
+                    // read. A peer that only cycles publish→createStream with
+                    // no media is still bounded by the publish-media squat
+                    // timer, and `teardown_refreshes_setup_timer` grants the
+                    // window only after media actually flowed or was sent.
+                    if was_active && self.teardown_refreshes_setup_timer() {
+                        self.session_setup_started = Instant::now();
+                    }
                     let _ =
                         state_machine::conn_transition(&mut self.state, ConnState::StreamCreated);
                     self.send_create_stream_response(txn, stream_id)?;
@@ -5464,7 +5503,7 @@ mod tests {
     }
 
     #[test]
-    fn publish_create_stream_cycling_cannot_reset_setup_timer() {
+    fn create_stream_grants_a_fresh_setup_window_to_a_live_publisher() {
         use std::time::{Duration, Instant};
 
         let mut conn = Conn::new();
@@ -5477,7 +5516,8 @@ mod tests {
             ..Stream::new(1)
         }));
         conn.media_bytes_received = 1;
-        conn.set_session_setup_started_for_test(Instant::now() - Duration::from_secs(11));
+        let original = Instant::now() - Duration::from_secs(11);
+        conn.set_session_setup_started_for_test(original);
         assert!(
             !conn.session_setup_timed_out(),
             "an active publisher with media must be exempt from the setup timeout"
@@ -5496,10 +5536,41 @@ mod tests {
             "the old publish role must be abandoned"
         );
 
+        // A client that replaces a live stream gets the id back in the
+        // `_result` and only then sends `publish`/`play` on it. The reaper
+        // runs before the next read, so without a fresh window a compliant
+        // multi-stream client is disconnected before its next command lands.
+        assert!(
+            conn.session_setup_started > original,
+            "replacing a live stream must re-arm the setup window"
+        );
+        assert!(
+            !conn.session_setup_timed_out(),
+            "createStream must not instantly expire a connection that just \
+             replaced a live publish role"
+        );
+    }
+
+    #[test]
+    fn create_stream_without_media_cannot_reset_setup_timer() {
+        use std::time::{Duration, Instant};
+
+        // No media ever flowed and no relay bytes were sent, so the teardown
+        // grace helper refuses the refresh: cycling createStream on a silent
+        // connection cannot dodge the reaper.
+        let mut conn = Conn::new();
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+        conn.next_stream_id = 1;
+        conn.active_stream_count = 1;
+        conn.set_session_setup_started_for_test(Instant::now() - Duration::from_secs(11));
+
+        let mut create = Buffer::with_capacity(128);
+        command::build_create_stream(&mut create, 2.0).unwrap();
+        conn.handle_command(create.as_slice()).unwrap();
+
         assert!(
             conn.session_setup_timed_out(),
-            "createStream must not refresh the setup timer; publish→createStream cycling \
-             would otherwise dodge the reaper with minimal inbound media"
+            "a silent createStream must not refresh the setup timer"
         );
     }
 
@@ -6938,12 +7009,50 @@ mod tests {
     }
 
     #[test]
-    fn read_messages_stops_when_track_budget_is_exhausted() {
+    fn read_messages_rearms_the_track_budget_for_a_direct_host_call() {
+        // An embedding host may drive the state machine through this public
+        // method instead of `recv`. A depleted budget must start a new batch
+        // rather than stopping inbound processing permanently.
         let mut conn = Conn::new();
         conn.recv_track_budget = 0;
         let mut budget = MAX_MESSAGES_PER_RECV;
         let _ = conn.read_messages(&mut budget);
-        assert!(conn.budget_exhausted);
+        assert_eq!(conn.recv_track_budget, MAX_TRACKS_PER_RECV);
+        assert!(!conn.budget_exhausted);
+    }
+
+    #[test]
+    fn multitrack_dispatch_without_an_auth_callback_charges_the_track_budget() {
+        // `on_media_cb` is the authorization hook, so without it the auth
+        // pass charges one unit per message. `on_frame_cb` still visits every
+        // track; the dispatch pass must charge that work too, or one 4 MiB
+        // aggregate runs >1e6 track callbacks inside a single recv batch.
+        let mut conn = Conn::new();
+        conn.relay_enabled = true;
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+        if let Some(s) = conn.current_stream.as_mut() {
+            s.is_publishing = true;
+        }
+        conn.on_frame_cb = Some(|_| {});
+
+        let tracks = 300u16;
+        let mut payload = vec![0x86, 0x10, b'a', b'v', b'c', b'1'];
+        for id in 0..tracks {
+            payload.push((id & 0xFF) as u8);
+            payload.extend_from_slice(&[0x00, 0x00, 0x01]);
+            payload.push(0xAA);
+        }
+
+        let mut messages_budget = MAX_MESSAGES_PER_RECV;
+        assert_eq!(
+            conn.handle_media_frame(1, FrameType::Video, 0, &payload, Some(&mut messages_budget)),
+            Ok(())
+        );
+        assert_eq!(messages_budget, MAX_MESSAGES_PER_RECV);
+        assert_eq!(
+            conn.recv_track_budget,
+            MAX_TRACKS_PER_RECV - tracks as usize
+        );
     }
 
     #[test]
