@@ -5575,7 +5575,8 @@ mod tests {
 
         // Prove the handler ran (the state gate would otherwise short-circuit).
         assert_eq!(
-            conn.current_stream.as_ref().unwrap().stream_id, 2,
+            conn.current_stream.as_ref().unwrap().stream_id,
+            2,
             "createStream must reach the stream replacement"
         );
         assert!(
