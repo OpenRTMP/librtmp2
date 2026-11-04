@@ -1732,6 +1732,10 @@ impl Conn {
         if self.recv_track_budget == 0 {
             self.recv_track_budget = MAX_TRACKS_PER_RECV;
         }
+        // `has_buffered_messages()` reports this flag, and only `recv` clears
+        // it. A host that loops while it stays true would never exit even after
+        // the buffer drained, so a new direct batch starts with a clear flag.
+        self.budget_exhausted = false;
         let mut processed = 0usize;
         loop {
             if processed >= MAX_MESSAGES_PER_READ
@@ -5559,6 +5563,7 @@ mod tests {
         // grace helper refuses the refresh: cycling createStream on a silent
         // connection cannot dodge the reaper.
         let mut conn = Conn::new();
+        conn.state = ConnState::AppConnected;
         conn.current_stream = Some(Box::new(Stream::new(1)));
         conn.next_stream_id = 1;
         conn.active_stream_count = 1;
@@ -5568,6 +5573,11 @@ mod tests {
         command::build_create_stream(&mut create, 2.0).unwrap();
         conn.handle_command(create.as_slice()).unwrap();
 
+        // Prove the handler ran (the state gate would otherwise short-circuit).
+        assert_eq!(
+            conn.current_stream.as_ref().unwrap().stream_id, 2,
+            "createStream must reach the stream replacement"
+        );
         assert!(
             conn.session_setup_timed_out(),
             "a silent createStream must not refresh the setup timer"
@@ -7015,10 +7025,15 @@ mod tests {
         // rather than stopping inbound processing permanently.
         let mut conn = Conn::new();
         conn.recv_track_budget = 0;
+        conn.budget_exhausted = true;
         let mut budget = MAX_MESSAGES_PER_RECV;
         let _ = conn.read_messages(&mut budget);
         assert_eq!(conn.recv_track_budget, MAX_TRACKS_PER_RECV);
         assert!(!conn.budget_exhausted);
+        assert!(
+            !conn.has_buffered_messages(),
+            "a direct batch must not leave the buffered-work flag set"
+        );
     }
 
     #[test]
