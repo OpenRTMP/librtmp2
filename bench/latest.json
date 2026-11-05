@@ -4,68 +4,68 @@
  "kind": "main",
  "version": "0.16.1",
  "tag": null,
- "commit": "4a82c1e939fdf2bb9a6214f3cd6fe78cc954aafb",
- "date": "2026-11-05T21:07:01Z",
- "run_url": "https://github.com/OpenRTMP/librtmp2/actions/runs/42107195932",
+ "commit": "1590d513eb4075decac5358248c2933929d46c24",
+ "date": "2026-11-05T21:13:17Z",
+ "run_url": "https://github.com/OpenRTMP/librtmp2/actions/runs/42109745185",
  "deps": {},
  "environment": {
   "cpu": "AMD EPYC 7763 64-Core Processor",
   "vcpus": 4,
   "ram_gib": 15.6,
-  "kernel": "Linux 7.0.0-1019-azure x86_64",
+  "kernel": "Linux 7.0.0-1017-azure x86_64",
   "rustc": "1.99.1",
-  "runner": "GitHub-hosted ubuntu26 (image 20261101.186.1)",
+  "runner": "GitHub-hosted ubuntu26 (image 20261026.180.1)",
   "shared_vm": true
  },
  "suites": {
   "protocol": {
    "amf0_build_connect": {
-    "ns": 207.37064008955338,
-    "ci_rel": 0.0022094194338706345,
+    "ns": 208.2481209617592,
+    "ci_rel": 0.0024387645556828287,
     "bytes": null,
     "elements": null
    },
    "chunk/write_read_roundtrip": {
-    "ns": 5398.701577243754,
-    "ci_rel": 0.01073442050948642,
+    "ns": 5432.05088998545,
+    "ci_rel": 0.007027184967559292,
     "bytes": 4096,
     "elements": null
    },
    "flv/audio_tag_aac": {
-    "ns": 1.2448456324836925,
-    "ci_rel": 0.0005219468461827963,
+    "ns": 1.2469640462248428,
+    "ci_rel": 0.000887003190468517,
     "bytes": null,
     "elements": null
    },
    "flv/video_tag_h264": {
-    "ns": 1.2497419964770433,
-    "ci_rel": 0.0008626387767244302,
+    "ns": 1.24574892251756,
+    "ci_rel": 0.0003990632687468719,
     "bytes": null,
     "elements": null
    },
    "fourcc_to_video_codec_avc1": {
-    "ns": 2.5450664614127723,
-    "ci_rel": 0.0187192495314076,
+    "ns": 2.505161441392138,
+    "ci_rel": 0.004950367700676987,
     "bytes": null,
     "elements": null
    },
    "server_read_c1": {
-    "ns": 956.965690203322,
-    "ci_rel": 0.002694797695328807,
+    "ns": 948.0062084232088,
+    "ci_rel": 0.0017806855206883813,
     "bytes": null,
     "elements": null
    }
   },
   "relay": {
    "relay/publish_to_player/100": {
-    "ns": 51726921.88831169,
-    "ci_rel": 0.0006107394375119582,
+    "ns": 51343626.16493507,
+    "ci_rel": 0.00021738977244479356,
     "bytes": null,
     "elements": 100
    },
    "relay/publish_to_player/500": {
-    "ns": 53779110.76883117,
-    "ci_rel": 0.001128939927496354,
+    "ns": 53213825.942857146,
+    "ci_rel": 0.0007865886476769126,
     "bytes": null,
     "elements": 500
    }
