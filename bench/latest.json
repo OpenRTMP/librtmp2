@@ -4,68 +4,68 @@
  "kind": "main",
  "version": "0.16.1",
  "tag": null,
- "commit": "669eac0f4e8695432f1cf6b45733b3bbfc86140a",
- "date": "2026-11-04T18:48:35Z",
- "run_url": "https://github.com/OpenRTMP/librtmp2/actions/runs/41889176060",
+ "commit": "6f9a9c824bdd180470e30ea6759ebcf4c537415f",
+ "date": "2026-11-05T20:48:58Z",
+ "run_url": "https://github.com/OpenRTMP/librtmp2/actions/runs/42106514090",
  "deps": {},
  "environment": {
   "cpu": "AMD EPYC 7763 64-Core Processor",
   "vcpus": 4,
   "ram_gib": 15.6,
-  "kernel": "Linux 7.0.0-1017-azure x86_64",
+  "kernel": "Linux 7.0.0-1019-azure x86_64",
   "rustc": "1.99.1",
-  "runner": "GitHub-hosted ubuntu26 (image 20261026.180.1)",
+  "runner": "GitHub-hosted ubuntu26 (image 20261101.186.1)",
   "shared_vm": true
  },
  "suites": {
   "protocol": {
    "amf0_build_connect": {
-    "ns": 208.52975493002276,
-    "ci_rel": 0.0016920243101766065,
+    "ns": 204.1139035244541,
+    "ci_rel": 0.0007203451098863003,
     "bytes": null,
     "elements": null
    },
    "chunk/write_read_roundtrip": {
-    "ns": 5449.807778319519,
-    "ci_rel": 0.011110423924262423,
+    "ns": 5397.740556636435,
+    "ci_rel": 0.004724458203924103,
     "bytes": 4096,
     "elements": null
    },
    "flv/audio_tag_aac": {
-    "ns": 1.248002817325229,
-    "ci_rel": 0.0018266479725019542,
+    "ns": 1.2468094339977334,
+    "ci_rel": 0.0023371944260659216,
     "bytes": null,
     "elements": null
    },
    "flv/video_tag_h264": {
-    "ns": 1.2461346148204024,
-    "ci_rel": 0.0003825266204022741,
+    "ns": 1.2446944014001784,
+    "ci_rel": 0.0002205264211137803,
     "bytes": null,
     "elements": null
    },
    "fourcc_to_video_codec_avc1": {
-    "ns": 3.4045587306242164,
-    "ci_rel": 0.00874379357197854,
+    "ns": 2.489264181808171,
+    "ci_rel": 0.00020342218047773498,
     "bytes": null,
     "elements": null
    },
    "server_read_c1": {
-    "ns": 943.0555563216507,
-    "ci_rel": 0.0006936577599524655,
+    "ns": 942.0080449659425,
+    "ci_rel": 0.0006189880978257075,
     "bytes": null,
     "elements": null
    }
   },
   "relay": {
    "relay/publish_to_player/100": {
-    "ns": 51346147.48051948,
-    "ci_rel": 0.00032451774439890685,
+    "ns": 51304201.24155844,
+    "ci_rel": 0.00028313757802876714,
     "bytes": null,
     "elements": 100
    },
    "relay/publish_to_player/500": {
-    "ns": 53219671.52597403,
-    "ci_rel": 0.0007441542079963344,
+    "ns": 53112089.6,
+    "ci_rel": 0.0003400775028801298,
     "bytes": null,
     "elements": 500
    }
