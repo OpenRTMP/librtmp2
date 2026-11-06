@@ -63,16 +63,42 @@ for _ in $(seq 1 50); do
 done
 
 echo "== publishing looping test stream with ffmpeg =="
+PUB_LOG="$(mktemp /tmp/play_publish.XXXXXX.log)"
 timeout 40 ffmpeg -hide_banner -loglevel error -re -stream_loop -1 \
     -f lavfi -i "testsrc=size=640x480:rate=20" \
     -f lavfi -i "sine=frequency=1000" \
     -c:v libx264 -preset ultrafast -pix_fmt yuv420p -g 20 \
     -c:a aac -b:a 64k \
-    -f flv "$URL" >"$(mktemp /tmp/play_publish.XXXXXX.log)" 2>&1 &
+    -f flv "$URL" >"$PUB_LOG" 2>&1 &
 PUB=$!
 
-# Give the publisher a moment to register the stream.
-sleep 3
+# Wait until MediaMTX confirms that the publisher has made the stream
+# available. FFmpeg startup can take longer on a busy CI runner.
+STREAM_READY=0
+for _ in $(seq 1 100); do
+    if grep -Fq "[path live/test] stream is available and online" "$MTX_LOG"; then
+        STREAM_READY=1
+        break
+    fi
+    if ! kill -0 "$PUB" 2>/dev/null; then
+        echo "ffmpeg publisher exited before the stream became available"
+        break
+    fi
+    if ! kill -0 "$MTX" 2>/dev/null; then
+        echo "mediamtx exited while waiting for the published stream"
+        break
+    fi
+    sleep 0.2
+done
+
+if [ "$STREAM_READY" -ne 1 ]; then
+    echo "stream was not available after waiting up to 20 seconds"
+    echo "== ffmpeg log (tail) =="
+    tail -n 40 "$PUB_LOG" || true
+    echo "== mediamtx log (tail) =="
+    tail -n 40 "$MTX_LOG" || true
+    exit 1
+fi
 
 echo "== pulling stream with the librtmp2 client example =="
 set +e
@@ -84,6 +110,8 @@ echo "== mediamtx log (tail) =="
 tail -n 8 "$MTX_LOG" || true
 
 if [ "$RC" -ne 0 ]; then
+    echo "== ffmpeg log (tail) =="
+    tail -n 40 "$PUB_LOG" || true
     echo "PLAY INTEROP FAILED (play client exit=$RC)"
     exit 1
 fi
