@@ -215,7 +215,25 @@ void             lrtmp2_server_destroy(lrtmp2_server_t *server);
 int              lrtmp2_server_listen(lrtmp2_server_t *server, const char *bind_addr);
 int              lrtmp2_server_poll(lrtmp2_server_t *server, int timeout_ms);
 void             lrtmp2_server_stop(lrtmp2_server_t *server);
+
+/* Return 0 to allow, non-zero to deny. userdata is passed back unchanged. */
+int lrtmp2_server_set_publish_auth_cb(
+    lrtmp2_server_t *server,
+    int (*cb)(uint64_t conn_id, const char *app, const char *stream,
+              void *userdata),
+    void *userdata);
+int lrtmp2_server_set_play_auth_cb(
+    lrtmp2_server_t *server,
+    int (*cb)(uint64_t conn_id, const char *app, const char *stream,
+              void *userdata),
+    void *userdata);
 ```
+
+The C callbacks run synchronously during the `publish`/`play` command and
+take priority over the Rust callback fields. If no C callback is installed, the
+existing default-allow behavior is unchanged. The callback must not re-enter
+the same server; `userdata` must stay valid until the callback is replaced or
+the server is destroyed.
 
 ### Client
 

@@ -34,6 +34,39 @@ use crate::types::*;
 pub const MAX_STREAMS_PER_CONN: u32 = 16;
 pub const MAX_PENDING_RELAY_FRAMES: usize = 1024;
 pub const MAX_PENDING_RELAY_BYTES: usize = 8 * 1024 * 1024;
+
+/// Invoke one C-ABI authorization callback with NUL-terminated names.
+/// A name containing NUL cannot be represented in C; fail closed instead of
+/// silently allowing it.
+fn c_auth_allows(
+    cb: unsafe extern "C" fn(
+        u64,
+        *const std::ffi::c_char,
+        *const std::ffi::c_char,
+        *mut std::ffi::c_void,
+    ) -> std::ffi::c_int,
+    conn_id: u64,
+    app: &str,
+    stream_name: &str,
+    userdata: usize,
+) -> bool {
+    let (Ok(app), Ok(stream_name)) = (
+        std::ffi::CString::new(app),
+        std::ffi::CString::new(stream_name),
+    ) else {
+        return false;
+    };
+    // SAFETY: the callback is installed by the C ABI setter; the caller owns
+    // the userdata lifetime for as long as the callback remains installed.
+    unsafe {
+        cb(
+            conn_id,
+            app.as_ptr(),
+            stream_name.as_ptr(),
+            userdata as *mut std::ffi::c_void,
+        ) == 0
+    }
+}
 /// Cap complete messages handled per `read_messages` call so one TCP recv batch
 /// cannot drain thousands of tiny control messages in a single state-machine step.
 const MAX_MESSAGES_PER_READ: usize = 256;
@@ -344,6 +377,33 @@ pub struct Conn {
     /// Three-state play authorization; see [`Self::on_publish_auth_cb`].
     pub on_play_auth_cb:
         Option<fn(conn_id: u64, app: &str, stream_name: &str) -> AuthorizationResult>,
+    /// Optional C-ABI publish authorization callback. Return `0` to allow and
+    /// any non-zero value to deny. Takes priority over the Rust callbacks above
+    /// when set. The C ABI installs this through
+    /// `lrtmp2_server_set_publish_auth_cb`; `userdata` is opaque to the library.
+    pub c_publish_auth_cb: Option<
+        unsafe extern "C" fn(
+            conn_id: u64,
+            app: *const std::ffi::c_char,
+            stream_name: *const std::ffi::c_char,
+            userdata: *mut std::ffi::c_void,
+        ) -> std::ffi::c_int,
+    >,
+    /// Opaque C callback context for [`Self::c_publish_auth_cb`]. Stored as a
+    /// `usize` so `Conn` stays `Send`/`Sync`; the C ABI casts it back.
+    pub c_publish_auth_userdata: usize,
+    /// Optional C-ABI play authorization callback; see
+    /// [`Self::c_publish_auth_cb`].
+    pub c_play_auth_cb: Option<
+        unsafe extern "C" fn(
+            conn_id: u64,
+            app: *const std::ffi::c_char,
+            stream_name: *const std::ffi::c_char,
+            userdata: *mut std::ffi::c_void,
+        ) -> std::ffi::c_int,
+    >,
+    /// Opaque C callback context for [`Self::c_play_auth_cb`].
+    pub c_play_auth_userdata: usize,
     /// Set while a `publish` request is waiting on `on_publish_auth_cb`
     /// (`Pending`) for a decision via `complete_publish_authorization`.
     pending_publish_auth: Option<PendingAuth>,
@@ -518,6 +578,10 @@ impl Conn {
             on_play_cb: None,
             on_publish_auth_cb: None,
             on_play_auth_cb: None,
+            c_publish_auth_cb: None,
+            c_publish_auth_userdata: 0,
+            c_play_auth_cb: None,
+            c_play_auth_userdata: 0,
             pending_publish_auth: None,
             pending_play_auth: None,
             resolved_publish_auth_ids: Vec::new(),
@@ -1930,6 +1994,8 @@ impl Conn {
                 || self.on_play_cb.is_some()
                 || self.on_publish_auth_cb.is_some()
                 || self.on_play_auth_cb.is_some()
+                || self.c_publish_auth_cb.is_some()
+                || self.c_play_auth_cb.is_some()
                 || self.on_media_cb.is_some()
                 || self.on_frame_cb.is_some()
                 || self.on_release_stream_cb.is_some() =>
@@ -2357,6 +2423,7 @@ impl Conn {
     fn requires_explicit_publish_auth(&self) -> bool {
         self.on_play_cb.is_some()
             || self.on_play_auth_cb.is_some()
+            || self.c_play_auth_cb.is_some()
             || self.on_media_cb.is_some()
             || self.on_frame_cb.is_some()
             || self.on_shared_object_cb.is_some()
@@ -2367,6 +2434,7 @@ impl Conn {
     fn requires_explicit_play_auth(&self) -> bool {
         self.on_publish_cb.is_some()
             || self.on_publish_auth_cb.is_some()
+            || self.c_publish_auth_cb.is_some()
             || self.on_media_cb.is_some()
             || self.on_frame_cb.is_some()
             || self.on_shared_object_cb.is_some()
@@ -2987,7 +3055,17 @@ impl Conn {
                 if self.pending_publish_auth.is_some() || self.publish_auth_sealed {
                     return self.send_publish_denied();
                 }
-                if let Some(cb) = self.on_publish_auth_cb {
+                if let Some(cb) = self.c_publish_auth_cb {
+                    if !c_auth_allows(
+                        cb,
+                        self.conn_id,
+                        &self.app,
+                        &name_str,
+                        self.c_publish_auth_userdata,
+                    ) {
+                        return self.send_publish_denied();
+                    }
+                } else if let Some(cb) = self.on_publish_auth_cb {
                     match cb(self.conn_id, &self.app, &name_str) {
                         AuthorizationResult::Allow => {}
                         AuthorizationResult::Deny => {
@@ -3038,7 +3116,17 @@ impl Conn {
                 if self.pending_play_auth.is_some() || self.play_auth_sealed {
                     return self.send_play_denied();
                 }
-                if let Some(cb) = self.on_play_auth_cb {
+                if let Some(cb) = self.c_play_auth_cb {
+                    if !c_auth_allows(
+                        cb,
+                        self.conn_id,
+                        &self.app,
+                        &name_str,
+                        self.c_play_auth_userdata,
+                    ) {
+                        return self.send_play_denied();
+                    }
+                } else if let Some(cb) = self.on_play_auth_cb {
                     match cb(self.conn_id, &self.app, &name_str) {
                         AuthorizationResult::Allow => {}
                         AuthorizationResult::Deny => {
@@ -3911,6 +3999,33 @@ mod tests {
     use super::*;
     use crate::amf::amf0;
     use crate::session::stream::Stream;
+
+    unsafe extern "C" fn c_allow(
+        _conn_id: u64,
+        _app: *const std::ffi::c_char,
+        _stream: *const std::ffi::c_char,
+        _userdata: *mut std::ffi::c_void,
+    ) -> std::ffi::c_int {
+        0
+    }
+
+    unsafe extern "C" fn c_deny(
+        _conn_id: u64,
+        _app: *const std::ffi::c_char,
+        _stream: *const std::ffi::c_char,
+        _userdata: *mut std::ffi::c_void,
+    ) -> std::ffi::c_int {
+        1
+    }
+
+    #[test]
+    fn c_auth_callback_maps_zero_to_allow_and_nonzero_to_deny() {
+        assert!(c_auth_allows(c_allow, 7, "live", "cam", 0));
+        assert!(!c_auth_allows(c_deny, 7, "live", "cam", 0));
+        // A NUL in either name cannot be represented in C; fail closed.
+        assert!(!c_auth_allows(c_allow, 7, "li\0ve", "cam", 0));
+        assert!(!c_auth_allows(c_allow, 7, "live", "ca\0m", 0));
+    }
 
     /// Decode every complete message in `wire` with the library's own
     /// chunk reader, as (type id, stream id, timestamp, payload).
@@ -8309,6 +8424,40 @@ mod tests {
         conn.handle_command(publish_buf("s").as_slice()).unwrap();
         assert!(!conn.current_stream.as_ref().unwrap().is_publishing);
         assert!(!conn.has_pending_authorization());
+    }
+
+    #[test]
+    fn c_publish_auth_allow_and_deny_control_publish() {
+        let mut allowed = app_conn();
+        allowed.c_publish_auth_cb = Some(c_allow);
+        allowed
+            .handle_command(publish_buf("allowed").as_slice())
+            .unwrap();
+        assert!(allowed.current_stream.as_ref().unwrap().is_publishing);
+
+        let mut denied = app_conn();
+        denied.c_publish_auth_cb = Some(c_deny);
+        denied
+            .handle_command(publish_buf("denied").as_slice())
+            .unwrap();
+        assert!(!denied.current_stream.as_ref().unwrap().is_publishing);
+    }
+
+    #[test]
+    fn c_play_auth_allow_and_deny_control_play() {
+        let mut allowed = app_conn();
+        allowed.c_play_auth_cb = Some(c_allow);
+        allowed
+            .handle_command(play_buf("allowed").as_slice())
+            .unwrap();
+        assert!(allowed.current_stream.as_ref().unwrap().is_playing);
+
+        let mut denied = app_conn();
+        denied.c_play_auth_cb = Some(c_deny);
+        denied
+            .handle_command(play_buf("denied").as_slice())
+            .unwrap();
+        assert!(!denied.current_stream.as_ref().unwrap().is_playing);
     }
 
     #[test]

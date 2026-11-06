@@ -173,6 +173,48 @@ mod ffi_tests {
         }
     }
 
+    unsafe extern "C" fn allow_cb(
+        _conn_id: u64,
+        _app: *const std::ffi::c_char,
+        _stream: *const std::ffi::c_char,
+        _userdata: *mut std::ffi::c_void,
+    ) -> std::ffi::c_int {
+        0
+    }
+
+    #[test]
+    fn server_c_auth_callback_setters_store_the_callback_and_userdata() {
+        let config = ServerConfig::default();
+        let server = NonNull::new(unsafe { lrtmp2_server_create(&config) })
+            .expect("lrtmp2_server_create returned null");
+        let userdata = 0x1234usize as *mut std::ffi::c_void;
+        unsafe {
+            assert_eq!(
+                lrtmp2_server_set_publish_auth_cb(server.as_ptr(), Some(allow_cb), userdata),
+                0
+            );
+            assert_eq!(
+                lrtmp2_server_set_play_auth_cb(server.as_ptr(), Some(allow_cb), userdata),
+                0
+            );
+            assert_eq!(server.as_ref().c_publish_auth_userdata, userdata as usize);
+            assert_eq!(server.as_ref().c_play_auth_userdata, userdata as usize);
+            assert!(server.as_ref().c_publish_auth_cb.is_some());
+            assert!(server.as_ref().c_play_auth_cb.is_some());
+
+            assert_eq!(
+                lrtmp2_server_set_publish_auth_cb(server.as_ptr(), None, std::ptr::null_mut()),
+                0
+            );
+            assert!(server.as_ref().c_publish_auth_cb.is_none());
+            assert_eq!(
+                lrtmp2_server_set_play_auth_cb(std::ptr::null_mut(), None, std::ptr::null_mut()),
+                -1
+            );
+            lrtmp2_server_destroy(server.as_ptr());
+        }
+    }
+
     #[test]
     fn server_create_preserves_negative_max_connections_as_unlimited() {
         let config = ServerConfig {
@@ -292,6 +334,66 @@ pub unsafe extern "C" fn lrtmp2_server_create(config: *const ServerConfig) -> *m
         Ok(s) => Box::into_raw(Box::new(s)),
         Err(_) => std::ptr::null_mut(),
     }
+}
+
+/// Install a C publish-authorization callback (FFI-compatible).
+///
+/// The callback runs synchronously during the RTMP `publish` command. Return
+/// `0` to allow the publish and any non-zero value to deny it. `userdata` is
+/// passed back unchanged and must stay valid until the callback is replaced or
+/// the server is destroyed. Passing a null callback clears it and restores the
+/// library's default allow behavior for embedders that have no callback.
+///
+/// Returns `0` on success and a negative value when `server` is null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lrtmp2_server_set_publish_auth_cb(
+    server: *mut server::Server,
+    cb: Option<
+        unsafe extern "C" fn(
+            conn_id: u64,
+            app: *const std::ffi::c_char,
+            stream_name: *const std::ffi::c_char,
+            userdata: *mut std::ffi::c_void,
+        ) -> std::ffi::c_int,
+    >,
+    userdata: *mut std::ffi::c_void,
+) -> i32 {
+    if server.is_null() {
+        return -1;
+    }
+    // SAFETY: the caller passed a live server pointer created by
+    // `lrtmp2_server_create` and keeps it valid for this call.
+    let s = unsafe { &mut *server };
+    s.c_publish_auth_cb = cb;
+    s.c_publish_auth_userdata = userdata as usize;
+    0
+}
+
+/// Install a C play-authorization callback (FFI-compatible).
+///
+/// See [`lrtmp2_server_set_publish_auth_cb`] for the return convention and
+/// `userdata` lifetime. Passing a null callback clears it.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lrtmp2_server_set_play_auth_cb(
+    server: *mut server::Server,
+    cb: Option<
+        unsafe extern "C" fn(
+            conn_id: u64,
+            app: *const std::ffi::c_char,
+            stream_name: *const std::ffi::c_char,
+            userdata: *mut std::ffi::c_void,
+        ) -> std::ffi::c_int,
+    >,
+    userdata: *mut std::ffi::c_void,
+) -> i32 {
+    if server.is_null() {
+        return -1;
+    }
+    // SAFETY: see `lrtmp2_server_set_publish_auth_cb`.
+    let s = unsafe { &mut *server };
+    s.c_play_auth_cb = cb;
+    s.c_play_auth_userdata = userdata as usize;
+    0
 }
 
 /// Destroy a server (FFI-compatible).

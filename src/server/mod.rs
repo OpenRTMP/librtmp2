@@ -545,6 +545,31 @@ pub struct Server {
     /// Three-state play authorization; see [`Self::on_publish_auth_cb`].
     pub on_play_auth_cb:
         Option<fn(conn_id: u64, app: &str, stream_name: &str) -> AuthorizationResult>,
+    /// Optional C-ABI publish authorization callback; see
+    /// [`crate::session::conn::Conn::c_publish_auth_cb`]. Installed by
+    /// `lrtmp2_server_set_publish_auth_cb`.
+    pub c_publish_auth_cb: Option<
+        unsafe extern "C" fn(
+            conn_id: u64,
+            app: *const std::ffi::c_char,
+            stream_name: *const std::ffi::c_char,
+            userdata: *mut std::ffi::c_void,
+        ) -> std::ffi::c_int,
+    >,
+    /// Opaque C callback context for [`Self::c_publish_auth_cb`].
+    pub c_publish_auth_userdata: usize,
+    /// Optional C-ABI play authorization callback; see
+    /// [`Self::c_publish_auth_cb`].
+    pub c_play_auth_cb: Option<
+        unsafe extern "C" fn(
+            conn_id: u64,
+            app: *const std::ffi::c_char,
+            stream_name: *const std::ffi::c_char,
+            userdata: *mut std::ffi::c_void,
+        ) -> std::ffi::c_int,
+    >,
+    /// Opaque C callback context for [`Self::c_play_auth_cb`].
+    pub c_play_auth_userdata: usize,
     /// Deadline for a `Pending` publish/play authorization before it's
     /// auto-denied. Defaults to
     /// [`crate::session::conn::DEFAULT_PENDING_AUTH_TIMEOUT`].
@@ -726,6 +751,10 @@ impl Server {
             on_play_cb: None,
             on_publish_auth_cb: None,
             on_play_auth_cb: None,
+            c_publish_auth_cb: None,
+            c_publish_auth_userdata: 0,
+            c_play_auth_cb: None,
+            c_play_auth_userdata: 0,
             pending_auth_timeout: crate::session::conn::DEFAULT_PENDING_AUTH_TIMEOUT,
             on_media_cb: None,
             on_shared_object_auth_cb: None,
@@ -1611,6 +1640,10 @@ impl Server {
         conn.on_play_cb = self.on_play_cb;
         conn.on_publish_auth_cb = self.on_publish_auth_cb;
         conn.on_play_auth_cb = self.on_play_auth_cb;
+        conn.c_publish_auth_cb = self.c_publish_auth_cb;
+        conn.c_publish_auth_userdata = self.c_publish_auth_userdata;
+        conn.c_play_auth_cb = self.c_play_auth_cb;
+        conn.c_play_auth_userdata = self.c_play_auth_userdata;
         conn.on_shared_object_auth_cb = self.on_shared_object_auth_cb;
         conn.on_shared_object_cb = self.on_shared_object_cb;
         conn.on_release_stream_cb = self.on_release_stream_cb;

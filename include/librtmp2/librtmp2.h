@@ -542,6 +542,37 @@ extern "C" {
 struct lrtmp2_server_t *lrtmp2_server_create(const struct lrtmp2_server_config_t *config);
 
 /**
+ * Install a C publish-authorization callback (FFI-compatible).
+ *
+ * The callback runs synchronously during the RTMP `publish` command. Return
+ * `0` to allow the publish and any non-zero value to deny it. `userdata` is
+ * passed back unchanged and must stay valid until the callback is replaced or
+ * the server is destroyed. Passing a null callback clears it and restores the
+ * library's default allow behavior for embedders that have no callback.
+ *
+ * Returns `0` on success and a negative value when `server` is null.
+ */
+int32_t lrtmp2_server_set_publish_auth_cb(struct lrtmp2_server_t *server,
+                                          int (*cb)(uint64_t conn_id,
+                                                    const char *app,
+                                                    const char *stream_name,
+                                                    void *userdata),
+                                          void *userdata);
+
+/**
+ * Install a C play-authorization callback (FFI-compatible).
+ *
+ * See [`lrtmp2_server_set_publish_auth_cb`] for the return convention and
+ * `userdata` lifetime. Passing a null callback clears it.
+ */
+int32_t lrtmp2_server_set_play_auth_cb(struct lrtmp2_server_t *server,
+                                       int (*cb)(uint64_t conn_id,
+                                                 const char *app,
+                                                 const char *stream_name,
+                                                 void *userdata),
+                                       void *userdata);
+
+/**
  * Destroy a server (FFI-compatible).
  */
 void lrtmp2_server_destroy(struct lrtmp2_server_t *server);
