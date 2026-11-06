@@ -13,6 +13,41 @@ begin at `1.0.0`.
 
 ## [Unreleased]
 
+## [0.17.0] — 2026-11-06
+
+### Added
+- C publish/play authorization. `lrtmp2_server_set_publish_auth_cb` and
+  `lrtmp2_server_set_play_auth_cb` install a synchronous callback with an
+  opaque userdata pointer; a zero return allows, any other value denies. The
+  C callback takes priority over the Rust hooks on that connection and fails
+  closed when a name contains NUL. Without a callback the default stays
+  allow, so existing C embedders are source- and behavior-compatible. The
+  generated header and the README document the API.
+
+### Fixed
+- Replacing or clearing a server's C authorization callback now updates
+  already accepted connections. Before, they kept invoking the old callback
+  with potentially freed userdata and a newly installed policy was ignored.
+- A direct `read_messages` batch clears the buffered-work flag, so a host
+  that loops on `has_buffered_messages()` no longer carries the state of the
+  previous batch.
+- `createStream` re-arms the setup window only when it replaces a live
+  publish or play role that carried media. Cycling `createStream` no longer
+  extends the setup timeout, so an idle client cannot dodge the reaper and
+  squat connection slots.
+- A multitrack message is charged once against the per-receive message
+  budget instead of once per sub-track. A wide container no longer fails the
+  connection or drops the following aggregate sub-tags, every sub-track in
+  the message is still authorized, and a separate per-receive track budget
+  bounds the work after the current frame. The track budget resets on the
+  next receive batch and for direct `read_messages` callers.
+- A client session reset clears the deferred terminal I/O error.
+- Benchmark tooling rejects unknown or repeated arguments instead of
+  treating them as the URL.
+
+### Changed
+- Build dependency update: cc 1.11.1.
+
 ## [0.16.1] — 2026-11-01
 
 ### Fixed
@@ -1247,6 +1282,8 @@ and others.
 - Protocol mapping documents for legacy, E-RTMP v1, and E-RTMP v2
 - `CONTRIBUTING.md` guidelines
 
+[Unreleased]: https://github.com/OpenRTMP/librtmp2/compare/v0.17.0...HEAD
+[0.17.0]: https://github.com/OpenRTMP/librtmp2/compare/v0.16.1...v0.17.0
 [0.16.1]: https://github.com/OpenRTMP/librtmp2/compare/v0.16.0...v0.16.1
 [0.16.0]: https://github.com/OpenRTMP/librtmp2/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/OpenRTMP/librtmp2/compare/v0.14.0...v0.15.0
