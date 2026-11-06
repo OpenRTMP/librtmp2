@@ -42,10 +42,12 @@ begin at `1.0.0`.
   bounds the work after the current frame. The track budget resets on the
   next receive batch and for direct `read_messages` callers.
 - A client session reset clears the deferred terminal I/O error.
-- Benchmark tooling rejects unknown or repeated arguments instead of
-  treating them as the URL.
+- Benchmark tooling rejects unknown, repeated or conflicting arguments
+  instead of treating them as the URL.
 
 ### Changed
+- The C authorization setters document that callbacks must not re-enter the
+  same server and setters must not run concurrently with `poll`.
 - Build dependency update: cc 1.11.1.
 
 ## [0.16.1] — 2026-11-01
