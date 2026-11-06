@@ -8416,6 +8416,31 @@ mod tests {
     }
 
     #[test]
+    fn c_auth_cross_gates_require_the_other_role_callback() {
+        // A play callback alone makes publish explicitly unauthorized.
+        let mut play_only = app_conn();
+        play_only.c_play_auth.callback = Some(c_allow);
+        play_only.handle_command(play_buf("p").as_slice()).unwrap();
+        assert!(play_only.current_stream.as_ref().unwrap().is_playing);
+        play_only
+            .handle_command(publish_buf("p").as_slice())
+            .unwrap();
+        assert!(!play_only.current_stream.as_ref().unwrap().is_publishing);
+
+        // A publish callback alone makes play explicitly unauthorized.
+        let mut publish_only = app_conn();
+        publish_only.c_publish_auth.callback = Some(c_allow);
+        publish_only
+            .handle_command(publish_buf("p").as_slice())
+            .unwrap();
+        assert!(publish_only.current_stream.as_ref().unwrap().is_publishing);
+        publish_only
+            .handle_command(play_buf("p").as_slice())
+            .unwrap();
+        assert!(!publish_only.current_stream.as_ref().unwrap().is_playing);
+    }
+
+    #[test]
     fn c_play_auth_allow_and_deny_control_play() {
         let mut allowed = app_conn();
         allowed.c_play_auth.callback = Some(c_allow);
