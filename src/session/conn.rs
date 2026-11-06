@@ -39,12 +39,7 @@ pub const MAX_PENDING_RELAY_BYTES: usize = 8 * 1024 * 1024;
 /// A name containing NUL cannot be represented in C; fail closed instead of
 /// silently allowing it.
 fn c_auth_allows(
-    cb: unsafe extern "C" fn(
-        u64,
-        *const std::ffi::c_char,
-        *const std::ffi::c_char,
-        *mut std::ffi::c_void,
-    ) -> std::ffi::c_int,
+    cb: CAuthCallback,
     conn_id: u64,
     app: &str,
     stream_name: &str,
@@ -381,27 +376,13 @@ pub struct Conn {
     /// any non-zero value to deny. Takes priority over the Rust callbacks above
     /// when set. The C ABI installs this through
     /// `lrtmp2_server_set_publish_auth_cb`; `userdata` is opaque to the library.
-    pub c_publish_auth_cb: Option<
-        unsafe extern "C" fn(
-            conn_id: u64,
-            app: *const std::ffi::c_char,
-            stream_name: *const std::ffi::c_char,
-            userdata: *mut std::ffi::c_void,
-        ) -> std::ffi::c_int,
-    >,
+    pub c_publish_auth_cb: Option<CAuthCallback>,
     /// Opaque C callback context for [`Self::c_publish_auth_cb`]. Stored as a
     /// `usize` so `Conn` stays `Send`/`Sync`; the C ABI casts it back.
     pub c_publish_auth_userdata: usize,
     /// Optional C-ABI play authorization callback; see
     /// [`Self::c_publish_auth_cb`].
-    pub c_play_auth_cb: Option<
-        unsafe extern "C" fn(
-            conn_id: u64,
-            app: *const std::ffi::c_char,
-            stream_name: *const std::ffi::c_char,
-            userdata: *mut std::ffi::c_void,
-        ) -> std::ffi::c_int,
-    >,
+    pub c_play_auth_cb: Option<CAuthCallback>,
     /// Opaque C callback context for [`Self::c_play_auth_cb`].
     pub c_play_auth_userdata: usize,
     /// Set while a `publish` request is waiting on `on_publish_auth_cb`
