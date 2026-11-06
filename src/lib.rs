@@ -1,4 +1,4 @@
-//! librtmp2 — A Rust port of the librtmp2 RTMP/RTMPS protocol library.
+//! librtmp2 â€” A Rust port of the librtmp2 RTMP/RTMPS protocol library.
 //!
 //! This is a complete 1:1 Rust port of the C library `librtmp2`.
 //! It provides server, client, handshake, chunk, message, AMF, FLV, and E-RTMP functionality.
@@ -84,7 +84,7 @@ fn error_c_string(code: ErrorCode) -> &'static [u8] {
 /// `Internal` for any value a caller passes that isn't one of ours.
 /// Constructing an `ErrorCode` directly from an arbitrary caller-supplied
 /// value would be undefined behavior, since not every `i32` is a valid
-/// discriminant for the enum — so the FFI boundary must validate the raw
+/// discriminant for the enum â€” so the FFI boundary must validate the raw
 /// `i32` first.
 fn error_code_from_raw(code: i32) -> ErrorCode {
     match code {
@@ -174,6 +174,7 @@ mod ffi_tests {
         }
     }
 
+    /// Test callback that allows every request.
     unsafe extern "C" fn allow_cb(
         _conn_id: u64,
         _app: *const std::ffi::c_char,
@@ -192,8 +193,8 @@ mod ffi_tests {
         unsafe {
             // Simulate a connection accepted before the callback is installed.
             let mut conn = Conn::new();
-            conn.c_publish_auth_userdata = 0x99;
-            conn.c_play_auth_userdata = 0x99;
+            conn.c_publish_auth.userdata = 0x99;
+            conn.c_play_auth.userdata = 0x99;
             server.as_mut().connections.push(conn);
 
             assert_eq!(
@@ -204,27 +205,42 @@ mod ffi_tests {
                 lrtmp2_server_set_play_auth_cb(server.as_ptr(), Some(allow_cb), userdata),
                 0
             );
-            assert_eq!(server.as_ref().c_publish_auth_userdata, userdata as usize);
-            assert_eq!(server.as_ref().c_play_auth_userdata, userdata as usize);
-            assert!(server.as_ref().c_publish_auth_cb.is_some());
-            assert!(server.as_ref().c_play_auth_cb.is_some());
+            assert_eq!(server.as_ref().c_publish_auth.userdata, userdata as usize);
+            assert_eq!(server.as_ref().c_play_auth.userdata, userdata as usize);
+            assert!(server.as_ref().c_publish_auth.callback.is_some());
+            assert!(server.as_ref().c_play_auth.callback.is_some());
             assert_eq!(
-                server.as_ref().connections[0].c_publish_auth_userdata,
+                server.as_ref().connections[0].c_publish_auth.userdata,
                 userdata as usize
             );
             assert_eq!(
-                server.as_ref().connections[0].c_play_auth_userdata,
+                server.as_ref().connections[0].c_play_auth.userdata,
                 userdata as usize
             );
-            assert!(server.as_ref().connections[0].c_publish_auth_cb.is_some());
-            assert!(server.as_ref().connections[0].c_play_auth_cb.is_some());
+            assert!(
+                server.as_ref().connections[0]
+                    .c_publish_auth
+                    .callback
+                    .is_some()
+            );
+            assert!(
+                server.as_ref().connections[0]
+                    .c_play_auth
+                    .callback
+                    .is_some()
+            );
 
             assert_eq!(
                 lrtmp2_server_set_publish_auth_cb(server.as_ptr(), None, std::ptr::null_mut()),
                 0
             );
-            assert!(server.as_ref().c_publish_auth_cb.is_none());
-            assert!(server.as_ref().connections[0].c_publish_auth_cb.is_none());
+            assert!(server.as_ref().c_publish_auth.callback.is_none());
+            assert!(
+                server.as_ref().connections[0]
+                    .c_publish_auth
+                    .callback
+                    .is_none()
+            );
             assert_eq!(
                 lrtmp2_server_set_play_auth_cb(std::ptr::null_mut(), None, std::ptr::null_mut()),
                 -1
@@ -322,7 +338,7 @@ mod ffi_tests {
 use std::ffi::c_int;
 
 /// Default connection cap applied at the FFI boundary when `max_connections`
-/// is exactly zero — the usual pattern from `calloc`/`{0}` initialization in
+/// is exactly zero â€” the usual pattern from `calloc`/`{0}` initialization in
 /// C embedders, which would otherwise disable all connection limiting. A
 /// negative value is left as-is: `Server` already treats `max_connections <=
 /// 0` as unlimited, and callers may pass a negative value deliberately to
@@ -362,6 +378,9 @@ pub unsafe extern "C" fn lrtmp2_server_create(config: *const ServerConfig) -> *m
 /// the server is destroyed. Passing a null callback clears it and restores the
 /// library's default allow behavior for embedders that have no callback.
 ///
+/// Do not call any function on the same server from the callback. Do not call
+/// this setter while `lrtmp2_server_poll` is running on that server.
+///
 /// Returns `0` on success and a negative value when `server` is null.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn lrtmp2_server_set_publish_auth_cb(
@@ -382,22 +401,24 @@ pub unsafe extern "C" fn lrtmp2_server_set_publish_auth_cb(
     // SAFETY: the caller passed a live server pointer created by
     // `lrtmp2_server_create` and keeps it valid for this call.
     let s = unsafe { &mut *server };
-    s.c_publish_auth_cb = cb;
-    s.c_publish_auth_userdata = userdata as usize;
+    s.c_publish_auth = crate::types::CAuthState {
+        callback: cb,
+        userdata: userdata as usize,
+    };
     // Connections copy the callback at accept time. Update the live ones too:
     // otherwise a replaced callback keeps using the old userdata after the
     // embedder has freed it, and a newly installed policy is ignored.
     for conn in &mut s.connections {
-        conn.c_publish_auth_cb = cb;
-        conn.c_publish_auth_userdata = userdata as usize;
+        conn.c_publish_auth = s.c_publish_auth;
     }
     0
 }
 
 /// Install a C play-authorization callback (FFI-compatible).
 ///
-/// See [`lrtmp2_server_set_publish_auth_cb`] for the return convention and
-/// `userdata` lifetime. Passing a null callback clears it.
+/// See [`lrtmp2_server_set_publish_auth_cb`] for the return convention,
+/// `userdata` lifetime and re-entrancy rules. Passing a null callback clears
+/// it.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn lrtmp2_server_set_play_auth_cb(
     server: *mut server::Server,
@@ -416,11 +437,12 @@ pub unsafe extern "C" fn lrtmp2_server_set_play_auth_cb(
     }
     // SAFETY: see `lrtmp2_server_set_publish_auth_cb`.
     let s = unsafe { &mut *server };
-    s.c_play_auth_cb = cb;
-    s.c_play_auth_userdata = userdata as usize;
+    s.c_play_auth = crate::types::CAuthState {
+        callback: cb,
+        userdata: userdata as usize,
+    };
     for conn in &mut s.connections {
-        conn.c_play_auth_cb = cb;
-        conn.c_play_auth_userdata = userdata as usize;
+        conn.c_play_auth = s.c_play_auth;
     }
     0
 }

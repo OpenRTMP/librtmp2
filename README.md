@@ -232,8 +232,9 @@ int lrtmp2_server_set_play_auth_cb(
 The C callbacks run synchronously during the `publish`/`play` command and
 take priority over the Rust callback fields. If no C callback is installed, the
 existing default-allow behavior is unchanged. The callback must not re-enter
-the same server; `userdata` must stay valid until the callback is replaced or
-the server is destroyed.
+the same server, and the setters must not run while `lrtmp2_server_poll` is
+active on that server; `userdata` must stay valid until the callback is
+replaced or the server is destroyed.
 
 ### Client
 
