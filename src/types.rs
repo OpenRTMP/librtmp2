@@ -387,12 +387,19 @@ impl Default for ServerConfig {
 
 /// Server-side publish/play authorization callback installed through the C ABI.
 /// Return `0` to allow and any non-zero value to deny.
-pub type CAuthCallback = unsafe extern "C" fn(
+pub(crate) type CAuthCallback = unsafe extern "C" fn(
     conn_id: u64,
     app: *const std::ffi::c_char,
     stream_name: *const std::ffi::c_char,
     userdata: *mut std::ffi::c_void,
 ) -> std::ffi::c_int;
+
+/// C callback plus its opaque context, kept together for Server/Conn copies.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct CAuthState {
+    pub(crate) callback: Option<CAuthCallback>,
+    pub(crate) userdata: usize,
+}
 
 /// on_connect callback type
 pub type OnConnectCb = Option<unsafe extern "C" fn(conn: *mut Conn, userdata: *mut u8) -> c_int>;

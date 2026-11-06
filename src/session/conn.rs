@@ -357,7 +357,7 @@ pub struct Conn {
     pub on_frame_cb: Option<fn(&Frame)>,
     /// When set, must return true before audio/video is queued for relay.
     /// For a multitrack (`ManyTracks`/`ManyTracksManyCodecs`) container, this
-    /// is called once per track with that track's codec, not once per frame —
+    /// is called once per track with that track's codec, not once per frame â€”
     /// any single denial rejects the whole frame.
     pub on_media_cb: Option<fn(u64, FrameType, Option<&str>) -> bool>,
     pub on_connect_cb: Option<fn()>,
@@ -372,19 +372,10 @@ pub struct Conn {
     /// Three-state play authorization; see [`Self::on_publish_auth_cb`].
     pub on_play_auth_cb:
         Option<fn(conn_id: u64, app: &str, stream_name: &str) -> AuthorizationResult>,
-    /// Optional C-ABI publish authorization callback. Return `0` to allow and
-    /// any non-zero value to deny. Takes priority over the Rust callbacks above
-    /// when set. The C ABI installs this through
-    /// `lrtmp2_server_set_publish_auth_cb`; `userdata` is opaque to the library.
-    pub c_publish_auth_cb: Option<CAuthCallback>,
-    /// Opaque C callback context for [`Self::c_publish_auth_cb`]. Stored as a
-    /// `usize` so `Conn` stays `Send`/`Sync`; the C ABI casts it back.
-    pub c_publish_auth_userdata: usize,
-    /// Optional C-ABI play authorization callback; see
-    /// [`Self::c_publish_auth_cb`].
-    pub c_play_auth_cb: Option<CAuthCallback>,
-    /// Opaque C callback context for [`Self::c_play_auth_cb`].
-    pub c_play_auth_userdata: usize,
+    /// C-ABI publish authorization callback plus its opaque context.
+    pub(crate) c_publish_auth: CAuthState,
+    /// C-ABI play authorization callback plus its opaque context.
+    pub(crate) c_play_auth: CAuthState,
     /// Set while a `publish` request is waiting on `on_publish_auth_cb`
     /// (`Pending`) for a decision via `complete_publish_authorization`.
     pending_publish_auth: Option<PendingAuth>,
@@ -444,7 +435,7 @@ pub struct Conn {
     /// route again. Bounded FIFO: once the cap is reached the oldest marker
     /// is dropped so the most recent abandonment is always recorded.
     pub(crate) abandoned_relay_routes: std::collections::VecDeque<(String, String)>,
-    /// Last measured client↔server RTT in milliseconds (RTMP UserControl ping).
+    /// Last measured clientâ†”server RTT in milliseconds (RTMP UserControl ping).
     pub rtt_ms: f64,
     pending_pings: HashMap<u32, Instant>,
     /// Bytes flushed since `last_send_progress` was last advanced.
@@ -559,10 +550,8 @@ impl Conn {
             on_play_cb: None,
             on_publish_auth_cb: None,
             on_play_auth_cb: None,
-            c_publish_auth_cb: None,
-            c_publish_auth_userdata: 0,
-            c_play_auth_cb: None,
-            c_play_auth_userdata: 0,
+            c_publish_auth: CAuthState::default(),
+            c_play_auth: CAuthState::default(),
             pending_publish_auth: None,
             pending_play_auth: None,
             resolved_publish_auth_ids: Vec::new(),
@@ -737,7 +726,7 @@ impl Conn {
 
     /// Borrowing form of [`relay_route_key`](Self::relay_route_key) for
     /// comparisons on the relay fanout path, which runs once per player
-    /// connection for every relayed frame — avoid the allocation there.
+    /// connection for every relayed frame â€” avoid the allocation there.
     pub fn relay_route_key_str(&self) -> &str {
         if !self.relay_key.is_empty() {
             return &self.relay_key;
@@ -770,7 +759,7 @@ impl Conn {
             // connection-level inject can claim a route without ever
             // transitioning to Publishing, so release that claim here too or
             // the route stays unavailable to socket publishers until close.
-            // Also evict any cache this idle inject wrote — a later publisher
+            // Also evict any cache this idle inject wrote â€” a later publisher
             // on the same route must not inherit stale codec headers.
             let claimed_route = self.claimed_publish_route.clone();
             self.release_claimed_publish_route();
@@ -838,7 +827,7 @@ impl Conn {
     /// renames many times cannot grow this set without bound: once the cap is
     /// reached the oldest marker is dropped so the newest is always recorded.
     /// The dropped marker takes any budget-deferred frames still queued for
-    /// its route with it — without the marker, processing one of those later
+    /// its route with it â€” without the marker, processing one of those later
     /// would treat the abandoned route as live and recreate the cache entry
     /// its abandonment evicted.
     pub(crate) fn note_abandoned_relay_route(&mut self, app: String, route: String) {
@@ -858,7 +847,7 @@ impl Conn {
 
     /// Stop relaying a publish route this connection no longer owns in the
     /// shared registry (e.g. after another peer's authorized `releaseStream`).
-    /// Does not call `routes.release` — the map entry is already absent or
+    /// Does not call `routes.release` â€” the map entry is already absent or
     /// held by someone else. Leaves `is_publishing` set for liveness timers.
     pub(crate) fn detach_lost_publish_route(&mut self) {
         let Some(claimed) = self.claimed_publish_route.take() else {
@@ -866,7 +855,7 @@ impl Conn {
         };
         self.relay_enabled = false;
         let app = self.app.clone();
-        // Frames are keyed by `relay_route_key()` at queue time — after an
+        // Frames are keyed by `relay_route_key()` at queue time â€” after an
         // integrator pins `relay_key`, that can differ from the claimed name.
         let live = self.relay_route_key();
         self.pending_relay
@@ -1042,7 +1031,7 @@ impl Conn {
         {
             // Don't let a rejected frame (e.g. over the pending-byte budget)
             // leave a route claimed that this connection never actually
-            // delivered anything on — that would block a real publisher.
+            // delivered anything on â€” that would block a real publisher.
             // Only roll back a claim/switch we just took; a claim already held
             // from an earlier successful inject on the same route stays intact.
             // On a failed route switch, restore the previous claim and undo the
@@ -1975,8 +1964,8 @@ impl Conn {
                 || self.on_play_cb.is_some()
                 || self.on_publish_auth_cb.is_some()
                 || self.on_play_auth_cb.is_some()
-                || self.c_publish_auth_cb.is_some()
-                || self.c_play_auth_cb.is_some()
+                || self.c_publish_auth.callback.is_some()
+                || self.c_play_auth.callback.is_some()
                 || self.on_media_cb.is_some()
                 || self.on_frame_cb.is_some()
                 || self.on_release_stream_cb.is_some() =>
@@ -2404,7 +2393,7 @@ impl Conn {
     fn requires_explicit_publish_auth(&self) -> bool {
         self.on_play_cb.is_some()
             || self.on_play_auth_cb.is_some()
-            || self.c_play_auth_cb.is_some()
+            || self.c_play_auth.callback.is_some()
             || self.on_media_cb.is_some()
             || self.on_frame_cb.is_some()
             || self.on_shared_object_cb.is_some()
@@ -2415,7 +2404,7 @@ impl Conn {
     fn requires_explicit_play_auth(&self) -> bool {
         self.on_publish_cb.is_some()
             || self.on_publish_auth_cb.is_some()
-            || self.c_publish_auth_cb.is_some()
+            || self.c_publish_auth.callback.is_some()
             || self.on_media_cb.is_some()
             || self.on_frame_cb.is_some()
             || self.on_shared_object_cb.is_some()
@@ -2547,8 +2536,8 @@ impl Conn {
             // RTMP publish name. Duplicate `publish` for the same name must
             // keep an already-authorized deferred relay and its pending
             // frames (integrator re-auth is unchanged). Detect switches via
-            // stream.name — with a pinned relay_key, next_route_key stays on
-            // the old DB id so renaming_route alone cannot see A→B.
+            // stream.name â€” with a pinned relay_key, next_route_key stays on
+            // the old DB id so renaming_route alone cannot see Aâ†’B.
             let was_playing = self.current_stream.as_ref().is_some_and(|s| s.is_playing);
             let publish_name_changed = self
                 .current_stream
@@ -3002,7 +2991,7 @@ impl Conn {
                     // an idle teardown: without a fresh window the reaper sees
                     // an idle stream on a long-lived connection and closes it
                     // before the client's publish/play on the new stream is
-                    // read. A peer that only cycles publish→createStream with
+                    // read. A peer that only cycles publishâ†’createStream with
                     // no media is still bounded by the publish-media squat
                     // timer, and `teardown_refreshes_setup_timer` grants the
                     // window only after media actually flowed or was sent.
@@ -3036,13 +3025,13 @@ impl Conn {
                 if self.pending_publish_auth.is_some() || self.publish_auth_sealed {
                     return self.send_publish_denied();
                 }
-                if let Some(cb) = self.c_publish_auth_cb {
+                if let Some(cb) = self.c_publish_auth.callback {
                     if !c_auth_allows(
                         cb,
                         self.conn_id,
                         &self.app,
                         &name_str,
-                        self.c_publish_auth_userdata,
+                        self.c_publish_auth.userdata,
                     ) {
                         return self.send_publish_denied();
                     }
@@ -3097,13 +3086,13 @@ impl Conn {
                 if self.pending_play_auth.is_some() || self.play_auth_sealed {
                     return self.send_play_denied();
                 }
-                if let Some(cb) = self.c_play_auth_cb {
+                if let Some(cb) = self.c_play_auth.callback {
                     if !c_auth_allows(
                         cb,
                         self.conn_id,
                         &self.app,
                         &name_str,
-                        self.c_play_auth_userdata,
+                        self.c_play_auth.userdata,
                     ) {
                         return self.send_play_denied();
                     }
@@ -3861,7 +3850,7 @@ fn read_data_event_name(buf: &mut Buffer, is_string: bool, out: &mut [u8; 64]) -
 }
 
 /// Wildcard FourCC (`*`) is valid in E-RTMP capability objects but must not
-/// appear on publisher media tags — it carries no concrete codec identity and
+/// appear on publisher media tags â€” it carries no concrete codec identity and
 /// would let codec-specific `on_media_cb` deny lists be bypassed.
 fn is_wildcard_media_fourcc(fourcc: &[u8; 4]) -> bool {
     fourcc[0] == b'*'
@@ -3916,7 +3905,7 @@ fn detect_video_codec(payload: &[u8]) -> Option<String> {
             return Some(VIDEO_COMMAND_CODEC_LABEL.to_string());
         }
         // Unpeeled ModEx wrappers expose extension metadata at bytes 1..5,
-        // not the inner codec FourCC — treat as unknown so deny lists apply.
+        // not the inner codec FourCC â€” treat as unknown so deny lists apply.
         if hdr.packet_type == ERTMP_PACKET_TYPE_MODEX {
             return None;
         }
@@ -3981,6 +3970,7 @@ mod tests {
     use crate::amf::amf0;
     use crate::session::stream::Stream;
 
+    /// Test callback that allows every request.
     unsafe extern "C" fn c_allow(
         _conn_id: u64,
         _app: *const std::ffi::c_char,
@@ -3990,6 +3980,7 @@ mod tests {
         0
     }
 
+    /// Test callback that denies every request.
     unsafe extern "C" fn c_deny(
         _conn_id: u64,
         _app: *const std::ffi::c_char,
@@ -8368,7 +8359,7 @@ mod tests {
         assert_eq!(conn.detected_video_width, Some(800));
     }
 
-    // ── Asynchronous publish/play authorization (AuthorizationResult) ──
+    // â”€â”€ Asynchronous publish/play authorization (AuthorizationResult) â”€â”€
 
     fn app_conn() -> Conn {
         let mut conn = Conn::new();
@@ -8410,14 +8401,14 @@ mod tests {
     #[test]
     fn c_publish_auth_allow_and_deny_control_publish() {
         let mut allowed = app_conn();
-        allowed.c_publish_auth_cb = Some(c_allow);
+        allowed.c_publish_auth.callback = Some(c_allow);
         allowed
             .handle_command(publish_buf("allowed").as_slice())
             .unwrap();
         assert!(allowed.current_stream.as_ref().unwrap().is_publishing);
 
         let mut denied = app_conn();
-        denied.c_publish_auth_cb = Some(c_deny);
+        denied.c_publish_auth.callback = Some(c_deny);
         denied
             .handle_command(publish_buf("denied").as_slice())
             .unwrap();
@@ -8427,14 +8418,14 @@ mod tests {
     #[test]
     fn c_play_auth_allow_and_deny_control_play() {
         let mut allowed = app_conn();
-        allowed.c_play_auth_cb = Some(c_allow);
+        allowed.c_play_auth.callback = Some(c_allow);
         allowed
             .handle_command(play_buf("allowed").as_slice())
             .unwrap();
         assert!(allowed.current_stream.as_ref().unwrap().is_playing);
 
         let mut denied = app_conn();
-        denied.c_play_auth_cb = Some(c_deny);
+        denied.c_play_auth.callback = Some(c_deny);
         denied
             .handle_command(play_buf("denied").as_slice())
             .unwrap();

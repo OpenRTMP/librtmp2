@@ -550,6 +550,9 @@ struct lrtmp2_server_t *lrtmp2_server_create(const struct lrtmp2_server_config_t
  * the server is destroyed. Passing a null callback clears it and restores the
  * library's default allow behavior for embedders that have no callback.
  *
+ * Do not call any function on the same server from the callback. Do not call
+ * this setter while `lrtmp2_server_poll` is running on that server.
+ *
  * Returns `0` on success and a negative value when `server` is null.
  */
 int32_t lrtmp2_server_set_publish_auth_cb(struct lrtmp2_server_t *server,
@@ -562,8 +565,9 @@ int32_t lrtmp2_server_set_publish_auth_cb(struct lrtmp2_server_t *server,
 /**
  * Install a C play-authorization callback (FFI-compatible).
  *
- * See [`lrtmp2_server_set_publish_auth_cb`] for the return convention and
- * `userdata` lifetime. Passing a null callback clears it.
+ * See [`lrtmp2_server_set_publish_auth_cb`] for the return convention,
+ * `userdata` lifetime and re-entrancy rules. Passing a null callback clears
+ * it.
  */
 int32_t lrtmp2_server_set_play_auth_cb(struct lrtmp2_server_t *server,
                                        int (*cb)(uint64_t conn_id,
