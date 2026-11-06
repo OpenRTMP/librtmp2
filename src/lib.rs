@@ -147,6 +147,7 @@ const _: [(); std::mem::size_of::<FrameSendFields>()] =
 mod ffi_tests {
     use super::*;
     use crate::server::Server;
+    use crate::session::conn::Conn;
     use std::ptr::NonNull;
 
     #[test]
@@ -185,10 +186,16 @@ mod ffi_tests {
     #[test]
     fn server_c_auth_callback_setters_store_the_callback_and_userdata() {
         let config = ServerConfig::default();
-        let server = NonNull::new(unsafe { lrtmp2_server_create(&config) })
+        let mut server = NonNull::new(unsafe { lrtmp2_server_create(&config) })
             .expect("lrtmp2_server_create returned null");
         let userdata = 0x1234usize as *mut std::ffi::c_void;
         unsafe {
+            // Simulate a connection accepted before the callback is installed.
+            let mut conn = Conn::new();
+            conn.c_publish_auth_userdata = 0x99;
+            conn.c_play_auth_userdata = 0x99;
+            server.as_mut().connections.push(conn);
+
             assert_eq!(
                 lrtmp2_server_set_publish_auth_cb(server.as_ptr(), Some(allow_cb), userdata),
                 0
@@ -201,12 +208,23 @@ mod ffi_tests {
             assert_eq!(server.as_ref().c_play_auth_userdata, userdata as usize);
             assert!(server.as_ref().c_publish_auth_cb.is_some());
             assert!(server.as_ref().c_play_auth_cb.is_some());
+            assert_eq!(
+                server.as_ref().connections[0].c_publish_auth_userdata,
+                userdata as usize
+            );
+            assert_eq!(
+                server.as_ref().connections[0].c_play_auth_userdata,
+                userdata as usize
+            );
+            assert!(server.as_ref().connections[0].c_publish_auth_cb.is_some());
+            assert!(server.as_ref().connections[0].c_play_auth_cb.is_some());
 
             assert_eq!(
                 lrtmp2_server_set_publish_auth_cb(server.as_ptr(), None, std::ptr::null_mut()),
                 0
             );
             assert!(server.as_ref().c_publish_auth_cb.is_none());
+            assert!(server.as_ref().connections[0].c_publish_auth_cb.is_none());
             assert_eq!(
                 lrtmp2_server_set_play_auth_cb(std::ptr::null_mut(), None, std::ptr::null_mut()),
                 -1
@@ -366,6 +384,13 @@ pub unsafe extern "C" fn lrtmp2_server_set_publish_auth_cb(
     let s = unsafe { &mut *server };
     s.c_publish_auth_cb = cb;
     s.c_publish_auth_userdata = userdata as usize;
+    // Connections copy the callback at accept time. Update the live ones too:
+    // otherwise a replaced callback keeps using the old userdata after the
+    // embedder has freed it, and a newly installed policy is ignored.
+    for conn in &mut s.connections {
+        conn.c_publish_auth_cb = cb;
+        conn.c_publish_auth_userdata = userdata as usize;
+    }
     0
 }
 
@@ -393,6 +418,10 @@ pub unsafe extern "C" fn lrtmp2_server_set_play_auth_cb(
     let s = unsafe { &mut *server };
     s.c_play_auth_cb = cb;
     s.c_play_auth_userdata = userdata as usize;
+    for conn in &mut s.connections {
+        conn.c_play_auth_cb = cb;
+        conn.c_play_auth_userdata = userdata as usize;
+    }
     0
 }
 
