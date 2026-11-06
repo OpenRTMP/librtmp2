@@ -548,26 +548,12 @@ pub struct Server {
     /// Optional C-ABI publish authorization callback; see
     /// [`crate::session::conn::Conn::c_publish_auth_cb`]. Installed by
     /// `lrtmp2_server_set_publish_auth_cb`.
-    pub c_publish_auth_cb: Option<
-        unsafe extern "C" fn(
-            conn_id: u64,
-            app: *const std::ffi::c_char,
-            stream_name: *const std::ffi::c_char,
-            userdata: *mut std::ffi::c_void,
-        ) -> std::ffi::c_int,
-    >,
+    pub c_publish_auth_cb: Option<crate::types::CAuthCallback>,
     /// Opaque C callback context for [`Self::c_publish_auth_cb`].
     pub c_publish_auth_userdata: usize,
     /// Optional C-ABI play authorization callback; see
     /// [`Self::c_publish_auth_cb`].
-    pub c_play_auth_cb: Option<
-        unsafe extern "C" fn(
-            conn_id: u64,
-            app: *const std::ffi::c_char,
-            stream_name: *const std::ffi::c_char,
-            userdata: *mut std::ffi::c_void,
-        ) -> std::ffi::c_int,
-    >,
+    pub c_play_auth_cb: Option<crate::types::CAuthCallback>,
     /// Opaque C callback context for [`Self::c_play_auth_cb`].
     pub c_play_auth_userdata: usize,
     /// Deadline for a `Pending` publish/play authorization before it's

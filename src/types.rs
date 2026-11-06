@@ -385,6 +385,15 @@ impl Default for ServerConfig {
 
 /* ── Callback types ── */
 
+/// Server-side publish/play authorization callback installed through the C ABI.
+/// Return `0` to allow and any non-zero value to deny.
+pub type CAuthCallback = unsafe extern "C" fn(
+    conn_id: u64,
+    app: *const std::ffi::c_char,
+    stream_name: *const std::ffi::c_char,
+    userdata: *mut std::ffi::c_void,
+) -> std::ffi::c_int;
+
 /// on_connect callback type
 pub type OnConnectCb = Option<unsafe extern "C" fn(conn: *mut Conn, userdata: *mut u8) -> c_int>;
 /// on_publish callback type
