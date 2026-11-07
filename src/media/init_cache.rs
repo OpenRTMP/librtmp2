@@ -72,8 +72,16 @@ fn sequence_header_kind(codec: ConfigCodec, record: &[u8]) -> CacheFrameKind {
 /// allows an empty Opus payload and falls back to the `MultichannelConfig`
 /// signal when present, otherwise to mono/stereo channel mapping.
 fn sequence_start_config_valid(frame_type: FrameType, fourcc: &[u8], record: &[u8]) -> bool {
-    if frame_type == FrameType::Audio && record.is_empty() && fourcc.get(..4) == Some(b"Opus") {
-        return true;
+    if frame_type == FrameType::Audio {
+        // Enhanced AAC uses the same AudioSpecificConfig bytes as the legacy
+        // tag. Validate it here too so the framing choice cannot bypass the
+        // legacy check and replace a cached valid header with a malformed one.
+        if fourcc.get(..4) == Some(b"mp4a") {
+            return validate_aac_config(record);
+        }
+        if record.is_empty() && fourcc.get(..4) == Some(b"Opus") {
+            return true;
+        }
     }
     validate_config_record(ConfigCodec::from_fourcc(fourcc), record)
 }
@@ -690,6 +698,23 @@ mod tests {
         assert_eq!(
             classify_cache_frame(FrameType::Video, &payload),
             CacheFrameKind::VideoKeyframe
+        );
+    }
+
+    #[test]
+    fn enhanced_aac_sequence_start_requires_a_valid_config() {
+        // Same AudioSpecificConfig bytes, two framings. The legacy tag must
+        // reject AOT 0; the enhanced FourCC must not become a bypass.
+        let invalid = [0x90, b'm', b'p', b'4', b'a', 0x00];
+        assert_eq!(
+            classify_cache_frame(FrameType::Audio, &invalid),
+            CacheFrameKind::LiveOnly
+        );
+        // AAC LC, 44.1 kHz, stereo.
+        let valid = [0x90, b'm', b'p', b'4', b'a', 0x12, 0x10];
+        assert_eq!(
+            classify_cache_frame(FrameType::Audio, &valid),
+            CacheFrameKind::AudioSequenceHeader
         );
     }
 

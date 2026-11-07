@@ -20,11 +20,13 @@ guarantees below are deliberately split between the transport layer and the
 
 ## Guaranteed by codec-aware validation (once per sequence header)
 
-`media::codec_config` checks the structure of `AVCDecoderConfigurationRecord`
-and `HEVCDecoderConfigurationRecord` (and of every sequence-start track of an
-E-RTMP multitrack container): version, SPS/PPS presence, the optional High-profile extension section, array/entry counts and
-lengths inside the record, no empty parameter set. Other FourCCs only need a
-non-empty record. It never decodes video and allocates nothing; it is not run
+`media::codec_config` checks the structure of `AVCDecoderConfigurationRecord`,
+`HEVCDecoderConfigurationRecord` and the AAC `AudioSpecificConfig` (legacy and
+enhanced `mp4a` framing, including every sequence-start track of an E-RTMP
+multitrack container): version, SPS/PPS presence, the optional High-profile
+extension section, array/entry counts and lengths inside the record, no empty
+parameter set, and a present audio object type/frequency/channel
+configuration. Other FourCCs only need a non-empty record. It never decodes video and allocates nothing; it is not run
 for coded frames.
 
 A sequence header that fails the check is still relayed live, but it is **never
