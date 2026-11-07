@@ -52,13 +52,13 @@ impl DeliveryHint {
         // Enhanced RTMP Audio Metadata (ExHeader packet type 3) is Critical
         // for the same reason: nothing replays it later, so a congested
         // receiver would lose it permanently. VideoCommand (StartSeek /
-        // EndSeek) and MultichannelConfig are equally one-shot decoder state:
-        // dropping them leaves a receiver stuck in seek or on the wrong
-        // channel map.
+        // EndSeek, enhanced or legacy frame type 5) and MultichannelConfig are
+        // equally one-shot decoder state: dropping them leaves a receiver
+        // stuck in seek or on the wrong channel map.
         if frame_type == FrameType::Audio && is_enhanced_audio_metadata(payload) {
             return Self::Critical;
         }
-        if frame_type == FrameType::Video && is_enhanced_video_command(payload) {
+        if frame_type == FrameType::Video && is_video_command(payload) {
             return Self::Critical;
         }
         if frame_type == FrameType::Audio && is_enhanced_audio_multichannel(payload) {
@@ -161,12 +161,17 @@ fn is_enhanced_audio_multichannel(payload: &[u8]) -> bool {
     hdr.is_ex_header != 0 && hdr.packet_type == ERTMP_AUDIO_PACKET_TYPE_MULTICHANNEL
 }
 
-fn is_enhanced_video_command(payload: &[u8]) -> bool {
-    // VideoCommand is an ExVideo frame type (5), not a packet type: its low
-    // nibble carries the command (StartSeek/EndSeek), not a codec packet type.
-    payload
-        .first()
-        .is_some_and(|b| b & 0x80 != 0 && (b >> 4) & 0x07 == 5)
+fn is_video_command(payload: &[u8]) -> bool {
+    // VideoCommand is frame type 5: its low nibble carries the command
+    // (StartSeek/EndSeek), not a codec packet type. The enhanced form uses the
+    // 3-bit ExHeader frame type; the legacy FLV tag uses the full high nibble.
+    payload.first().is_some_and(|b| {
+        if b & 0x80 != 0 {
+            (b >> 4) & 0x07 == 5
+        } else {
+            (b >> 4) & 0x0F == 5
+        }
+    })
 }
 
 #[cfg(test)]
@@ -271,6 +276,21 @@ mod tests {
             DeliveryHint::Droppable
         );
         assert_eq!(hint(FrameType::Audio, &[], true), DeliveryHint::Droppable);
+    }
+
+    #[test]
+    fn legacy_video_command_is_critical_not_droppable() {
+        // Legacy frame type 5 (VideoInfo/Command) carries one command byte.
+        // Dropping it leaves a receiver stuck in a seek state, so it must be
+        // treated like the enhanced command framing.
+        assert_eq!(
+            hint(FrameType::Video, &[0x56, 0x00], true),
+            DeliveryHint::Critical
+        );
+        assert_eq!(
+            hint(FrameType::Video, &[0x57, 0x01], true),
+            DeliveryHint::Critical
+        );
     }
 
     #[test]

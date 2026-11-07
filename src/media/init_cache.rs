@@ -51,9 +51,17 @@ fn classify_video(payload: &[u8]) -> CacheFrameKind {
 }
 
 fn is_video_command(payload: &[u8]) -> bool {
-    payload
-        .first()
-        .is_some_and(|b| b & 0x80 != 0 && (b >> 4) & 0x07 == VIDEO_FRAME_TYPE_COMMAND)
+    // Enhanced (IsExHeader) commands use the 3-bit frame type; the legacy
+    // FLV tag uses the full high nibble for its frame type. Both spell the
+    // command as 5, and in both cases the low nibble is a command byte, not a
+    // codec/packet type.
+    payload.first().is_some_and(|b| {
+        if b & 0x80 != 0 {
+            (b >> 4) & 0x07 == VIDEO_FRAME_TYPE_COMMAND
+        } else {
+            (b >> 4) & 0x0F == VIDEO_FRAME_TYPE_COMMAND
+        }
+    })
 }
 
 /// A sequence header is only cacheable when its configuration record is
@@ -260,6 +268,13 @@ fn populate_video_frame(frame: &mut Frame, payload: &[u8]) {
     // the inner codec FourCC -- leave the frame's codec fields unset so
     // deny/allow lists see an unknown codec (mirrors `detect_video_codec`).
     if hdr.is_ex_header != 0 && hdr.packet_type == ERTMP_PACKET_TYPE_MODEX {
+        return;
+    }
+    // A VideoCommand (enhanced or legacy frame type 5) carries a command byte,
+    // not a codec identity or composition time; leave those fields unset so a
+    // media hook cannot mistake the command byte for a codec.
+    if hdr.frame_type == VIDEO_FRAME_TYPE_COMMAND {
+        frame.video_frame_type = hdr.frame_type;
         return;
     }
     frame.composition_time = hdr.composition_time;
@@ -788,6 +803,32 @@ mod tests {
         hvc[0] = 0xD0;
         assert_eq!(
             classify_cache_frame(FrameType::Video, &hvc),
+            CacheFrameKind::LiveOnly
+        );
+    }
+
+    #[test]
+    fn legacy_video_command_frames_are_live_only_for_every_nibble() {
+        // Legacy FLV frame type 5 (VideoInfo/Command) uses the full high
+        // nibble; the low nibble is the command byte, not a codec id. Such a
+        // frame must never be treated as a sequence header or keyframe, even
+        // when its command byte looks like AVCPacketType 0/1.
+        let body = mt_avc_seq(&[(0, &valid_avc())]);
+        for nibble in 0..16u8 {
+            let mut payload = body.clone();
+            payload[0] = 0x50 | nibble;
+            assert_eq!(
+                classify_cache_frame(FrameType::Video, &payload),
+                CacheFrameKind::LiveOnly,
+                "legacy command nibble {nibble}"
+            );
+        }
+        assert_eq!(
+            classify_cache_frame(FrameType::Video, &[0x57, 0x00]),
+            CacheFrameKind::LiveOnly
+        );
+        assert_eq!(
+            classify_cache_frame(FrameType::Video, &[0x57, 0x01]),
             CacheFrameKind::LiveOnly
         );
     }
