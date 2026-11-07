@@ -3913,6 +3913,12 @@ fn detect_video_codec(payload: &[u8]) -> Option<String> {
         fourcc.copy_from_slice(&hdr.fourcc[..4]);
         return media_fourcc_auth_label(&fourcc);
     } else {
+        // Legacy FLV frame type 5 is a VideoCommand: its low nibble is a
+        // UI8 command, not a codec id, so report the same stable command
+        // label as the enhanced framing instead of `legacy:<nibble>`.
+        if hdr.frame_type == crate::ertmp::exvideo::VIDEO_FRAME_TYPE_COMMAND {
+            return Some(VIDEO_COMMAND_CODEC_LABEL.to_string());
+        }
         match payload[0] & 0x0F {
             7 => Some("avc1".to_string()),
             12 => Some("hvc1".to_string()),
@@ -6503,6 +6509,32 @@ mod tests {
              a command frame and bypass a codec deny list"
         );
         assert!(conn.pending_relay.is_empty());
+    }
+
+    #[test]
+    fn legacy_video_command_is_not_mistaken_for_avc_media() {
+        fn deny_avc(_: u64, frame_type: FrameType, codec: Option<&str>) -> bool {
+            frame_type != FrameType::Video || codec != Some("avc1")
+        }
+
+        // Legacy FLV frame type 5: the low nibble is a command byte, not an
+        // AVC codec id. A policy that denies AVC must not deny or mislabel a
+        // seek command (and a command must not be cached as a header).
+        assert_eq!(
+            detect_video_codec(&[0x57, 0x01]),
+            Some(VIDEO_COMMAND_CODEC_LABEL.to_string())
+        );
+
+        let mut conn = Conn::new();
+        conn.relay_enabled = true;
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+        conn.current_stream.as_mut().unwrap().is_publishing = true;
+        conn.on_media_cb = Some(deny_avc);
+        assert_eq!(
+            conn.handle_media_frame(1, FrameType::Video, 0, &[0x57, 0x01], None),
+            Ok(())
+        );
+        assert!(conn.detected_video_codec.is_none());
     }
 
     #[test]
