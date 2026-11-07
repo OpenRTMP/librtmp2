@@ -703,17 +703,28 @@ mod tests {
 
     #[test]
     fn enhanced_aac_sequence_start_requires_a_valid_config() {
-        // Same AudioSpecificConfig bytes, two framings. The legacy tag must
-        // reject AOT 0; the enhanced FourCC must not become a bypass.
-        let invalid = [0x90, b'm', b'p', b'4', b'a', 0x00];
+        // Same AudioSpecificConfig bytes, two framings. Both must reject
+        // AOT 0 and accept AAC LC, 44.1 kHz, stereo.
+        let enhanced_invalid = [0x90, b'm', b'p', b'4', b'a', 0x00];
         assert_eq!(
-            classify_cache_frame(FrameType::Audio, &invalid),
+            classify_cache_frame(FrameType::Audio, &enhanced_invalid),
             CacheFrameKind::LiveOnly
         );
-        // AAC LC, 44.1 kHz, stereo.
-        let valid = [0x90, b'm', b'p', b'4', b'a', 0x12, 0x10];
+        let enhanced_valid = [0x90, b'm', b'p', b'4', b'a', 0x12, 0x10];
         assert_eq!(
-            classify_cache_frame(FrameType::Audio, &valid),
+            classify_cache_frame(FrameType::Audio, &enhanced_valid),
+            CacheFrameKind::AudioSequenceHeader
+        );
+
+        // Legacy AAC tag: sound format 10, AACPacketType 0, then the config.
+        let legacy_invalid = [0xAF, 0x00, 0x00];
+        assert_eq!(
+            classify_cache_frame(FrameType::Audio, &legacy_invalid),
+            CacheFrameKind::LiveOnly
+        );
+        let legacy_valid = [0xAF, 0x00, 0x12, 0x10];
+        assert_eq!(
+            classify_cache_frame(FrameType::Audio, &legacy_valid),
             CacheFrameKind::AudioSequenceHeader
         );
     }
