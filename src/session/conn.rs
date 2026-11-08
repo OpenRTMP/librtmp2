@@ -252,6 +252,10 @@ pub struct Conn {
     pub bytes_at_last_ack: u64,
     /// Audio/video payload bytes received (excludes handshake/control overhead).
     pub media_bytes_received: u64,
+    /// Accepted media frames, including zero-length audio silence. Byte
+    /// telemetry stays in `media_bytes_received`, so a publisher that sends
+    /// only silence still refreshes the publish-media deadline.
+    pub media_frames_received: u64,
     /// Bytes accepted via [`Conn::inject_relay_frame`] (AV + script/metadata;
     /// socket telemetry stays in `media_bytes_received`). Counts trusted
     /// injects toward publisher liveness and deferred-relay drain so route
@@ -267,6 +271,8 @@ pub struct Conn {
     /// telemetry, so the deadline compares against this baseline (mirroring
     /// `pause_grace_media_bytes_sent`) instead of expecting it to be cleared.
     media_bytes_at_epoch_start: u64,
+    /// Snapshot of `media_frames_received` for the current publish/idle epoch.
+    media_frames_at_epoch_start: u64,
     /// Snapshot of `injected_media_bytes_total` taken when the current
     /// publish/idle epoch armed its media deadline (see `media_bytes_at_epoch_start`).
     injected_bytes_at_epoch_start: u64,
@@ -278,6 +284,7 @@ pub struct Conn {
     /// media followed by a fresh publish" apart and would inherit the expired
     /// squat deadline instead of starting a fresh window.
     teardown_grace_media_bytes_received: u64,
+    teardown_grace_media_frames_received: u64,
     teardown_grace_injected_bytes: u64,
     /// Route key for which the publish-media deadline was most recently armed.
     /// Used to avoid re-arming the deadline when a peer cycles
@@ -504,11 +511,14 @@ impl Conn {
             bytes_received: 0,
             bytes_at_last_ack: 0,
             media_bytes_received: 0,
+            media_frames_received: 0,
             injected_media_bytes: 0,
             injected_media_bytes_total: 0,
             media_bytes_at_epoch_start: 0,
+            media_frames_at_epoch_start: 0,
             injected_bytes_at_epoch_start: 0,
             teardown_grace_media_bytes_received: 0,
+            teardown_grace_media_frames_received: 0,
             teardown_grace_injected_bytes: 0,
             publish_media_deadline_route: None,
             media_bytes_sent: 0,
@@ -595,6 +605,7 @@ impl Conn {
     /// armed" rather than testing the counter against zero.
     fn received_media_in_current_epoch(&self) -> bool {
         self.media_bytes_received > self.media_bytes_at_epoch_start
+            || self.media_frames_received > self.media_frames_at_epoch_start
     }
 
     /// True when media (socket or trusted inject) has arrived since the current
@@ -604,6 +615,7 @@ impl Conn {
     /// inject-only publisher's same-route republish must still re-arm).
     fn media_flowed_since_arm(&self) -> bool {
         self.media_bytes_received > self.media_bytes_at_epoch_start
+            || self.media_frames_received > self.media_frames_at_epoch_start
             || self.injected_media_bytes_total > self.injected_bytes_at_epoch_start
     }
 
@@ -1207,11 +1219,13 @@ impl Conn {
     fn teardown_refreshes_setup_timer(&mut self) -> bool {
         let media_since_last_grant = self.media_bytes_received
             > self.teardown_grace_media_bytes_received
+            || self.media_frames_received > self.teardown_grace_media_frames_received
             || self.injected_media_bytes_total > self.teardown_grace_injected_bytes;
         if !media_since_last_grant && self.media_bytes_sent <= self.pause_grace_media_bytes_sent {
             return false;
         }
         self.teardown_grace_media_bytes_received = self.media_bytes_received;
+        self.teardown_grace_media_frames_received = self.media_frames_received;
         self.teardown_grace_injected_bytes = self.injected_media_bytes_total;
         self.pause_grace_media_bytes_sent = self.media_bytes_sent;
         true
@@ -1368,6 +1382,7 @@ impl Conn {
                 self.media_bytes_received = self
                     .media_bytes_received
                     .saturating_add(payload.len() as u64);
+                self.media_frames_received = self.media_frames_received.saturating_add(1);
             }
             return Ok(());
         }
@@ -1403,6 +1418,7 @@ impl Conn {
         self.media_bytes_received = self
             .media_bytes_received
             .saturating_add(payload.len() as u64);
+        self.media_frames_received = self.media_frames_received.saturating_add(1);
         let dispatched = self.dispatch_media_frame_callbacks(
             frame_type,
             timestamp,
@@ -2537,6 +2553,7 @@ impl Conn {
             // telemetry, so rebase the epoch on a snapshot of it.
             self.injected_media_bytes = 0;
             self.media_bytes_at_epoch_start = self.media_bytes_received;
+            self.media_frames_at_epoch_start = self.media_frames_received;
             self.injected_bytes_at_epoch_start = self.injected_media_bytes_total;
             self.publish_media_deadline_route = Some(next_route_key.clone());
         }
@@ -7057,6 +7074,28 @@ mod tests {
         assert!(conn.pending_relay[0].payload.is_empty());
         assert_eq!(conn.pending_relay[1].timestamp, 1040);
         assert_eq!(conn.pending_relay[1].payload, vec![0xAF, 0x01, 0x21]);
+        assert_eq!(conn.media_frames_received, 2);
+    }
+
+    #[test]
+    fn aggregate_audio_silence_counts_as_publisher_activity() {
+        let mut conn = Conn::new();
+        conn.relay_enabled = true;
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+        if let Some(s) = conn.current_stream.as_mut() {
+            s.is_publishing = true;
+        }
+
+        // A zero-length audio sub-tag carries no bytes but is valid media. It
+        // must refresh publisher liveness, or the 2 s squat timer closes an
+        // audio-only publisher that is sending silence.
+        conn.handle_aggregate_for_test(1, 1000, &flv_subtag(0x08, 0, &[]))
+            .unwrap();
+
+        assert_eq!(conn.media_bytes_received, 0);
+        assert_eq!(conn.media_frames_received, 1);
+        assert!(conn.received_media_in_current_epoch());
+        assert!(!conn.publish_media_squat_expired());
     }
 
     #[test]
