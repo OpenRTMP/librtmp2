@@ -971,7 +971,10 @@ impl Client {
             if body + data_size > payload.len() {
                 return Err(ErrorCode::Protocol);
             }
-            if data_size == 0 {
+            if data_size == 0 && tag_type != msg_dispatch::RTMP_MSG_AUDIO {
+                // A zero-length audio sub-tag is the RTMP audio-silence
+                // message; other empty sub-tags are not valid messages. The
+                // MAX_AGGREGATE_SUBTAGS bound caps the loop regardless.
                 return Err(ErrorCode::Protocol);
             }
             if *messages_processed >= MAX_MESSAGES_PER_POLL {
@@ -1884,6 +1887,48 @@ mod tests {
              not only discover it near the 5s deadline (took {:?})",
             start.elapsed()
         );
+    }
+
+    fn aggregate_subtag(tag_type: u8, timestamp: u32, data: &[u8]) -> Vec<u8> {
+        let mut v = Vec::new();
+        v.push(tag_type);
+        let len = data.len() as u32;
+        v.extend_from_slice(&[(len >> 16) as u8, (len >> 8) as u8, len as u8]);
+        v.extend_from_slice(&[
+            (timestamp >> 16) as u8,
+            (timestamp >> 8) as u8,
+            timestamp as u8,
+            (timestamp >> 24) as u8,
+        ]);
+        v.extend_from_slice(&[0, 0, 0]);
+        v.extend_from_slice(data);
+        v.extend_from_slice(&((11 + data.len()) as u32).to_be_bytes());
+        v
+    }
+
+    #[test]
+    fn aggregate_audio_silence_subtag_is_accepted() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        CALLS.store(0, Ordering::Relaxed);
+        fn count_calls(_frame: &Frame) {
+            CALLS.fetch_add(1, Ordering::Relaxed);
+        }
+
+        let mut client = Client::new();
+        client.on_frame_cb = Some(count_calls);
+        let mut aggregate = Vec::new();
+        aggregate.extend(aggregate_subtag(0x08, 0, &[]));
+        aggregate.extend(aggregate_subtag(0x08, 40, &[0xAF, 0x01, 0x21]));
+
+        let mut processed = 0usize;
+        client
+            .handle_aggregate_message(1000, &aggregate, &mut processed)
+            .unwrap();
+
+        assert_eq!(processed, 2);
+        assert_eq!(CALLS.load(Ordering::Relaxed), 2);
     }
 
     #[test]

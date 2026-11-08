@@ -10,6 +10,7 @@ use crate::ertmp::multitrack_media::{
     foreach_track, is_multitrack_container, multitrack_has_metadata,
 };
 use crate::ertmp::{exaudio, exvideo};
+use crate::media::modex::ERTMP_PACKET_TYPE_MODEX;
 use crate::types::{
     AudioHeader, ERTMP_AUDIO_PACKET_TYPE_METADATA, ERTMP_AUDIO_PACKET_TYPE_MULTICHANNEL,
     ERTMP_PACKET_TYPE_METADATA, FrameType, VideoHeader,
@@ -172,7 +173,13 @@ fn is_video_command(payload: &[u8]) -> bool {
     // 3-bit ExHeader frame type; the legacy FLV tag uses the full high nibble.
     payload.first().is_some_and(|b| {
         if b & 0x80 != 0 {
-            (b >> 4) & 0x07 == 5
+            // An unpeeled ModEx wrapper's frame type describes the inner
+            // packet only after the chain is peeled. Classifying the wrapper
+            // itself as a one-shot VideoCommand would make every such frame
+            // Critical under congestion, defeating the droppable policy.
+            let frame_type = (b >> 4) & 0x07;
+            let packet_type = b & 0x0F;
+            frame_type == 5 && packet_type != ERTMP_PACKET_TYPE_MODEX
         } else {
             (b >> 4) & 0x0F == 5
         }
@@ -307,6 +314,21 @@ mod tests {
         assert_eq!(
             hint(FrameType::Video, &[0x57, 0x01], true),
             DeliveryHint::Critical
+        );
+    }
+
+    #[test]
+    fn unpeeled_modex_wrapper_is_not_a_video_command() {
+        // 0xD7 = ExHeader | frame type 5 | packet type 7 (ModEx). The frame
+        // type belongs to the inner packet only after the chain is peeled; the
+        // wrapper itself must not become permanently Critical.
+        assert_eq!(
+            hint(
+                FrameType::Video,
+                &[0xD7, 0x02, 0x00, 0x00, 0x07, 0x01, 0x27, 0x01],
+                true
+            ),
+            DeliveryHint::Droppable
         );
     }
 

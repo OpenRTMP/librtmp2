@@ -1465,10 +1465,15 @@ impl Conn {
             if body + data_size > payload.len() {
                 return Err(ErrorCode::Protocol);
             }
-            // Mirror multitrack: zero-length sub-tags pack the maximum sub-tag
-            // count into the smallest wire footprint and bypass per-sub-tag
-            // processing budgets when their type is not audio/video/script.
-            if data_size == 0 {
+            // A zero-length audio sub-tag is the RTMP audio-silence message
+            // (a zero-length audio payload without an AudioTagHeader), which
+            // the standalone media path accepts and relays. Rejecting it here
+            // made a conforming aggregate tear down the whole publisher
+            // session. Other zero-length sub-tags remain rejected: an empty
+            // video/data tag is not a valid message, and the loop's
+            // MAX_AGGREGATE_SUBTAGS bound already caps the work an attacker
+            // can pack into the container.
+            if data_size == 0 && tag_type != msg_dispatch::RTMP_MSG_AUDIO {
                 return Err(ErrorCode::Protocol);
             }
             if *messages_budget == 0 || self.recv_track_budget == 0 {
@@ -7030,6 +7035,31 @@ mod tests {
     }
 
     #[test]
+    fn aggregate_audio_silence_subtag_is_accepted_and_relayed() {
+        let mut conn = Conn::new();
+        conn.relay_enabled = true;
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+        if let Some(s) = conn.current_stream.as_mut() {
+            s.is_publishing = true;
+        }
+
+        // The RTMP audio-silence message is a zero-length audio payload. An
+        // aggregate that carries it between normal sub-tags must not be
+        // rejected as malformed (which used to close the publisher session).
+        let mut aggregate = Vec::new();
+        aggregate.extend(flv_subtag(0x08, 0, &[]));
+        aggregate.extend(flv_subtag(0x08, 40, &[0xAF, 0x01, 0x21]));
+
+        conn.handle_aggregate_for_test(1, 1000, &aggregate).unwrap();
+
+        assert_eq!(conn.pending_relay.len(), 2);
+        assert_eq!(conn.pending_relay[0].frame_type, FrameType::Audio);
+        assert!(conn.pending_relay[0].payload.is_empty());
+        assert_eq!(conn.pending_relay[1].timestamp, 1040);
+        assert_eq!(conn.pending_relay[1].payload, vec![0xAF, 0x01, 0x21]);
+    }
+
+    #[test]
     fn aggregate_message_unpacks_audio_and_video_subtags_into_relay() {
         let mut conn = Conn::new();
         conn.relay_enabled = true;
@@ -7364,15 +7394,20 @@ mod tests {
     }
 
     #[test]
-    fn aggregate_rejects_zero_size_subtags() {
-        let mut conn = Conn::new();
-        let aggregate = flv_subtag(0x08, 0, &[]);
-        let mut messages_budget = MAX_MESSAGES_PER_RECV;
+    fn aggregate_rejects_zero_size_non_audio_subtags() {
+        // Zero-length audio is the RTMP silence message (accepted and covered
+        // by aggregate_audio_silence_subtag_is_accepted_and_relayed). Other
+        // empty sub-tags are not valid messages.
+        for tag_type in [0x09u8, 0x01] {
+            let mut conn = Conn::new();
+            let aggregate = flv_subtag(tag_type, 0, &[]);
+            let mut messages_budget = MAX_MESSAGES_PER_RECV;
 
-        assert_eq!(
-            conn.handle_aggregate(1, 0, &aggregate, &mut messages_budget),
-            Err(ErrorCode::Protocol)
-        );
+            assert_eq!(
+                conn.handle_aggregate(1, 0, &aggregate, &mut messages_budget),
+                Err(ErrorCode::Protocol)
+            );
+        }
     }
 
     #[test]
