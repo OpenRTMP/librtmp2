@@ -2624,11 +2624,21 @@ impl Server {
     }
 
     fn frame_has_unpeeled_modex_wrapper(frame: &RelayFrame) -> bool {
-        frame.cache_payload.is_none()
-            && frame
-                .payload
-                .first()
-                .is_some_and(|b| b & 0x80 != 0 && b & 0x0F == ERTMP_PACKET_TYPE_MODEX)
+        if frame.cache_payload.is_some() {
+            return false;
+        }
+        let Some(&b) = frame.payload.first() else {
+            return false;
+        };
+        match frame.frame_type {
+            // Legacy video never sets bit 7; enhanced video always does.
+            FrameType::Video => b & 0x80 != 0 && b & 0x0F == ERTMP_PACKET_TYPE_MODEX,
+            // Legacy audio also sets bit 7 for SoundFormat 8/10/11/14. Only
+            // the reserved E-RTMP ExHeader nibble 9 makes a low nibble of 7 a
+            // ModEx wrapper; 0x87 is legacy G.711U and must pass through.
+            FrameType::Audio => (b >> 4) & 0x0F == 0x09 && b & 0x0F == ERTMP_PACKET_TYPE_MODEX,
+            _ => false,
+        }
     }
 
     fn count_relay_players(&self, frame: &RelayFrame) -> usize {
@@ -6550,6 +6560,23 @@ mod tests {
         assert!(
             !Server::conn_will_receive_relay_frame(&player, &frame),
             "an unpeeled ModEx wrapper must not reach a non-multitrack player"
+        );
+
+        // 0x87 is legacy G.711U (SoundFormat 8, low nibble 7), not an
+        // enhanced audio ModEx wrapper. The gate must not drop it.
+        player.current_stream.as_mut().unwrap().receive_audio = true;
+        let legacy_audio = RelayFrame {
+            app: "live".to_string(),
+            stream_name: "stream".to_string(),
+            publisher_conn_id: EXTERNAL_RELAY_PUBLISHER_ID,
+            frame_type: FrameType::Audio,
+            timestamp: 0,
+            cache_payload: None,
+            payload: vec![0x87, 0x01],
+        };
+        assert!(
+            Server::conn_will_receive_relay_frame(&player, &legacy_audio),
+            "legacy G.711U must not be mistaken for a ModEx wrapper"
         );
     }
 
