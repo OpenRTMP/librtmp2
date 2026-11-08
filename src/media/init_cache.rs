@@ -272,8 +272,10 @@ fn populate_video_frame(frame: &mut Frame, payload: &[u8]) {
     }
     // A VideoCommand (enhanced or legacy frame type 5) carries a command byte,
     // not a codec identity or composition time; leave those fields unset so a
-    // media hook cannot mistake the command byte for a codec.
-    if hdr.frame_type == VIDEO_FRAME_TYPE_COMMAND {
+    // media hook cannot mistake the command byte for a codec. An enhanced
+    // Metadata packet may also use frame type 5; it still carries a FourCC and
+    // must keep its metadata/codec classification.
+    if hdr.frame_type == VIDEO_FRAME_TYPE_COMMAND && hdr.packet_type != ERTMP_PACKET_TYPE_METADATA {
         frame.video_frame_type = hdr.frame_type;
         return;
     }
@@ -607,6 +609,23 @@ mod tests {
         };
         populate_av_frame(&mut frame, &payload);
         assert_eq!(frame.is_metadata, 1);
+    }
+
+    #[test]
+    fn enhanced_metadata_packet_with_command_frame_type_keeps_metadata_and_codec() {
+        // 0xD4 = IsExHeader | frame type 5 | packet type 4 (Metadata). The
+        // frame type matches VideoCommand, but metadata packets still carry a
+        // FourCC and must keep their is_metadata/codec classification.
+        let payload = [0xD4, b'h', b'v', b'c', b'1', 0x00, 0x01];
+        let mut frame = Frame {
+            frame_type: FrameType::Video,
+            ..Default::default()
+        };
+        populate_av_frame(&mut frame, &payload);
+        assert_eq!(frame.is_metadata, 1);
+        assert_eq!(&frame.video_fourcc.cc[..4], b"hvc1");
+        assert_eq!(frame.video_codec, VideoCodec::H265);
+        assert_eq!(frame.video_frame_type, 5);
     }
 
     #[test]
