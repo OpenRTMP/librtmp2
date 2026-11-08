@@ -971,11 +971,12 @@ impl Client {
             if body + data_size > payload.len() {
                 return Err(ErrorCode::Protocol);
             }
-            if data_size == 0 && tag_type != msg_dispatch::RTMP_MSG_AUDIO {
-                // A zero-length audio sub-tag is the RTMP audio-silence
-                // message; other empty sub-tags are not valid messages. The
-                // MAX_AGGREGATE_SUBTAGS bound caps the loop regardless.
-                return Err(ErrorCode::Protocol);
+            if data_size == 0 {
+                // Empty audio is the RTMP silence message; empty video/data
+                // is not a valid message. MAX_AGGREGATE_SUBTAGS caps the loop.
+                if tag_type != msg_dispatch::RTMP_MSG_AUDIO {
+                    return Err(ErrorCode::Protocol);
+                }
             }
             if *messages_processed >= MAX_MESSAGES_PER_POLL {
                 break;
