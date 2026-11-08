@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 
 use crate::chunk::state::{DEFAULT_CHUNK_SIZE, DEFAULT_MAX_MSG_LENGTH, RTMP_WIRE_MAX_MSG_LENGTH};
 use crate::ertmp::multitrack_media::{foreach_track, is_multitrack_container};
+use crate::media::modex::ERTMP_PACKET_TYPE_MODEX;
 use crate::media::{
     CacheFrameKind, DeliveryHint, classify_cache_frame, is_on_metadata_payload,
     normalize_modex_payload_with_frame_type,
@@ -2609,12 +2610,25 @@ impl Server {
             return false;
         }
         if matches!(frame.frame_type, FrameType::Audio | FrameType::Video)
-            && is_multitrack_container(frame.frame_type, frame.cache_payload())
             && !conn.accepts_multitrack()
+            && (is_multitrack_container(frame.frame_type, frame.cache_payload())
+                || Self::frame_has_unpeeled_modex_wrapper(frame))
         {
+            // A ModEx chain longer than the peel limit is deliberately left
+            // opaque, so its inner packet type is unknown. Conservatively
+            // treat it like a multitrack container: a player that did not
+            // negotiate multitrack must not receive bytes it cannot parse.
             return false;
         }
         true
+    }
+
+    fn frame_has_unpeeled_modex_wrapper(frame: &RelayFrame) -> bool {
+        frame.cache_payload.is_none()
+            && frame
+                .payload
+                .first()
+                .is_some_and(|b| b & 0x80 != 0 && b & 0x0F == ERTMP_PACKET_TYPE_MODEX)
     }
 
     fn count_relay_players(&self, frame: &RelayFrame) -> usize {
@@ -6487,6 +6501,56 @@ mod tests {
         player.current_stream.as_mut().unwrap().receive_audio = true;
         assert!(Server::conn_will_receive_relay_frame(&player, &audio));
         assert!(!Server::conn_will_receive_relay_frame(&player, &video));
+    }
+
+    #[test]
+    fn unpeeled_modex_wrapper_is_not_delivered_to_a_player_without_multitrack() {
+        use crate::net::testing::{PairStream, stream_pair};
+        use crate::session::stream::Stream;
+        use crate::transport::Transport;
+
+        let (server_end, _peer_end) = stream_pair().unwrap();
+        server_end.set_nonblocking(true).unwrap();
+
+        let mut player = Conn::new();
+        player.app = "live".to_string();
+        player.relay_enabled = true;
+        player.transport = Some(crate::net::testing::transport_from(server_end));
+        player.current_stream = Some(Box::new(Stream {
+            stream_id: 1,
+            name: "stream".to_string(),
+            is_publishing: false,
+            is_playing: true,
+            paused: false,
+            receive_audio: false,
+            receive_video: true,
+        }));
+        player.negotiated_caps.has_caps_ex = true;
+        player.negotiated_caps.multitrack_enabled = false;
+        assert!(!player.accepts_multitrack());
+
+        // 33 single-byte ModEx layers exceed the peel limit, so the payload is
+        // left opaque. Its inner packet is a multitrack container, which this
+        // player never negotiated.
+        let mut payload = vec![0x97];
+        for _ in 0..33 {
+            payload.extend_from_slice(&[0x00, 0x00, 0x07]);
+        }
+        payload.extend_from_slice(&[0x96, 0x11, b'a', b'v', b'c', b'1']);
+        let frame = RelayFrame {
+            app: "live".to_string(),
+            stream_name: "stream".to_string(),
+            publisher_conn_id: EXTERNAL_RELAY_PUBLISHER_ID,
+            frame_type: FrameType::Video,
+            timestamp: 0,
+            cache_payload: None,
+            payload,
+        };
+
+        assert!(
+            !Server::conn_will_receive_relay_frame(&player, &frame),
+            "an unpeeled ModEx wrapper must not reach a non-multitrack player"
+        );
     }
 
     #[test]
