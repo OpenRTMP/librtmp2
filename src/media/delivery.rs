@@ -64,6 +64,11 @@ impl DeliveryHint {
         if frame_type == FrameType::Audio && is_enhanced_audio_multichannel(payload) {
             return Self::Critical;
         }
+        // The RTMP "audio silence" message is a zero-length audio payload.
+        // Dropping it under congestion loses the flush/clock transition.
+        if frame_type == FrameType::Audio && payload.is_empty() {
+            return Self::Critical;
+        }
         match classify_cache_frame(frame_type, payload) {
             CacheFrameKind::VideoSequenceHeader | CacheFrameKind::AudioSequenceHeader => {
                 Self::Critical
@@ -275,7 +280,19 @@ mod tests {
             hint(FrameType::Video, &[0x17], true),
             DeliveryHint::Droppable
         );
-        assert_eq!(hint(FrameType::Audio, &[], true), DeliveryHint::Droppable);
+        // A zero-length audio message is the spec-defined silence message and
+        // stays Critical; a non-empty truncated audio tag is droppable.
+        assert_eq!(hint(FrameType::Audio, &[], true), DeliveryHint::Critical);
+        assert_eq!(
+            hint(FrameType::Audio, &[0xAF], true),
+            DeliveryHint::Droppable
+        );
+    }
+
+    #[test]
+    fn audio_silence_is_critical_on_every_route() {
+        assert_eq!(hint(FrameType::Audio, &[], true), DeliveryHint::Critical);
+        assert_eq!(hint(FrameType::Audio, &[], false), DeliveryHint::Critical);
     }
 
     #[test]

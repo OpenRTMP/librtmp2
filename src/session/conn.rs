@@ -1286,7 +1286,11 @@ impl Conn {
                 }
             }
             FrameType::Audio if self.detected_audio_codec.is_none() => {
-                self.detected_audio_codec = current_codec.map(str::to_owned);
+                // A silence message has no codec; do not pin the stats codec
+                // to the synthetic label. A later real audio frame fills it.
+                if current_codec != Some(AUDIO_SILENCE_CODEC_LABEL) {
+                    self.detected_audio_codec = current_codec.map(str::to_owned);
+                }
             }
             _ => {}
         }
@@ -3883,6 +3887,12 @@ fn fourcc_auth_label(fourcc: &[u8; 4]) -> String {
 /// it is not a detected codec (see `update_detected_media_metadata`).
 const VIDEO_COMMAND_CODEC_LABEL: &str = "command";
 
+/// Codec label reported for the RTMP "audio silence" message (a zero-length
+/// audio payload). The spec defines it as silence without an AudioTagHeader,
+/// so it has no codec; the label exists only so a media hook cannot auto-deny
+/// a conforming silence message.
+const AUDIO_SILENCE_CODEC_LABEL: &str = "silence";
+
 fn detect_video_codec(payload: &[u8]) -> Option<String> {
     if let Some(cc) = first_track_fourcc(FrameType::Video, payload) {
         return media_fourcc_auth_label(&cc);
@@ -3929,6 +3939,12 @@ fn detect_video_codec(payload: &[u8]) -> Option<String> {
 }
 
 fn detect_audio_codec(payload: &[u8]) -> Option<String> {
+    // E-RTMP / RTMP "audio silence": a zero-length audio message has no
+    // AudioTagHeader and therefore no codec. Report a stable non-None label so
+    // a media hook cannot auto-deny a conforming silence message.
+    if payload.is_empty() {
+        return Some(AUDIO_SILENCE_CODEC_LABEL.to_string());
+    }
     if let Some(cc) = first_track_fourcc(FrameType::Audio, payload) {
         return media_fourcc_auth_label(&cc);
     }
@@ -6535,6 +6551,32 @@ mod tests {
             Ok(())
         );
         assert!(conn.detected_video_codec.is_none());
+    }
+
+    #[test]
+    fn audio_silence_is_not_mistaken_for_an_unknown_codec() {
+        fn deny_aac(_: u64, frame_type: FrameType, codec: Option<&str>) -> bool {
+            frame_type != FrameType::Audio || codec != Some("mp4a")
+        }
+
+        // A zero-length audio message is the RTMP/E-RTMP silence message: it
+        // has no AudioTagHeader and therefore no codec. A codec deny list must
+        // not auto-deny it and tear the publisher down.
+        assert_eq!(
+            detect_audio_codec(&[]),
+            Some(AUDIO_SILENCE_CODEC_LABEL.to_string())
+        );
+
+        let mut conn = Conn::new();
+        conn.relay_enabled = true;
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+        conn.current_stream.as_mut().unwrap().is_publishing = true;
+        conn.on_media_cb = Some(deny_aac);
+        assert_eq!(
+            conn.handle_media_frame(1, FrameType::Audio, 0, &[], None),
+            Ok(())
+        );
+        assert!(conn.detected_audio_codec.is_none());
     }
 
     #[test]
