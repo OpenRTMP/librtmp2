@@ -1896,10 +1896,7 @@ impl Server {
             // did not report the fd readable, or handshake/protocol processing
             // can stall until the peer sends more data.
             let skip_recv = readable.is_some_and(|r| !r.contains(&conn.conn_id))
-                && conn
-                    .transport
-                    .as_ref()
-                    .is_none_or(|t| t.pending() <= 0);
+                && conn.transport.as_ref().is_none_or(|t| t.pending() <= 0);
             if !conn_closed_this_iteration
                 && !skip_recv
                 && Self::recv_drain_one_connection(conn, &mut buf)
