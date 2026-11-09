@@ -1890,8 +1890,16 @@ impl Server {
             // to recv this tick -- still subject to the timeout/dead-transport
             // checks above and the buffered-message drain below (in case a
             // prior tick left a complete message queued), just not a wasted
-            // syscall.
-            let skip_recv = readable.is_some_and(|r| !r.contains(&conn.conn_id));
+            // syscall. RTMPS may still hold decrypted bytes in OpenSSL's
+            // internal buffer after the kernel recv queue is empty (see
+            // [`Transport::pending`]); those must be drained even when epoll
+            // did not report the fd readable, or handshake/protocol processing
+            // can stall until the peer sends more data.
+            let skip_recv = readable.is_some_and(|r| !r.contains(&conn.conn_id))
+                && conn
+                    .transport
+                    .as_ref()
+                    .is_none_or(|t| t.pending() <= 0);
             if !conn_closed_this_iteration
                 && !skip_recv
                 && Self::recv_drain_one_connection(conn, &mut buf)
@@ -3599,9 +3607,11 @@ mod tests {
         // "this connection's bytes were actually read this tick".
         peer.write_all(&[0xFF; 16]).unwrap();
 
-        // conn_id 42 is not in the (empty) readable set, so
-        // process_connections_ready must not attempt recv() on it at all --
-        // the connection survives this tick with the garbage still unread.
+        // conn_id 42 is not in the (empty) readable set and the plaintext
+        // transport has no `SSL_pending` buffer, so process_connections_ready
+        // must not attempt recv() on it -- the connection survives this tick
+        // with the garbage still unread (RTMPS with pending() > 0 is the
+        // exception; see recv_and_reap_connections).
         server.process_connections_ready(&HashSet::new()).unwrap();
         assert_eq!(
             server.connections.len(),
