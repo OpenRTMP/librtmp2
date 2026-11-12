@@ -13,6 +13,36 @@ begin at `1.0.0`.
 
 ## [Unreleased]
 
+## [0.17.1] — 2026-11-12
+
+### Fixed
+- Enhanced AAC sequence headers are validated like legacy ones before they
+  replace the cached AudioSpecificConfig. A malformed enhanced `mp4a` record
+  can no longer evict a valid header and be replayed to late joiners; the
+  regression test covers both framings.
+- Legacy FLV VideoInfo/Command frames (frame type 5) are recognised as
+  commands instead of being cached as AVC keyframes. `0x57 0x01` is no
+  longer dropped under congestion, and the per-frame callback reports no
+  codec identity for it. An enhanced Metadata packet that uses frame type 5
+  keeps its FourCC and codec identity.
+- The spec-defined zero-length audio silence message is accepted. A server
+  with an `on_media_cb` (librtmp2-server always installs one) treated it as
+  an unknown codec and closed the publisher. It is reported as `silence`
+  without pinning the detected codec, stays critical under congestion, and
+  counts toward publisher liveness. Aggregate parsers accept an empty audio
+  sub-tag, while empty video and data tags stay invalid.
+- An unpeeled ModEx chain is no longer classified as a VideoCommand and can
+  no longer bypass the multitrack relay gate; opaque wrappers are handled
+  conservatively at fan-out. Legacy G.711U audio (`0x87`) also stays out of
+  the ModEx gate.
+- A server driven through `poll_ready`/`process_connections_ready` no longer
+  skips receive while OpenSSL has decrypted bytes waiting, so an RTMPS
+  handshake or command cannot stall until the kernel socket becomes readable
+  again.
+
+### Changed
+- CI workflows pin third-party GitHub Actions to commit SHAs.
+
 ## [0.17.0] — 2026-11-06
 
 ### Added
@@ -1284,7 +1314,8 @@ and others.
 - Protocol mapping documents for legacy, E-RTMP v1, and E-RTMP v2
 - `CONTRIBUTING.md` guidelines
 
-[Unreleased]: https://github.com/OpenRTMP/librtmp2/compare/v0.17.0...HEAD
+[Unreleased]: https://github.com/OpenRTMP/librtmp2/compare/v0.17.1...HEAD
+[0.17.1]: https://github.com/OpenRTMP/librtmp2/compare/v0.17.0...v0.17.1
 [0.17.0]: https://github.com/OpenRTMP/librtmp2/compare/v0.16.1...v0.17.0
 [0.16.1]: https://github.com/OpenRTMP/librtmp2/compare/v0.16.0...v0.16.1
 [0.16.0]: https://github.com/OpenRTMP/librtmp2/compare/v0.15.0...v0.16.0
