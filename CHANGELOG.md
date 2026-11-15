@@ -13,6 +13,10 @@ begin at `1.0.0`.
 
 ## [Unreleased]
 
+### Changed
+- The play interop CI test runs the librtmp2 client against MediaMTX v1.21.4
+  (was v1.21.3).
+
 ## [0.17.1] — 2026-11-12
 
 ### Fixed
