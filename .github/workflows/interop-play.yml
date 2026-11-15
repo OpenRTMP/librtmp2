@@ -22,7 +22,7 @@ jobs:
 
     - name: Download mediamtx (real RTMP server)
       run: |
-        ver=v1.21.3
+        ver=v1.21.4
         base="https://github.com/bluenviron/mediamtx/releases/download/${ver}"
         cd "$RUNNER_TEMP"
         curl -fsSLO --retry 5 --retry-delay 3 --retry-max-time 180 \
