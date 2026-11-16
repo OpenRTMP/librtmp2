@@ -60,27 +60,30 @@ pub fn fourcc_list_parse(list: &mut FourCcList, data: &[u8]) -> Result<usize> {
 
 /// Write a FourCC list to a buffer. Returns bytes written.
 pub fn fourcc_list_write(list: &FourCcList, buf: &mut [u8]) -> usize {
-    let needed = 4
-        + (0..list.count)
-            .map(|i| if list.entries[i].cc[0] == b'*' { 3 } else { 6 })
-            .sum::<usize>();
+    let count = list.count.min(list.entries.len());
+    let needed = 4 + list
+        .entries
+        .iter()
+        .take(count)
+        .map(|entry| if entry.cc[0] == b'*' { 3 } else { 6 })
+        .sum::<usize>();
     if buf.len() < needed {
         return 0;
     }
 
-    let cnt = list.count as u32;
+    let cnt = count as u32;
     buf[..4].copy_from_slice(&cnt.to_be_bytes());
 
     let mut offset = 4;
-    for i in 0..list.count {
-        let wildcard = list.entries[i].cc[0] == b'*';
+    for entry in list.entries.iter().take(count) {
+        let wildcard = entry.cc[0] == b'*';
         let len = if wildcard { 1 } else { 4 };
         buf[offset..offset + 2].copy_from_slice(&(len as u16).to_be_bytes());
         offset += 2;
         if wildcard {
             buf[offset] = b'*';
         } else {
-            buf[offset..offset + 4].copy_from_slice(&list.entries[i].cc[..4]);
+            buf[offset..offset + 4].copy_from_slice(&entry.cc[..4]);
         }
         offset += len;
     }
@@ -108,6 +111,21 @@ mod tests {
         assert!(fourcc_list_add(&mut list, b"av01").is_ok());
         assert_eq!(list.count, 1);
         assert_eq!(&list.entries[0].cc[..4], b"av01");
+    }
+
+    #[test]
+    fn oversized_fourcc_count_is_clamped_instead_of_panicking() {
+        let mut list = FourCcList::default();
+        for entry in &mut list.entries {
+            entry.cc[..4].copy_from_slice(b"av01");
+        }
+        list.count = list.entries.len() + 1;
+        let mut wire = [0u8; 256];
+        let len = fourcc_list_write(&list, &mut wire);
+        assert!(len > 0);
+        let mut parsed = FourCcList::default();
+        fourcc_list_parse(&mut parsed, &wire[..len]).unwrap();
+        assert_eq!(parsed.count, list.entries.len());
     }
 }
 
@@ -232,28 +250,31 @@ pub fn video_fourcc_info_map_parse(map: &mut VideoFourCcInfoMap, data: &[u8]) ->
 
 /// Write the binary helper representation with a UI32 capability mask per key.
 pub fn video_fourcc_info_map_write(map: &VideoFourCcInfoMap, buf: &mut [u8]) -> usize {
-    let needed = 4
-        + (0..map.count)
-            .map(|i| if map.entries[i].cc[0] == b'*' { 7 } else { 10 })
-            .sum::<usize>();
+    let count = map.count.min(map.entries.len()).min(map.masks.len());
+    let needed = 4 + map
+        .entries
+        .iter()
+        .take(count)
+        .map(|entry| if entry.cc[0] == b'*' { 7 } else { 10 })
+        .sum::<usize>();
     if buf.len() < needed {
         return 0;
     }
 
-    buf[..4].copy_from_slice(&(map.count as u32).to_be_bytes());
+    buf[..4].copy_from_slice(&(count as u32).to_be_bytes());
     let mut offset = 4;
-    for i in 0..map.count {
-        let wildcard = map.entries[i].cc[0] == b'*';
+    for (entry, mask) in map.entries.iter().zip(map.masks.iter()).take(count) {
+        let wildcard = entry.cc[0] == b'*';
         let len = if wildcard { 1 } else { 4 };
         buf[offset..offset + 2].copy_from_slice(&(len as u16).to_be_bytes());
         offset += 2;
         if wildcard {
             buf[offset] = b'*';
         } else {
-            buf[offset..offset + 4].copy_from_slice(&map.entries[i].cc[..4]);
+            buf[offset..offset + 4].copy_from_slice(&entry.cc[..4]);
         }
         offset += len;
-        buf[offset..offset + 4].copy_from_slice(&map.masks[i].to_be_bytes());
+        buf[offset..offset + 4].copy_from_slice(&mask.to_be_bytes());
         offset += 4;
     }
     offset
@@ -334,5 +355,21 @@ mod video_map_tests {
         assert_eq!(&parsed.entries[1].cc[..4], b"hvc1");
         assert_eq!(parsed.masks[0], 3);
         assert_eq!(parsed.masks[1], FOUR_CC_INFO_CAN_DECODE);
+    }
+
+    #[test]
+    fn oversized_video_map_count_is_clamped_instead_of_panicking() {
+        let mut map = VideoFourCcInfoMap::default();
+        for (entry, mask) in map.entries.iter_mut().zip(map.masks.iter_mut()) {
+            entry.cc[..4].copy_from_slice(b"av01");
+            *mask = FOUR_CC_INFO_CAN_DECODE;
+        }
+        map.count = map.entries.len() + 1;
+        let mut wire = [0u8; 256];
+        let len = video_fourcc_info_map_write(&map, &mut wire);
+        assert!(len > 0);
+        let mut parsed = VideoFourCcInfoMap::default();
+        video_fourcc_info_map_parse(&mut parsed, &wire[..len]).unwrap();
+        assert_eq!(parsed.count, map.entries.len());
     }
 }
