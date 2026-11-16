@@ -185,15 +185,18 @@ pub fn write_negotiated_caps(buf: &mut Buffer, caps: &NegotiatedCaps) -> Result<
 }
 
 pub fn write_four_cc_list_amf(buf: &mut Buffer, list: &FourCcList) -> Result<()> {
+    // `count` is a caller-controlled `pub` field on an FFI type; never index
+    // past the fixed array when a C caller supplies an inconsistent count.
+    let count = list.count.min(list.entries.len());
     buf.write(&[Amf0Type::StrictArray as u8])
         .map_err(|_| ErrorCode::Internal)?;
-    buf.write(&(list.count as u32).to_be_bytes())
+    buf.write(&(count as u32).to_be_bytes())
         .map_err(|_| ErrorCode::Internal)?;
-    for i in 0..list.count {
-        let cc = if list.entries[i].cc[0] == b'*' {
+    for entry in list.entries.iter().take(count) {
+        let cc = if entry.cc[0] == b'*' {
             "*"
         } else {
-            std::str::from_utf8(&list.entries[i].cc[..4]).unwrap_or("????")
+            std::str::from_utf8(&entry.cc[..4]).unwrap_or("????")
         };
         amf0::write_string(buf, cc)?;
     }
@@ -201,15 +204,16 @@ pub fn write_four_cc_list_amf(buf: &mut Buffer, list: &FourCcList) -> Result<()>
 }
 
 pub fn write_video_fourcc_info_map_amf(buf: &mut Buffer, map: &VideoFourCcInfoMap) -> Result<()> {
+    let count = map.count.min(map.entries.len()).min(map.masks.len());
     amf0::write_object_begin(buf)?;
-    for i in 0..map.count {
-        let key = if map.entries[i].cc[0] == b'*' {
+    for (entry, mask) in map.entries.iter().zip(map.masks.iter()).take(count) {
+        let key = if entry.cc[0] == b'*' {
             "*"
         } else {
-            std::str::from_utf8(&map.entries[i].cc[..4]).map_err(|_| ErrorCode::Amf)?
+            std::str::from_utf8(&entry.cc[..4]).map_err(|_| ErrorCode::Amf)?
         };
         amf0::write_object_key(buf, key)?;
-        amf0::write_number(buf, map.masks[i] as f64)?;
+        amf0::write_number(buf, *mask as f64)?;
     }
     amf0::write_object_end(buf)
 }
@@ -323,8 +327,12 @@ pub fn negotiate_caps(client: &crate::types::ConnectInfo) -> NegotiatedCaps {
     let mut out = NegotiatedCaps::default();
 
     if client.has_four_cc_list {
-        for i in 0..client.four_cc_list.count {
-            let cc = fourcc_entry_bytes(&client.four_cc_list.entries[i]);
+        let count = client
+            .four_cc_list
+            .count
+            .min(client.four_cc_list.entries.len());
+        for entry in client.four_cc_list.entries.iter().take(count) {
+            let cc = fourcc_entry_bytes(entry);
             if four_cc_supported(cc) {
                 let _ = fourcc_list_add(&mut out.four_cc_list, cc);
             }
@@ -347,13 +355,27 @@ pub fn negotiate_caps(client: &crate::types::ConnectInfo) -> NegotiatedCaps {
     }
 
     if client.has_video_four_cc_info_map {
-        for i in 0..client.video_four_cc_info_map.count {
-            let cc = fourcc_entry_bytes(&client.video_four_cc_info_map.entries[i]);
-            let negotiated_mask = client.video_four_cc_info_map.masks[i] & FOUR_CC_INFO_CAN_FORWARD;
+        let count = client
+            .video_four_cc_info_map
+            .count
+            .min(client.video_four_cc_info_map.entries.len())
+            .min(client.video_four_cc_info_map.masks.len());
+        for (entry, mask) in client
+            .video_four_cc_info_map
+            .entries
+            .iter()
+            .zip(client.video_four_cc_info_map.masks.iter())
+            .take(count)
+        {
+            let cc = fourcc_entry_bytes(entry);
+            let negotiated_mask = *mask & FOUR_CC_INFO_CAN_FORWARD;
             if negotiated_mask == 0 || !four_cc_supported(cc) {
                 continue;
             }
             let idx = out.video_four_cc_info_map.count;
+            if idx >= out.video_four_cc_info_map.entries.len() {
+                break;
+            }
             if cc == b"*" {
                 out.video_four_cc_info_map.entries[idx].cc[0] = b'*';
             } else {
@@ -553,5 +575,31 @@ mod tests {
             read_fourcc_number(&mut buf).unwrap(),
             i32::from_be_bytes(*b"av01")
         );
+    }
+
+    #[test]
+    fn oversized_fourcc_counts_are_clamped_instead_of_panicking() {
+        let mut list = FourCcList::default();
+        for entry in &mut list.entries {
+            entry.cc[..4].copy_from_slice(b"av01");
+        }
+        list.count = list.entries.len() + 1;
+        let mut buf = Buffer::new();
+        write_four_cc_list_amf(&mut buf, &list).unwrap();
+        let mut parsed = FourCcList::default();
+        read_four_cc_list_amf(&mut buf, &mut parsed).unwrap();
+        assert_eq!(parsed.count, list.entries.len());
+
+        let mut map = VideoFourCcInfoMap::default();
+        for (entry, mask) in map.entries.iter_mut().zip(map.masks.iter_mut()) {
+            entry.cc[..4].copy_from_slice(b"av01");
+            *mask = 1;
+        }
+        map.count = map.entries.len() + 1;
+        let mut buf = Buffer::new();
+        write_video_fourcc_info_map_amf(&mut buf, &map).unwrap();
+        let mut parsed = VideoFourCcInfoMap::default();
+        read_video_fourcc_info_map_amf(&mut buf, &mut parsed).unwrap();
+        assert_eq!(parsed.count, map.entries.len());
     }
 }
