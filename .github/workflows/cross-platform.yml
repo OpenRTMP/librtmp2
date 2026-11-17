@@ -118,8 +118,24 @@ jobs:
             git clone --depth 1 https://github.com/microsoft/vcpkg.git $root
             & "$root\bootstrap-vcpkg.bat" -disableMetrics
           }
-          & "$root\vcpkg.exe" install "openssl:$env:VCPKG_TRIPLET"
-          if ($LASTEXITCODE -ne 0) { throw "vcpkg install failed" }
+          # The x64 GitHub-hosted runner has Strawberry Perl installed. Prefer it
+          # so vcpkg does not download a second copy just to build OpenSSL.
+          if ($env:VCPKG_TRIPLET -eq 'x64-windows-static-md') {
+            $perlExe = Join-Path $env:SystemDrive 'Strawberry\perl\bin\perl.exe'
+            if (Test-Path $perlExe) {
+              $perlDir = Split-Path -Parent $perlExe
+              $env:PATH = "$perlDir;$env:PATH"
+              Write-Host "Using preinstalled Strawberry Perl: $perlExe"
+            }
+          }
+          # vcpkg does not retry some HTTPS/TLS download errors (curl 35).
+          for ($attempt = 1; $attempt -le 3; $attempt++) {
+            & "$root\vcpkg.exe" install "openssl:$env:VCPKG_TRIPLET"
+            if ($LASTEXITCODE -eq 0) { break }
+            if ($attempt -eq 3) { throw "vcpkg install failed after $attempt attempts" }
+            Write-Warning "vcpkg install failed (attempt $attempt/3); retrying in 15 seconds"
+            Start-Sleep -Seconds 15
+          }
           "OPENSSL_DIR=$root\installed\$env:VCPKG_TRIPLET" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Rustfmt
