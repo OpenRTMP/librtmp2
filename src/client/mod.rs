@@ -889,13 +889,7 @@ impl Client {
                                 } else {
                                     FrameType::Video
                                 };
-                                self.deliver_av_frame_cb(
-                                    cb,
-                                    frame_type,
-                                    msg.timestamp,
-                                    &payload,
-                                    messages_processed,
-                                )?;
+                                self.deliver_av_frame_cb(cb, frame_type, msg.timestamp, &payload)?;
                             }
                         } else if msg.msg_type_id == msg_dispatch::RTMP_MSG_AMF0_DATA
                             || msg.msg_type_id == msg_dispatch::RTMP_MSG_AMF3_DATA
@@ -1004,22 +998,10 @@ impl Client {
             if let Some(cb) = self.on_frame_cb {
                 match tag_type {
                     msg_dispatch::RTMP_MSG_AUDIO => {
-                        self.deliver_av_frame_cb(
-                            cb,
-                            FrameType::Audio,
-                            out_ts,
-                            tag_payload,
-                            messages_processed,
-                        )?;
+                        self.deliver_av_frame_cb(cb, FrameType::Audio, out_ts, tag_payload)?;
                     }
                     msg_dispatch::RTMP_MSG_VIDEO => {
-                        self.deliver_av_frame_cb(
-                            cb,
-                            FrameType::Video,
-                            out_ts,
-                            tag_payload,
-                            messages_processed,
-                        )?;
+                        self.deliver_av_frame_cb(cb, FrameType::Video, out_ts, tag_payload)?;
                     }
                     msg_dispatch::RTMP_MSG_AMF0_DATA => {
                         self.deliver_script_frame_cb(cb, out_ts, tag_payload);
@@ -1054,7 +1036,6 @@ impl Client {
         frame_type: FrameType,
         timestamp: u32,
         payload: &[u8],
-        messages_processed: &mut usize,
     ) -> Result<()> {
         // Always peel ModEx wrappers for frame metadata, as `handle_media_frame`
         // does on the server side: gating on the negotiated `caps_ex_mask`
@@ -1064,15 +1045,11 @@ impl Client {
             normalize_modex_payload_with_frame_type(payload, CAPS_EX_MASK_MODEX, frame_type);
         let parse_payload = normalized.as_ref();
         let is_multitrack = is_multitrack_container(frame_type, parse_payload);
-        let mut track_index = 0usize;
+        // The enclosing message was already admitted and charged once against
+        // the poll budget. Do not skip sub-tracks here: a partially delivered
+        // multitrack frame is worse than a bounded (MAX_MULTITRACK_SUBTRACKS)
+        // number of callbacks for one admitted message.
         let parsed_multitrack = foreach_track(frame_type, parse_payload, |track| {
-            if track_index > 0 {
-                if *messages_processed >= MAX_MESSAGES_PER_POLL {
-                    return;
-                }
-                *messages_processed += 1;
-            }
-            track_index += 1;
             self.invoke_multitrack_on_frame_cb(
                 cb,
                 frame_type,
@@ -2423,6 +2400,44 @@ mod tests {
         assert_eq!(seen[0].1, vec![0xAA, 0xBB, 0xCC]);
         assert_eq!(seen[1].0, 1);
         assert_eq!(seen[1].1, vec![0xDD, 0xEE]);
+    }
+
+    #[test]
+    fn admitted_multitrack_message_delivers_every_subtrack_at_the_poll_budget_edge() {
+        use std::sync::{LazyLock, Mutex};
+
+        static SEEN: LazyLock<Mutex<Vec<u8>>> = LazyLock::new(|| Mutex::new(Vec::new()));
+
+        // Two subtracks with distinct payloads.
+        let payload = vec![
+            0x86, 0x10, b'a', b'v', b'c', b'1', 0x00, 0x00, 0x00, 0x03, 0xAA, 0xBB, 0xCC, 0x01,
+            0x00, 0x00, 0x02, 0xDD, 0xEE,
+        ];
+        let mut wire = Buffer::new();
+        let mut cmsg = ChunkMessage::default();
+        cmsg.csid = 6;
+        cmsg.fmt = 0;
+        cmsg.msg_length = payload.len() as u32;
+        cmsg.msg_type_id = msg_dispatch::RTMP_MSG_VIDEO;
+        cmsg.msg_stream_id = 1;
+        chunk_write(&mut wire, &cmsg, &payload, payload.len(), 128).unwrap();
+
+        let mut client = Client::new();
+        client.recv_buffer.write(wire.peek()).unwrap();
+        SEEN.lock().unwrap().clear();
+        client.on_frame_cb = Some(|frame| {
+            SEEN.lock().unwrap().push(frame.track_id);
+        });
+
+        // One slot left: the message is admitted and charged, but both of its
+        // subtracks must still reach the callback.
+        let mut messages_processed = MAX_MESSAGES_PER_POLL - 1;
+        client
+            .drain_ready_messages(&mut messages_processed)
+            .unwrap();
+
+        assert_eq!(messages_processed, MAX_MESSAGES_PER_POLL);
+        assert_eq!(*SEEN.lock().unwrap(), vec![0, 1]);
     }
 
     #[test]
