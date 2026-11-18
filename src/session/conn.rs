@@ -876,11 +876,10 @@ impl Conn {
             stream.is_publishing = false;
         }
         self.session_setup_started = Instant::now();
-        // Media that arrived while the route was still owned must not keep
-        // the squat timer satisfied after the role was lost.
-        self.media_bytes_at_epoch_start = self.media_bytes_received;
-        self.media_frames_at_epoch_start = self.media_frames_received;
-        self.injected_bytes_at_epoch_start = self.injected_media_bytes_total;
+        // Do not rebase the publish-media epoch counters here: they belong to
+        // `complete_publish_authorized`, which re-arms them when a same-route
+        // republish follows media. Rebasing made `media_flowed_since_arm()`
+        // false and inherited this detach instant as the new squat deadline.
         let app = self.app.clone();
         // Frames are keyed by `relay_route_key()` at queue time â€” after an
         // integrator pins `relay_key`, that can differ from the claimed name.
@@ -6846,6 +6845,8 @@ mod tests {
         conn.claimed_publish_route = Some("cam1".to_string());
         conn.relay_enabled = true;
         conn.media_bytes_received = 4096;
+        conn.injected_media_bytes = 8192;
+        conn.injected_media_bytes_total = 8192;
 
         conn.detach_lost_publish_route();
 
