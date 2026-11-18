@@ -860,12 +860,27 @@ impl Conn {
     /// Stop relaying a publish route this connection no longer owns in the
     /// shared registry (e.g. after another peer's authorized `releaseStream`).
     /// Does not call `routes.release` â€” the map entry is already absent or
-    /// held by someone else. Leaves `is_publishing` set for liveness timers.
+    /// held by someone else.
+    ///
+    /// The publish role is cleared and the setup timer restarted: keeping
+    /// `is_publishing` set made every liveness timer treat the connection as
+    /// a live publisher (media kept flowing into the ignored branch), so a
+    /// displaced publisher that kept sending was never reaped and could pin
+    /// its per-address connection slots indefinitely.
     pub(crate) fn detach_lost_publish_route(&mut self) {
         let Some(claimed) = self.claimed_publish_route.take() else {
             return;
         };
         self.relay_enabled = false;
+        if let Some(stream) = self.current_stream.as_mut() {
+            stream.is_publishing = false;
+        }
+        self.session_setup_started = Instant::now();
+        // Media that arrived while the route was still owned must not keep
+        // the squat timer satisfied after the role was lost.
+        self.media_bytes_at_epoch_start = self.media_bytes_received;
+        self.media_frames_at_epoch_start = self.media_frames_received;
+        self.injected_bytes_at_epoch_start = self.injected_media_bytes_total;
         let app = self.app.clone();
         // Frames are keyed by `relay_route_key()` at queue time â€” after an
         // integrator pins `relay_key`, that can differ from the claimed name.
@@ -6811,6 +6826,41 @@ mod tests {
             routes.lock().unwrap().get(&key).is_none(),
             "releaseStream must force-clear a stale claim once the host authorizes it, so a \
              reconnecting encoder can republish"
+        );
+    }
+
+    #[test]
+    fn displaced_publisher_loses_the_publish_role_and_is_reaped_by_the_setup_timer() {
+        use std::collections::HashMap;
+        use std::sync::{Arc, Mutex};
+
+        let routes = Arc::new(Mutex::new(HashMap::new()));
+        PublishRouteRegistry::new(Arc::clone(&routes)).claim(9, "live", "cam1");
+
+        let mut conn = Conn::new();
+        conn.conn_id = 9;
+        conn.app = "live".to_string();
+        conn.publish_routes = Some(PublishRouteRegistry::new(Arc::clone(&routes)));
+        conn.current_stream = Some(Box::new(Stream::new(1)));
+        conn.current_stream.as_mut().unwrap().is_publishing = true;
+        conn.claimed_publish_route = Some("cam1".to_string());
+        conn.relay_enabled = true;
+        conn.media_bytes_received = 4096;
+
+        conn.detach_lost_publish_route();
+
+        assert!(!conn.relay_enabled);
+        assert!(
+            !conn.current_stream.as_ref().unwrap().is_publishing,
+            "a displaced publisher must not keep the publish role"
+        );
+        assert!(!conn.session_setup_timed_out());
+        conn.set_session_setup_started_for_test(
+            Instant::now() - (RTMP_SESSION_SETUP_TIMEOUT + Duration::from_secs(1)),
+        );
+        assert!(
+            conn.session_setup_timed_out(),
+            "a displaced publisher that keeps sending must still be reaped"
         );
     }
 
