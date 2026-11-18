@@ -630,16 +630,17 @@ impl Client {
 
     /// Capabilities advertised in `connect`.
     ///
-    /// Reconnect support is only claimed when the host wired up
-    /// `on_reconnect_request_cb`, but the client can also parse E-RTMP
-    /// multitrack containers. Advertising `capsEx` without the multitrack bit
-    /// makes a v2 server treat this client as a capsEx peer that did not opt
-    /// in, dropping every multitrack frame instead of delivering it.
+    /// The client always advertises E-RTMP multitrack because it can parse
+    /// those containers; a v2 server only sends them to opted-in peers.
+    /// Reconnect is claimed only when the host wired up
+    /// `on_reconnect_request_cb`, and the reconnect field is sent only then.
     fn advertised_caps(&self) -> Option<NegotiatedCaps> {
-        self.on_reconnect_request_cb.map(|_| NegotiatedCaps {
+        let reconnect = self.on_reconnect_request_cb.is_some();
+        Some(NegotiatedCaps {
             has_caps_ex: true,
-            caps_ex_mask: CAPS_EX_MASK_RECONNECT | CAPS_EX_MASK_MULTITRACK,
-            has_reconnect: true,
+            caps_ex_mask: CAPS_EX_MASK_MULTITRACK
+                | if reconnect { CAPS_EX_MASK_RECONNECT } else { 0 },
+            has_reconnect: reconnect,
             multitrack_enabled: true,
             reconnect: Reconnect::default(),
             ..Default::default()
@@ -1850,19 +1851,25 @@ mod tests {
     }
 
     #[test]
-    fn reconnect_support_does_not_hide_multitrack_from_the_server() {
+    fn multitrack_is_advertised_independently_of_reconnect_support() {
         let mut client = Client::new();
-        assert!(client.advertised_caps().is_none());
-        client.on_reconnect_request_cb = Some(|_, _| {});
         let caps = client
             .advertised_caps()
-            .expect("reconnect advertises capsEx");
+            .expect("the client always advertises capsEx");
         assert_ne!(
             caps.caps_ex_mask & CAPS_EX_MASK_MULTITRACK,
             0,
-            "the client parses multitrack, so advertising capsEx must include it"
+            "the client parses multitrack, so capsEx must include it"
         );
         assert!(caps.multitrack_enabled);
+        assert!(!caps.has_reconnect);
+        assert_eq!(caps.caps_ex_mask & CAPS_EX_MASK_RECONNECT, 0);
+
+        client.on_reconnect_request_cb = Some(|_, _| {});
+        let caps = client.advertised_caps().expect("capsEx");
+        assert!(caps.has_reconnect);
+        assert_ne!(caps.caps_ex_mask & CAPS_EX_MASK_RECONNECT, 0);
+        assert_ne!(caps.caps_ex_mask & CAPS_EX_MASK_MULTITRACK, 0);
     }
 
     #[test]
