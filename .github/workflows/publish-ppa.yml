@@ -106,6 +106,15 @@ jobs:
           persist-credentials: false
           ref: ${{ inputs.tag || github.ref_name }}
 
+      - name: Prepare Debian packaging for revisioned source uploads
+        # Standalone runs may publish older release tags (such as v0.17.1)
+        # whose checkout still contains 3.0 (native) and the old vendor path.
+        # Normalize the packaging without modifying the upstream sources.
+        run: |
+          printf '3.0 (quilt)\n' > debian/source/format
+          sed -i 's#^VENDOR_ARCHIVE := vendor.tar.xz$#VENDOR_ARCHIVE := debian/vendor.tar.xz#' debian/rules
+          grep -qx 'VENDOR_ARCHIVE := debian/vendor.tar.xz' debian/rules
+
       - name: Install packaging dependencies
         run: |
           sudo apt-get update
