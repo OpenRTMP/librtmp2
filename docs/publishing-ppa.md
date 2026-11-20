@@ -6,8 +6,9 @@ package and uploads it to a Launchpad PPA with `dput`. It runs as a job of
 run publishes to the PPA automatically alongside the GitHub Release and
 crates.io publish — there's nothing extra to trigger. Launchpad's own
 build farm then compiles the binary `.deb` for each targeted Ubuntu series
-(default `resolute` only, configurable via the workflow's `series` input
-when running it standalone). The workflow never builds or uploads a binary
+(default `resolute` for Ubuntu 26.04 LTS and `stonking` for Ubuntu
+26.10, configurable via the workflow's `series` input when running it
+standalone). The workflow never builds or uploads a binary
 package itself.
 
 Because Rust crate downloads require network access, and Launchpad's
@@ -102,7 +103,7 @@ without a full release — run `publish-ppa.yml` directly via its own
 `workflow_dispatch`.
 
 Each targeted series gets its own upload, versioned
-`X.Y.Z~<series><build-id>` (e.g. `0.3.0~resolute15r1` — no Debian
+`X.Y.Z~<series><build-id>` (e.g. `0.3.0~stonking15r1` — no Debian
 revision, since `debian/source/format` is `3.0 (native)`), since binaries
 built for one Ubuntu series are generally not installable on another. The
 `<build-id>` suffix (`<run_number>r<run_attempt>`) makes every upload's
