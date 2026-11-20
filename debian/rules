@@ -1,7 +1,7 @@
 #!/usr/bin/make -f
 
 # Launchpad PPA builders have no network access. The PPA workflow vendors all
-# crates, stores them in vendor.tar.xz inside the Debian source package, and
+# crates, stores them in debian/vendor.tar.xz inside the Debian source package, and
 # generates .cargo/config.toml pointing cargo at the extracted vendor/ tree.
 export CARGO_HOME := $(CURDIR)/debian/cargo_home
 export CARGO_NET_OFFLINE := true
@@ -9,7 +9,7 @@ export DEB_BUILD_MAINT_OPTIONS := hardening=+all
 
 DEB_HOST_MULTIARCH ?= $(shell dpkg-architecture -qDEB_HOST_MULTIARCH)
 UPSTREAM_VERSION := $(shell dpkg-parsechangelog -SVersion | sed 's/-.*//')
-VENDOR_ARCHIVE := vendor.tar.xz
+VENDOR_ARCHIVE := debian/vendor.tar.xz
 
 # Per docs/abi-policy.md the soname only bumps on a major (ABI-breaking)
 # release, not expected before 1.0.0 - so the soname major tracks "0" for
