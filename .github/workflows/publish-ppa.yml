@@ -27,7 +27,7 @@ on:
       series:
         description: 'Comma-separated Ubuntu series to target'
         required: false
-        default: 'resolute'
+        default: 'resolute,stonking'
   workflow_call:
     inputs:
       tag:
@@ -38,7 +38,7 @@ on:
         description: 'Comma-separated Ubuntu series to target'
         required: false
         type: string
-        default: 'resolute'
+        default: 'resolute,stonking'
     secrets:
       PPA_GPG_PRIVATE_KEY:
         required: true
@@ -80,7 +80,7 @@ jobs:
             exit 1
           fi
 
-          SERIES_CSV="${INPUT_SERIES:-resolute}"
+          SERIES_CSV="${INPUT_SERIES:-resolute,stonking}"
           SERIES_JSON=$(printf '%s' "$SERIES_CSV" | tr ',' '\n' | jq -R . | jq -sc .)
           echo "series=$SERIES_JSON" >> "$GITHUB_OUTPUT"
 
