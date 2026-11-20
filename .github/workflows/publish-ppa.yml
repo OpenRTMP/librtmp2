@@ -95,11 +95,8 @@ jobs:
     env:
       VERSION: ${{ needs.resolve.outputs.version }}
       SERIES: ${{ matrix.series }}
-      # Launchpad permanently rejects re-uploading a filename+version whose
-      # contents differ from what it already has on record - and cargo
-      # vendor's output isn't byte-reproducible across runs, so every retry
-      # needs a fresh suffix. run_number is stable across "re-run failed
-      # jobs" on the *same* run, hence also folding in run_attempt.
+      # Revision 1 resets on each upstream release; a per-run suffix makes
+      # same-version uploads unique (run_number alone is not enough for reruns).
       BUILD_ID: ${{ github.run_number }}r${{ github.run_attempt }}
       DEBEMAIL: info@openrtmp.org
       DEBFULLNAME: OpenRTMP
@@ -145,21 +142,33 @@ jobs:
         run: cargo build --locked --release --offline --all-features --verbose
 
       - name: Archive the vendored tree for the Debian source package
-        # dpkg-source and debhelper intentionally filter many build-like file
-        # names. Vendored crates can legitimately checksum such files (for
-        # example vcpkg's empty *.a test fixtures), so transport vendor/ as one
-        # archive and unpack it only when the binary package is built.
+        # Keep generated dependencies in debian/ so every retry can use the
+        # same deterministic upstream source tarball (3.0 quilt). The PPA
+        # builder extracts the vendored crates from this archive offline.
         run: |
           tar --sort=name \
               --mtime='@0' \
               --owner=0 --group=0 --numeric-owner \
-              -cJf vendor.tar.xz -C vendor .
+              -cJf debian/vendor.tar.xz -C vendor .
           rm -rf vendor target debian/cargo_home
+
+      - name: Create deterministic upstream source archive
+        # Debian revisions require 3.0 (quilt). Keep generated (potentially
+        # non-reproducible) vendor content in debian/vendor.tar.xz instead.
+        run: |
+          tar --sort=name \
+              --mtime='@0' \
+              --owner=0 --group=0 --numeric-owner \
+              --exclude='./.git' --exclude='./debian' \
+              --transform="s#^[.]#librtmp2-${VERSION}#" \
+              -cJf "../librtmp2_${VERSION}.orig.tar.xz" .
 
       - name: Add changelog entry for ${{ matrix.series }}
         run: |
+          DEB_VERSION="${VERSION}-1~${SERIES}${BUILD_ID}"
+          echo "DEB_VERSION=${DEB_VERSION}" >> "$GITHUB_ENV"
           dch --package librtmp2 \
-              --newversion "${VERSION}~${SERIES}${BUILD_ID}" \
+              --newversion "${DEB_VERSION}" \
               --distribution "${SERIES}" \
               --force-distribution \
               --force-bad-version \
@@ -177,12 +186,12 @@ jobs:
         run: |
           VERIFY_DIR=$(mktemp -d)
           trap 'rm -rf "$VERIFY_DIR"' EXIT
-          DSC="../librtmp2_${VERSION}~${SERIES}${BUILD_ID}.dsc"
+          DSC="../librtmp2_${DEB_VERSION}.dsc"
           dpkg-source -x "$DSC" "$VERIFY_DIR/source"
           make -C "$VERIFY_DIR/source" -f debian/rules override_dh_auto_build
 
       - name: Lintian (non-blocking sanity check)
-        run: lintian --pedantic "../librtmp2_${VERSION}~${SERIES}${BUILD_ID}_source.changes" || true
+        run: lintian --pedantic "../librtmp2_${DEB_VERSION}_source.changes" || true
 
       - name: Import signing key
         # Secrets go through the environment, never into the script text:
@@ -207,7 +216,7 @@ jobs:
           printf '%s' "$PPA_GPG_PASSPHRASE" > "$PASSFILE"
           debsign -k"$PPA_GPG_KEY_ID" \
             -p"gpg --batch --pinentry-mode loopback --passphrase-file $PASSFILE" \
-            "../librtmp2_${VERSION}~${SERIES}${BUILD_ID}_source.changes"
+            "../librtmp2_${DEB_VERSION}_source.changes"
 
       - name: Upload to PPA
         env:
@@ -215,4 +224,4 @@ jobs:
         run: |
           test -n "$PPA_TARGET" || { echo "::error::vars.PPA_TARGET is not set"; exit 1; }
           dput "ppa:${PPA_TARGET}" \
-            "../librtmp2_${VERSION}~${SERIES}${BUILD_ID}_source.changes"
+            "../librtmp2_${DEB_VERSION}_source.changes"
