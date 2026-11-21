@@ -13,6 +13,8 @@ begin at `1.0.0`.
 
 ## [Unreleased]
 
+## [0.17.2] — 2026-11-21
+
 ### Fixed
 - A fmt=3 chunk that starts a new message uses the extended timestamp value
   when present. ffmpeg carries the actual delta there for deltas >=
@@ -1352,7 +1354,8 @@ and others.
 - Protocol mapping documents for legacy, E-RTMP v1, and E-RTMP v2
 - `CONTRIBUTING.md` guidelines
 
-[Unreleased]: https://github.com/OpenRTMP/librtmp2/compare/v0.17.1...HEAD
+[Unreleased]: https://github.com/OpenRTMP/librtmp2/compare/v0.17.2...HEAD
+[0.17.2]: https://github.com/OpenRTMP/librtmp2/compare/v0.17.1...v0.17.2
 [0.17.1]: https://github.com/OpenRTMP/librtmp2/compare/v0.17.0...v0.17.1
 [0.17.0]: https://github.com/OpenRTMP/librtmp2/compare/v0.16.1...v0.17.0
 [0.16.1]: https://github.com/OpenRTMP/librtmp2/compare/v0.16.0...v0.16.1
