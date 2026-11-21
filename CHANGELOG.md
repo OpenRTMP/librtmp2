@@ -13,9 +13,42 @@ begin at `1.0.0`.
 
 ## [Unreleased]
 
+### Fixed
+- A fmt=3 chunk that starts a new message uses the extended timestamp value
+  when present. ffmpeg carries the actual delta there for deltas >=
+  `0xFFFFFF`; the reader previously advanced by the previous delta and jumped
+  the timeline. Registry re-initialization now discards the previous session's
+  per-CSID state, and a fragmented extended-timestamp message keeps its
+  timestamp across continuation chunks.
+- Reserved legacy video codec nibbles are no longer cached as keyframes.
+  Codecs 8 (RealH263) and 9 (MPEG-4 Part 2) remain cacheable because ffmpeg
+  emits them in the wild.
+- The generic aggregate decoder rejects zero-length video/data sub-tags,
+  matching the session path; zero-length audio is still the RTMP silence
+  message.
+- The client always advertises the E-RTMP multitrack capability and claims
+  reconnect only when a reconnect callback is installed. The capsEx mask used
+  to be sent only for reconnect support and omitted the multitrack bit, so a
+  v2 server dropped every multitrack frame for this client. A force-released
+  publish route now clears the publish role and restarts the setup timer, so
+  a displaced publisher that keeps sending is reaped instead of pinning its
+  connection slots.
+- Every sub-track of an admitted multitrack message reaches the frame
+  callback. The poll budget was re-checked per sub-track and silently skipped
+  the tail once it was used up; `MAX_MULTITRACK_SUBTRACKS` still bounds the
+  work. A same-route republish keeps its fresh media window.
+- A FourCC list or video FourCC info map whose public `count` exceeds the
+  entry arrays is clamped in the AMF and binary writers and in the
+  negotiation reader, instead of panicking on an out-of-bounds index.
+
 ### Changed
+- Debian packaging uses the non-native quilt source format, loads the
+  vendored source archive from `debian/` and uses the standard `1` revision.
+  PPA builds default to Ubuntu 26.10, and release tags from before the quilt
+  switch can still be republished.
 - The play interop CI test runs the librtmp2 client against MediaMTX v1.21.4
   (was v1.21.3).
+- Build dependency update: cc 1.11.3.
 
 ## [0.17.1] — 2026-11-12
 

@@ -135,6 +135,14 @@ fn classify_legacy_video(payload: &[u8]) -> CacheFrameKind {
     if frame_type_nibble != 1 {
         return CacheFrameKind::LiveOnly;
     }
+    // Reserved/unknown codec nibbles are not cacheable keyframes: their frame
+    // layout is unknown, and storing one would replace the last real keyframe
+    // that late joiners replay. Codec 8 (RealH263) and 9 (MPEG-4 Part 2) are
+    // not in the Adobe list but are emitted in the wild (ffmpeg defines both),
+    // so they keep keyframe replay. 10, 11 and 15 are unassigned for video.
+    if !matches!(codec_id, 1..=9 | 12..=14) {
+        return CacheFrameKind::LiveOnly;
+    }
     // Legacy AVC: nibble 1 is "keyframe" for sequence-end (AVCPacketType 2)
     // as well as coded IDR (type 1). Only NALU packets are cacheable IDRs.
     if codec_id != 7 || avc_packet_type == Some(1) {
@@ -802,6 +810,35 @@ mod tests {
             classify_cache_frame(FrameType::Video, &payload),
             CacheFrameKind::VideoSequenceHeader
         );
+    }
+
+    #[test]
+    fn reserved_legacy_video_codec_is_not_cached_as_a_keyframe() {
+        // Frame type 1 with a codec nibble that no legacy/E-RTMP mapping
+        // defines. Its layout is unknown, so it must not replace the last
+        // real keyframe in the late-joiner cache.
+        for codec in [0u8, 10, 11, 15] {
+            let payload = [(1 << 4) | codec, 0x01, 0xAA];
+            assert_eq!(
+                classify_cache_frame(FrameType::Video, &payload),
+                CacheFrameKind::LiveOnly,
+                "codec nibble {codec}"
+            );
+        }
+    }
+
+    #[test]
+    fn in_the_wild_codec_keyframes_stay_cacheable() {
+        // ffmpeg emits 8 (RealH263) and 9 (MPEG-4 Part 2) even though the
+        // Adobe list does not name them.
+        for codec in [8u8, 9] {
+            let payload = [(1 << 4) | codec, 0x01, 0xAA];
+            assert_eq!(
+                classify_cache_frame(FrameType::Video, &payload),
+                CacheFrameKind::VideoKeyframe,
+                "codec nibble {codec}"
+            );
+        }
     }
 
     #[test]
