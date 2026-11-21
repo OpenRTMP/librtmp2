@@ -36,7 +36,8 @@ begin at `1.0.0`.
 - Every sub-track of an admitted multitrack message reaches the frame
   callback. The poll budget was re-checked per sub-track and silently skipped
   the tail once it was used up; `MAX_MULTITRACK_SUBTRACKS` still bounds the
-  work. A same-route republish keeps its fresh media window.
+  work. A same-route republish after media gets a fresh media window;
+  cycling without media keeps the prior deadline.
 - A FourCC list or video FourCC info map whose public `count` exceeds the
   entry arrays is clamped in the AMF and binary writers and in the
   negotiation reader, instead of panicking on an out-of-bounds index.
@@ -44,8 +45,8 @@ begin at `1.0.0`.
 ### Changed
 - Debian packaging uses the non-native quilt source format, loads the
   vendored source archive from `debian/` and uses the standard `1` revision.
-  PPA builds default to Ubuntu 26.10, and release tags from before the quilt
-  switch can still be republished.
+  PPA builds default to Ubuntu 26.04 LTS and 26.10, and release tags from
+  before the quilt switch can still be republished.
 - The play interop CI test runs the librtmp2 client against MediaMTX v1.21.4
   (was v1.21.3).
 - Build dependency update: cc 1.11.3.
