@@ -114,6 +114,10 @@ jobs:
           printf '3.0 (quilt)\n' > debian/source/format
           sed -i 's#^VENDOR_ARCHIVE := vendor.tar.xz$#VENDOR_ARCHIVE := debian/vendor.tar.xz#' debian/rules
           grep -qx 'VENDOR_ARCHIVE := debian/vendor.tar.xz' debian/rules
+          # dpkg-source refuses to include the generated vendor archive unless
+          # it is whitelisted; tags from before the quilt switch lack the file.
+          mkdir -p debian/source
+          printf 'debian/vendor.tar.xz\n' > debian/source/include-binaries
 
       - name: Install packaging dependencies
         run: |

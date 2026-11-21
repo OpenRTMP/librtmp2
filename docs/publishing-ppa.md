@@ -133,6 +133,9 @@ Launchpad's infrastructure and outside this repo's CI.
   `dch`; the committed entry is only a placeholder
 - `debian/source/format` — `3.0 (quilt)`; the workflow creates an upstream
   `.orig.tar.xz` and stores the offline vendor archive in `debian/`
+- `debian/source/include-binaries` — whitelists the generated
+  `debian/vendor.tar.xz`, which `dpkg-source` otherwise rejects as an
+  unwanted binary file
 
 You can build and inspect a source package locally (signing skipped)
 with:
