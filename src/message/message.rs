@@ -135,6 +135,11 @@ pub fn decode_aggregate(
         if body + data_size as usize > payload.len() {
             return Err(ErrorCode::Protocol);
         }
+        // A zero-length audio sub-tag is the RTMP silence message. An empty
+        // video/data tag is not valid; the session path rejects it too.
+        if data_size == 0 && tag_type != 0x08 {
+            return Err(ErrorCode::Protocol);
+        }
 
         if !have_base {
             base_ts = ts;
@@ -391,6 +396,18 @@ mod tests {
         let chunk = chunk_msg(RTMP_MSG_ABORT_MESSAGE);
         decode(&mut conn, &chunk, &7u32.to_be_bytes()).unwrap();
         assert_eq!(conn.reset_csid, Some(7));
+    }
+
+    #[test]
+    fn aggregate_zero_size_video_is_rejected() {
+        let mut conn = MockConn::new();
+        let chunk = chunk_msg(RTMP_MSG_AGGREGATE);
+        // tag type 0x09 (video), 24-bit data size 0, timestamp 0, stream id 0.
+        let aggregate = [0x09u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        assert_eq!(
+            decode_aggregate(&mut conn, &chunk, &aggregate),
+            Err(ErrorCode::Protocol)
+        );
     }
 
     #[test]
