@@ -643,12 +643,21 @@ mod tests {
         chunk_write(&mut wire, &msg, &payload, payload.len(), 4).unwrap();
 
         let mut reg = ChunkRegistry::new();
+        reg.default_chunk_size = 4;
         let mut out_msg = ChunkMessage::default();
         let mut ptr = std::ptr::null();
         let mut len = 0;
+        let mut first = true;
         loop {
             let rc =
                 chunk_read(&mut wire, &mut reg, None, &mut out_msg, &mut ptr, &mut len).unwrap();
+            if first {
+                assert_ne!(
+                    rc, 1,
+                    "the first 4-byte read must leave the fmt=3 continuation unread"
+                );
+                first = false;
+            }
             if rc == 1 {
                 break;
             }
@@ -657,9 +666,14 @@ mod tests {
                 "the fragmented message must complete before the wire ends"
             );
         }
+        assert_eq!(wire.available(), 0);
         assert_eq!(out_msg.timestamp, 0x0200_0000);
         assert_eq!(out_msg.msg_length, payload.len() as u32);
         assert_eq!(len, payload.len());
+        // SAFETY: the reader points at its reassembly buffer, which is valid
+        // until the next chunk_read; the loop has completed the message.
+        let received = unsafe { std::slice::from_raw_parts(ptr, len) };
+        assert_eq!(received, payload.as_slice());
     }
 
     #[test]
