@@ -357,7 +357,20 @@ pub fn chunk_read(
                 // Per RTMP spec 5.3.1.3, a fmt=3 chunk that starts a new message
                 // (rather than continuing one) implicitly repeats the previous
                 // delta -- it does not freeze the timestamp at its old value.
-                stream.type0_timestamp = stream.type0_timestamp.wrapping_add(stream.last_delta);
+                // When the inherited type-0 header used an extended timestamp,
+                // the wire carries the actual delta here. ffmpeg emits that
+                // shape for deltas >= 0xFFFFFF and reference readers add the
+                // ext value, so ignoring it would jump the timeline by the
+                // previous absolute timestamp.
+                let delta = if ext_ts {
+                    final_timestamp
+                } else {
+                    stream.last_delta
+                };
+                stream.type0_timestamp = stream.type0_timestamp.wrapping_add(delta);
+                if ext_ts {
+                    stream.last_delta = final_timestamp;
+                }
             }
             _ => {}
         }
@@ -533,6 +546,50 @@ mod tests {
             out_msg.timestamp, 2,
             "a fmt=3 new message after fmt=0 must repeat the type-0 timestamp \
              as its delta (RTMP spec 5.3.1.2.4)"
+        );
+    }
+
+    #[test]
+    fn fmt3_new_message_uses_the_extended_timestamp_delta() {
+        let payload = b"again";
+        let msg = ChunkMessage {
+            csid: 3,
+            fmt: 0,
+            timestamp: 0x0200_0000,
+            msg_length: payload.len() as u32,
+            msg_type_id: 0x09,
+            msg_stream_id: 1,
+            is_complete: false,
+        };
+
+        let mut wire = Buffer::new();
+        chunk_write(&mut wire, &msg, payload, payload.len(), 128).unwrap();
+
+        let mut reg = ChunkRegistry::new();
+        let mut out_msg = ChunkMessage::default();
+        let mut ptr = std::ptr::null();
+        let mut len = 0;
+        assert_eq!(
+            chunk_read(&mut wire, &mut reg, None, &mut out_msg, &mut ptr, &mut len).unwrap(),
+            1
+        );
+        assert_eq!(out_msg.timestamp, 0x0200_0000);
+
+        // Same size/type as the previous message, new fmt=3 message with the
+        // 0x0100_0000 delta carried only in the extended timestamp. ffmpeg
+        // emits exactly this shape for deltas >= 0xFFFFFF.
+        let mut next = Buffer::new();
+        next.write(&fmt3_wire(3, &[])).unwrap();
+        next.write(&0x0100_0000u32.to_be_bytes()).unwrap();
+        next.write(payload).unwrap();
+        let result = chunk_read(&mut next, &mut reg, None, &mut out_msg, &mut ptr, &mut len);
+
+        assert_eq!(result.unwrap(), 1);
+        assert!(out_msg.is_complete);
+        assert_eq!(len, payload.len());
+        assert_eq!(
+            out_msg.timestamp, 0x0300_0000,
+            "the fmt=3 extended timestamp is the delta, not the previous type-0 timestamp"
         );
     }
 

@@ -166,8 +166,13 @@ impl ChunkRegistry {
         }
     }
 
-    /// Initialize the registry.
+    /// Initialize the registry, discarding any state from a previous session.
     pub fn init(&mut self) {
+        // The C API's `lrtmp2_chunk_registry_init()` frees every chunk stream
+        // and its reassembly buffer. Keeping them here would let a new peer's
+        // fmt=2/3 header inherit the previous session's type/length/stream id
+        // and would keep the old per-CSID chunk size.
+        self.destroy();
         self.initialized = true;
         self.default_chunk_size = DEFAULT_CHUNK_SIZE;
     }
@@ -386,6 +391,23 @@ mod tests {
         assert_eq!(reg.default_chunk_size, DEFAULT_CHUNK_SIZE);
         reg.set_all_chunk_size(256);
         assert_eq!(reg.default_chunk_size, 256);
+    }
+
+    #[test]
+    fn init_discards_previous_session_state() {
+        let mut reg = ChunkRegistry::new();
+        {
+            let stream = reg.get_or_create(3).unwrap();
+            stream.has_message_header = true;
+            stream.type0_msg_length = 1234;
+        }
+        reg.set_all_chunk_size(256);
+        assert!(reg.get(3).is_some());
+
+        reg.init();
+
+        assert!(reg.get(3).is_none());
+        assert_eq!(reg.default_chunk_size, DEFAULT_CHUNK_SIZE);
     }
 
     #[test]
