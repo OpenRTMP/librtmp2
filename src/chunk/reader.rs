@@ -594,6 +594,75 @@ mod tests {
     }
 
     #[test]
+    fn fmt3_extended_delta_after_a_fmt1_header_uses_the_new_delta() {
+        let payload = b"data";
+        // fmt=1, csid 3: absolute marker, length 4, video, ext delta 0x01000000.
+        let mut wire = Buffer::new();
+        wire.write(&[0x43]).unwrap();
+        wire.write(&[0xFF, 0xFF, 0xFF]).unwrap();
+        wire.write(&[0x00, 0x00, 0x04]).unwrap();
+        wire.write(&[0x09]).unwrap();
+        wire.write(&0x0100_0000u32.to_be_bytes()).unwrap();
+        wire.write(payload).unwrap();
+
+        let mut reg = ChunkRegistry::new();
+        let mut out_msg = ChunkMessage::default();
+        let mut ptr = std::ptr::null();
+        let mut len = 0;
+        assert_eq!(
+            chunk_read(&mut wire, &mut reg, None, &mut out_msg, &mut ptr, &mut len).unwrap(),
+            1
+        );
+        assert_eq!(out_msg.timestamp, 0x0100_0000);
+
+        // New fmt=3 message with a different extended delta.
+        let mut next = Buffer::new();
+        next.write(&fmt3_wire(3, &[])).unwrap();
+        next.write(&0x0080_0000u32.to_be_bytes()).unwrap();
+        next.write(payload).unwrap();
+        assert_eq!(
+            chunk_read(&mut next, &mut reg, None, &mut out_msg, &mut ptr, &mut len).unwrap(),
+            1
+        );
+        assert_eq!(out_msg.timestamp, 0x0180_0000);
+    }
+
+    #[test]
+    fn fmt3_continuation_with_extended_timestamp_keeps_the_message_timestamp() {
+        let payload = [0xAB_u8; 8];
+        let msg = ChunkMessage {
+            csid: 3,
+            fmt: 0,
+            timestamp: 0x0200_0000,
+            msg_length: payload.len() as u32,
+            msg_type_id: 0x09,
+            msg_stream_id: 1,
+            is_complete: false,
+        };
+        let mut wire = Buffer::new();
+        chunk_write(&mut wire, &msg, &payload, payload.len(), 4).unwrap();
+
+        let mut reg = ChunkRegistry::new();
+        let mut out_msg = ChunkMessage::default();
+        let mut ptr = std::ptr::null();
+        let mut len = 0;
+        loop {
+            let rc =
+                chunk_read(&mut wire, &mut reg, None, &mut out_msg, &mut ptr, &mut len).unwrap();
+            if rc == 1 {
+                break;
+            }
+            assert!(
+                wire.available() > 0,
+                "the fragmented message must complete before the wire ends"
+            );
+        }
+        assert_eq!(out_msg.timestamp, 0x0200_0000);
+        assert_eq!(out_msg.msg_length, payload.len() as u32);
+        assert_eq!(len, payload.len());
+    }
+
+    #[test]
     fn fmt2_after_complete_message_can_start_new_message_with_inherited_header() {
         let payload = b"done";
         let msg = ChunkMessage {

@@ -26,6 +26,13 @@ more complex Adobe variants are out of scope for now.
 | Per-`csid` state carry-forward | `ChunkRegistry` / `ChunkStream` in `src/chunk/state.rs` (per-connection, not global) |
 | Reassembly to full messages | `src/chunk/reader.rs` → `message::message::decode()` in `src/message/message.rs` |
 
+A `fmt=3` chunk that starts a new message normally repeats the previous
+timestamp delta. When the inherited type-0 header used an extended timestamp,
+the wire also carries a 4-byte value. ffmpeg puts the actual delta there for
+deltas >= `0xFFFFFF`; the reader uses that value (and remembers it as the new
+delta) instead of the previous one. Continuation chunks ignore it, as their
+timestamp is inherited.
+
 ## Protocol Control Messages (spec §5.4)
 
 | Message | Type ID | Implementation |

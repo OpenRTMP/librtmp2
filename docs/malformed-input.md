@@ -13,6 +13,8 @@ guarantees below are deliberately split between the transport layer and the
 - Control messages with short, unknown or out-of-range payloads are ignored or
   rejected; `Abort` of an unknown chunk stream is a no-op and keeps the header
   context of a known one.
+- An Aggregate message rejects a zero-length video/data sub-tag; only a
+  zero-length audio sub-tag is the RTMP silence message.
 - Connection state is per `Conn`; a failing publisher is closed on its own and
   releases its publish route and cache entries.
 - Media is forwarded without being decoded. A malformed *bitstream* inside a
