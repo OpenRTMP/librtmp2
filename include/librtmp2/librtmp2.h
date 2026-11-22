@@ -22,6 +22,13 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/**
+ * Maximum number of object keys tolerated while decoding one AMF0 object
+ * before the decoder rejects the message.
+ *
+ * Bounds the work a hostile peer can demand from an object that claims a huge
+ * number of keys, independent of how many bytes it actually sends.
+ */
 #define MAX_OBJECT_KEYS 256
 
 /**
@@ -94,8 +101,19 @@
  */
 #define MAX_OUTBOUND_CHUNK_SIZE 65536
 
+/**
+ * E-RTMP v2 `AudioPacketType` value identifying a multitrack audio container.
+ *
+ * Same value as [`crate::types::ERTMP_AUDIO_PACKET_TYPE_MULTITRACK`], repeated
+ * here so this module is self-contained.
+ */
 #define ERTMP_AUDIO_PACKET_TYPE_MULTITRACK 5
 
+/**
+ * E-RTMP v2 `VideoPacketType` value identifying a multitrack video container.
+ *
+ * Same value as [`crate::types::ERTMP_VIDEO_PACKET_TYPE_MULTITRACK`].
+ */
 #define ERTMP_VIDEO_PACKET_TYPE_MULTITRACK 6
 
 /**
@@ -109,30 +127,79 @@
  */
 #define ERTMP_PACKET_TYPE_MODEX 7
 
+/**
+ * RTMP control message types.
+ *
+ * These are the `msg_type_id` values of RTMP protocol control messages. Each
+ * control message must be sent on chunk stream 2 with message stream 0, per the
+ * RTMP specification.
+ *
+ * SetChunkSize: changes the chunk payload size for subsequent chunks.
+ */
 #define CTRL_SET_CHUNK_SIZE 1
 
+/**
+ * AbortMessage: discards a partially transmitted message on a chunk stream.
+ */
 #define CTRL_ABORT_MESSAGE 2
 
+/**
+ * Acknowledgement: reports bytes received so far.
+ */
 #define CTRL_ACKNOWLEDGEMENT 3
 
+/**
+ * UserControlMessage: carries a [`UCTRL_*`](UCTRL_STREAM_BEGIN) event.
+ */
 #define CTRL_USER_CONTROL 4
 
+/**
+ * WindowAckSize: how many bytes may arrive before an Acknowledgement is due.
+ */
 #define CTRL_WINDOW_ACK_SIZE 5
 
+/**
+ * SetPeerBandwidth: limits the peer's output bandwidth.
+ */
 #define CTRL_SET_PEER_BANDWIDTH 6
 
+/**
+ * RTMP User Control event types.
+ *
+ * The 16-bit event type that prefixes a [`CTRL_USER_CONTROL`] message.
+ *
+ * StreamBegin: the stream is ready for playback.
+ */
 #define UCTRL_STREAM_BEGIN 0
 
+/**
+ * StreamEOF: the stream ended.
+ */
 #define UCTRL_STREAM_EOF 1
 
+/**
+ * StreamDry: the stream has no more data.
+ */
 #define UCTRL_STREAM_DRY 2
 
+/**
+ * SetBufferLength: a player's buffer length in milliseconds.
+ */
 #define UCTRL_SET_BUFFER_LENGTH 3
 
+/**
+ * StreamIsRecorded: the stream is being recorded.
+ */
 #define UCTRL_STREAM_IS_RECORDED 4
 
+/**
+ * PingRequest: ask the peer to send a PingResponse.
+ */
 #define UCTRL_PING_REQUEST 6
 
+/**
+ * PingResponse: answer to a PingRequest.
+ */
 #define UCTRL_PING_RESPONSE 7
 
 /**
@@ -154,32 +221,80 @@
  */
 #define MIN_WINDOW_ACK_SIZE 1024
 
+/**
+ * RTMP message type IDs.
+ *
+ * The `msg_type_id` byte of a chunk header selects how the reassembled message
+ * body is interpreted. Values match the RTMP 1.0 specification (section 5.4)
+ * and the FLV tag type ids for audio (8) and video (9).
+ *
+ * Protocol control: set the chunk size.
+ */
 #define RTMP_MSG_SET_CHUNK_SIZE 1
 
+/**
+ * Protocol control: abort a partially transmitted message.
+ */
 #define RTMP_MSG_ABORT_MESSAGE 2
 
+/**
+ * Protocol control: acknowledge received bytes.
+ */
 #define RTMP_MSG_ACKNOWLEDGEMENT 3
 
+/**
+ * Protocol control: user control event (ping, stream begin, ...).
+ */
 #define RTMP_MSG_USER_CONTROL 4
 
+/**
+ * Protocol control: window acknowledgement size.
+ */
 #define RTMP_MSG_WINDOW_ACK_SIZE 5
 
+/**
+ * Protocol control: set peer bandwidth.
+ */
 #define RTMP_MSG_SET_PEER_BANDWIDTH 6
 
+/**
+ * Audio payload.
+ */
 #define RTMP_MSG_AUDIO 8
 
+/**
+ * Video payload.
+ */
 #define RTMP_MSG_VIDEO 9
 
+/**
+ * AMF3 data message.
+ */
 #define RTMP_MSG_AMF3_DATA 15
 
+/**
+ * AMF3 shared object message.
+ */
 #define RTMP_MSG_AMF3_SHARED_OBJECT 16
 
+/**
+ * AMF3 command message.
+ */
 #define RTMP_MSG_AMF3_COMMAND 17
 
+/**
+ * AMF0 data message (e.g. `onMetaData`).
+ */
 #define RTMP_MSG_AMF0_DATA 18
 
+/**
+ * AMF0 command message (`connect`, `publish`, `play`, ...).
+ */
 #define RTMP_MSG_AMF0_COMMAND 20
 
+/**
+ * Aggregate message: several FLV-style tags in one RTMP message.
+ */
 #define RTMP_MSG_AGGREGATE 22
 
 /**
@@ -238,69 +353,140 @@
  */
 #define DEFAULT_PLAYER_SEND_BUFFER_HARD_LIMIT ((32 * 1024) * 1024)
 
+/**
+ * Maximum number of concurrently active message streams per connection.
+ *
+ * A peer that opens more is rejected rather than allowed to grow the stream
+ * table without bound.
+ */
 #define MAX_STREAMS_PER_CONN 16
 
+/**
+ * Maximum number of relay frames queued for one player before the connection
+ * is considered fatally congested.
+ */
 #define MAX_PENDING_RELAY_FRAMES 1024
 
+/**
+ * Default cap on queued relay payload bytes per player.
+ *
+ * Used when a connection does not carry an explicit
+ * [`Conn::max_pending_relay_bytes`] from the server's
+ * [`crate::types::ResourceLimits`].
+ */
 #define MAX_PENDING_RELAY_BYTES ((8 * 1024) * 1024)
 
 /**
- * Enhanced RTMP v1 VideoPacketType
+ * Enhanced RTMP v1 VideoPacketType: start of a codec sequence header.
  */
 #define ERTMP_PACKET_TYPE_SEQUENCE_START 0
 
+/**
+ * Enhanced RTMP v1 VideoPacketType: a coded frame.
+ */
 #define ERTMP_PACKET_TYPE_CODED_FRAMES 1
 
+/**
+ * Enhanced RTMP v1 VideoPacketType: end of a codec sequence.
+ */
 #define ERTMP_PACKET_TYPE_SEQUENCE_END 2
 
+/**
+ * Enhanced RTMP v1 VideoPacketType: coded frames with an extended header.
+ */
 #define ERTMP_PACKET_TYPE_CODED_FRAMES_X 3
 
+/**
+ * Enhanced RTMP v1 VideoPacketType: metadata (e.g. HDR `colorInfo`).
+ */
 #define ERTMP_PACKET_TYPE_METADATA 4
 
+/**
+ * Enhanced RTMP v1 VideoPacketType: start of an MPEG-2 TS sequence.
+ */
 #define ERTMP_PACKET_TYPE_MPEG2TS_SEQUENCE_START 5
 
 /**
- * Enhanced RTMP v1/v2 AudioPacketType
+ * Enhanced RTMP v1/v2 AudioPacketType: start of an audio codec sequence header
+ * (e.g. AAC AudioSpecificConfig).
  */
 #define ERTMP_AUDIO_PACKET_TYPE_SEQUENCE_START 0
 
+/**
+ * Enhanced RTMP v1/v2 AudioPacketType: a coded audio frame.
+ */
 #define ERTMP_AUDIO_PACKET_TYPE_CODED_FRAMES 1
 
+/**
+ * Enhanced RTMP v1/v2 AudioPacketType: end of an audio codec sequence.
+ */
 #define ERTMP_AUDIO_PACKET_TYPE_SEQUENCE_END 2
 
+/**
+ * Enhanced RTMP v1/v2 AudioPacketType: metadata.
+ */
 #define ERTMP_AUDIO_PACKET_TYPE_METADATA 3
 
+/**
+ * Enhanced RTMP v2 AudioPacketType: multichannel configuration.
+ */
 #define ERTMP_AUDIO_PACKET_TYPE_MULTICHANNEL 4
 
 /**
  * E-RTMP v2 `CapsExMask` bits carried in the connect `capsEx` AMF number.
+ *
+ * Reconnect support requested by the client.
  */
 #define CAPS_EX_MASK_RECONNECT 1
 
+/**
+ * Multitrack (per-track audio/video containers) support.
+ */
 #define CAPS_EX_MASK_MULTITRACK 2
 
+/**
+ * ModEx (modular extension wrapper) support.
+ */
 #define CAPS_EX_MASK_MODEX 4
 
+/**
+ * Nanosecond timestamp-offset (`TimestampOffsetNano`) support.
+ */
 #define CAPS_EX_MASK_TIMESTAMP_NANO 8
 
+/**
+ * Capability mask the built-in server advertises by default.
+ */
 #define CAPS_EX_MASK_SERVER_DEFAULT ((CAPS_EX_MASK_MULTITRACK | CAPS_EX_MASK_MODEX) | CAPS_EX_MASK_TIMESTAMP_NANO)
 
 /**
- * Enhanced RTMP v1 AudioSampleRate (legacy)
+ * Enhanced RTMP v1 AudioSampleRate (legacy): 5512 Hz.
  */
 #define ERTMP_AUDIO_RATE_5500 0
 
+/**
+ * 11025 Hz sample rate.
+ */
 #define ERTMP_AUDIO_RATE_11025 1
 
+/**
+ * 22050 Hz sample rate.
+ */
 #define ERTMP_AUDIO_RATE_22050 2
 
+/**
+ * 44100 Hz sample rate.
+ */
 #define ERTMP_AUDIO_RATE_44100 3
 
 /**
- * Enhanced RTMP v1 AudioSampleSize (legacy)
+ * Enhanced RTMP v1 AudioSampleSize (legacy): 8-bit samples.
  */
 #define ERTMP_AUDIO_SAMPLE_8BIT 0
 
+/**
+ * 16-bit samples.
+ */
 #define ERTMP_AUDIO_SAMPLE_16BIT 1
 
 /**
@@ -310,56 +496,188 @@
 
 /**
  * E-RTMP v2 per-codec capability flags.
+ *
+ * Bit flags OR-ed together in [`VideoFourCcInfoMap::masks`] to describe what
+ * an endpoint can do with a given video codec.
+ *
+ * This endpoint can decode the codec.
  */
 #define FOUR_CC_INFO_CAN_DECODE 1
 
+/**
+ * This endpoint can encode the codec.
+ */
 #define FOUR_CC_INFO_CAN_ENCODE 2
 
+/**
+ * This endpoint can forward the codec without decoding it.
+ */
 #define FOUR_CC_INFO_CAN_FORWARD 4
 
+/**
+ * Union of every capability flag.
+ */
 #define FOUR_CC_INFO_ALL ((FOUR_CC_INFO_CAN_DECODE | FOUR_CC_INFO_CAN_ENCODE) | FOUR_CC_INFO_CAN_FORWARD)
 
 /**
  * Frame type classification.
+ *
+ * Distinguishes the four kinds of RTMP message the library delivers as a
+ * [`Frame`]. Audio and video frames carry codec payloads; script and
+ * metadata frames carry AMF-encoded side data (e.g. `onMetaData`).
+ *
+ * ```
+ * use librtmp2::types::FrameType;
+ *
+ * assert_eq!(FrameType::Audio as i32, 0);
+ * assert_eq!(FrameType::Video as i32, 1);
+ * ```
  */
 typedef enum FrameType {
+  /**
+   * Audio payload (RTMP message type `0x08`).
+   */
   Audio = 0,
+  /**
+   * Video payload (RTMP message type `0x09`).
+   */
   Video = 1,
+  /**
+   * Script data / metadata (RTMP message types `0x12`, `0x0F`).
+   */
   Script = 2,
+  /**
+   * Metadata side channel (Enhanced RTMP metadata packet).
+   */
   Metadata = 3,
 } FrameType;
 
 /**
  * Audio codec identifiers.
+ *
+ * The discriminants are the FLV `SoundFormat` values (high nibble of the first
+ * audio tag byte) used by legacy RTMP audio, so they match the wire format
+ * directly. SoundFormat `9` is Enhanced RTMP's ExHeader discriminator rather
+ * than a codec, and `12`/`13`/`15` are reserved by the FLV specification.
+ *
+ * Enhanced RTMP identifies codecs through a FourCC instead — see
+ * [`crate::ertmp::fourcc`] — and reports them in [`Frame::audio_fourcc`]. Note
+ * that [`AudioCodec::Opus`] is reachable only through a FourCC: legacy
+ * SoundFormat `14` means MP3 at 8 kHz, not Opus.
+ *
+ * ```
+ * use librtmp2::types::AudioCodec;
+ *
+ * assert_eq!(AudioCodec::Aac as u8, 10);
+ * assert_eq!(AudioCodec::default(), AudioCodec::Pcm);
+ * ```
  */
 typedef enum AudioCodec {
+  /**
+   * Uncompressed linear PCM, platform-endian.
+   */
   Pcm = 0,
+  /**
+   * ADPCM.
+   */
   Adpcm = 1,
+  /**
+   * MP3.
+   */
   Mp3 = 2,
+  /**
+   * Linear PCM, little-endian.
+   */
   PcmLe = 3,
+  /**
+   * Nellymoser 16 kHz.
+   */
   Nelly16k = 4,
+  /**
+   * Nellymoser 8 kHz.
+   */
   Nelly8k = 5,
+  /**
+   * Nellymoser.
+   */
   Nelly = 6,
+  /**
+   * G.711 A-law.
+   */
   G711A = 7,
+  /**
+   * G.711 µ-law.
+   */
   G711U = 8,
+  /**
+   * AAC.
+   */
   Aac = 10,
+  /**
+   * Speex.
+   */
   Speex = 11,
+  /**
+   * Opus (Enhanced RTMP `Opus` FourCC only; no legacy SoundFormat).
+   */
   Opus = 14,
 } AudioCodec;
 
 /**
  * Video codec identifiers (legacy).
+ *
+ * The discriminants are the FLV `CodecID` values (low nibble of the first
+ * video tag byte) for legacy RTMP video. Enhanced RTMP identifies codecs
+ * through a FourCC instead — see [`VideoFourCcInfoMap`] and
+ * [`crate::ertmp::fourcc`] — and reports them in [`Frame::video_fourcc`].
+ *
+ * ```
+ * use librtmp2::types::VideoCodec;
+ *
+ * assert_eq!(VideoCodec::H264 as u8, 7);
+ * assert_eq!(VideoCodec::default(), VideoCodec::Jpeg);
+ * ```
  */
 typedef enum VideoCodec {
+  /**
+   * JPEG (still image).
+   */
   Jpeg = 1,
+  /**
+   * Sorenson H.263.
+   */
   Sorenson = 2,
+  /**
+   * Screen video.
+   */
   Screen = 3,
+  /**
+   * On2 VP6.
+   */
   Vp6 = 4,
+  /**
+   * On2 VP6 with alpha channel.
+   */
   Vp6a = 5,
+  /**
+   * Screen video v2.
+   */
   Screen2 = 6,
+  /**
+   * AVC / H.264.
+   */
   H264 = 7,
+  /**
+   * HEVC / H.265 (Enhanced RTMP only).
+   */
   H265 = 12,
+  /**
+   * AV1 (Enhanced RTMP only).
+   */
   Av1 = 13,
+  /**
+   * VP9 (Enhanced RTMP only).
+   */
   Vp9 = 14,
 } VideoCodec;
 
@@ -403,9 +721,30 @@ typedef struct lrtmp2_server_t {
  * see that function's `# Safety` section. Rust callers should prefer
  * [`crate::server::Server::from_config`], which takes TLS paths as `&Path`
  * and never dereferences these fields.
+ *
+ * ```
+ * use librtmp2::types::ServerConfig;
+ *
+ * // Plaintext RTMP listener on 0.0.0.0 with library defaults:
+ * let cfg = ServerConfig {
+ *     chunk_size: 4096,
+ *     ..ServerConfig::default()
+ * };
+ * assert_eq!(cfg.tls_enabled, 0);
+ * assert!(cfg.tls_cert_file.is_null());
+ * ```
  */
 typedef struct lrtmp2_server_config_t {
+  /**
+   * Maximum number of concurrent accepted connections. `0` means "use the
+   * library default" at the C ABI boundary; a negative value means
+   * unlimited.
+   */
   int max_connections;
+  /**
+   * Outbound chunk size announced to peers via `SetChunkSize`, in bytes.
+   * Clamped by the server to a sane range.
+   */
   int chunk_size;
   /**
    * TLS / RTMPS fields
@@ -470,31 +809,81 @@ typedef struct FourCc {
 /**
  * A parsed frame.
  *
- * Input to the send path (`lrtmp2_client_send_frame`). The Rust client and
- * server deliver parsed frames through an `on_frame` callback, which the
- * C ABI does not yet expose.
+ * Input to the send path (`lrtmp2_client_send_frame`) and the value delivered
+ * to `on_frame` callbacks. The Rust client and server deliver parsed frames
+ * through an `on_frame` callback, which the C ABI does not yet expose.
+ *
+ * # Data pointer lifetime
+ *
+ * [`Frame::data`] points at a payload owned by the connection that produced
+ * the frame (for callbacks) or by the caller (for the send path). It is valid
+ * only for the duration of the callback, or for the duration of the
+ * `send_frame` call when sending; copy the bytes if you need to retain them.
+ *
+ * # Example
+ *
+ * ```
+ * use librtmp2::types::{Frame, FrameType};
+ *
+ * let frame = Frame {
+ *     frame_type: FrameType::Video,
+ *     timestamp: 1000,
+ *     size: 0,
+ *     ..Frame::default()
+ * };
+ * assert_eq!(frame.frame_type, FrameType::Video);
+ * // `track_id` defaults to 255, meaning "not a multitrack frame".
+ * assert_eq!(frame.track_id, u8::MAX);
+ * ```
  */
 typedef struct lrtmp2_frame_t {
+  /**
+   * Audio, video, script, or metadata classification.
+   */
   enum FrameType frame_type;
+  /**
+   * RTMP message timestamp in milliseconds.
+   */
   uint32_t timestamp;
+  /**
+   * Composition time offset in milliseconds (video only; 0 otherwise).
+   */
   uint32_t composition_time;
+  /**
+   * Length of the payload at [`Frame::data`], in bytes.
+   */
   uint32_t size;
+  /**
+   * Pointer to the payload bytes; validity is described on [`Frame`].
+   */
   const uint8_t *data;
   /**
-   * Audio-specific
+   * Audio-specific: codec identified from the legacy FLV sound format.
    */
   enum AudioCodec audio_codec;
+  /**
+   * Audio-specific: sample rate in Hz (`0` when unknown).
+   */
   uint32_t audio_sample_rate;
+  /**
+   * Audio-specific: channel count.
+   */
   uint8_t audio_channels;
+  /**
+   * Audio-specific: bit depth in bits (e.g. `8` or `16`).
+   */
   uint8_t audio_bit_depth;
   /**
    * Enhanced: FourCC from ExAudioTagHeader
    */
   struct FourCc audio_fourcc;
   /**
-   * Video-specific
+   * Video-specific: codec identified from the legacy FLV codec id.
    */
   enum VideoCodec video_codec;
+  /**
+   * Video-specific: FourCC from the Enhanced RTMP video tag header.
+   */
   struct FourCc video_fourcc;
   /**
    * 1=keyframe, 2=inter, etc.
@@ -554,6 +943,13 @@ struct lrtmp2_server_t *lrtmp2_server_create(const struct lrtmp2_server_config_t
  * this setter while `lrtmp2_server_poll` is running on that server.
  *
  * Returns `0` on success and a negative value when `server` is null.
+ *
+ * # Safety
+ *
+ * `server` must be a live pointer returned by [`lrtmp2_server_create`] that
+ * has not been destroyed, and it must not be in use by a concurrent
+ * `lrtmp2_server_poll` on another thread. When `cb` is non-null, `userdata`
+ * must stay valid until the callback is replaced or the server is destroyed.
  */
 int32_t lrtmp2_server_set_publish_auth_cb(struct lrtmp2_server_t *server,
                                           int (*cb)(uint64_t conn_id,
@@ -568,6 +964,13 @@ int32_t lrtmp2_server_set_publish_auth_cb(struct lrtmp2_server_t *server,
  * See [`lrtmp2_server_set_publish_auth_cb`] for the return convention,
  * `userdata` lifetime and re-entrancy rules. Passing a null callback clears
  * it.
+ *
+ * # Safety
+ *
+ * `server` must be a live pointer returned by [`lrtmp2_server_create`] that
+ * has not been destroyed, and it must not be in use by a concurrent
+ * `lrtmp2_server_poll` on another thread. When `cb` is non-null, `userdata`
+ * must stay valid until the callback is replaced or the server is destroyed.
  */
 int32_t lrtmp2_server_set_play_auth_cb(struct lrtmp2_server_t *server,
                                        int (*cb)(uint64_t conn_id,
@@ -578,21 +981,63 @@ int32_t lrtmp2_server_set_play_auth_cb(struct lrtmp2_server_t *server,
 
 /**
  * Destroy a server (FFI-compatible).
+ *
+ * A null pointer is accepted and does nothing.
+ *
+ * # Safety
+ *
+ * `server` must be either null or a pointer returned by
+ * [`lrtmp2_server_create`] that has not already been destroyed. After this
+ * call the pointer is dangling and must not be used again — in particular, no
+ * connection callback installed on the server may retain it.
  */
 void lrtmp2_server_destroy(struct lrtmp2_server_t *server);
 
 /**
  * Start listening (FFI-compatible).
+ *
+ * `bind_addr` is a NUL-terminated UTF-8 `"host:port"` string (port defaults to
+ * 1935). Returns `0` on success or a negative [`ErrorCode`] value; a null
+ * pointer or invalid UTF-8 yields [`ErrorCode::Internal`] rather than binding
+ * `0.0.0.0`.
+ *
+ * # Safety
+ *
+ * `server` must be a live pointer returned by [`lrtmp2_server_create`] that has
+ * not been destroyed. `bind_addr` must be null or point to a NUL-terminated C
+ * string valid for the duration of the call. The server must not be in use by a
+ * concurrent `lrtmp2_server_poll` on another thread.
  */
 int32_t lrtmp2_server_listen(struct lrtmp2_server_t *server, const char *bind_addr);
 
 /**
  * Poll for events (FFI-compatible).
+ *
+ * Blocks up to `timeout_ms` milliseconds, then accepts connections, advances
+ * every connection, and relays media. Returns `0` on success or a negative
+ * [`ErrorCode`] value.
+ *
+ * # Safety
+ *
+ * `server` must be a live pointer returned by [`lrtmp2_server_create`] that has
+ * not been destroyed. Because this call mutates the whole server, no other
+ * function may be called on the same server concurrently (including from a
+ * callback it fires), and `lrtmp2_server_destroy` must not run until the call
+ * returns.
  */
 int32_t lrtmp2_server_poll(struct lrtmp2_server_t *server, int32_t timeout_ms);
 
 /**
  * Stop the server (FFI-compatible).
+ *
+ * Clears the running flag so a subsequent [`lrtmp2_server_poll`] returns
+ * [`ErrorCode::Internal`]. Safe on a null pointer (no-op).
+ *
+ * # Safety
+ *
+ * `server` must be null or a live pointer returned by [`lrtmp2_server_create`]
+ * that has not been destroyed, and it must not be in use by a concurrent
+ * `lrtmp2_server_poll` on another thread.
  */
 void lrtmp2_server_stop(struct lrtmp2_server_t *server);
 
@@ -604,41 +1049,116 @@ void lrtmp2_server_stop(struct lrtmp2_server_t *server);
  * testing only) control `rtmps://` verification for this client. Returns NULL if
  * `tls_ca_file` is non-NULL but not valid UTF-8, rather than silently
  * falling back to default verification.
+ *
+ * # Safety
+ *
+ * `config` must be null or point to a readable [`ServerConfig`] valid for the
+ * duration of the call. When `config.tls_ca_file` is non-null it must point to
+ * a NUL-terminated C string (invalid UTF-8 is rejected with a null return). The
+ * other pointer fields are not dereferenced by this function.
  */
 struct lrtmp2_client_t *lrtmp2_client_create(const struct lrtmp2_server_config_t *config);
 
 /**
  * Destroy a client (FFI-compatible).
+ *
+ * A null pointer is accepted and does nothing.
+ *
+ * # Safety
+ *
+ * `c` must be either null or a pointer returned by [`lrtmp2_client_create`]
+ * that has not already been destroyed. After this call the pointer is dangling
+ * and must not be used again, including from any callback it installed.
  */
 void lrtmp2_client_destroy(struct lrtmp2_client_t *c);
 
 /**
  * Connect (FFI-compatible).
+ *
+ * `url` is a NUL-terminated `rtmp://…` or `rtmps://…` URL. Returns `0` on
+ * success or a negative [`ErrorCode`] value.
+ *
+ * # Safety
+ *
+ * `c` must be a live pointer returned by [`lrtmp2_client_create`] that has not
+ * been destroyed, and `url` must be null or point to a NUL-terminated C string
+ * valid for the duration of the call. A non-UTF-8 `url` is treated as an empty
+ * URL and fails the connect. The client must not be used concurrently from
+ * another thread.
  */
 int32_t lrtmp2_client_connect(struct lrtmp2_client_t *c, const char *url);
 
 /**
  * Publish (FFI-compatible).
+ *
+ * Requires a successful [`lrtmp2_client_connect`] first. Returns `0` on success
+ * or a negative [`ErrorCode`] value.
+ *
+ * # Safety
+ *
+ * `c` must be a live pointer returned by [`lrtmp2_client_create`] that has not
+ * been destroyed, and it must not be used concurrently from another thread.
  */
 int32_t lrtmp2_client_publish(struct lrtmp2_client_t *c);
 
 /**
  * Play (FFI-compatible).
+ *
+ * Requires a successful [`lrtmp2_client_connect`] first. Returns `0` on success
+ * or a negative [`ErrorCode`] value. Received frames are delivered to the Rust
+ * `on_frame_cb`, which has no C equivalent yet.
+ *
+ * # Safety
+ *
+ * `c` must be a live pointer returned by [`lrtmp2_client_create`] that has not
+ * been destroyed, and it must not be used concurrently from another thread.
  */
 int32_t lrtmp2_client_play(struct lrtmp2_client_t *c);
 
 /**
  * Send a frame (FFI-compatible).
+ *
+ * `frame` must describe a complete RTMP tag body. `frame.data`/`frame.size`
+ * are copied before the call returns, so they need only be valid during it.
+ * Frames larger than `client::MAX_CLIENT_FRAME_BYTES` are rejected with
+ * [`ErrorCode::Protocol`]. Requires the client to be publishing. Returns `0` on
+ * success or a negative [`ErrorCode`] value.
+ *
+ * # Safety
+ *
+ * `c` must be a live pointer returned by [`lrtmp2_client_create`] that has not
+ * been destroyed. `frame` must point to a readable [`Frame`] whose enum
+ * discriminants are valid and whose `data` points to `size` readable bytes (or
+ * is null when `size` is `0`) for the duration of the call. The client must not
+ * be used concurrently from another thread.
  */
 int32_t lrtmp2_client_send_frame(struct lrtmp2_client_t *c, const struct lrtmp2_frame_t *frame);
 
 /**
  * Poll client (FFI-compatible).
+ *
+ * Blocks up to `timeout_ms` milliseconds, flushes outbound data, and services
+ * inbound control traffic. Returns `0` on success or a negative [`ErrorCode`]
+ * value.
+ *
+ * # Safety
+ *
+ * `c` must be a live pointer returned by [`lrtmp2_client_create`] that has not
+ * been destroyed, and it must not be used concurrently from another thread or
+ * from inside a callback it fires.
  */
 int32_t lrtmp2_client_poll(struct lrtmp2_client_t *c, int32_t timeout_ms);
 
 /**
  * Get connection fd (FFI-compatible).
+ *
+ * Reserved for ABI compatibility: it currently always returns `-1` and never
+ * touches `_conn`.
+ *
+ * # Safety
+ *
+ * The pointer is never dereferenced, so any pointer value — including null — is
+ * accepted. It is still marked `unsafe` to keep the C signature stable.
  */
 int32_t lrtmp2_conn_get_fd(const struct lrtmp2_conn_t *_conn);
 
@@ -673,7 +1193,13 @@ int32_t lrtmp2_version_patch(void);
  * Takes a raw `i32` rather than `ErrorCode` so that an out-of-range value
  * from a caller (e.g. a weakly-typed binding forwarding an unrelated int)
  * cannot construct an invalid enum discriminant, which would be undefined
- * behavior.
+ * behavior. Out-of-range values map to [`ErrorCode::Internal`].
+ *
+ * # Safety
+ *
+ * The returned pointer is a `'static`, NUL-terminated string owned by the
+ * library. It must not be modified or freed, and stays valid for the whole
+ * process, so callers may keep it.
  */
 const char *lrtmp2_error_string(int32_t code);
 
