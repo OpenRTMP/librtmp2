@@ -7,11 +7,37 @@ use crate::types::{CapsExit, ErrorCode, FOUR_CC_INFO_ALL, FourCcList, Result, Vi
 /* ── fourCcList ── */
 
 /// Initialize a FourCC list.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::ertmp::connect_caps::fourcc_list_init;
+/// use librtmp2::types::FourCcList;
+///
+/// let mut list = FourCcList::default();
+/// fourcc_list_init(&mut list);
+/// assert_eq!(list.count, 0);
+/// ```
 pub fn fourcc_list_init(list: &mut FourCcList) {
     list.count = 0;
 }
 
 /// Add a FourCC to the list.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::ertmp::connect_caps::{fourcc_list_add, fourcc_list_init};
+/// use librtmp2::types::FourCcList;
+///
+/// let mut list = FourCcList::default();
+/// fourcc_list_init(&mut list);
+/// fourcc_list_add(&mut list, b"avc1").unwrap();
+/// fourcc_list_add(&mut list, b"hvc1").unwrap();
+///
+/// assert_eq!(list.count, 2);
+/// assert_eq!(&list.entries[0].cc[..4], b"avc1");
+/// ```
 pub fn fourcc_list_add(list: &mut FourCcList, cc: &[u8]) -> Result<()> {
     if list.count >= crate::types::MAX_FOURCCS {
         return Err(ErrorCode::Io);
@@ -30,6 +56,27 @@ pub fn fourcc_list_add(list: &mut FourCcList, cc: &[u8]) -> Result<()> {
 }
 
 /// Parse a FourCC list from raw data.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::ertmp::connect_caps::{fourcc_list_init, fourcc_list_parse};
+/// use librtmp2::types::FourCcList;
+///
+/// // A UI32 entry count, then per entry a UI16 length (1 for "*", 4 for a codec)
+/// // followed by the bytes.
+/// let mut data = Vec::new();
+/// data.extend_from_slice(&1u32.to_be_bytes());
+/// data.extend_from_slice(&4u16.to_be_bytes());
+/// data.extend_from_slice(b"avc1");
+///
+/// let mut list = FourCcList::default();
+/// fourcc_list_init(&mut list);
+/// let n = fourcc_list_parse(&mut list, &data).unwrap();
+///
+/// assert_eq!(n, 1); // entries parsed
+/// assert_eq!(&list.entries[0].cc[..4], b"avc1");
+/// ```
 pub fn fourcc_list_parse(list: &mut FourCcList, data: &[u8]) -> Result<usize> {
     if data.len() < 4 {
         return Err(ErrorCode::Io);
@@ -59,6 +106,30 @@ pub fn fourcc_list_parse(list: &mut FourCcList, data: &[u8]) -> Result<usize> {
 }
 
 /// Write a FourCC list to a buffer. Returns bytes written.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::ertmp::connect_caps::{
+///     fourcc_list_add, fourcc_list_init, fourcc_list_parse, fourcc_list_write,
+/// };
+/// use librtmp2::types::FourCcList;
+///
+/// let mut list = FourCcList::default();
+/// fourcc_list_init(&mut list);
+/// fourcc_list_add(&mut list, b"hvc1").unwrap();
+///
+/// let mut buf = [0u8; 32];
+/// let n = fourcc_list_write(&list, &mut buf);
+/// assert!(n > 0);
+///
+/// // Round-trips through the parser.
+/// let mut back = FourCcList::default();
+/// fourcc_list_init(&mut back);
+/// fourcc_list_parse(&mut back, &buf[..n]).unwrap();
+/// assert_eq!(back.count, 1);
+/// assert_eq!(&back.entries[0].cc[..4], b"hvc1");
+/// ```
 pub fn fourcc_list_write(list: &FourCcList, buf: &mut [u8]) -> usize {
     let count = list.count.min(list.entries.len());
     let needed = 4 + list
@@ -132,6 +203,27 @@ mod tests {
 /* ── E-RTMP v2 capsEx ── */
 
 /// Parse capability negotiation data.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::ertmp::connect_caps::caps_exit_parse;
+/// use librtmp2::types::CapsExit;
+///
+/// // Two UI32 legacy codec bitmasks; the version is implied, not transmitted.
+/// let mut data = Vec::new();
+/// data.extend_from_slice(&0x80u32.to_be_bytes());  // video bitmask
+/// data.extend_from_slice(&0x400u32.to_be_bytes()); // audio bitmask
+///
+/// let mut caps = CapsExit::default();
+/// caps_exit_parse(&mut caps, &data).unwrap();
+/// assert_eq!(caps.version, 1); // set by the parser
+/// assert_eq!(caps.video_codec_32, 0x80);
+/// assert_eq!(caps.audio_codec_32, 0x400);
+///
+/// // Fewer than 8 bytes is rejected.
+/// assert!(caps_exit_parse(&mut caps, &[0u8; 4]).is_err());
+/// ```
 pub fn caps_exit_parse(caps: &mut CapsExit, data: &[u8]) -> Result<()> {
     if data.len() < 8 {
         return Err(ErrorCode::Io);
@@ -147,6 +239,29 @@ pub fn caps_exit_parse(caps: &mut CapsExit, data: &[u8]) -> Result<()> {
 }
 
 /// Write capability negotiation data. Returns bytes written.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::ertmp::connect_caps::{caps_exit_parse, caps_exit_write};
+/// use librtmp2::types::CapsExit;
+///
+/// let caps = CapsExit {
+///     version: 2,
+///     video_codec_32: 1,
+///     audio_codec_32: 2,
+/// };
+///
+/// // The wire form is two UI32 masks: 8 bytes, no version field.
+/// let mut buf = [0u8; 8];
+/// let n = caps_exit_write(&caps, &mut buf);
+/// assert_eq!(n, 8);
+///
+/// let mut back = CapsExit::default();
+/// caps_exit_parse(&mut back, &buf[..n]).unwrap();
+/// assert_eq!(back.video_codec_32, 1);
+/// assert_eq!(back.audio_codec_32, 2);
+/// ```
 pub fn caps_exit_write(caps: &CapsExit, buf: &mut [u8]) -> usize {
     if buf.len() < 8 {
         return 0;
@@ -169,6 +284,26 @@ pub fn caps_exit_write(caps: &CapsExit, buf: &mut [u8]) -> usize {
 /// Parse a video FourCC info map from the legacy binary helper representation.
 /// New encodings append a UI32 capability mask to each key; the old key-only
 /// representation remains accepted and is interpreted as supporting all flags.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::ertmp::connect_caps::video_fourcc_info_map_parse;
+/// use librtmp2::types::VideoFourCcInfoMap;
+///
+/// // UI32 entry count, then per entry: UI16 length, the FourCC, and a UI32 mask.
+/// let mut data = Vec::new();
+/// data.extend_from_slice(&1u32.to_be_bytes());
+/// data.extend_from_slice(&4u16.to_be_bytes());
+/// data.extend_from_slice(b"avc1");
+/// data.extend_from_slice(&0x03u32.to_be_bytes()); // decode | encode
+///
+/// let mut map = VideoFourCcInfoMap::default();
+/// let n = video_fourcc_info_map_parse(&mut map, &data).unwrap();
+/// assert_eq!(n, 1);
+/// assert_eq!(&map.entries[0].cc[..4], b"avc1");
+/// assert_eq!(map.masks[0], 0x03);
+/// ```
 pub fn video_fourcc_info_map_parse(map: &mut VideoFourCcInfoMap, data: &[u8]) -> Result<usize> {
     if data.len() < 4 {
         return Err(ErrorCode::Io);
@@ -249,6 +384,28 @@ pub fn video_fourcc_info_map_parse(map: &mut VideoFourCcInfoMap, data: &[u8]) ->
 }
 
 /// Write the binary helper representation with a UI32 capability mask per key.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::ertmp::connect_caps::{
+///     video_fourcc_info_map_parse, video_fourcc_info_map_write,
+/// };
+/// use librtmp2::types::{FourCc, VideoFourCcInfoMap, FOUR_CC_INFO_ALL};
+///
+/// let mut map = VideoFourCcInfoMap::default();
+/// map.entries[0] = FourCc { cc: *b"avc1 " };
+/// map.masks[0] = FOUR_CC_INFO_ALL;
+/// map.count = 1;
+///
+/// let mut buf = [0u8; 64];
+/// let n = video_fourcc_info_map_write(&map, &mut buf);
+/// assert!(n > 0);
+///
+/// let mut back = VideoFourCcInfoMap::default();
+/// video_fourcc_info_map_parse(&mut back, &buf[..n]).unwrap();
+/// assert_eq!(back.count, 1);
+/// ```
 pub fn video_fourcc_info_map_write(map: &VideoFourCcInfoMap, buf: &mut [u8]) -> usize {
     let count = map.count.min(map.entries.len()).min(map.masks.len());
     let needed = 4 + map

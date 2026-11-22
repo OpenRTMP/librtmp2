@@ -5,6 +5,21 @@
 use crate::types::{ErrorCode, Reconnect, Result};
 
 /// Parse a reconnect request.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::ertmp::reconnect::reconnect_parse;
+/// use librtmp2::types::Reconnect;
+///
+/// let mut rc = Reconnect::default();
+/// reconnect_parse(&mut rc, &[0, 0, 0, 1, 0, 0, 0x10, 0]).unwrap();
+/// assert_eq!(rc.replay, 1);
+/// assert_eq!(rc.limit, 0x1000);
+///
+/// // The wire form is exactly 8 bytes.
+/// assert!(reconnect_parse(&mut rc, &[0u8; 7]).is_err());
+/// ```
 pub fn reconnect_parse(rc: &mut Reconnect, data: &[u8]) -> Result<()> {
     if data.len() != 8 {
         return Err(ErrorCode::Io);
@@ -21,6 +36,25 @@ pub fn reconnect_parse(rc: &mut Reconnect, data: &[u8]) -> Result<()> {
 }
 
 /// Write a reconnect request. Returns bytes written.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::ertmp::reconnect::{reconnect_parse, reconnect_write};
+/// use librtmp2::types::Reconnect;
+///
+/// let rc = Reconnect { replay: 1, limit: 4096 };
+/// let mut buf = [0u8; 8];
+/// assert_eq!(reconnect_write(&rc, &mut buf), 8);
+///
+/// let mut back = Reconnect::default();
+/// reconnect_parse(&mut back, &buf).unwrap();
+/// assert_eq!(back.replay, rc.replay);
+/// assert_eq!(back.limit, rc.limit);
+///
+/// // A short buffer cannot hold the value.
+/// assert_eq!(reconnect_write(&rc, &mut [0u8; 4]), 0);
+/// ```
 pub fn reconnect_write(rc: &Reconnect, buf: &mut [u8]) -> usize {
     if buf.len() < 8 {
         return 0;
