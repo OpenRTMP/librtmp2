@@ -585,7 +585,11 @@ impl TlsCtx {
         })
     }
 
-    /// TLS is not available in this build.
+    /// TLS is not available in this build; always returns
+    /// [`ErrorCode::Unsupported`].
+    ///
+    /// Mirrors the `tls`-enabled [`TlsCtx::new_server`] so the server code path
+    /// compiles unchanged with `--no-default-features`.
     #[cfg(not(feature = "tls"))]
     pub fn new_server(_cert_file: &str, _key_file: &str) -> Result<Self> {
         Err(ErrorCode::Unsupported)
@@ -654,6 +658,11 @@ impl TlsCtx {
         }
     }
 
+    /// TLS is not available in this build; always returns
+    /// [`ErrorCode::Unsupported`].
+    ///
+    /// Mirrors the `tls`-enabled [`TlsCtx::accept`]. The socket is left open and
+    /// owned by the caller, since no transport takes it over.
     #[cfg(not(feature = "tls"))]
     pub fn accept(&self, _fd: RawSocket) -> Result<Transport> {
         Err(ErrorCode::Unsupported)
