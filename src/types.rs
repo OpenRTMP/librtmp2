@@ -1144,8 +1144,8 @@ impl Default for Multitrack {
 /// Only `TimestampOffsetNano` (wire `modExType` 0) is defined by the v2 spec;
 /// every other wire value is surfaced as [`ModexType::Nop`] so callers degrade
 /// gracefully instead of rejecting the frame. The discriminants below are an
-/// internal Rust representation, not the wire values — use
-/// [`crate::media::modex::modex_write`] to serialize.
+/// internal Rust representation, not the wire values - use
+/// [`crate::ertmp::modex::modex_write`] to serialize.
 ///
 /// # Examples
 ///
