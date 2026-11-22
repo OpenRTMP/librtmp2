@@ -207,11 +207,23 @@ pub fn version_major() -> i32 {
 }
 
 /// Get the minor version number.
+///
+/// # Examples
+///
+/// ```
+/// assert!(librtmp2::version_minor() >= 0);
+/// ```
 pub fn version_minor() -> i32 {
     i32::try_from(types::VERSION_MINOR).unwrap_or(0)
 }
 
 /// Get the patch version number.
+///
+/// # Examples
+///
+/// ```
+/// assert!(librtmp2::version_patch() >= 0);
+/// ```
 pub fn version_patch() -> i32 {
     i32::try_from(types::VERSION_PATCH).unwrap_or(0)
 }
@@ -233,6 +245,15 @@ pub fn tls_supported() -> bool {
 ///
 /// Equivalent to [`types::ErrorCode::as_str`]. The returned string is static
 /// and NUL-free.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::types::ErrorCode;
+///
+/// assert_eq!(librtmp2::error_string(ErrorCode::Timeout), "Timeout");
+/// assert_eq!(librtmp2::error_string(ErrorCode::Amf), "AMF error");
+/// ```
 pub fn error_string(code: ErrorCode) -> &'static str {
     code.as_str()
 }
@@ -525,6 +546,23 @@ const DEFAULT_FFI_MAX_CONNECTIONS: c_int = 256;
 /// `(*config).tls_enabled != 0`, `tls_cert_file` and `tls_key_file` must each be
 /// a pointer to a NUL-terminated C string (valid UTF-8) that stays alive for
 /// the duration of this call; see [`server::Server::new`].
+///
+/// # Examples
+///
+/// ```
+/// # use librtmp2::types::ServerConfig;
+/// # unsafe {
+/// // A zero-initialised config is the usual C pattern; `max_connections: 0`
+/// // means "use the library default" at this boundary.
+/// let cfg = ServerConfig::default();
+/// let server = librtmp2::lrtmp2_server_create(&cfg);
+/// assert!(!server.is_null());
+/// librtmp2::lrtmp2_server_destroy(server);
+///
+/// // A null config is rejected rather than dereferenced.
+/// assert!(librtmp2::lrtmp2_server_create(std::ptr::null()).is_null());
+/// # }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn lrtmp2_server_create(config: *const ServerConfig) -> *mut server::Server {
     if config.is_null() {
@@ -561,6 +599,35 @@ pub unsafe extern "C" fn lrtmp2_server_create(config: *const ServerConfig) -> *m
 /// has not been destroyed, and it must not be in use by a concurrent
 /// `lrtmp2_server_poll` on another thread. When `cb` is non-null, `userdata`
 /// must stay valid until the callback is replaced or the server is destroyed.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::types::ServerConfig;
+///
+/// unsafe extern "C" fn allow(
+///     _conn_id: u64,
+///     _app: *const std::ffi::c_char,
+///     _stream: *const std::ffi::c_char,
+///     _userdata: *mut std::ffi::c_void,
+/// ) -> std::ffi::c_int {
+///     0 // 0 = allow
+/// }
+///
+/// # unsafe {
+/// let server = librtmp2::lrtmp2_server_create(&ServerConfig::default());
+/// assert_eq!(
+///     librtmp2::lrtmp2_server_set_publish_auth_cb(server, Some(allow), std::ptr::null_mut()),
+///     0
+/// );
+/// // Passing a null callback restores the default allow policy.
+/// assert_eq!(
+///     librtmp2::lrtmp2_server_set_publish_auth_cb(server, None, std::ptr::null_mut()),
+///     0
+/// );
+/// librtmp2::lrtmp2_server_destroy(server);
+/// # }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn lrtmp2_server_set_publish_auth_cb(
     server: *mut server::Server,
@@ -605,6 +672,35 @@ pub unsafe extern "C" fn lrtmp2_server_set_publish_auth_cb(
 /// has not been destroyed, and it must not be in use by a concurrent
 /// `lrtmp2_server_poll` on another thread. When `cb` is non-null, `userdata`
 /// must stay valid until the callback is replaced or the server is destroyed.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::types::ServerConfig;
+///
+/// unsafe extern "C" fn allow(
+///     _conn_id: u64,
+///     _app: *const std::ffi::c_char,
+///     _stream: *const std::ffi::c_char,
+///     _userdata: *mut std::ffi::c_void,
+/// ) -> std::ffi::c_int {
+///     0
+/// }
+///
+/// # unsafe {
+/// let server = librtmp2::lrtmp2_server_create(&ServerConfig::default());
+/// assert_eq!(
+///     librtmp2::lrtmp2_server_set_play_auth_cb(server, Some(allow), std::ptr::null_mut()),
+///     0
+/// );
+/// // A null server pointer is rejected with a negative value.
+/// assert_eq!(
+///     librtmp2::lrtmp2_server_set_play_auth_cb(std::ptr::null_mut(), None, std::ptr::null_mut()),
+///     -1
+/// );
+/// librtmp2::lrtmp2_server_destroy(server);
+/// # }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn lrtmp2_server_set_play_auth_cb(
     server: *mut server::Server,
@@ -643,6 +739,19 @@ pub unsafe extern "C" fn lrtmp2_server_set_play_auth_cb(
 /// [`lrtmp2_server_create`] that has not already been destroyed. After this
 /// call the pointer is dangling and must not be used again — in particular, no
 /// connection callback installed on the server may retain it.
+///
+/// # Examples
+///
+/// ```
+/// # use librtmp2::types::ServerConfig;
+/// # unsafe {
+/// let server = librtmp2::lrtmp2_server_create(&ServerConfig::default());
+/// librtmp2::lrtmp2_server_destroy(server);
+///
+/// // Destroying null is a no-op, so a failed create needs no special case.
+/// librtmp2::lrtmp2_server_destroy(std::ptr::null_mut());
+/// # }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn lrtmp2_server_destroy(server: *mut server::Server) {
     if !server.is_null() {
@@ -663,6 +772,26 @@ pub unsafe extern "C" fn lrtmp2_server_destroy(server: *mut server::Server) {
 /// not been destroyed. `bind_addr` must be null or point to a NUL-terminated C
 /// string valid for the duration of the call. The server must not be in use by a
 /// concurrent `lrtmp2_server_poll` on another thread.
+///
+/// # Examples
+///
+/// ```
+/// use std::ffi::CString;
+/// use librtmp2::types::ServerConfig;
+///
+/// # unsafe {
+/// let server = librtmp2::lrtmp2_server_create(&ServerConfig::default());
+/// let addr = CString::new("127.0.0.1:0").unwrap();
+/// assert_eq!(librtmp2::lrtmp2_server_listen(server, addr.as_ptr()), 0);
+///
+/// // A null address is rejected instead of binding 0.0.0.0.
+/// assert_eq!(
+///     librtmp2::lrtmp2_server_listen(server, std::ptr::null()),
+///     librtmp2::types::ErrorCode::Internal as i32
+/// );
+/// librtmp2::lrtmp2_server_destroy(server);
+/// # }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn lrtmp2_server_listen(
     server: *mut server::Server,
@@ -697,6 +826,23 @@ pub unsafe extern "C" fn lrtmp2_server_listen(
 /// function may be called on the same server concurrently (including from a
 /// callback it fires), and `lrtmp2_server_destroy` must not run until the call
 /// returns.
+///
+/// # Examples
+///
+/// ```
+/// use std::ffi::CString;
+/// use librtmp2::types::ServerConfig;
+///
+/// # unsafe {
+/// let server = librtmp2::lrtmp2_server_create(&ServerConfig::default());
+/// let addr = CString::new("127.0.0.1:0").unwrap();
+/// librtmp2::lrtmp2_server_listen(server, addr.as_ptr());
+///
+/// // Non-blocking tick: returns 0 when nothing happened.
+/// assert_eq!(librtmp2::lrtmp2_server_poll(server, 0), 0);
+/// librtmp2::lrtmp2_server_destroy(server);
+/// # }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn lrtmp2_server_poll(server: *mut server::Server, timeout_ms: i32) -> i32 {
     if server.is_null() {
@@ -719,6 +865,23 @@ pub unsafe extern "C" fn lrtmp2_server_poll(server: *mut server::Server, timeout
 /// `server` must be null or a live pointer returned by [`lrtmp2_server_create`]
 /// that has not been destroyed, and it must not be in use by a concurrent
 /// `lrtmp2_server_poll` on another thread.
+///
+/// # Examples
+///
+/// ```
+/// # use librtmp2::types::ServerConfig;
+/// # unsafe {
+/// let server = librtmp2::lrtmp2_server_create(&ServerConfig::default());
+/// librtmp2::lrtmp2_server_stop(server);
+///
+/// // After stopping, polling reports an error rather than blocking.
+/// assert_ne!(librtmp2::lrtmp2_server_poll(server, 0), 0);
+/// librtmp2::lrtmp2_server_destroy(server);
+///
+/// // Stopping null is a no-op.
+/// librtmp2::lrtmp2_server_stop(std::ptr::null_mut());
+/// # }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn lrtmp2_server_stop(server: *mut server::Server) {
     if !server.is_null() {
@@ -740,6 +903,18 @@ pub unsafe extern "C" fn lrtmp2_server_stop(server: *mut server::Server) {
 /// duration of the call. When `config.tls_ca_file` is non-null it must point to
 /// a NUL-terminated C string (invalid UTF-8 is rejected with a null return). The
 /// other pointer fields are not dereferenced by this function.
+///
+/// # Examples
+///
+/// ```
+/// # unsafe {
+/// // A null config means "use defaults", i.e. verify rtmps:// against the
+/// // system trust store.
+/// let client = librtmp2::lrtmp2_client_create(std::ptr::null());
+/// assert!(!client.is_null());
+/// librtmp2::lrtmp2_client_destroy(client);
+/// # }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn lrtmp2_client_create(config: *const ServerConfig) -> *mut client::Client {
     let mut c = client::Client::new();
@@ -772,6 +947,18 @@ pub unsafe extern "C" fn lrtmp2_client_create(config: *const ServerConfig) -> *m
 /// `c` must be either null or a pointer returned by [`lrtmp2_client_create`]
 /// that has not already been destroyed. After this call the pointer is dangling
 /// and must not be used again, including from any callback it installed.
+///
+/// # Examples
+///
+/// ```
+/// # unsafe {
+/// let client = librtmp2::lrtmp2_client_create(std::ptr::null());
+/// librtmp2::lrtmp2_client_destroy(client);
+///
+/// // Destroying null is a no-op.
+/// librtmp2::lrtmp2_client_destroy(std::ptr::null_mut());
+/// # }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn lrtmp2_client_destroy(c: *mut client::Client) {
     if !c.is_null() {
@@ -791,6 +978,27 @@ pub unsafe extern "C" fn lrtmp2_client_destroy(c: *mut client::Client) {
 /// valid for the duration of the call. A non-UTF-8 `url` is treated as an empty
 /// URL and fails the connect. The client must not be used concurrently from
 /// another thread.
+///
+/// # Examples
+///
+/// ```
+/// use std::ffi::CString;
+///
+/// # unsafe {
+/// let client = librtmp2::lrtmp2_client_create(std::ptr::null());
+/// let url = CString::new("rtmp://127.0.0.1:1/live/cam1").unwrap();
+///
+/// // Nothing is listening on port 1, so this fails; the point is the call shape.
+/// assert_ne!(librtmp2::lrtmp2_client_connect(client, url.as_ptr()), 0);
+///
+/// // A null URL is rejected.
+/// assert_eq!(
+///     librtmp2::lrtmp2_client_connect(client, std::ptr::null()),
+///     librtmp2::types::ErrorCode::Internal as i32
+/// );
+/// librtmp2::lrtmp2_client_destroy(client);
+/// # }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn lrtmp2_client_connect(
     c: *mut client::Client,
@@ -816,6 +1024,21 @@ pub unsafe extern "C" fn lrtmp2_client_connect(
 ///
 /// `c` must be a live pointer returned by [`lrtmp2_client_create`] that has not
 /// been destroyed, and it must not be used concurrently from another thread.
+///
+/// # Examples
+///
+/// ```
+/// # unsafe {
+/// let client = librtmp2::lrtmp2_client_create(std::ptr::null());
+///
+/// // Publishing before connecting is a protocol error, not a crash.
+/// assert_eq!(
+///     librtmp2::lrtmp2_client_publish(client),
+///     librtmp2::types::ErrorCode::Protocol as i32
+/// );
+/// librtmp2::lrtmp2_client_destroy(client);
+/// # }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn lrtmp2_client_publish(c: *mut client::Client) -> i32 {
     if c.is_null() {
@@ -837,6 +1060,21 @@ pub unsafe extern "C" fn lrtmp2_client_publish(c: *mut client::Client) -> i32 {
 ///
 /// `c` must be a live pointer returned by [`lrtmp2_client_create`] that has not
 /// been destroyed, and it must not be used concurrently from another thread.
+///
+/// # Examples
+///
+/// ```
+/// # unsafe {
+/// let client = librtmp2::lrtmp2_client_create(std::ptr::null());
+///
+/// // Playing before connecting is a protocol error.
+/// assert_eq!(
+///     librtmp2::lrtmp2_client_play(client),
+///     librtmp2::types::ErrorCode::Protocol as i32
+/// );
+/// librtmp2::lrtmp2_client_destroy(client);
+/// # }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn lrtmp2_client_play(c: *mut client::Client) -> i32 {
     if c.is_null() {
@@ -863,6 +1101,37 @@ pub unsafe extern "C" fn lrtmp2_client_play(c: *mut client::Client) -> i32 {
 /// discriminants are valid and whose `data` points to `size` readable bytes (or
 /// is null when `size` is `0`) for the duration of the call. The client must not
 /// be used concurrently from another thread.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::types::{Frame, FrameType};
+///
+/// # unsafe {
+/// let client = librtmp2::lrtmp2_client_create(std::ptr::null());
+///
+/// // Sending before the client is Publishing is rejected before the frame is
+/// // ever read, so `frame.data` need not be valid here.
+/// assert_eq!(
+///     librtmp2::lrtmp2_client_send_frame(client, std::ptr::null()),
+///     librtmp2::types::ErrorCode::Internal as i32
+/// );
+///
+/// // A well-formed frame is still refused while disconnected.
+/// let payload = [0x17u8, 0x01];
+/// let frame = Frame {
+///     frame_type: FrameType::Video,
+///     size: payload.len() as u32,
+///     data: payload.as_ptr(),
+///     ..Frame::default()
+/// };
+/// assert_eq!(
+///     librtmp2::lrtmp2_client_send_frame(client, &frame),
+///     librtmp2::types::ErrorCode::Protocol as i32
+/// );
+/// librtmp2::lrtmp2_client_destroy(client);
+/// # }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn lrtmp2_client_send_frame(
     c: *mut client::Client,
@@ -907,6 +1176,24 @@ pub unsafe extern "C" fn lrtmp2_client_send_frame(
 /// `c` must be a live pointer returned by [`lrtmp2_client_create`] that has not
 /// been destroyed, and it must not be used concurrently from another thread or
 /// from inside a callback it fires.
+///
+/// # Examples
+///
+/// ```
+/// # unsafe {
+/// let client = librtmp2::lrtmp2_client_create(std::ptr::null());
+///
+/// // Polling a client that never connected reports an error.
+/// assert_ne!(librtmp2::lrtmp2_client_poll(client, 0), 0);
+///
+/// // A null pointer is rejected.
+/// assert_eq!(
+///     librtmp2::lrtmp2_client_poll(std::ptr::null_mut(), 0),
+///     librtmp2::types::ErrorCode::Internal as i32
+/// );
+/// librtmp2::lrtmp2_client_destroy(client);
+/// # }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn lrtmp2_client_poll(c: *mut client::Client, timeout_ms: i32) -> i32 {
     if c.is_null() {
@@ -927,36 +1214,84 @@ pub unsafe extern "C" fn lrtmp2_client_poll(c: *mut client::Client, timeout_ms: 
 ///
 /// The pointer is never dereferenced, so any pointer value — including null — is
 /// accepted. It is still marked `unsafe` to keep the C signature stable.
+///
+/// # Examples
+///
+/// ```
+/// # unsafe {
+/// // Reserved for ABI compatibility: the pointer is never dereferenced and the
+/// // call always reports "no fd".
+/// assert_eq!(librtmp2::lrtmp2_conn_get_fd(std::ptr::null()), -1);
+/// # }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn lrtmp2_conn_get_fd(_conn: *const session::conn::Conn) -> i32 {
     -1
 }
 
 /// Check TLS support (FFI-compatible).
+///
+/// # Examples
+///
+/// ```
+/// let v = librtmp2::lrtmp2_tls_supported();
+/// assert!(v == 0 || v == 1);
+/// assert_eq!(v == 1, librtmp2::tls_supported());
+/// ```
 #[unsafe(no_mangle)]
 pub extern "C" fn lrtmp2_tls_supported() -> i32 {
     if tls_supported() { 1 } else { 0 }
 }
 
 /// Get version string (FFI-compatible).
+///
+/// # Examples
+///
+/// ```
+/// # unsafe {
+/// let p = librtmp2::lrtmp2_version_string();
+/// assert!(!p.is_null());
+/// // NUL-terminated and stable for the life of the process.
+/// let s = std::ffi::CStr::from_ptr(p).to_str().unwrap();
+/// assert!(!s.is_empty());
+/// # }
+/// ```
 #[unsafe(no_mangle)]
 pub extern "C" fn lrtmp2_version_string() -> *const std::ffi::c_char {
     concat!(env!("CARGO_PKG_VERSION"), "\0").as_ptr() as *const std::ffi::c_char
 }
 
 /// Get major version (FFI-compatible).
+///
+/// # Examples
+///
+/// ```
+/// assert_eq!(librtmp2::lrtmp2_version_major(), librtmp2::version_major());
+/// ```
 #[unsafe(no_mangle)]
 pub extern "C" fn lrtmp2_version_major() -> i32 {
     version_major()
 }
 
 /// Get minor version (FFI-compatible).
+///
+/// # Examples
+///
+/// ```
+/// assert_eq!(librtmp2::lrtmp2_version_minor(), librtmp2::version_minor());
+/// ```
 #[unsafe(no_mangle)]
 pub extern "C" fn lrtmp2_version_minor() -> i32 {
     version_minor()
 }
 
 /// Get patch version (FFI-compatible).
+///
+/// # Examples
+///
+/// ```
+/// assert_eq!(librtmp2::lrtmp2_version_patch(), librtmp2::version_patch());
+/// ```
 #[unsafe(no_mangle)]
 pub extern "C" fn lrtmp2_version_patch() -> i32 {
     version_patch()
@@ -974,6 +1309,21 @@ pub extern "C" fn lrtmp2_version_patch() -> i32 {
 /// The returned pointer is a `'static`, NUL-terminated string owned by the
 /// library. It must not be modified or freed, and stays valid for the whole
 /// process, so callers may keep it.
+///
+/// # Examples
+///
+/// ```
+/// # unsafe {
+/// let p = librtmp2::lrtmp2_error_string(librtmp2::types::ErrorCode::Timeout as i32);
+/// assert!(!p.is_null());
+/// let s = std::ffi::CStr::from_ptr(p).to_str().unwrap();
+/// assert_eq!(s, "Timeout");
+///
+/// // Out-of-range codes map to the internal error rather than misbehaving.
+/// let p = librtmp2::lrtmp2_error_string(9999);
+/// assert_eq!(std::ffi::CStr::from_ptr(p).to_str().unwrap(), "Internal error");
+/// # }
+/// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn lrtmp2_error_string(code: i32) -> *const std::ffi::c_char {
     error_c_string(error_code_from_raw(code)).as_ptr() as *const std::ffi::c_char

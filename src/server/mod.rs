@@ -483,6 +483,18 @@ struct PendingTlsConnection {
 /// other listener exactly as if they shared a port. Running two *separate*
 /// `Server` instances instead would silently split the relay: each instance
 /// only relays among its own `connections`.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::server::Server;
+/// use librtmp2::types::ServerConfig;
+///
+/// let server = Server::from_config(ServerConfig::default(), None)?;
+/// assert!(!server.running);
+/// assert!(server.connections.is_empty());
+/// # Ok::<(), librtmp2::types::ErrorCode>(())
+/// ```
 pub struct Server {
     /// Configuration this server was created with; the C ABI and
     /// [`Server::from_config`] both populate it.
@@ -784,6 +796,19 @@ impl Server {
     /// Panics if `base` is zero, has the high bit set (reserved for
     /// [`is_external_publisher_id`]), or if any connection ID has already been
     /// issued.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use librtmp2::server::Server;
+    /// use librtmp2::types::ServerConfig;
+    ///
+    /// let mut server = Server::from_config(ServerConfig::default(), None)?;
+    /// // Give each shard a disjoint id range so ids stay unique across processes.
+    /// server.set_conn_id_base(1 << 32);
+    /// assert!(server.connections.is_empty());
+    /// # Ok::<(), librtmp2::types::ErrorCode>(())
+    /// ```
     pub fn set_conn_id_base(&mut self, base: u64) {
         assert!(base != 0, "conn_id base must be non-zero");
         assert!(
@@ -809,17 +834,64 @@ impl Server {
     /// into an internal buffer capped by `max_frames` and `max_bytes`. On
     /// overflow the oldest frames are dropped so the buffer stays bounded.
     /// Injected (socket-less) frames are not exported, to avoid echo loops.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use librtmp2::server::Server;
+    /// use librtmp2::types::ServerConfig;
+    ///
+    /// let mut server = Server::from_config(ServerConfig::default(), None)?;
+    ///
+    /// // Disabled by default: no extra copies.
+    /// assert!(server.drain_exported_relay_frames().is_empty());
+    ///
+    /// // Buffer at most 256 frames / 4 MiB; older frames are dropped on overflow.
+    /// server.enable_relay_export(256, 4 * 1024 * 1024);
+    /// assert!(server.drain_exported_relay_frames().is_empty());
+    /// # Ok::<(), librtmp2::types::ErrorCode>(())
+    /// ```
     pub fn enable_relay_export(&mut self, max_frames: usize, max_bytes: usize) {
         self.relay_export = Some(RelayExportBuffer::new(max_frames, max_bytes));
     }
 
     /// Disable relay export and discard any buffered frames.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use librtmp2::server::Server;
+    /// use librtmp2::types::ServerConfig;
+    ///
+    /// let mut server = Server::from_config(ServerConfig::default(), None)?;
+    /// server.enable_relay_export(64, 1024 * 1024);
+    /// server.disable_relay_export();
+    ///
+    /// // With export off, draining yields nothing.
+    /// assert!(server.drain_exported_relay_frames().is_empty());
+    /// # Ok::<(), librtmp2::types::ErrorCode>(())
+    /// ```
     pub fn disable_relay_export(&mut self) {
         self.relay_export = None;
     }
 
     /// Drain and return all currently buffered export frames (empty when
     /// export is disabled).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use librtmp2::server::Server;
+    /// use librtmp2::types::ServerConfig;
+    ///
+    /// let mut server = Server::from_config(ServerConfig::default(), None)?;
+    /// server.enable_relay_export(64, 1024 * 1024);
+    ///
+    /// // Nothing has been published yet.
+    /// let frames = server.drain_exported_relay_frames();
+    /// assert!(frames.is_empty());
+    /// # Ok::<(), librtmp2::types::ErrorCode>(())
+    /// ```
     pub fn drain_exported_relay_frames(&mut self) -> Vec<RelayFrame> {
         self.drain_exported_relay_frames_with_hints()
             .into_iter()
@@ -831,6 +903,21 @@ impl Server {
     /// codec-neutral [`DeliveryHint`], classified where librtmp2 already
     /// parses media for its init cache so an exporting relay never has to
     /// look at the payload itself.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use librtmp2::server::Server;
+    /// use librtmp2::types::ServerConfig;
+    ///
+    /// let mut server = Server::from_config(ServerConfig::default(), None)?;
+    /// server.enable_relay_export(64, 1024 * 1024);
+    ///
+    /// // Each drained frame arrives paired with its codec-neutral delivery hint.
+    /// let with_hints = server.drain_exported_relay_frames_with_hints();
+    /// assert!(with_hints.is_empty());
+    /// # Ok::<(), librtmp2::types::ErrorCode>(())
+    /// ```
     pub fn drain_exported_relay_frames_with_hints(&mut self) -> Vec<(RelayFrame, DeliveryHint)> {
         match self.relay_export.as_mut() {
             Some(buf) => buf.drain(),
@@ -1041,6 +1128,22 @@ impl Server {
     /// external feed ends (required for continually changing routes; see
     /// [`MAX_EXTERNAL_PUBLISH_ROUTES`]). Also drops any init-cache entry owned
     /// solely by that external id and pending inject frames for the route.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use librtmp2::server::Server;
+    /// use librtmp2::types::{FrameType, ServerConfig};
+    ///
+    /// let mut server = Server::from_config(ServerConfig::default(), None)?;
+    /// server.inject_relay_frame("live", "cam1", FrameType::Video, 0, &[0x17])?;
+    ///
+    /// // Releasing frees the route so another feed can claim it.
+    /// server.release_injected_route("live", "cam1");
+    /// // Releasing an unknown route is a no-op.
+    /// server.release_injected_route("live", "nope");
+    /// # Ok::<(), librtmp2::types::ErrorCode>(())
+    /// ```
     pub fn release_injected_route(&mut self, app: &str, stream_name: &str) {
         let key = (app.to_string(), stream_name.to_string());
         self.inject_route_last_seen.remove(&key);
@@ -1069,6 +1172,22 @@ impl Server {
     ///
     /// Convenience for shutdown / remesh; prefer
     /// [`Self::release_injected_route`] per finished feed in normal operation.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use librtmp2::server::Server;
+    /// use librtmp2::types::{FrameType, ServerConfig};
+    ///
+    /// let mut server = Server::from_config(ServerConfig::default(), None)?;
+    /// server.inject_relay_frame("live", "cam1", FrameType::Video, 0, &[0x17])?;
+    /// server.inject_relay_frame("live", "cam2", FrameType::Video, 0, &[0x17])?;
+    ///
+    /// server.release_all_injected_routes();
+    /// // Safe to call twice.
+    /// server.release_all_injected_routes();
+    /// # Ok::<(), librtmp2::types::ErrorCode>(())
+    /// ```
     pub fn release_all_injected_routes(&mut self) {
         let external_keys: Vec<(String, String)> = {
             let Ok(routes) = self.active_publish_routes.lock() else {
@@ -1141,6 +1260,19 @@ impl Server {
     /// before reconnecting -- this call only sends the request and does not
     /// close `conn_id` itself. Returns `Err(ErrorCode::Internal)` if no
     /// connection with `conn_id` is currently held by this server.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use librtmp2::server::Server;
+    /// use librtmp2::types::ServerConfig;
+    ///
+    /// let mut server = Server::from_config(ServerConfig::default(), None)?;
+    ///
+    /// // No connection carries the id, so the request is refused.
+    /// assert!(server.request_reconnect(7, None, None).is_err());
+    /// # Ok::<(), librtmp2::types::ErrorCode>(())
+    /// ```
     pub fn request_reconnect(
         &mut self,
         conn_id: u64,
@@ -1235,6 +1367,21 @@ impl Server {
     /// external readiness loop needs to watch a multi-listener `Server`.
     /// Each entry is an `i32` file descriptor on Unix and a `u64` Winsock
     /// `SOCKET` on Windows (see [`net::RawSocket`]).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use librtmp2::server::Server;
+    /// use librtmp2::types::ServerConfig;
+    ///
+    /// let mut server = Server::from_config(ServerConfig::default(), None)?;
+    /// assert!(server.listener_fds().is_empty());
+    ///
+    /// server.listen("127.0.0.1:0")?;
+    /// // One entry per bound listener, for an external readiness loop.
+    /// assert_eq!(server.listener_fds().len(), 1);
+    /// # Ok::<(), librtmp2::types::ErrorCode>(())
+    /// ```
     pub fn listener_fds(&self) -> Vec<net::RawSocket> {
         self.listeners
             .iter()
@@ -1250,6 +1397,19 @@ impl Server {
     /// connections, media relay, and stream cache. To add a listener with an
     /// *independent* TLS certificate — e.g. plaintext RTMP plus RTMPS on a
     /// second port — use [`Server::listen_tls`] instead.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use librtmp2::server::Server;
+    /// use librtmp2::types::ServerConfig;
+    ///
+    /// let mut server = Server::from_config(ServerConfig::default(), None)?;
+    /// server.listen("127.0.0.1:0")?;
+    /// assert!(server.running);
+    /// assert!(!server.listener_fds().is_empty());
+    /// # Ok::<(), librtmp2::types::ErrorCode>(())
+    /// ```
     pub fn listen(&mut self, bind_addr: &str) -> Result<()> {
         let addr = Self::resolve_bind_addr(bind_addr)?;
         let tcp = self.bind_listener(&addr)?;
@@ -1271,6 +1431,19 @@ impl Server {
     /// Returns [`ErrorCode::Unsupported`] on Windows, which has no
     /// `SO_REUSEPORT` load balancing; bind one listener with
     /// [`Self::listen`] there instead.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use librtmp2::server::Server;
+    /// use librtmp2::types::ServerConfig;
+    ///
+    /// let mut server = Server::from_config(ServerConfig::default(), None)?;
+    /// // Returns `Unsupported` on platforms without SO_REUSEPORT load balancing.
+    /// // On Linux/macOS the shard binds and shares the port with its siblings.
+    /// let _ = server.listen_reuseport("127.0.0.1:0");
+    /// # Ok::<(), librtmp2::types::ErrorCode>(())
+    /// ```
     pub fn listen_reuseport(&mut self, bind_addr: &str) -> Result<()> {
         let addr = Self::resolve_bind_addr(bind_addr)?;
         let tcp = self.bind_listener_reuseport(&addr)?;
@@ -1287,6 +1460,20 @@ impl Server {
     /// Connections accepted here land in the same `connections` list as every
     /// other listener on this `Server`, so a publisher here is relayed to
     /// players on any other listener (plaintext or TLS) and vice versa.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use librtmp2::server::Server;
+    /// use librtmp2::types::ServerConfig;
+    ///
+    /// let mut server = Server::from_config(ServerConfig::default(), None)?;
+    /// // Needs a real PEM pair, so this only demonstrates the call shape.
+    /// let result = server.listen_tls("127.0.0.1:0", "cert.pem", "key.pem");
+    /// // Missing files are reported, not panicked on.
+    /// assert!(result.is_err());
+    /// # Ok::<(), librtmp2::types::ErrorCode>(())
+    /// ```
     pub fn listen_tls(&mut self, bind_addr: &str, cert_file: &str, key_file: &str) -> Result<()> {
         let ctx = TlsCtx::new_server(cert_file, key_file)?;
         let addr = Self::resolve_bind_addr(bind_addr)?;
@@ -1513,6 +1700,23 @@ impl Server {
     }
 
     /// Stop the server.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use librtmp2::server::Server;
+    /// use librtmp2::types::ServerConfig;
+    ///
+    /// let mut server = Server::from_config(ServerConfig::default(), None)?;
+    /// server.listen("127.0.0.1:0")?;
+    /// assert!(server.running);
+    ///
+    /// server.stop();
+    /// assert!(!server.running);
+    /// // A stopped server refuses to be polled.
+    /// assert!(server.poll(0).is_err());
+    /// # Ok::<(), librtmp2::types::ErrorCode>(())
+    /// ```
     pub fn stop(&mut self) {
         self.running = false;
         self.listeners.clear();
@@ -1835,6 +2039,20 @@ impl Server {
     /// Process all active connections: drain readable bytes, drive the
     /// protocol state machine, relay frames from publishers to players,
     /// flush pending writes, and reap closed peers.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use librtmp2::server::Server;
+    /// use librtmp2::types::ServerConfig;
+    ///
+    /// let mut server = Server::from_config(ServerConfig::default(), None)?;
+    /// server.listen("127.0.0.1:0")?;
+    ///
+    /// // With no connections yet, a processing pass is a cheap no-op.
+    /// server.process_connections()?;
+    /// # Ok::<(), librtmp2::types::ErrorCode>(())
+    /// ```
     pub fn process_connections(&mut self) -> Result<()> {
         let mut relay_sends = 0usize;
         self.process_connections_impl(None, &mut relay_sends)
@@ -1850,6 +2068,23 @@ impl Server {
     /// Timeout reaping and all other per-tick bookkeeping still run for
     /// every connection regardless of `readable`, since those aren't
     /// contingent on new bytes having arrived.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::collections::HashSet;
+    ///
+    /// use librtmp2::server::Server;
+    /// use librtmp2::types::ServerConfig;
+    ///
+    /// let mut server = Server::from_config(ServerConfig::default(), None)?;
+    /// server.listen("127.0.0.1:0")?;
+    ///
+    /// // Only connections the readiness loop marked readable are serviced.
+    /// let readable = HashSet::new();
+    /// server.process_connections_ready(&readable)?;
+    /// # Ok::<(), librtmp2::types::ErrorCode>(())
+    /// ```
     pub fn process_connections_ready(&mut self, readable: &HashSet<u64>) -> Result<()> {
         let mut relay_sends = 0usize;
         self.process_connections_impl(Some(readable), &mut relay_sends)
