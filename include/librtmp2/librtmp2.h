@@ -689,7 +689,19 @@ typedef enum VideoCodec {
  * every other wire value is surfaced as [`ModexType::Nop`] so callers degrade
  * gracefully instead of rejecting the frame. The discriminants below are an
  * internal Rust representation, not the wire values — use
- * `ertmp::modex::modex_write` to serialize.
+ * [`crate::media::modex::modex_write`] to serialize.
+ *
+ * # Examples
+ *
+ * ```
+ * use librtmp2::types::ModexType;
+ *
+ * // A consumer-side "ignore this extension".
+ * assert_eq!(ModexType::default(), ModexType::Nop);
+ *
+ * // The only extension the v2 spec defines.
+ * assert_eq!(ModexType::TimestampOffsetNano as u8, 0);
+ * ```
  */
 typedef enum ModexType {
   /**
@@ -707,6 +719,16 @@ typedef enum ModexType {
 
 /**
  * Opaque server handle
+ *
+ * # Examples
+ *
+ * ```
+ * use librtmp2::types::Server;
+ *
+ * // A zero-sized marker standing in for the C `lrtmp2_server_t*` type. The real
+ * // state lives behind `librtmp2::server::Server`.
+ * assert_eq!(std::mem::size_of::<Server>(), 0);
+ * ```
  */
 typedef struct lrtmp2_server_t {
   uint8_t _private[0];
@@ -791,6 +813,14 @@ typedef struct lrtmp2_server_config_t {
 
 /**
  * Opaque client handle
+ *
+ * # Examples
+ *
+ * ```
+ * use librtmp2::types::Client;
+ *
+ * assert_eq!(std::mem::size_of::<Client>(), 0);
+ * ```
  */
 typedef struct lrtmp2_client_t {
   uint8_t _private[0];
@@ -798,6 +828,22 @@ typedef struct lrtmp2_client_t {
 
 /**
  * FourCC code for Enhanced RTMP.
+ *
+ * A four-character codec identifier such as `"avc1"` or `"Opus"`, stored
+ * NUL-terminated so it can be handed to C unchanged.
+ *
+ * # Examples
+ *
+ * ```
+ * use librtmp2::types::FourCc;
+ *
+ * let avc = FourCc { cc: *b"avc1\0" };
+ * assert_eq!(&avc.cc[..4], b"avc1");
+ * assert_eq!(avc.cc[4], 0); // NUL terminator
+ *
+ * // The default is an all-zero (unset) code.
+ * assert_eq!(FourCc::default().cc, [0u8; 5]);
+ * ```
  */
 typedef struct FourCc {
   /**
@@ -901,6 +947,14 @@ typedef struct lrtmp2_frame_t {
 
 /**
  * Opaque connection handle
+ *
+ * # Examples
+ *
+ * ```
+ * use librtmp2::types::Conn;
+ *
+ * assert_eq!(std::mem::size_of::<Conn>(), 0);
+ * ```
  */
 typedef struct lrtmp2_conn_t {
   uint8_t _private[0];
@@ -927,6 +981,23 @@ extern "C" {
  * `(*config).tls_enabled != 0`, `tls_cert_file` and `tls_key_file` must each be
  * a pointer to a NUL-terminated C string (valid UTF-8) that stays alive for
  * the duration of this call; see [`server::Server::new`].
+ *
+ * # Examples
+ *
+ * ```
+ * # use librtmp2::types::ServerConfig;
+ * # unsafe {
+ * // A zero-initialised config is the usual C pattern; `max_connections: 0`
+ * // means "use the library default" at this boundary.
+ * let cfg = ServerConfig::default();
+ * let server = librtmp2::lrtmp2_server_create(&cfg);
+ * assert!(!server.is_null());
+ * librtmp2::lrtmp2_server_destroy(server);
+ *
+ * // A null config is rejected rather than dereferenced.
+ * assert!(librtmp2::lrtmp2_server_create(std::ptr::null()).is_null());
+ * # }
+ * ```
  */
 struct lrtmp2_server_t *lrtmp2_server_create(const struct lrtmp2_server_config_t *config);
 
@@ -950,6 +1021,35 @@ struct lrtmp2_server_t *lrtmp2_server_create(const struct lrtmp2_server_config_t
  * has not been destroyed, and it must not be in use by a concurrent
  * `lrtmp2_server_poll` on another thread. When `cb` is non-null, `userdata`
  * must stay valid until the callback is replaced or the server is destroyed.
+ *
+ * # Examples
+ *
+ * ```
+ * use librtmp2::types::ServerConfig;
+ *
+ * unsafe extern "C" fn allow(
+ *     _conn_id: u64,
+ *     _app: *const std::ffi::c_char,
+ *     _stream: *const std::ffi::c_char,
+ *     _userdata: *mut std::ffi::c_void,
+ * ) -> std::ffi::c_int {
+ *     0 // 0 = allow
+ * }
+ *
+ * # unsafe {
+ * let server = librtmp2::lrtmp2_server_create(&ServerConfig::default());
+ * assert_eq!(
+ *     librtmp2::lrtmp2_server_set_publish_auth_cb(server, Some(allow), std::ptr::null_mut()),
+ *     0
+ * );
+ * // Passing a null callback restores the default allow policy.
+ * assert_eq!(
+ *     librtmp2::lrtmp2_server_set_publish_auth_cb(server, None, std::ptr::null_mut()),
+ *     0
+ * );
+ * librtmp2::lrtmp2_server_destroy(server);
+ * # }
+ * ```
  */
 int32_t lrtmp2_server_set_publish_auth_cb(struct lrtmp2_server_t *server,
                                           int (*cb)(uint64_t conn_id,
@@ -971,6 +1071,35 @@ int32_t lrtmp2_server_set_publish_auth_cb(struct lrtmp2_server_t *server,
  * has not been destroyed, and it must not be in use by a concurrent
  * `lrtmp2_server_poll` on another thread. When `cb` is non-null, `userdata`
  * must stay valid until the callback is replaced or the server is destroyed.
+ *
+ * # Examples
+ *
+ * ```
+ * use librtmp2::types::ServerConfig;
+ *
+ * unsafe extern "C" fn allow(
+ *     _conn_id: u64,
+ *     _app: *const std::ffi::c_char,
+ *     _stream: *const std::ffi::c_char,
+ *     _userdata: *mut std::ffi::c_void,
+ * ) -> std::ffi::c_int {
+ *     0
+ * }
+ *
+ * # unsafe {
+ * let server = librtmp2::lrtmp2_server_create(&ServerConfig::default());
+ * assert_eq!(
+ *     librtmp2::lrtmp2_server_set_play_auth_cb(server, Some(allow), std::ptr::null_mut()),
+ *     0
+ * );
+ * // A null server pointer is rejected with a negative value.
+ * assert_eq!(
+ *     librtmp2::lrtmp2_server_set_play_auth_cb(std::ptr::null_mut(), None, std::ptr::null_mut()),
+ *     -1
+ * );
+ * librtmp2::lrtmp2_server_destroy(server);
+ * # }
+ * ```
  */
 int32_t lrtmp2_server_set_play_auth_cb(struct lrtmp2_server_t *server,
                                        int (*cb)(uint64_t conn_id,
@@ -990,6 +1119,19 @@ int32_t lrtmp2_server_set_play_auth_cb(struct lrtmp2_server_t *server,
  * [`lrtmp2_server_create`] that has not already been destroyed. After this
  * call the pointer is dangling and must not be used again — in particular, no
  * connection callback installed on the server may retain it.
+ *
+ * # Examples
+ *
+ * ```
+ * # use librtmp2::types::ServerConfig;
+ * # unsafe {
+ * let server = librtmp2::lrtmp2_server_create(&ServerConfig::default());
+ * librtmp2::lrtmp2_server_destroy(server);
+ *
+ * // Destroying null is a no-op, so a failed create needs no special case.
+ * librtmp2::lrtmp2_server_destroy(std::ptr::null_mut());
+ * # }
+ * ```
  */
 void lrtmp2_server_destroy(struct lrtmp2_server_t *server);
 
@@ -1007,6 +1149,26 @@ void lrtmp2_server_destroy(struct lrtmp2_server_t *server);
  * not been destroyed. `bind_addr` must be null or point to a NUL-terminated C
  * string valid for the duration of the call. The server must not be in use by a
  * concurrent `lrtmp2_server_poll` on another thread.
+ *
+ * # Examples
+ *
+ * ```
+ * use std::ffi::CString;
+ * use librtmp2::types::ServerConfig;
+ *
+ * # unsafe {
+ * let server = librtmp2::lrtmp2_server_create(&ServerConfig::default());
+ * let addr = CString::new("127.0.0.1:0").unwrap();
+ * assert_eq!(librtmp2::lrtmp2_server_listen(server, addr.as_ptr()), 0);
+ *
+ * // A null address is rejected instead of binding 0.0.0.0.
+ * assert_eq!(
+ *     librtmp2::lrtmp2_server_listen(server, std::ptr::null()),
+ *     librtmp2::types::ErrorCode::Internal as i32
+ * );
+ * librtmp2::lrtmp2_server_destroy(server);
+ * # }
+ * ```
  */
 int32_t lrtmp2_server_listen(struct lrtmp2_server_t *server, const char *bind_addr);
 
@@ -1024,6 +1186,23 @@ int32_t lrtmp2_server_listen(struct lrtmp2_server_t *server, const char *bind_ad
  * function may be called on the same server concurrently (including from a
  * callback it fires), and `lrtmp2_server_destroy` must not run until the call
  * returns.
+ *
+ * # Examples
+ *
+ * ```
+ * use std::ffi::CString;
+ * use librtmp2::types::ServerConfig;
+ *
+ * # unsafe {
+ * let server = librtmp2::lrtmp2_server_create(&ServerConfig::default());
+ * let addr = CString::new("127.0.0.1:0").unwrap();
+ * librtmp2::lrtmp2_server_listen(server, addr.as_ptr());
+ *
+ * // Non-blocking tick: returns 0 when nothing happened.
+ * assert_eq!(librtmp2::lrtmp2_server_poll(server, 0), 0);
+ * librtmp2::lrtmp2_server_destroy(server);
+ * # }
+ * ```
  */
 int32_t lrtmp2_server_poll(struct lrtmp2_server_t *server, int32_t timeout_ms);
 
@@ -1038,6 +1217,23 @@ int32_t lrtmp2_server_poll(struct lrtmp2_server_t *server, int32_t timeout_ms);
  * `server` must be null or a live pointer returned by [`lrtmp2_server_create`]
  * that has not been destroyed, and it must not be in use by a concurrent
  * `lrtmp2_server_poll` on another thread.
+ *
+ * # Examples
+ *
+ * ```
+ * # use librtmp2::types::ServerConfig;
+ * # unsafe {
+ * let server = librtmp2::lrtmp2_server_create(&ServerConfig::default());
+ * librtmp2::lrtmp2_server_stop(server);
+ *
+ * // After stopping, polling reports an error rather than blocking.
+ * assert_ne!(librtmp2::lrtmp2_server_poll(server, 0), 0);
+ * librtmp2::lrtmp2_server_destroy(server);
+ *
+ * // Stopping null is a no-op.
+ * librtmp2::lrtmp2_server_stop(std::ptr::null_mut());
+ * # }
+ * ```
  */
 void lrtmp2_server_stop(struct lrtmp2_server_t *server);
 
@@ -1056,6 +1252,18 @@ void lrtmp2_server_stop(struct lrtmp2_server_t *server);
  * duration of the call. When `config.tls_ca_file` is non-null it must point to
  * a NUL-terminated C string (invalid UTF-8 is rejected with a null return). The
  * other pointer fields are not dereferenced by this function.
+ *
+ * # Examples
+ *
+ * ```
+ * # unsafe {
+ * // A null config means "use defaults", i.e. verify rtmps:// against the
+ * // system trust store.
+ * let client = librtmp2::lrtmp2_client_create(std::ptr::null());
+ * assert!(!client.is_null());
+ * librtmp2::lrtmp2_client_destroy(client);
+ * # }
+ * ```
  */
 struct lrtmp2_client_t *lrtmp2_client_create(const struct lrtmp2_server_config_t *config);
 
@@ -1069,6 +1277,18 @@ struct lrtmp2_client_t *lrtmp2_client_create(const struct lrtmp2_server_config_t
  * `c` must be either null or a pointer returned by [`lrtmp2_client_create`]
  * that has not already been destroyed. After this call the pointer is dangling
  * and must not be used again, including from any callback it installed.
+ *
+ * # Examples
+ *
+ * ```
+ * # unsafe {
+ * let client = librtmp2::lrtmp2_client_create(std::ptr::null());
+ * librtmp2::lrtmp2_client_destroy(client);
+ *
+ * // Destroying null is a no-op.
+ * librtmp2::lrtmp2_client_destroy(std::ptr::null_mut());
+ * # }
+ * ```
  */
 void lrtmp2_client_destroy(struct lrtmp2_client_t *c);
 
@@ -1085,6 +1305,27 @@ void lrtmp2_client_destroy(struct lrtmp2_client_t *c);
  * valid for the duration of the call. A non-UTF-8 `url` is treated as an empty
  * URL and fails the connect. The client must not be used concurrently from
  * another thread.
+ *
+ * # Examples
+ *
+ * ```
+ * use std::ffi::CString;
+ *
+ * # unsafe {
+ * let client = librtmp2::lrtmp2_client_create(std::ptr::null());
+ * let url = CString::new("rtmp://127.0.0.1:1/live/cam1").unwrap();
+ *
+ * // Nothing is listening on port 1, so this fails; the point is the call shape.
+ * assert_ne!(librtmp2::lrtmp2_client_connect(client, url.as_ptr()), 0);
+ *
+ * // A null URL is rejected.
+ * assert_eq!(
+ *     librtmp2::lrtmp2_client_connect(client, std::ptr::null()),
+ *     librtmp2::types::ErrorCode::Internal as i32
+ * );
+ * librtmp2::lrtmp2_client_destroy(client);
+ * # }
+ * ```
  */
 int32_t lrtmp2_client_connect(struct lrtmp2_client_t *c, const char *url);
 
@@ -1098,6 +1339,21 @@ int32_t lrtmp2_client_connect(struct lrtmp2_client_t *c, const char *url);
  *
  * `c` must be a live pointer returned by [`lrtmp2_client_create`] that has not
  * been destroyed, and it must not be used concurrently from another thread.
+ *
+ * # Examples
+ *
+ * ```
+ * # unsafe {
+ * let client = librtmp2::lrtmp2_client_create(std::ptr::null());
+ *
+ * // Publishing before connecting is a protocol error, not a crash.
+ * assert_eq!(
+ *     librtmp2::lrtmp2_client_publish(client),
+ *     librtmp2::types::ErrorCode::Protocol as i32
+ * );
+ * librtmp2::lrtmp2_client_destroy(client);
+ * # }
+ * ```
  */
 int32_t lrtmp2_client_publish(struct lrtmp2_client_t *c);
 
@@ -1112,6 +1368,21 @@ int32_t lrtmp2_client_publish(struct lrtmp2_client_t *c);
  *
  * `c` must be a live pointer returned by [`lrtmp2_client_create`] that has not
  * been destroyed, and it must not be used concurrently from another thread.
+ *
+ * # Examples
+ *
+ * ```
+ * # unsafe {
+ * let client = librtmp2::lrtmp2_client_create(std::ptr::null());
+ *
+ * // Playing before connecting is a protocol error.
+ * assert_eq!(
+ *     librtmp2::lrtmp2_client_play(client),
+ *     librtmp2::types::ErrorCode::Protocol as i32
+ * );
+ * librtmp2::lrtmp2_client_destroy(client);
+ * # }
+ * ```
  */
 int32_t lrtmp2_client_play(struct lrtmp2_client_t *c);
 
@@ -1131,6 +1402,37 @@ int32_t lrtmp2_client_play(struct lrtmp2_client_t *c);
  * discriminants are valid and whose `data` points to `size` readable bytes (or
  * is null when `size` is `0`) for the duration of the call. The client must not
  * be used concurrently from another thread.
+ *
+ * # Examples
+ *
+ * ```
+ * use librtmp2::types::{Frame, FrameType};
+ *
+ * # unsafe {
+ * let client = librtmp2::lrtmp2_client_create(std::ptr::null());
+ *
+ * // Sending before the client is Publishing is rejected before the frame is
+ * // ever read, so `frame.data` need not be valid here.
+ * assert_eq!(
+ *     librtmp2::lrtmp2_client_send_frame(client, std::ptr::null()),
+ *     librtmp2::types::ErrorCode::Internal as i32
+ * );
+ *
+ * // A well-formed frame is still refused while disconnected.
+ * let payload = [0x17u8, 0x01];
+ * let frame = Frame {
+ *     frame_type: FrameType::Video,
+ *     size: payload.len() as u32,
+ *     data: payload.as_ptr(),
+ *     ..Frame::default()
+ * };
+ * assert_eq!(
+ *     librtmp2::lrtmp2_client_send_frame(client, &frame),
+ *     librtmp2::types::ErrorCode::Protocol as i32
+ * );
+ * librtmp2::lrtmp2_client_destroy(client);
+ * # }
+ * ```
  */
 int32_t lrtmp2_client_send_frame(struct lrtmp2_client_t *c, const struct lrtmp2_frame_t *frame);
 
@@ -1146,6 +1448,24 @@ int32_t lrtmp2_client_send_frame(struct lrtmp2_client_t *c, const struct lrtmp2_
  * `c` must be a live pointer returned by [`lrtmp2_client_create`] that has not
  * been destroyed, and it must not be used concurrently from another thread or
  * from inside a callback it fires.
+ *
+ * # Examples
+ *
+ * ```
+ * # unsafe {
+ * let client = librtmp2::lrtmp2_client_create(std::ptr::null());
+ *
+ * // Polling a client that never connected reports an error.
+ * assert_ne!(librtmp2::lrtmp2_client_poll(client, 0), 0);
+ *
+ * // A null pointer is rejected.
+ * assert_eq!(
+ *     librtmp2::lrtmp2_client_poll(std::ptr::null_mut(), 0),
+ *     librtmp2::types::ErrorCode::Internal as i32
+ * );
+ * librtmp2::lrtmp2_client_destroy(client);
+ * # }
+ * ```
  */
 int32_t lrtmp2_client_poll(struct lrtmp2_client_t *c, int32_t timeout_ms);
 
@@ -1159,31 +1479,79 @@ int32_t lrtmp2_client_poll(struct lrtmp2_client_t *c, int32_t timeout_ms);
  *
  * The pointer is never dereferenced, so any pointer value — including null — is
  * accepted. It is still marked `unsafe` to keep the C signature stable.
+ *
+ * # Examples
+ *
+ * ```
+ * # unsafe {
+ * // Reserved for ABI compatibility: the pointer is never dereferenced and the
+ * // call always reports "no fd".
+ * assert_eq!(librtmp2::lrtmp2_conn_get_fd(std::ptr::null()), -1);
+ * # }
+ * ```
  */
 int32_t lrtmp2_conn_get_fd(const struct lrtmp2_conn_t *_conn);
 
 /**
  * Check TLS support (FFI-compatible).
+ *
+ * # Examples
+ *
+ * ```
+ * let v = librtmp2::lrtmp2_tls_supported();
+ * assert!(v == 0 || v == 1);
+ * assert_eq!(v == 1, librtmp2::tls_supported());
+ * ```
  */
 int32_t lrtmp2_tls_supported(void);
 
 /**
  * Get version string (FFI-compatible).
+ *
+ * # Examples
+ *
+ * ```
+ * # unsafe {
+ * let p = librtmp2::lrtmp2_version_string();
+ * assert!(!p.is_null());
+ * // NUL-terminated and stable for the life of the process.
+ * let s = std::ffi::CStr::from_ptr(p).to_str().unwrap();
+ * assert!(!s.is_empty());
+ * # }
+ * ```
  */
 const char *lrtmp2_version_string(void);
 
 /**
  * Get major version (FFI-compatible).
+ *
+ * # Examples
+ *
+ * ```
+ * assert_eq!(librtmp2::lrtmp2_version_major(), librtmp2::version_major());
+ * ```
  */
 int32_t lrtmp2_version_major(void);
 
 /**
  * Get minor version (FFI-compatible).
+ *
+ * # Examples
+ *
+ * ```
+ * assert_eq!(librtmp2::lrtmp2_version_minor(), librtmp2::version_minor());
+ * ```
  */
 int32_t lrtmp2_version_minor(void);
 
 /**
  * Get patch version (FFI-compatible).
+ *
+ * # Examples
+ *
+ * ```
+ * assert_eq!(librtmp2::lrtmp2_version_patch(), librtmp2::version_patch());
+ * ```
  */
 int32_t lrtmp2_version_patch(void);
 
@@ -1200,6 +1568,21 @@ int32_t lrtmp2_version_patch(void);
  * The returned pointer is a `'static`, NUL-terminated string owned by the
  * library. It must not be modified or freed, and stays valid for the whole
  * process, so callers may keep it.
+ *
+ * # Examples
+ *
+ * ```
+ * # unsafe {
+ * let p = librtmp2::lrtmp2_error_string(librtmp2::types::ErrorCode::Timeout as i32);
+ * assert!(!p.is_null());
+ * let s = std::ffi::CStr::from_ptr(p).to_str().unwrap();
+ * assert_eq!(s, "Timeout");
+ *
+ * // Out-of-range codes map to the internal error rather than misbehaving.
+ * let p = librtmp2::lrtmp2_error_string(9999);
+ * assert_eq!(std::ffi::CStr::from_ptr(p).to_str().unwrap(), "Internal error");
+ * # }
+ * ```
  */
 const char *lrtmp2_error_string(int32_t code);
 
