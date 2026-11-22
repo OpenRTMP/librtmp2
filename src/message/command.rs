@@ -17,6 +17,31 @@ const MAX_CONNECT_OBJECT_KEYS: usize = 256;
 /* ── Encoder ── */
 
 /// Build a "connect" command.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::buffer::Buffer;
+/// use librtmp2::message::command;
+///
+/// let mut buf = Buffer::new();
+/// command::build_connect(
+///     &mut buf,
+///     "live",                        // app
+///     "rtmp://example.com/live",     // tcUrl
+///     "",                            // pageUrl
+///     "",                            // swfUrl
+///     "FMLE/3.0",                    // flashVer
+///     0,                             // legacy audio codec mask
+///     0,                             // legacy video codec mask
+///     None,                          // no Enhanced RTMP capabilities
+/// )
+/// .unwrap();
+///
+/// let mut name = [0u8; 32];
+/// let n = command::peek_name(&mut Buffer::from_slice(buf.peek()), &mut name).unwrap();
+/// assert_eq!(&name[..n], b"connect");
+/// ```
 pub fn build_connect(
     buf: &mut Buffer,
     app: &str,
@@ -70,6 +95,20 @@ pub fn build_connect(
 }
 
 /// Build a NetConnection `_error` response.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::buffer::Buffer;
+/// use librtmp2::message::command;
+///
+/// let mut buf = Buffer::new();
+/// command::build_error(&mut buf, 1.0, "NetConnection.Connect.Rejected", "denied").unwrap();
+///
+/// let mut name = [0u8; 32];
+/// let n = command::peek_name(&mut Buffer::from_slice(buf.peek()), &mut name).unwrap();
+/// assert_eq!(&name[..n], b"_error");
+/// ```
 pub fn build_error(
     buf: &mut Buffer,
     transaction_id: f64,
@@ -356,6 +395,20 @@ pub const RECONNECT_REQUEST_CODE: &str = "NetConnection.Connect.ReconnectRequest
 /// Build a `NetConnection.Connect.ReconnectRequest` onStatus command.
 /// `tc_url` is omitted when `None`, telling the client to reuse its current
 /// connection URL (per spec).
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::buffer::Buffer;
+/// use librtmp2::message::command;
+///
+/// let mut buf = Buffer::new();
+/// command::build_reconnect_request(&mut buf, Some("rtmp://other/live"), Some("draining")).unwrap();
+///
+/// let mut name = [0u8; 32];
+/// let n = command::peek_name(&mut Buffer::from_slice(buf.peek()), &mut name).unwrap();
+/// assert_eq!(&name[..n], b"onStatus");
+/// ```
 pub fn build_reconnect_request(
     buf: &mut Buffer,
     tc_url: Option<&str>,
@@ -392,6 +445,31 @@ pub struct ReconnectRequest {
 /// code is [`RECONNECT_REQUEST_CODE`], `None` for any other onStatus code
 /// (including other status/error events the caller does not care about).
 /// Returns `Err` only for a malformed command.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::buffer::Buffer;
+/// use librtmp2::message::command;
+///
+/// // A ReconnectRequest is an `onStatus` whose code is
+/// // `NetConnection.Connect.ReconnectRequest`.
+/// let mut wire = Buffer::new();
+/// command::build_reconnect_request(&mut wire, Some("rtmp://other/live"), Some("draining")).unwrap();
+///
+/// let req = command::read_reconnect_request(&mut Buffer::from_slice(wire.peek()))
+///     .unwrap()
+///     .expect("code matches ReconnectRequest");
+/// assert_eq!(req.tc_url.as_deref(), Some("rtmp://other/live"));
+/// assert_eq!(req.description.as_deref(), Some("draining"));
+///
+/// // Any other onStatus code yields None rather than an error.
+/// let mut other = Buffer::new();
+/// command::build_onstatus(&mut other, "status", "NetStream.Publish.Start", "ok").unwrap();
+/// assert!(command::read_reconnect_request(&mut Buffer::from_slice(other.peek()))
+///     .unwrap()
+///     .is_none());
+/// ```
 pub fn read_reconnect_request(buf: &mut Buffer) -> Result<Option<ReconnectRequest>> {
     let mut name = [0u8; 64];
     let name_len = amf0::read_string(buf, &mut name)?;
@@ -440,6 +518,31 @@ pub fn read_reconnect_request(buf: &mut Buffer) -> Result<Option<ReconnectReques
 /* ── Decoder ── */
 
 /// Peek at the command name without consuming it.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::buffer::Buffer;
+/// use librtmp2::message::command;
+///
+/// let mut wire = Buffer::new();
+/// command::build_play(&mut wire, "cam1").unwrap();
+///
+/// let mut peek_buf = Buffer::from_slice(wire.peek());
+/// let mut name = [0u8; 32];
+/// let n = command::peek_name(&mut peek_buf, &mut name).unwrap();
+/// assert_eq!(&name[..n], b"play");
+///
+/// // The read position is restored, so the command can still be decoded.
+/// assert_eq!(peek_buf.available(), wire.available());
+/// let txn = command::read_create_stream(&mut {
+///     let mut b = Buffer::new();
+///     command::build_create_stream(&mut b, 1.0).unwrap();
+///     Buffer::from_slice(b.peek())
+/// })
+/// .unwrap();
+/// assert_eq!(txn, 1.0);
+/// ```
 pub fn peek_name(buf: &mut Buffer, out: &mut [u8]) -> Result<usize> {
     let saved_pos = buf.read_pos();
     let result = amf0::read_string(buf, out);
@@ -560,6 +663,17 @@ fn read_connect_plain_field(
 /// Read a createStream command. `transaction_id` is set as soon as the
 /// transaction id itself has been parsed, so a caller can echo it back when a
 /// later argument turns out to be malformed.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::buffer::Buffer;
+/// use librtmp2::message::command;
+///
+/// let mut wire = Buffer::new();
+/// command::build_create_stream(&mut wire, 4.0).unwrap();
+/// assert_eq!(command::read_create_stream(&mut Buffer::from_slice(wire.peek())).unwrap(), 4.0);
+/// ```
 pub(crate) fn read_create_stream_partial(
     buf: &mut Buffer,
     transaction_id: &mut Option<f64>,
@@ -579,6 +693,22 @@ pub fn read_create_stream(buf: &mut Buffer) -> Result<f64> {
 }
 
 /// Read a publish command.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::buffer::Buffer;
+/// use librtmp2::message::command;
+///
+/// let mut wire = Buffer::new();
+/// command::build_publish(&mut wire, "cam1", "live").unwrap();
+///
+/// let mut name = [0u8; 32];
+/// let mut mode = [0u8; 16];
+/// command::read_publish(&mut Buffer::from_slice(wire.peek()), &mut name, &mut mode).unwrap();
+/// assert_eq!(&name[..4], b"cam1");
+/// assert_eq!(&mode[..4], b"live");
+/// ```
 pub fn read_publish(
     buf: &mut Buffer,
     stream_name: &mut [u8],
@@ -599,6 +729,20 @@ pub fn read_publish(
 }
 
 /// Read a play command.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::buffer::Buffer;
+/// use librtmp2::message::command;
+///
+/// let mut wire = Buffer::new();
+/// command::build_play(&mut wire, "cam1").unwrap();
+///
+/// let mut name = [0u8; 32];
+/// command::read_play(&mut Buffer::from_slice(wire.peek()), &mut name).unwrap();
+/// assert_eq!(&name[..4], b"cam1");
+/// ```
 pub fn read_play(buf: &mut Buffer, stream_name: &mut [u8]) -> Result<()> {
     let mut name = [0u8; 64];
     amf0::read_string(buf, &mut name)?;
@@ -609,6 +753,20 @@ pub fn read_play(buf: &mut Buffer, stream_name: &mut [u8]) -> Result<()> {
 }
 
 /// Read a `releaseStream` command. Returns the target stream name.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::buffer::Buffer;
+/// use librtmp2::message::command;
+///
+/// let mut wire = Buffer::new();
+/// command::build_release_stream(&mut wire, "cam1").unwrap();
+///
+/// let mut name = [0u8; 32];
+/// command::read_release_stream(&mut Buffer::from_slice(wire.peek()), &mut name).unwrap();
+/// assert_eq!(&name[..4], b"cam1");
+/// ```
 pub fn read_release_stream(buf: &mut Buffer, stream_name: &mut [u8]) -> Result<()> {
     let mut name = [0u8; 64];
     amf0::read_string(buf, &mut name)?;
@@ -619,6 +777,18 @@ pub fn read_release_stream(buf: &mut Buffer, stream_name: &mut [u8]) -> Result<(
 }
 
 /// Read a pause command. Returns the pause flag (true = pause, false = unpause).
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::buffer::Buffer;
+/// use librtmp2::message::command;
+///
+/// let mut wire = Buffer::new();
+/// command::build_pause(&mut wire, true).unwrap();
+/// // `true` means pause; `build_pause(.., false)` would resume.
+/// assert!(command::read_pause(&mut Buffer::from_slice(wire.peek())).unwrap());
+/// ```
 pub fn read_pause(buf: &mut Buffer) -> Result<bool> {
     let mut name = [0u8; 64];
     amf0::read_string(buf, &mut name)?;
@@ -628,6 +798,17 @@ pub fn read_pause(buf: &mut Buffer) -> Result<bool> {
 }
 
 /// Read a seek command. Returns the target time in milliseconds.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::buffer::Buffer;
+/// use librtmp2::message::command;
+///
+/// let mut wire = Buffer::new();
+/// command::build_seek(&mut wire, 1500.0).unwrap();
+/// assert_eq!(command::read_seek(&mut Buffer::from_slice(wire.peek())).unwrap(), 1500.0);
+/// ```
 pub fn read_seek(buf: &mut Buffer) -> Result<f64> {
     let mut name = [0u8; 64];
     amf0::read_string(buf, &mut name)?;
@@ -637,6 +818,23 @@ pub fn read_seek(buf: &mut Buffer) -> Result<f64> {
 }
 
 /// Read receiveAudio / receiveVideo: the boolean enable flag.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::buffer::Buffer;
+/// use librtmp2::message::command;
+///
+/// // Four AMF0 values: the command name, a transaction id, a null command object,
+/// // and finally the enable flag.
+/// let mut wire = Buffer::new();
+/// librtmp2::amf::amf0::write_string(&mut wire, "receiveAudio").unwrap();
+/// librtmp2::amf::amf0::write_number(&mut wire, 0.0).unwrap();
+/// librtmp2::amf::amf0::write_null(&mut wire).unwrap();
+/// librtmp2::amf::amf0::write_boolean(&mut wire, false).unwrap();
+///
+/// assert!(!command::read_bool_command(&mut Buffer::from_slice(wire.peek())).unwrap());
+/// ```
 pub fn read_bool_command(buf: &mut Buffer) -> Result<bool> {
     let mut name = [0u8; 64];
     amf0::read_string(buf, &mut name)?;
@@ -647,6 +845,24 @@ pub fn read_bool_command(buf: &mut Buffer) -> Result<bool> {
 
 /// Read a closeStream command. Returns `None` when the peer sends the usual
 /// three-argument form (stream id comes from the RTMP message stream id).
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::buffer::Buffer;
+/// use librtmp2::message::command;
+///
+/// // A closeStream with no trailing stream id is the common form.
+/// let mut wire = Buffer::new();
+/// librtmp2::amf::amf0::write_string(&mut wire, "closeStream").unwrap();
+/// librtmp2::amf::amf0::write_number(&mut wire, 0.0).unwrap();
+/// librtmp2::amf::amf0::write_null(&mut wire).unwrap();
+///
+/// assert_eq!(
+///     command::read_close_stream(&mut Buffer::from_slice(wire.peek())).unwrap(),
+///     None
+/// );
+/// ```
 pub fn read_close_stream(buf: &mut Buffer) -> Result<Option<u32>> {
     let mut name = [0u8; 64];
     amf0::read_string(buf, &mut name)?;
@@ -666,6 +882,20 @@ pub fn read_close_stream(buf: &mut Buffer) -> Result<Option<u32>> {
 }
 
 /// Build a pause command.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::buffer::Buffer;
+/// use librtmp2::message::command;
+///
+/// let mut buf = Buffer::new();
+/// command::build_pause(&mut buf, true).unwrap();
+///
+/// let mut name = [0u8; 32];
+/// let n = command::peek_name(&mut Buffer::from_slice(buf.peek()), &mut name).unwrap();
+/// assert_eq!(&name[..n], b"pause");
+/// ```
 pub fn build_pause(buf: &mut Buffer, pause: bool) -> Result<()> {
     amf0::write_string(buf, "pause")?;
     amf0::write_number(buf, 0.0)?;
@@ -675,6 +905,20 @@ pub fn build_pause(buf: &mut Buffer, pause: bool) -> Result<()> {
 }
 
 /// Build a seek command.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::buffer::Buffer;
+/// use librtmp2::message::command;
+///
+/// let mut buf = Buffer::new();
+/// command::build_seek(&mut buf, 1500.0).unwrap();
+///
+/// let mut name = [0u8; 32];
+/// let n = command::peek_name(&mut Buffer::from_slice(buf.peek()), &mut name).unwrap();
+/// assert_eq!(&name[..n], b"seek");
+/// ```
 pub fn build_seek(buf: &mut Buffer, millis: f64) -> Result<()> {
     amf0::write_string(buf, "seek")?;
     amf0::write_number(buf, 0.0)?;
@@ -684,6 +928,27 @@ pub fn build_seek(buf: &mut Buffer, millis: f64) -> Result<()> {
 }
 
 /// Read a connect _result response.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::buffer::Buffer;
+/// use librtmp2::message::command;
+///
+/// // `_result`, the echoed transaction id, a null command object, then the
+/// // response object (here empty).
+/// let mut wire = Buffer::new();
+/// librtmp2::amf::amf0::write_string(&mut wire, "_result").unwrap();
+/// librtmp2::amf::amf0::write_number(&mut wire, 1.0).unwrap();
+/// librtmp2::amf::amf0::write_null(&mut wire).unwrap();
+/// librtmp2::amf::amf0::write_object_begin(&mut wire).unwrap();
+/// librtmp2::amf::amf0::write_object_end(&mut wire).unwrap();
+///
+/// assert_eq!(
+///     command::read_connect_result(&mut Buffer::from_slice(wire.peek())).unwrap(),
+///     1.0
+/// );
+/// ```
 pub fn read_connect_result(buf: &mut Buffer) -> Result<f64> {
     read_connect_result_with_caps(buf, None)
 }
@@ -778,6 +1043,21 @@ fn parse_connect_result_caps(buf: &mut Buffer, caps: &mut NegotiatedCaps) -> Res
 }
 
 /// Read a createStream _result response.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::buffer::Buffer;
+/// use librtmp2::message::command;
+///
+/// let mut wire = Buffer::new();
+/// command::build_create_stream_result(&mut wire, 4.0, 1.0).unwrap();
+///
+/// let (txn, stream_id) =
+///     command::read_create_stream_result(&mut Buffer::from_slice(wire.peek())).unwrap();
+/// assert_eq!(txn, 4.0);
+/// assert_eq!(stream_id, 1.0);
+/// ```
 pub fn read_create_stream_result(buf: &mut Buffer) -> Result<(f64, f64)> {
     let mut name = [0u8; 64];
     amf0::read_string(buf, &mut name)?;
@@ -796,6 +1076,26 @@ pub fn read_create_stream_result(buf: &mut Buffer) -> Result<(f64, f64)> {
 /// `NetStream.Play.Reset`) before the terminal one -- callers must keep
 /// waiting for further `onStatus` messages on `Ok(false)` rather than
 /// treating it as failure.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::buffer::Buffer;
+/// use librtmp2::message::command;
+///
+/// let mut wire = Buffer::new();
+/// command::build_onstatus(&mut wire, "status", "NetStream.Publish.Start", "ok").unwrap();
+///
+/// assert!(
+///     command::read_onstatus(&mut Buffer::from_slice(wire.peek()), "NetStream.Publish.Start")
+///         .unwrap()
+/// );
+/// // A non-matching status code reports false.
+/// assert!(
+///     !command::read_onstatus(&mut Buffer::from_slice(wire.peek()), "NetStream.Play.Start")
+///         .unwrap()
+/// );
+/// ```
 pub fn read_onstatus(buf: &mut Buffer, expected_code: &str) -> Result<bool> {
     let mut name = [0u8; 64];
     amf0::read_string(buf, &mut name)?;
