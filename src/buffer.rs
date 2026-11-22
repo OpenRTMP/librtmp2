@@ -20,6 +20,20 @@ pub const RECV_BUFFER_KEEP_CAPACITY: usize = 512 * 1024;
 const BUFFER_GROW_FACTOR: usize = 2;
 
 /// A growable byte buffer with read/write cursors.
+
+/// # Examples
+///
+/// ```
+/// use librtmp2::buffer::Buffer;
+///
+/// let mut buf = Buffer::with_capacity(64);
+/// buf.write(b"chunk").unwrap();
+///
+/// // Peeking does not move the read cursor; draining does.
+/// assert_eq!(buf.peek(), b"chunk");
+/// buf.drain(5);
+/// assert_eq!(buf.available(), 0);
+/// ```
 #[derive(Debug)]
 pub struct Buffer {
     data: Vec<u8>,
@@ -60,6 +74,17 @@ impl Buffer {
     }
 
     /// Create a new buffer with a specific initial capacity.
+
+    /// # Examples
+    ///
+    /// ```
+    /// use librtmp2::buffer::Buffer;
+    ///
+    /// // Exact pre-allocation avoids reallocation on the first writes.
+    /// let buf = Buffer::with_capacity(1024);
+    /// assert_eq!(buf.available(), 0);
+    /// assert!(buf.space() >= 1024);
+    /// ```
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
             data: vec![0u8; capacity],
@@ -96,6 +121,20 @@ impl Buffer {
     }
 
     /// Create an unowned view over existing data (for stack/static buffers).
+
+    /// # Examples
+    ///
+    /// ```
+    /// use librtmp2::buffer::Buffer;
+    ///
+    /// let mut raw = [1u8, 2, 3, 4];
+    /// let mut view = Buffer::from_static(&mut raw);
+    ///
+    /// assert_eq!(view.available(), 4);
+    /// let mut out = [0u8; 2];
+    /// view.read(&mut out).unwrap();
+    /// assert_eq!(out, [1, 2]);
+    /// ```
     pub fn from_static(data: &mut [u8]) -> Buffer {
         let len = data.len();
         Buffer {
@@ -107,11 +146,36 @@ impl Buffer {
     }
 
     /// Number of bytes available to read.
+
+    /// # Examples
+    ///
+    /// ```
+    /// use librtmp2::buffer::Buffer;
+    ///
+    /// let mut buf = Buffer::from_slice(&[0xAA, 0xBB]);
+    /// assert_eq!(buf.available(), 2);
+    ///
+    /// let mut one = [0u8; 1];
+    /// buf.read(&mut one).unwrap();
+    /// assert_eq!(buf.available(), 1);
+    /// ```
     pub fn available(&self) -> usize {
         self.size.saturating_sub(self.read_pos)
     }
 
     /// Remaining write space.
+
+    /// # Examples
+    ///
+    /// ```
+    /// use librtmp2::buffer::Buffer;
+    ///
+    /// let mut buf = Buffer::with_capacity(8);
+    /// let before = buf.space();
+    /// buf.write(&[0u8; 4]).unwrap();
+    /// // Four of the reserved bytes are now occupied.
+    /// assert_eq!(buf.space(), before.saturating_sub(4));
+    /// ```
     pub fn space(&self) -> usize {
         self.data.len().saturating_sub(self.size)
     }
@@ -149,6 +213,18 @@ impl Buffer {
     /// Ensure at least `additional` bytes can be written without another
     /// reallocation or compaction, so a multi-part write (e.g. a chunked
     /// RTMP message) either fits entirely or fails before writing anything.
+
+    /// # Examples
+    ///
+    /// ```
+    /// use librtmp2::buffer::Buffer;
+    ///
+    /// let mut buf = Buffer::new();
+    /// buf.reserve(4096).unwrap();
+    /// // One contiguous 4096-byte write cannot fail part-way.
+    /// buf.write(&[0u8; 4096]).unwrap();
+    /// assert_eq!(buf.available(), 4096);
+    /// ```
     pub fn reserve(&mut self, additional: usize) -> Result<()> {
         self.make_room(additional)
     }
@@ -204,11 +280,34 @@ impl Buffer {
     }
 
     /// Total allocated capacity (logical size plus spare write space).
+
+    /// # Examples
+    ///
+    /// ```
+    /// use librtmp2::buffer::Buffer;
+    ///
+    /// let buf = Buffer::with_capacity(128);
+    /// assert!(buf.capacity() >= 128);
+    /// // Nothing written yet, so all of it is spare.
+    /// assert_eq!(buf.available(), 0);
+    /// ```
     pub fn capacity(&self) -> usize {
         self.data.len()
     }
 
     /// Reset the buffer to empty.
+
+    /// # Examples
+    ///
+    /// ```
+    /// use librtmp2::buffer::Buffer;
+    ///
+    /// let mut buf = Buffer::from_slice(&[1, 2, 3]);
+    /// buf.reset();
+    ///
+    /// assert_eq!(buf.available(), 0);
+    /// assert_eq!(buf.read_pos(), 0);
+    /// ```
     pub fn reset(&mut self) {
         self.size = 0;
         self.read_pos = 0;
@@ -221,6 +320,21 @@ impl Buffer {
     /// Shrink an allocation that grew past `keep` bytes once most of it has
     /// been read. Unread bytes move to the front and are kept, so this is safe
     /// to call with a partial chunk still buffered.
+
+    /// # Examples
+    ///
+    /// ```
+    /// use librtmp2::buffer::Buffer;
+    ///
+    /// let mut buf = Buffer::from_slice(&[1, 2, 3, 4]);
+    /// // Read most of it back, then give the capacity back.
+    /// let mut head = [0u8; 3];
+    /// buf.read(&mut head).unwrap();
+    /// buf.release_excess(8);
+    ///
+    /// // The unread byte survives the shrink.
+    /// assert_eq!(buf.peek(), &[4]);
+    /// ```
     pub fn release_excess(&mut self, keep: usize) {
         if !self.owned || self.data.len() <= keep || self.available() > keep / 2 {
             return;
@@ -291,31 +405,105 @@ impl Buffer {
     }
 
     /// Get the raw data slice.
+
+    /// # Examples
+    ///
+    /// ```
+    /// use librtmp2::buffer::Buffer;
+    ///
+    /// let buf = Buffer::from_slice(&[9, 8, 7]);
+    /// // `as_slice` is the whole backing store, unlike `peek` (unread window).
+    /// assert!(buf.as_slice().len() >= 3);
+    /// assert_eq!(buf.peek(), &[9, 8, 7]);
+    /// ```
     pub fn as_slice(&self) -> &[u8] {
         &self.data[..self.size]
     }
 
     /// Get the raw data slice mutably.
+
+    /// # Examples
+    ///
+    /// ```
+    /// use librtmp2::buffer::Buffer;
+    ///
+    /// let mut buf = Buffer::with_capacity(4);
+    /// buf.write(&[0; 4]).unwrap();
+    /// // Patch a byte in place, then re-read it through `peek`.
+    /// buf.as_mut_slice()[0] = 0xAB;
+    /// assert_eq!(buf.peek()[0], 0xAB);
+    /// ```
     pub fn as_mut_slice(&mut self) -> &mut [u8] {
         &mut self.data[..self.size]
     }
 
     /// Get the write position for direct writing.
+
+    /// # Examples
+    ///
+    /// ```
+    /// use librtmp2::buffer::Buffer;
+    ///
+    /// let mut buf = Buffer::from_slice(&[1, 2]);
+    /// // For a buffer that is only appended to, the write cursor sits at the end.
+    /// assert!(buf.write_pos() >= 2);
+    /// assert_eq!(buf.read_pos(), 0);
+    /// ```
     pub fn write_pos(&self) -> usize {
         self.size
     }
 
     /// Set the size after direct writing.
+
+    /// # Examples
+    ///
+    /// ```
+    /// use librtmp2::buffer::Buffer;
+    ///
+    /// let mut buf = Buffer::new();
+    /// // Committing zero bytes leaves the buffer empty.
+    /// let end = buf.write_pos();
+    /// buf.set_size(end);
+    /// assert_eq!(buf.available(), 0);
+    /// ```
     pub fn set_size(&mut self, size: usize) {
         self.size = size.min(self.data.len());
     }
 
     /// Get the current read position.
+
+    /// # Examples
+    ///
+    /// ```
+    /// use librtmp2::buffer::Buffer;
+    ///
+    /// let mut buf = Buffer::from_slice(&[1, 2, 3]);
+    /// assert_eq!(buf.read_pos(), 0);
+    ///
+    /// let mut one = [0u8; 1];
+    /// buf.read(&mut one).unwrap();
+    /// assert_eq!(buf.read_pos(), 1);
+    /// ```
     pub fn read_pos(&self) -> usize {
         self.read_pos
     }
 
     /// Set the read position.
+
+    /// # Examples
+    ///
+    /// ```
+    /// use librtmp2::buffer::Buffer;
+    ///
+    /// let mut buf = Buffer::from_slice(&[1, 2, 3]);
+    /// let mut two = [0u8; 2];
+    /// buf.read(&mut two).unwrap();
+    ///
+    /// // Rewind to re-read from the start.
+    /// buf.set_read_pos(0);
+    /// assert_eq!(buf.available(), 3);
+    /// assert_eq!(buf.peek(), &[1, 2, 3]);
+    /// ```
     pub fn set_read_pos(&mut self, pos: usize) {
         self.read_pos = pos.min(self.size);
     }

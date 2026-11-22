@@ -91,6 +91,26 @@ pub fn build_error(
 }
 
 /// Build a "releaseStream" command.
+///
+/// Asks the server to release a stream name another connection is publishing,
+/// so a reconnecting encoder can reclaim it. The server only honours it when an
+/// `on_release_stream_cb` authorises the eviction; see
+/// [`crate::session::conn::Conn`].
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::buffer::Buffer;
+/// use librtmp2::message::command;
+///
+/// let mut buf = Buffer::new();
+/// command::build_release_stream(&mut buf, "cam1").unwrap();
+///
+/// // The command name is the first AMF0 value on the wire.
+/// let mut name = [0u8; 32];
+/// let n = command::peek_name(&mut Buffer::from_slice(buf.peek()), &mut name).unwrap();
+/// assert_eq!(&name[..n], b"releaseStream");
+/// ```
 pub fn build_release_stream(buf: &mut Buffer, stream_name: &str) -> Result<()> {
     amf0::write_string(buf, "releaseStream")?;
     amf0::write_number(buf, 2.0)?;
@@ -100,6 +120,23 @@ pub fn build_release_stream(buf: &mut Buffer, stream_name: &str) -> Result<()> {
 }
 
 /// Build a "createStream" command.
+///
+/// `transaction_id` is echoed by the server in its `_result`; the client picks a
+/// fresh non-zero id per request so replies can be matched.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::buffer::Buffer;
+/// use librtmp2::message::command;
+///
+/// let mut buf = Buffer::new();
+/// command::build_create_stream(&mut buf, 4.0).unwrap();
+///
+/// let mut name = [0u8; 32];
+/// let n = command::peek_name(&mut Buffer::from_slice(buf.peek()), &mut name).unwrap();
+/// assert_eq!(&name[..n], b"createStream");
+/// ```
 pub fn build_create_stream(buf: &mut Buffer, transaction_id: f64) -> Result<()> {
     amf0::write_string(buf, "createStream")?;
     amf0::write_number(buf, transaction_id)?;
@@ -108,6 +145,24 @@ pub fn build_create_stream(buf: &mut Buffer, transaction_id: f64) -> Result<()> 
 }
 
 /// Build a "publish" command.
+///
+/// `publish_type` is the RTMP publish mode (`"live"`, `"record"`, or
+/// `"append"`). An empty string omits the field, which some servers accept and
+/// others reject; prefer `"live"`.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::buffer::Buffer;
+/// use librtmp2::message::command;
+///
+/// let mut buf = Buffer::new();
+/// command::build_publish(&mut buf, "cam1", "live").unwrap();
+///
+/// let mut name = [0u8; 32];
+/// let n = command::peek_name(&mut Buffer::from_slice(buf.peek()), &mut name).unwrap();
+/// assert_eq!(&name[..n], b"publish");
+/// ```
 pub fn build_publish(buf: &mut Buffer, stream_name: &str, publish_type: &str) -> Result<()> {
     amf0::write_string(buf, "publish")?;
     amf0::write_number(buf, 0.0)?;
@@ -120,6 +175,23 @@ pub fn build_publish(buf: &mut Buffer, stream_name: &str, publish_type: &str) ->
 }
 
 /// Build a "play" command.
+///
+/// Starts playback of `stream_name`; a `-` prefix means "play the recorded
+/// stream" and a `?` suffix carries query parameters, both per RTMP convention.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::buffer::Buffer;
+/// use librtmp2::message::command;
+///
+/// let mut buf = Buffer::new();
+/// command::build_play(&mut buf, "cam1").unwrap();
+///
+/// let mut name = [0u8; 32];
+/// let n = command::peek_name(&mut Buffer::from_slice(buf.peek()), &mut name).unwrap();
+/// assert_eq!(&name[..n], b"play");
+/// ```
 pub fn build_play(buf: &mut Buffer, stream_name: &str) -> Result<()> {
     amf0::write_string(buf, "play")?;
     amf0::write_number(buf, 0.0)?;
@@ -129,6 +201,24 @@ pub fn build_play(buf: &mut Buffer, stream_name: &str) -> Result<()> {
 }
 
 /// Build a "FCPublish" command.
+///
+/// Part of the Flash Media Server publish handshake. The built-in server treats
+/// it as a no-op, but clients send it for interoperability with FMS-style
+/// servers.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::buffer::Buffer;
+/// use librtmp2::message::command;
+///
+/// let mut buf = Buffer::new();
+/// command::build_fcpublish(&mut buf, "cam1").unwrap();
+///
+/// let mut name = [0u8; 32];
+/// let n = command::peek_name(&mut Buffer::from_slice(buf.peek()), &mut name).unwrap();
+/// assert_eq!(&name[..n], b"FCPublish");
+/// ```
 pub fn build_fcpublish(buf: &mut Buffer, stream_name: &str) -> Result<()> {
     amf0::write_string(buf, "FCPublish")?;
     amf0::write_number(buf, 0.0)?;
@@ -138,6 +228,23 @@ pub fn build_fcpublish(buf: &mut Buffer, stream_name: &str) -> Result<()> {
 }
 
 /// Build a "FCUnpublish" command.
+///
+/// The counterpart to [`build_fcpublish`]; tells an FMS-style server that the
+/// client has finished publishing this stream name.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::buffer::Buffer;
+/// use librtmp2::message::command;
+///
+/// let mut buf = Buffer::new();
+/// command::build_fcunpublish(&mut buf, "cam1").unwrap();
+///
+/// let mut name = [0u8; 32];
+/// let n = command::peek_name(&mut Buffer::from_slice(buf.peek()), &mut name).unwrap();
+/// assert_eq!(&name[..n], b"FCUnpublish");
+/// ```
 pub fn build_fcunpublish(buf: &mut Buffer, stream_name: &str) -> Result<()> {
     amf0::write_string(buf, "FCUnpublish")?;
     amf0::write_number(buf, 0.0)?;
@@ -147,6 +254,23 @@ pub fn build_fcunpublish(buf: &mut Buffer, stream_name: &str) -> Result<()> {
 }
 
 /// Build a "deleteStream" command.
+///
+/// Frees a stream slot on the server; the server answers by sending
+/// `StreamEOF` to any player and clearing the publish route.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::buffer::Buffer;
+/// use librtmp2::message::command;
+///
+/// let mut buf = Buffer::new();
+/// command::build_deletestream(&mut buf, 5.0, 1).unwrap();
+///
+/// let mut name = [0u8; 32];
+/// let n = command::peek_name(&mut Buffer::from_slice(buf.peek()), &mut name).unwrap();
+/// assert_eq!(&name[..n], b"deleteStream");
+/// ```
 pub fn build_deletestream(buf: &mut Buffer, transaction_id: f64, stream_id: u32) -> Result<()> {
     amf0::write_string(buf, "deleteStream")?;
     amf0::write_number(buf, transaction_id)?;
@@ -156,6 +280,22 @@ pub fn build_deletestream(buf: &mut Buffer, transaction_id: f64, stream_id: u32)
 }
 
 /// Build a createStream _result response.
+///
+/// `stream_id` is the slot the client may then publish or play on.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::buffer::Buffer;
+/// use librtmp2::message::command;
+///
+/// let mut buf = Buffer::new();
+/// command::build_create_stream_result(&mut buf, 4.0, 1.0).unwrap();
+///
+/// let mut name = [0u8; 32];
+/// let n = command::peek_name(&mut Buffer::from_slice(buf.peek()), &mut name).unwrap();
+/// assert_eq!(&name[..n], b"_result");
+/// ```
 pub fn build_create_stream_result(
     buf: &mut Buffer,
     transaction_id: f64,
@@ -169,6 +309,29 @@ pub fn build_create_stream_result(
 }
 
 /// Build an onStatus command.
+///
+/// `level` is `"status"`, `"warning"` or `"error"`; `code` a `NetStream.*`
+/// status code; `description` is free-form. The receiver matches on `code` via
+/// [`read_onstatus`].
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::buffer::Buffer;
+/// use librtmp2::message::command;
+///
+/// let mut buf = Buffer::new();
+/// command::build_onstatus(
+///     &mut buf,
+///     "status",
+///     "NetStream.Publish.Start",
+///     "publishing",
+/// ).unwrap();
+///
+/// let mut name = [0u8; 32];
+/// let n = command::peek_name(&mut Buffer::from_slice(buf.peek()), &mut name).unwrap();
+/// assert_eq!(&name[..n], b"onStatus");
+/// ```
 pub fn build_onstatus(buf: &mut Buffer, level: &str, code: &str, description: &str) -> Result<()> {
     amf0::write_string(buf, "onStatus")?;
     amf0::write_number(buf, 0.0)?;

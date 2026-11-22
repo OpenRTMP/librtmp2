@@ -321,6 +321,22 @@ impl Default for VideoCodec {
 /* ── FourCC for E-RTMP ── */
 
 /// FourCC code for Enhanced RTMP.
+///
+/// A four-character codec identifier such as `"avc1"` or `"Opus"`, stored
+/// NUL-terminated so it can be handed to C unchanged.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::types::FourCc;
+///
+/// let avc = FourCc { cc: *b"avc1\0" };
+/// assert_eq!(&avc.cc[..4], b"avc1");
+/// assert_eq!(avc.cc[4], 0); // NUL terminator
+///
+/// // The default is an all-zero (unset) code.
+/// assert_eq!(FourCc::default().cc, [0u8; 5]);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[repr(C)]
 pub struct FourCc {
@@ -422,6 +438,20 @@ impl Default for Frame {
 /// Pairs an [`ErrorCode`] with a fixed-size, NUL-padded human-readable message.
 /// The buffer is `[u8; 256]` to keep the struct `#[repr(C)]`-compatible with
 /// `include/librtmp2/types.h`.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::types::{ErrorCode, ErrorInfo};
+///
+/// let info = ErrorInfo {
+///     code: ErrorCode::Timeout,
+///     ..ErrorInfo::default()
+/// };
+/// assert_eq!(info.code, ErrorCode::Timeout);
+/// // The message buffer is zero-initialised, so it is a valid empty C string.
+/// assert_eq!(info.message[0], 0);
+/// ```
 #[derive(Debug, Clone)]
 #[repr(C)]
 pub struct ErrorInfo {
@@ -443,6 +473,27 @@ impl Default for ErrorInfo {
 /* ── Server config ── */
 
 /// Per-connection and server-wide memory limits (Rust-only; not part of the C ABI).
+///
+/// Caps how much memory a hostile or misbehaving peer can make the library
+/// retain. The defaults are tuned for a busy relay; lower them first when
+/// embedding somewhere with a tight memory budget.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::types::ResourceLimits;
+///
+/// let defaults = ResourceLimits::default();
+/// assert_eq!(defaults.max_reassembly_bytes, 32 * 1024 * 1024);
+///
+/// // Tighten the per-connection reassembly ceiling; keep the rest.
+/// let tight = ResourceLimits {
+///     max_reassembly_bytes: 1024 * 1024,
+///     ..ResourceLimits::default()
+/// };
+/// assert_eq!(tight.max_reassembly_bytes, 1024 * 1024);
+/// assert_eq!(tight.max_stream_cache_bytes, defaults.max_stream_cache_bytes);
+/// ```
 #[derive(Debug, Clone, Copy)]
 pub struct ResourceLimits {
     /// Total bytes retained across all stream-cache entries.
@@ -687,6 +738,22 @@ pub const ERTMP_AUDIO_SAMPLE_16BIT: u8 = 1;
 ///
 /// The result of decoding the first bytes of an RTMP video payload, legacy FLV
 /// or Enhanced RTMP alike. See [`crate::ertmp::exvideo`] for the parser.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::ertmp::exvideo::exvideo_parse;
+/// use librtmp2::types::VideoHeader;
+///
+/// // 0x17 = legacy AVC keyframe (bit 7 clear), then AVCPacketType 0x01.
+/// let mut hdr = VideoHeader::default();
+/// exvideo_parse(&[0x17, 0x01, 0x00, 0x00, 0x00], &mut hdr).unwrap();
+///
+/// assert_eq!(hdr.is_ex_header, 0); // legacy tag
+/// assert_eq!(hdr.frame_type, 1);   // keyframe
+/// // `header_size` is where the codec payload begins.
+/// assert!(hdr.header_size >= 5);
+/// ```
 #[derive(Debug, Clone, Default)]
 #[repr(C)]
 pub struct VideoHeader {
@@ -711,6 +778,21 @@ pub struct VideoHeader {
 ///
 /// The result of decoding the first bytes of an RTMP audio payload, legacy FLV
 /// or Enhanced RTMP alike. See [`crate::ertmp::exaudio`] for the parser.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::ertmp::exaudio::exaudio_parse;
+/// use librtmp2::types::{AudioCodec, AudioHeader};
+///
+/// let mut hdr = AudioHeader::default();
+/// // Legacy AAC sequence header: 0xAF = AAC, 44 kHz, 16-bit, stereo.
+/// exaudio_parse(&[0xAF, 0x00], &mut hdr).unwrap();
+///
+/// assert_eq!(hdr.is_ex_header, 0);
+/// assert_eq!(hdr.audio_codec, AudioCodec::Aac);
+/// assert_eq!(hdr.aac_packet_type, 0); // sequence header
+/// ```
 #[derive(Debug, Clone, Default)]
 #[repr(C)]
 pub struct AudioHeader {
@@ -745,6 +827,23 @@ pub struct AudioHeader {
 /// Mirrors the Enhanced RTMP `colorInfo` object: the three CTA-861 style
 /// enumerations that describe an HDR signal. Values are passed through
 /// unchanged from the wire.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::types::HdrInfo;
+///
+/// // An HDR10 (PQ / BT.2020) signal.
+/// let hdr = HdrInfo {
+///     color_primaries: 9,  // BT.2020
+///     transfer_chars: 16,  // PQ
+///     matrix_coeffs: 9,    // BT.2020 non-constant
+/// };
+/// assert_eq!(hdr.transfer_chars, 16);
+///
+/// // The default is all-zero, i.e. "unspecified".
+/// assert_eq!(HdrInfo::default().color_primaries, 0);
+/// ```
 #[derive(Debug, Clone, Copy, Default)]
 #[repr(C)]
 pub struct HdrInfo {
@@ -801,6 +900,22 @@ pub const FOUR_CC_INFO_ALL: u32 =
     FOUR_CC_INFO_CAN_DECODE | FOUR_CC_INFO_CAN_ENCODE | FOUR_CC_INFO_CAN_FORWARD;
 
 /// Video FourCC info map. Each entry's mask uses `FOUR_CC_INFO_*`.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::types::{
+///     FourCc, VideoFourCcInfoMap, FOUR_CC_INFO_CAN_DECODE, FOUR_CC_INFO_CAN_ENCODE,
+/// };
+///
+/// let mut map = VideoFourCcInfoMap::default();
+/// map.entries[0] = FourCc { cc: *b"avc1\0" };
+/// map.masks[0] = FOUR_CC_INFO_CAN_DECODE | FOUR_CC_INFO_CAN_ENCODE;
+/// map.count = 1;
+///
+/// assert_eq!(map.count, 1);
+/// assert_eq!(map.masks[0], 0x03);
+/// ```
 #[derive(Debug, Clone, Default)]
 #[repr(C)]
 pub struct VideoFourCcInfoMap {
@@ -816,6 +931,20 @@ pub struct VideoFourCcInfoMap {
 ///
 /// Sent as the `capsEx` numbers in the E-RTMP v2 `connect` command; carries the
 /// protocol version and the legacy 32-bit codec bitmasks.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::types::CapsExit;
+///
+/// let caps = CapsExit {
+///     version: 2,
+///     video_codec_32: 0x0000_0080, // legacy H.264 bit
+///     audio_codec_32: 0x0000_0400, // legacy AAC bit
+/// };
+/// assert_eq!(caps.version, 2);
+/// assert_ne!(caps.video_codec_32, 0);
+/// ```
 #[derive(Debug, Clone, Default)]
 #[repr(C)]
 pub struct CapsExit {
@@ -833,6 +962,19 @@ pub struct CapsExit {
 ///
 /// E-RTMP v2 `reconnect` value advertised in `connect`. See
 /// [`crate::ertmp::reconnect`] for the wire codec.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::types::Reconnect;
+///
+/// // Ask the server to replay buffered data on reconnect, up to 64 KiB.
+/// let rc = Reconnect { replay: 1, limit: 64 * 1024 };
+/// assert_eq!(rc.replay, 1);
+///
+/// // The default disables replay.
+/// assert_eq!(Reconnect::default().replay, 0);
+/// ```
 #[derive(Debug, Clone, Copy, Default)]
 #[repr(C)]
 pub struct Reconnect {
@@ -870,6 +1012,20 @@ impl Default for MultitrackType {
 ///
 /// Describes one track in a multitrack container: its type and a UTF-8/ASCII
 /// name such as `"mono"` or `"camera2"`.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::types::{Multitrack, MultitrackType};
+///
+/// let mut track = Multitrack::default();
+/// track.track_type = MultitrackType::Video;
+/// track.track_name[..6].copy_from_slice(b"camera");
+/// track.track_name[6] = b'2';
+///
+/// assert_eq!(track.track_type, MultitrackType::Video);
+/// assert_eq!(&track.track_name[..7], b"camera2");
+/// ```
 #[derive(Debug, Clone)]
 #[repr(C)]
 pub struct Multitrack {
@@ -897,7 +1053,19 @@ impl Default for Multitrack {
 /// every other wire value is surfaced as [`ModexType::Nop`] so callers degrade
 /// gracefully instead of rejecting the frame. The discriminants below are an
 /// internal Rust representation, not the wire values — use
-/// `ertmp::modex::modex_write` to serialize.
+/// [`crate::media::modex::modex_write`] to serialize.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::types::ModexType;
+///
+/// // A consumer-side "ignore this extension".
+/// assert_eq!(ModexType::default(), ModexType::Nop);
+///
+/// // The only extension the v2 spec defines.
+/// assert_eq!(ModexType::TimestampOffsetNano as u8, 0);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
 pub enum ModexType {
@@ -931,6 +1099,22 @@ impl ModexType {
 /// A wrapper is `sizeMinusOne` + `modExData` + one option byte holding
 /// `modExType:UB[4] | nextPacketType:UB[4]`; see
 /// [`crate::media::modex`].
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::types::{Modex, ModexType};
+///
+/// // A 1 ms nanosecond offset followed by a coded frame (packet type 1).
+/// let modex = Modex {
+///     modex_type: ModexType::TimestampOffsetNano,
+///     offset: 1_000_000,
+///     next_packet_type: 1,
+/// };
+/// assert_eq!(modex.modex_type, ModexType::TimestampOffsetNano);
+/// // Only the low 24 bits reach the wire.
+/// assert_eq!(modex.offset & 0xFF_FFFF, 1_000_000);
+/// ```
 #[derive(Debug, Clone, Copy, Default)]
 #[repr(C)]
 pub struct Modex {
@@ -951,6 +1135,22 @@ pub struct Modex {
 ///
 /// A borrowed view of a parsed FLV audio tag. [`AudioTag::data`] points into the
 /// parser's input buffer and is only valid while that buffer lives.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::flv::audio_tag;
+/// use librtmp2::types::{AudioCodec, AudioTag};
+///
+/// let payload = [0xAF, 0x01, 0x21, 0x10]; // AAC, raw frame
+/// let mut tag = AudioTag::default();
+/// audio_tag::parse(&payload, &mut tag).unwrap();
+///
+/// assert_eq!(tag.codec, AudioCodec::Aac);
+/// assert_eq!(tag.aac_packet_type, 1);
+/// // `data`/`size` cover the whole payload passed in.
+/// assert_eq!(tag.size, payload.len());
+/// ```
 #[derive(Debug, Clone)]
 #[repr(C)]
 pub struct AudioTag {
@@ -988,6 +1188,23 @@ impl Default for AudioTag {
 ///
 /// A borrowed view of a parsed FLV video tag. [`VideoTag::data`] points into the
 /// parser's input buffer and is only valid while that buffer lives.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::flv::video_tag;
+/// use librtmp2::types::{VideoCodec, VideoTag};
+///
+/// // AVC keyframe: 0x17 = keyframe + AVC, 0x01 = NALU, cts = 0.
+/// let payload = [0x17, 0x01, 0x00, 0x00, 0x00, 0xAA, 0xBB];
+/// let mut tag = VideoTag::default();
+/// video_tag::parse(&payload, &mut tag).unwrap();
+///
+/// assert_eq!(tag.codec, VideoCodec::H264);
+/// assert_eq!(tag.frame_type, 1);
+/// assert_eq!(tag.avc_packet_type, 1);
+/// assert_eq!(tag.composition_time, 0);
+/// ```
 #[derive(Debug, Clone)]
 #[repr(C)]
 pub struct VideoTag {
@@ -1023,6 +1240,23 @@ impl Default for VideoTag {
 /// A borrowed view of a parsed FLV script (metadata) tag. [`ScriptTag::data`]
 /// points into the parser's input buffer and is only valid while that buffer
 /// lives.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::flv::script_tag;
+/// use librtmp2::types::ScriptTag;
+///
+/// // AMF0 string "onMetaData" then an empty object.
+/// let mut payload = vec![0x02, 0x00, 0x0A];
+/// payload.extend_from_slice(b"onMetaData");
+/// payload.extend_from_slice(&[0x03, 0x00, 0x00, 0x09]);
+///
+/// let mut tag = ScriptTag::default();
+/// script_tag::parse(&payload, &mut tag).unwrap();
+/// assert_eq!(&tag.name[..10], b"onMetaData");
+/// assert!(tag.size > 0);
+/// ```
 #[derive(Debug, Clone)]
 #[repr(C)]
 pub struct ScriptTag {
