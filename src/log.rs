@@ -137,6 +137,14 @@ pub fn log(level: LogLevel, file: &str, line: u32, args: std::fmt::Arguments<'_>
 
 /// Log at debug level.
 #[macro_export]
+///
+/// # Examples
+///
+/// ```
+/// // Verbose diagnostics, filtered out unless the level is `Debug`.
+/// librtmp2::log::set_level(librtmp2::log::LogLevel::Debug);
+/// librtmp2::log_debug!("chunk {} of {}", 1, 4);
+/// ```
 macro_rules! log_debug {
     ($($arg:tt)*) => {
         $crate::log::log($crate::log::LogLevel::Debug, file!(), line!(), format_args!($($arg)*))
@@ -145,6 +153,13 @@ macro_rules! log_debug {
 
 /// Log at info level.
 #[macro_export]
+///
+/// # Examples
+///
+/// ```
+/// // Connection-lifecycle messages.
+/// librtmp2::log_info!("accepted connection from {}", "127.0.0.1");
+/// ```
 macro_rules! log_info {
     ($($arg:tt)*) => {
         $crate::log::log($crate::log::LogLevel::Info, file!(), line!(), format_args!($($arg)*))
@@ -153,6 +168,13 @@ macro_rules! log_info {
 
 /// Log at warn level.
 #[macro_export]
+///
+/// # Examples
+///
+/// ```
+/// // Recoverable problems that do not stop the connection.
+/// librtmp2::log_warn!("peer announced chunk size {}; clamped", 1);
+/// ```
 macro_rules! log_warn {
     ($($arg:tt)*) => {
         $crate::log::log($crate::log::LogLevel::Warn, file!(), line!(), format_args!($($arg)*))
@@ -161,6 +183,13 @@ macro_rules! log_warn {
 
 /// Log at error level.
 #[macro_export]
+///
+/// # Examples
+///
+/// ```
+/// // Errors that fail a connection or operation.
+/// librtmp2::log_error!("handshake failed: {}", "bad version byte");
+/// ```
 macro_rules! log_error {
     ($($arg:tt)*) => {
         $crate::log::log($crate::log::LogLevel::Error, file!(), line!(), format_args!($($arg)*))

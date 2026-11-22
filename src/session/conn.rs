@@ -163,6 +163,26 @@ const MAX_AGGREGATE_SUBTAGS: usize = 4096;
 /// Constructed by publishers (via the session media path), by
 /// [`Conn::inject_relay_frame`], or by [`crate::server::Server::inject_relay_frame`].
 /// Integrators that drain export buffers receive clones of these frames.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::session::conn::RelayFrame;
+/// use librtmp2::types::FrameType;
+///
+/// let frame = RelayFrame {
+///     frame_type: FrameType::Audio,
+///     timestamp: 0,
+///     payload: vec![0xAF, 0x01],
+///     cache_payload: None,
+///     app: "live".to_string(),
+///     stream_name: "cam1".to_string(),
+///     publisher_conn_id: 1,
+/// };
+///
+/// assert_eq!(frame.frame_type, FrameType::Audio);
+/// assert_eq!(frame.timestamp, 0);
+/// ```
 #[derive(Clone)]
 pub struct RelayFrame {
     /// Audio, video, script (`onMetaData`), or metadata classification.
@@ -254,6 +274,29 @@ impl RelayFrame {
     /// Codec-neutral congestion hint for this frame (see
     /// [`crate::DeliveryHint`]). `route_has_video` is whether the frame's
     /// stream carries video.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use librtmp2::session::conn::RelayFrame;
+    /// use librtmp2::types::FrameType;
+    ///
+    /// let frame = RelayFrame {
+    ///     frame_type: FrameType::Video,
+    ///     timestamp: 0,
+    ///     // A legacy AVC keyframe (0x17) is a resync point.
+    ///     payload: vec![0x17, 0x01, 0x00, 0x00, 0x00],
+    ///     cache_payload: None,
+    ///     app: "live".to_string(),
+    ///     stream_name: "cam1".to_string(),
+    ///     publisher_conn_id: 1,
+    /// };
+    ///
+    /// assert_eq!(
+    ///     frame.delivery_hint(true),
+    ///     librtmp2::media::DeliveryHint::ResyncPoint
+    /// );
+    /// ```
     pub fn delivery_hint(&self, route_has_video: bool) -> crate::DeliveryHint {
         crate::DeliveryHint::classify(self.frame_type, self.cache_payload(), route_has_video)
     }
@@ -744,6 +787,16 @@ impl Conn {
     /// grace window (`session_setup_started` is reset on every such
     /// transition -- see `FCUnpublish`/`deleteStream`/`closeStream` in
     /// `handle_command`).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use librtmp2::session::conn::Conn;
+    ///
+    /// let conn = Conn::new();
+    /// // A freshly accepted connection is still inside its setup grace window.
+    /// assert!(!conn.session_setup_timed_out());
+    /// ```
     pub fn session_setup_timed_out(&self) -> bool {
         // A connection waiting on `on_publish_auth_cb`/`on_play_auth_cb` is
         // governed exclusively by `reap_timed_out_pending_auth`'s longer
@@ -853,6 +906,19 @@ impl Conn {
     }
 
     /// Key used to route relayed media between publishers and players.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use librtmp2::session::conn::Conn;
+    ///
+    /// let mut conn = Conn::new();
+    /// conn.app = "live".to_string();
+    /// conn.relay_key = "cam1".to_string();
+    ///
+    /// // A pinned relay key wins over the app/stream fallback.
+    /// assert_eq!(conn.relay_route_key(), "cam1");
+    /// ```
     pub fn relay_route_key(&self) -> String {
         self.relay_route_key_str().to_string()
     }
@@ -860,6 +926,18 @@ impl Conn {
     /// Borrowing form of [`relay_route_key`](Self::relay_route_key) for
     /// comparisons on the relay fanout path, which runs once per player
     /// connection for every relayed frame â€” avoid the allocation there.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use librtmp2::session::conn::Conn;
+    ///
+    /// let mut conn = Conn::new();
+    /// conn.relay_key = "cam1".to_string();
+    ///
+    /// // The borrowed form avoids an allocation on the relay fan-out path.
+    /// assert_eq!(conn.relay_route_key_str(), "cam1");
+    /// ```
     pub fn relay_route_key_str(&self) -> &str {
         if !self.relay_key.is_empty() {
             return &self.relay_key;
@@ -2042,6 +2120,19 @@ impl Conn {
     ///
     /// Hosts that drive the state machine themselves call this instead of
     /// [`Conn::process`]; doing so starts a fresh per-batch sub-track budget.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use librtmp2::session::conn::Conn;
+    ///
+    /// let mut conn = Conn::new();
+    /// // The handshake has not produced any messages yet, so the pass does nothing.
+    /// let mut budget = 64usize;
+    /// // Nothing is buffered yet, so no message budget is consumed.
+    /// conn.read_messages(&mut budget);
+    /// assert_eq!(budget, 64);
+    /// ```
     pub fn read_messages(&mut self, messages_budget: &mut usize) -> i32 {
         // `recv` re-arms the per-batch track budget, but this public entry
         // point can also be driven directly by an embedding host (and is the
@@ -2269,6 +2360,24 @@ impl Conn {
 
     /// Send an AMF3 Shared Object message (RTMP message type `0x10`) on this
     /// connection.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use librtmp2::message::shared_object::SharedObjectMessage;
+    /// use librtmp2::session::conn::Conn;
+    ///
+    /// let mut conn = Conn::new();
+    /// let msg = SharedObjectMessage {
+    ///     name: "chat".to_string(),
+    ///     version: 0,
+    ///     flags: 0,
+    ///     events: Vec::new(),
+    /// };
+    ///
+    /// conn.send_shared_object(&msg).unwrap();
+    /// assert!(conn.send_buffer.available() > 0);
+    /// ```
     pub fn send_shared_object(&mut self, so: &SharedObjectMessage) -> Result<()> {
         let mut amf_buf = Buffer::with_capacity(256);
         shared_object::write(so, &mut amf_buf)?;
@@ -2521,6 +2630,19 @@ impl Conn {
     }
 
     /// Apply a chunk size to outbound writes and inbound reassembly.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use librtmp2::session::conn::Conn;
+    ///
+    /// let mut conn = Conn::new();
+    /// conn.apply_chunk_size(4096);
+    ///
+    /// // Applies to the announced size, the active outbound size and every stream.
+    /// assert_eq!(conn.chunk_size, 4096);
+    /// assert_eq!(conn.chunk_reg.default_chunk_size, 4096);
+    /// ```
     pub fn apply_chunk_size(&mut self, chunk_size: u32) {
         self.chunk_size = chunk_size;
         self.active_chunk_size = chunk_size;
@@ -2938,6 +3060,18 @@ impl Conn {
     /// it does *not* lift the seal the reap set. The reap is terminal for the
     /// connection (the built-in server tears it down), so the sealed slot is
     /// never reopened for a request made after the reap.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use librtmp2::session::conn::Conn;
+    ///
+    /// let mut conn = Conn::new();
+    /// // No publish request is pending, so the completion cannot match one. The
+    /// // library reports a protocol error rather than authorizing some later request.
+    /// let _ = conn.complete_publish_authorization(1, true);
+    /// assert!(!conn.has_pending_publish_authorization());
+    /// ```
     pub fn complete_publish_authorization(&mut self, request_id: u64, allow: bool) -> Result<()> {
         // A completion that does not match the request currently waiting is
         // either a duplicate or a decision for a request this connection
@@ -2984,6 +3118,16 @@ impl Conn {
     /// Resolve a `play` request left `Pending` by `on_play_auth_cb`. See
     /// [`Self::complete_publish_authorization`] for no-op semantics, including
     /// that a completion for a reaped request leaves `play_auth_sealed` set.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use librtmp2::session::conn::Conn;
+    ///
+    /// let mut conn = Conn::new();
+    /// assert!(!conn.has_pending_play_authorization());
+    /// let _ = conn.complete_play_authorization(1, true);
+    /// ```
     pub fn complete_play_authorization(&mut self, request_id: u64, allow: bool) -> Result<()> {
         if !self
             .pending_play_auth
@@ -3074,6 +3218,18 @@ impl Conn {
     /// id remembered but not its slot: the withdrawn request was already
     /// answered with a terminal denial, so the stale completion resolves
     /// nothing and the role stays free for a new request.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use librtmp2::session::conn::Conn;
+    ///
+    /// let conn = Conn::new();
+    /// // Nothing is pending on a fresh connection.
+    /// assert!(!conn.has_pending_authorization());
+    /// assert!(!conn.has_pending_publish_authorization());
+    /// assert!(!conn.has_pending_play_authorization());
+    /// ```
     pub fn has_pending_authorization(&self) -> bool {
         self.pending_publish_auth.is_some() || self.pending_play_auth.is_some()
     }
@@ -3082,6 +3238,22 @@ impl Conn {
     /// `complete_publish_authorization`. Media/route gates on the publish role
     /// use this instead of [`Self::has_pending_authorization`] so a pending
     /// `play` decision cannot stop an authorized publisher's relay.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use librtmp2::session::conn::Conn;
+    ///
+    /// let mut conn = Conn::new();
+    /// assert!(!conn.has_pending_publish_authorization());
+    ///
+    /// // Installing a three-state callback does not itself create a pending request;
+    /// // only an incoming `publish` command can.
+    /// conn.on_publish_auth_cb = Some(|_, _, _| {
+    ///     librtmp2::types::AuthorizationResult::Allow
+    /// });
+    /// assert!(!conn.has_pending_publish_authorization());
+    /// ```
     pub fn has_pending_publish_authorization(&self) -> bool {
         self.pending_publish_auth.is_some()
     }
@@ -3149,8 +3321,26 @@ impl Conn {
     ///
     /// # Errors
     ///
-    /// Returns an error when the payload is not a decodable AMF0 command; a
-    /// merely unknown command name is not an error.
+    /// A payload whose command name cannot even be read is **ignored**
+    /// (returns `Ok`) rather than rejected, and so is a well-formed but unknown
+    /// command name: a peer sending an extension command must not break the
+    /// session. Errors come from a known command with malformed arguments.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use librtmp2::session::conn::Conn;
+    ///
+    /// let mut conn = Conn::new();
+    ///
+    /// // A payload with no readable command name is ignored, not an error.
+    /// conn.handle_command(&[0xFF, 0xFF]).unwrap();
+    ///
+    /// // A well-formed but unknown command name is ignored.
+    /// let mut buf = librtmp2::buffer::Buffer::new();
+    /// librtmp2::amf::amf0::write_string(&mut buf, "onSomethingElse").unwrap();
+    /// conn.handle_command(buf.peek()).unwrap();
+    /// ```
     pub fn handle_command(&mut self, payload: &[u8]) -> Result<()> {
         let mut buf = Buffer::from_slice(payload);
         let mut name_buf = [0u8; 64];
@@ -3663,6 +3853,19 @@ impl Conn {
     /// # Errors
     ///
     /// Propagates encoding and buffer-growth failures.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use librtmp2::session::conn::Conn;
+    ///
+    /// let mut conn = Conn::new();
+    /// // `None` means "no Enhanced RTMP capabilities negotiated".
+    /// conn.send_connect_response(1.0, None).unwrap();
+    ///
+    /// // Emits WindowAckSize, SetPeerBandwidth, SetChunkSize and the `_result`.
+    /// assert!(conn.send_buffer.available() > 0);
+    /// ```
     pub fn send_connect_response(
         &mut self,
         transaction_id: f64,
@@ -3720,6 +3923,17 @@ impl Conn {
     /// # Errors
     ///
     /// Propagates encoding and buffer-growth failures.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use librtmp2::session::conn::Conn;
+    ///
+    /// let mut conn = Conn::new();
+    /// conn.send_command_error(1.0, "NetConnection.Call.Failed", "unsupported")
+    ///     .unwrap();
+    /// assert!(conn.send_buffer.available() > 0);
+    /// ```
     pub fn send_command_error(
         &mut self,
         transaction_id: f64,
@@ -3743,6 +3957,16 @@ impl Conn {
     /// # Errors
     ///
     /// Propagates encoding and buffer-growth failures.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use librtmp2::session::conn::Conn;
+    ///
+    /// let mut conn = Conn::new();
+    /// conn.send_create_stream_response(4.0, 1).unwrap();
+    /// assert!(conn.send_buffer.available() > 0);
+    /// ```
     pub fn send_create_stream_response(
         &mut self,
         transaction_id: f64,
@@ -3763,6 +3987,19 @@ impl Conn {
     /// # Errors
     ///
     /// Propagates encoding and buffer-growth failures.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use librtmp2::session::conn::Conn;
+    ///
+    /// let mut conn = Conn::new();
+    /// conn.send_onstatus(1, "status", "NetStream.Publish.Start", "publishing")
+    ///     .unwrap();
+    ///
+    /// // The reply is staged in the send buffer, ready for `flush`.
+    /// assert!(conn.send_buffer.available() > 0);
+    /// ```
     pub fn send_onstatus(
         &mut self,
         stream_id: u32,
@@ -3835,6 +4072,18 @@ impl Conn {
     /// expected to keep streaming through the next media boundary, then
     /// establish a new connection and disconnect from this one -- this call
     /// only sends the request, it does not close the connection itself.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use librtmp2::session::conn::Conn;
+    ///
+    /// let mut conn = Conn::new();
+    /// // `None` means "reuse your current URL"; `Some(url)` redirects.
+    /// conn.send_reconnect_request(None, Some("draining")).unwrap();
+    ///
+    /// assert!(conn.send_buffer.available() > 0);
+    /// ```
     pub fn send_reconnect_request(
         &mut self,
         tc_url: Option<&str>,
@@ -3909,6 +4158,20 @@ impl Conn {
     }
 
     /// Drop the transport and clear the embedder-visible fd copy.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use librtmp2::net::INVALID_SOCKET;
+    /// use librtmp2::session::conn::Conn;
+    ///
+    /// let mut conn = Conn::new();
+    /// conn.disconnect_transport();
+    ///
+    /// // After teardown there is no transport and the fd copy is invalid.
+    /// assert!(conn.transport.is_none());
+    /// assert_eq!(conn.get_fd(), INVALID_SOCKET);
+    /// ```
     pub fn disconnect_transport(&mut self) {
         self.transport = None;
         self.client_fd = crate::net::INVALID_SOCKET;
@@ -3976,6 +4239,17 @@ impl Conn {
     }
 
     /// Send an AMF0 data message (e.g. onMetaData) on the current stream.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use librtmp2::session::conn::Conn;
+    ///
+    /// let mut conn = Conn::new();
+    /// // An AMF0 data message body, e.g. a script tag payload.
+    /// conn.send_data_message(0, &[0x02, 0x00, 0x0A]).unwrap();
+    /// assert!(conn.send_buffer.available() > 0);
+    /// ```
     pub fn send_data_message(&mut self, timestamp: u32, payload: &[u8]) -> Result<()> {
         self.send_frame(FrameType::Script, timestamp, payload)
     }

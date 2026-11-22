@@ -91,16 +91,130 @@ const MAX_AGGREGATE_SUBTAGS: usize = 4096;
 /// ```
 pub trait Connection {
     /// Callback for every parsed audio/video frame, or `None` to drop frames.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use librtmp2::message::message::{Connection, Stream};
+    /// # use librtmp2::types::{Frame, Result};
+    /// # struct D;
+    /// # impl Connection for D {
+    /// #     fn get_frame_callback(&self) -> Option<fn(&Frame)> { None }
+    /// #     fn get_current_stream(&self) -> Option<&dyn Stream> { None }
+    /// #     fn handle_command(&mut self, _p: &[u8]) -> Result<()> { Ok(()) }
+    /// #     fn set_window_ack_size(&mut self, _s: u32) {}
+    /// #     fn reset_chunk_stream(&mut self, _c: u32) {}
+    /// #     fn set_all_chunk_size(&mut self, _c: u32) {}
+    /// # }
+    /// // Returning `None` drops every frame instead of delivering it.
+    /// assert!(D.get_frame_callback().is_none());
+    /// ```
     fn get_frame_callback(&self) -> Option<fn(&Frame)>;
     /// The stream a `publish`/`play` command applies to, if any.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use librtmp2::message::message::{Connection, Stream};
+    /// # use librtmp2::types::{Frame, Result};
+    /// # struct D;
+    /// # impl Connection for D {
+    /// #     fn get_frame_callback(&self) -> Option<fn(&Frame)> { None }
+    /// #     fn get_current_stream(&self) -> Option<&dyn Stream> { None }
+    /// #     fn handle_command(&mut self, _p: &[u8]) -> Result<()> { Ok(()) }
+    /// #     fn set_window_ack_size(&mut self, _s: u32) {}
+    /// #     fn reset_chunk_stream(&mut self, _c: u32) {}
+    /// #     fn set_all_chunk_size(&mut self, _c: u32) {}
+    /// # }
+    /// // No stream selected yet, so publish/play commands have no target.
+    /// assert!(D.get_current_stream().is_none());
+    /// ```
     fn get_current_stream(&self) -> Option<&dyn Stream>;
     /// Handle an AMF0 command payload (`connect`, `publish`, `play`, ...).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use librtmp2::message::message::{Connection, Stream};
+    /// # use librtmp2::types::{Frame, Result};
+    /// # struct D;
+    /// # impl Connection for D {
+    /// #     fn get_frame_callback(&self) -> Option<fn(&Frame)> { None }
+    /// #     fn get_current_stream(&self) -> Option<&dyn Stream> { None }
+    /// #     fn handle_command(&mut self, _p: &[u8]) -> Result<()> { Ok(()) }
+    /// #     fn set_window_ack_size(&mut self, _s: u32) {}
+    /// #     fn reset_chunk_stream(&mut self, _c: u32) {}
+    /// #     fn set_all_chunk_size(&mut self, _c: u32) {}
+    /// # }
+    /// let mut conn = D;
+    /// // The dispatcher hands over the whole AMF0 command body; decoding it is the
+    /// // implementor's job.
+    /// conn.handle_command(b"payload").unwrap();
+    /// ```
     fn handle_command(&mut self, payload: &[u8]) -> Result<()>;
     /// Record the peer's `WindowAckSize` (0 disables acknowledgements).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use librtmp2::message::message::{Connection, Stream};
+    /// # use librtmp2::types::{Frame, Result};
+    /// # struct D;
+    /// # impl Connection for D {
+    /// #     fn get_frame_callback(&self) -> Option<fn(&Frame)> { None }
+    /// #     fn get_current_stream(&self) -> Option<&dyn Stream> { None }
+    /// #     fn handle_command(&mut self, _p: &[u8]) -> Result<()> { Ok(()) }
+    /// #     fn set_window_ack_size(&mut self, _s: u32) {}
+    /// #     fn reset_chunk_stream(&mut self, _c: u32) {}
+    /// #     fn set_all_chunk_size(&mut self, _c: u32) {}
+    /// # }
+    /// let mut conn = D;
+    /// // `0` disables acknowledgements entirely.
+    /// conn.set_window_ack_size(0);
+    /// conn.set_window_ack_size(2_500_000);
+    /// ```
     fn set_window_ack_size(&mut self, size: u32);
     /// Drop any partially reassembled message on chunk stream `csid`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use librtmp2::message::message::{Connection, Stream};
+    /// # use librtmp2::types::{Frame, Result};
+    /// # struct D;
+    /// # impl Connection for D {
+    /// #     fn get_frame_callback(&self) -> Option<fn(&Frame)> { None }
+    /// #     fn get_current_stream(&self) -> Option<&dyn Stream> { None }
+    /// #     fn handle_command(&mut self, _p: &[u8]) -> Result<()> { Ok(()) }
+    /// #     fn set_window_ack_size(&mut self, _s: u32) {}
+    /// #     fn reset_chunk_stream(&mut self, _c: u32) {}
+    /// #     fn set_all_chunk_size(&mut self, _c: u32) {}
+    /// # }
+    /// let mut conn = D;
+    /// // Called when the peer sends an AbortMessage for this chunk stream.
+    /// conn.reset_chunk_stream(4);
+    /// ```
     fn reset_chunk_stream(&mut self, csid: u32);
     /// Apply a `SetChunkSize` to every chunk stream on this connection.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use librtmp2::message::message::{Connection, Stream};
+    /// # use librtmp2::types::{Frame, Result};
+    /// # struct D;
+    /// # impl Connection for D {
+    /// #     fn get_frame_callback(&self) -> Option<fn(&Frame)> { None }
+    /// #     fn get_current_stream(&self) -> Option<&dyn Stream> { None }
+    /// #     fn handle_command(&mut self, _p: &[u8]) -> Result<()> { Ok(()) }
+    /// #     fn set_window_ack_size(&mut self, _s: u32) {}
+    /// #     fn reset_chunk_stream(&mut self, _c: u32) {}
+    /// #     fn set_all_chunk_size(&mut self, _c: u32) {}
+    /// # }
+    /// let mut conn = D;
+    /// // Mirrors a received SetChunkSize onto every chunk stream.
+    /// conn.set_all_chunk_size(4096);
+    /// ```
     fn set_all_chunk_size(&mut self, chunk_size: u32);
 }
 
@@ -128,6 +242,23 @@ pub trait Connection {
 /// ```
 pub trait Stream {
     /// `true` while this stream is publishing.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use librtmp2::message::message::Stream;
+    /// # struct Publishing;
+    /// # impl Stream for Publishing {
+    /// #     fn is_publishing(&self) -> bool { true }
+    /// # }
+    /// # struct Playing;
+    /// # impl Stream for Playing {
+    /// #     fn is_publishing(&self) -> bool { false }
+    /// # }
+    /// // The dispatcher uses this to decide whether inbound media is a publish.
+    /// assert!(Publishing.is_publishing());
+    /// assert!(!Playing.is_publishing());
+    /// ```
     fn is_publishing(&self) -> bool;
 }
 

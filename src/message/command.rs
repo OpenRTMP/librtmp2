@@ -719,6 +719,22 @@ pub(crate) fn read_create_stream_partial(
 }
 
 /// Read a createStream command.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::buffer::Buffer;
+/// use librtmp2::message::command;
+///
+/// let mut wire = Buffer::new();
+/// command::build_create_stream(&mut wire, 4.0).unwrap();
+///
+/// // Returns the transaction id the client chose.
+/// assert_eq!(
+///     command::read_create_stream(&mut Buffer::from_slice(wire.peek())).unwrap(),
+///     4.0
+/// );
+/// ```
 pub fn read_create_stream(buf: &mut Buffer) -> Result<f64> {
     let mut transaction_id = None;
     read_create_stream_partial(buf, &mut transaction_id)?;
@@ -987,6 +1003,34 @@ pub fn read_connect_result(buf: &mut Buffer) -> Result<f64> {
 }
 
 /// Read a connect `_result` and optionally capture negotiated E-RTMP caps.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::buffer::Buffer;
+/// use librtmp2::message::command;
+/// use librtmp2::types::NegotiatedCaps;
+///
+/// // `_result`, the echoed transaction id, a null command object, then the
+/// // response object.
+/// let mut wire = Buffer::new();
+/// librtmp2::amf::amf0::write_string(&mut wire, "_result").unwrap();
+/// librtmp2::amf::amf0::write_number(&mut wire, 1.0).unwrap();
+/// librtmp2::amf::amf0::write_null(&mut wire).unwrap();
+/// librtmp2::amf::amf0::write_object_begin(&mut wire).unwrap();
+/// librtmp2::amf::amf0::write_object_end(&mut wire).unwrap();
+///
+/// let mut caps = NegotiatedCaps::default();
+/// let txn = command::read_connect_result_with_caps(
+///     &mut Buffer::from_slice(wire.peek()),
+///     Some(&mut caps),
+/// )
+/// .unwrap();
+///
+/// assert_eq!(txn, 1.0);
+/// // No capability fields were present, so nothing was negotiated.
+/// assert!(!caps.has_caps_ex);
+/// ```
 pub fn read_connect_result_with_caps(
     buf: &mut Buffer,
     mut caps: Option<&mut NegotiatedCaps>,
