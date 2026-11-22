@@ -134,6 +134,16 @@ for the ingest side or
 [`client::Client`](https://docs.rs/librtmp2/latest/librtmp2/client/struct.Client.html)
 for the outbound side.
 
+Documentation coverage is tracked locally with the same metric docs.rs reports
+(§ Coverage on the crate page). Run it yourself:
+
+```bash
+scripts/doc-coverage.sh                      # all features
+scripts/doc-coverage.sh --no-default-features
+```
+
+The script fails on any undocumented public item, so it doubles as a CI gate.
+
 ### Constructing a server (Rust)
 
 Use the safe constructor — TLS material is given as filesystem paths, so no

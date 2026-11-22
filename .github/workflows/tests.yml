@@ -63,6 +63,11 @@ jobs:
         RUSTFLAGS="-D missing_docs" cargo check --locked --lib --all-features
         RUSTFLAGS="-D missing_docs" cargo check --locked --lib --no-default-features
 
+    - name: Docs (coverage matches the docs.rs metric, no undocumented items)
+      run: |
+        scripts/doc-coverage.sh --all-features
+        scripts/doc-coverage.sh --no-default-features
+
     - name: Doc tests (examples must compile and pass)
       run: |
         cargo test --locked --doc --all-features
