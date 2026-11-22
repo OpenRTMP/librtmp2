@@ -228,6 +228,26 @@ pub fn write_long_string_bytes(buf: &mut Buffer, data: &[u8]) -> Result<()> {
 }
 
 /// Write the beginning of an AMF0 object.
+///
+/// Must be followed by zero or more [`write_object_key`]/value pairs and then
+/// [`write_object_end`]. An object missing its end marker makes the whole
+/// message undecodable, so the three calls always travel together.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::amf::amf0;
+/// use librtmp2::buffer::Buffer;
+///
+/// // {"app": "live"}
+/// let mut buf = Buffer::new();
+/// amf0::write_object_begin(&mut buf).unwrap();
+/// amf0::write_object_key(&mut buf, "app").unwrap();
+/// amf0::write_string(&mut buf, "live").unwrap();
+/// amf0::write_object_end(&mut buf).unwrap();
+///
+/// assert_eq!(buf.peek()[0], 0x03); // Object marker
+/// ```
 pub fn write_object_begin(buf: &mut Buffer) -> Result<()> {
     buf.write(&[Amf0Type::Object as u8])
         .map_err(|_| ErrorCode::Internal)?;
@@ -235,6 +255,22 @@ pub fn write_object_begin(buf: &mut Buffer) -> Result<()> {
 }
 
 /// Write the end of an AMF0 object (0x00 0x00 0x09).
+///
+/// Closes an object opened with [`write_object_begin`]; the three-byte sequence
+/// is an empty key followed by the `ObjectEnd` marker.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::amf::amf0;
+/// use librtmp2::buffer::Buffer;
+///
+/// let mut buf = Buffer::new();
+/// amf0::write_object_begin(&mut buf).unwrap();
+/// amf0::write_object_end(&mut buf).unwrap();
+/// // Object marker followed by the end sentinel.
+/// assert_eq!(buf.peek(), &[0x03, 0x00, 0x00, 0x09]);
+/// ```
 pub fn write_object_end(buf: &mut Buffer) -> Result<()> {
     buf.write(&[0x00, 0x00, 0x09])
         .map_err(|_| ErrorCode::Internal)?;
@@ -254,6 +290,29 @@ pub fn write_object_key(buf: &mut Buffer, key: &str) -> Result<()> {
 }
 
 /// Write the beginning of an AMF0 ECMA array (4-byte count).
+///
+/// `count` announces the number of key/value pairs; the decoder still relies on
+/// the object-end marker to stop, so the count is advisory. Close with
+/// [`write_object_end`].
+///
+/// # Errors
+///
+/// Returns [`ErrorCode::Internal`] when the buffer cannot grow.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::amf::amf0;
+/// use librtmp2::buffer::Buffer;
+///
+/// let mut buf = Buffer::new();
+/// amf0::write_ecma_array_begin(&mut buf, 1).unwrap();
+/// amf0::write_object_key(&mut buf, "duration").unwrap();
+/// amf0::write_number(&mut buf, 0.0).unwrap();
+/// amf0::write_object_end(&mut buf).unwrap();
+///
+/// assert_eq!(buf.peek()[0], 0x08); // ECMA array marker
+/// ```
 pub fn write_ecma_array_begin(buf: &mut Buffer, count: u32) -> Result<()> {
     buf.write(&[Amf0Type::EcmaArray as u8])
         .map_err(|_| ErrorCode::Internal)?;
@@ -311,17 +370,83 @@ pub fn read_type(buf: &mut Buffer) -> Result<Amf0Type> {
 }
 
 /// Read an AMF0 number (without type marker).
+///
+/// Consumes eight bytes of IEEE-754 big-endian data. The marker is *not* read;
+/// call [`read_type`] first when decoding a self-describing stream, or use
+/// [`read_number`]'s counterpart directly after a known marker.
+///
+/// # Errors
+///
+/// Returns [`ErrorCode::Io`] when fewer than eight bytes are available.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::amf::amf0;
+/// use librtmp2::buffer::Buffer;
+///
+/// // Encode then decode, skipping the marker by hand.
+/// let mut buf = Buffer::new();
+/// amf0::write_number(&mut buf, 1.5).unwrap();
+/// let mut reader = Buffer::from_slice(&buf.peek()[1..]);
+/// assert_eq!(amf0::read_number(&mut reader).unwrap(), 1.5);
+/// ```
 pub fn read_number(buf: &mut Buffer) -> Result<f64> {
     read_double(buf)
 }
 
 /// Read an AMF0 boolean.
+///
+/// Consumes one byte (non-zero means `true`). Like [`read_number`], the type
+/// marker is not consumed.
+///
+/// # Errors
+///
+/// Returns [`ErrorCode::Io`] when no byte is available.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::amf::amf0;
+/// use librtmp2::buffer::Buffer;
+///
+/// let mut buf = Buffer::new();
+/// amf0::write_boolean(&mut buf, true).unwrap();
+/// // Skip the 0x01 marker, then read the value byte.
+/// let mut reader = Buffer::from_slice(&buf.peek()[1..]);
+/// assert!(amf0::read_boolean(&mut reader).unwrap());
+/// ```
 pub fn read_boolean(buf: &mut Buffer) -> Result<bool> {
     let b = read_u8(buf)?;
     Ok(b != 0)
 }
 
 /// Read an AMF0 string into a byte buffer.
+///
+/// Consumes the marker, the 16-bit length and the UTF-8 bytes, writing them to
+/// `out` plus a trailing NUL, and returns the string length without the NUL.
+/// Prefer [`read_string_alloc`] when the length is not known in advance.
+///
+/// # Errors
+///
+/// Returns [`ErrorCode::Amf`] when the marker is not `0x02`, the string does not
+/// fit in `out` (one byte is reserved for the NUL), or the bytes are not read.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::amf::amf0;
+/// use librtmp2::buffer::Buffer;
+///
+/// let mut buf = Buffer::new();
+/// amf0::write_string(&mut buf, "live").unwrap();
+///
+/// let mut out = [0u8; 16];
+/// let n = amf0::read_string(&mut buf, &mut out).unwrap();
+/// assert_eq!(n, 4);
+/// assert_eq!(&out[..n], b"live");
+/// assert_eq!(out[n], 0); // NUL-terminated for C interop
+/// ```
 pub fn read_string(buf: &mut Buffer, out: &mut [u8]) -> Result<usize> {
     let ty = read_u8(buf)?;
     if ty != Amf0Type::String as u8 {
@@ -339,6 +464,25 @@ pub fn read_string(buf: &mut Buffer, out: &mut [u8]) -> Result<usize> {
 /// Read an AMF0 string with the wire length limit (u16) and return it as a
 /// freshly allocated `String`. Used where a fixed-size staging buffer would
 /// otherwise impose a smaller, unrelated cap than the writer accepts.
+///
+/// Unlike [`read_string`], the result is not NUL-terminated and any length up to
+/// `u16::MAX` is accepted.
+///
+/// # Errors
+///
+/// Returns [`ErrorCode::Amf`] when the marker is not `0x02` or the bytes are not
+/// valid UTF-8, and [`ErrorCode::Io`] when the data is truncated.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::amf::amf0;
+/// use librtmp2::buffer::Buffer;
+///
+/// let mut buf = Buffer::new();
+/// amf0::write_string(&mut buf, "onMetaData").unwrap();
+/// assert_eq!(amf0::read_string_alloc(&mut buf).unwrap(), "onMetaData");
+/// ```
 pub fn read_string_alloc(buf: &mut Buffer) -> Result<String> {
     let ty = read_u8(buf)?;
     if ty != Amf0Type::String as u8 {
@@ -386,6 +530,29 @@ pub fn read_object_key(buf: &mut Buffer, out: &mut [u8]) -> Result<usize> {
 }
 
 /// Check if the next 3 bytes are the object end marker (0x00 0x00 0x09).
+///
+/// Non-consuming: the caller still has to consume the marker (e.g. by reading
+/// it into a scratch slice) once this returns `true`. Returns `false` when fewer
+/// than three bytes are buffered.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::amf::amf0;
+/// use librtmp2::buffer::Buffer;
+///
+/// // After an object's last value, the end marker is pending.
+/// let mut buf = Buffer::new();
+/// amf0::write_object_begin(&mut buf).unwrap();
+/// amf0::write_object_end(&mut buf).unwrap();
+///
+/// let mut reader = Buffer::from_slice(&buf.peek()[1..]);
+/// assert!(amf0::is_object_end(&mut reader));
+///
+/// // A key follows here, so this is not the end.
+/// let mut with_key = Buffer::from_slice(&[0x00, 0x03, b'a']);
+/// assert!(!amf0::is_object_end(&mut with_key));
+/// ```
 pub fn is_object_end(buf: &mut Buffer) -> bool {
     let peek = buf.peek();
     if peek.len() < 3 {

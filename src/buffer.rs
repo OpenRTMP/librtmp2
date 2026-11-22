@@ -39,6 +39,17 @@ impl Default for Buffer {
 
 impl Buffer {
     /// Create a new buffer with default initial capacity.
+    ///
+    /// The buffer starts empty but pre-allocates [`BUFFER_INITIAL_SIZE`] bytes so
+    /// the first writes do not reallocate.
+    ///
+    /// ```
+    /// use librtmp2::buffer::Buffer;
+    ///
+    /// let buf = Buffer::new();
+    /// assert_eq!(buf.available(), 0);
+    /// assert!(buf.space() >= 1);
+    /// ```
     pub fn new() -> Self {
         Self {
             data: vec![0u8; BUFFER_INITIAL_SIZE],
@@ -59,6 +70,22 @@ impl Buffer {
     }
 
     /// Create an "unowned" buffer wrapping external data.
+    ///
+    /// The bytes are copied, and the buffer starts with its read cursor at the
+    /// beginning, so the whole slice is immediately readable.
+    ///
+    /// ```
+    /// use librtmp2::buffer::Buffer;
+    ///
+    /// let mut buf = Buffer::from_slice(&[0xAA, 0xBB, 0xCC]);
+    /// assert_eq!(buf.available(), 3);
+    /// assert_eq!(buf.peek(), &[0xAA, 0xBB, 0xCC]);
+    ///
+    /// let mut first = [0u8; 2];
+    /// assert_eq!(buf.read(&mut first).unwrap(), 2);
+    /// assert_eq!(first, [0xAA, 0xBB]);
+    /// assert_eq!(buf.available(), 1);
+    /// ```
     pub fn from_slice(data: &[u8]) -> Self {
         Self {
             data: data.to_vec(),
@@ -90,6 +117,23 @@ impl Buffer {
     }
 
     /// Write data to the buffer.
+    ///
+    /// Appends at the write cursor, growing the backing allocation if needed.
+    /// Data already readable (before the read cursor) is untouched.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorCode::Internal`] when the buffer cannot grow.
+    ///
+    /// ```
+    /// use librtmp2::buffer::Buffer;
+    ///
+    /// let mut buf = Buffer::new();
+    /// buf.write(&[1, 2, 3]).unwrap();
+    /// // An empty write is a no-op.
+    /// assert_eq!(buf.write(&[]).unwrap(), 0);
+    /// assert_eq!(buf.peek(), &[1, 2, 3]);
+    /// ```
     pub fn write(&mut self, data: &[u8]) -> Result<usize> {
         if data.is_empty() {
             return Ok(0);
@@ -110,6 +154,28 @@ impl Buffer {
     }
 
     /// Read data from the buffer.
+    ///
+    /// Advances the read cursor by `out.len()` on success. All-or-nothing: if
+    /// fewer bytes are available than `out` needs, the cursor does not move.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorCode::Io`] when fewer than `out.len()` bytes are available.
+    ///
+    /// ```
+    /// use librtmp2::buffer::Buffer;
+    ///
+    /// let mut buf = Buffer::from_slice(&[1, 2]);
+    ///
+    /// // Asking for more than is available fails without consuming anything.
+    /// let mut too_big = [0u8; 3];
+    /// assert!(buf.read(&mut too_big).is_err());
+    /// assert_eq!(buf.available(), 2);
+    ///
+    /// let mut ok = [0u8; 2];
+    /// assert_eq!(buf.read(&mut ok).unwrap(), 2);
+    /// assert_eq!(buf.available(), 0);
+    /// ```
     pub fn read(&mut self, out: &mut [u8]) -> Result<usize> {
         if self.read_pos + out.len() > self.size {
             return Err(ErrorCode::Io);
@@ -120,6 +186,19 @@ impl Buffer {
     }
 
     /// Peek at available data without consuming it.
+    ///
+    /// Returns everything between the read cursor and the end of written data.
+    /// This is the cheap way to inspect a complete message before deciding
+    /// whether to consume it.
+    ///
+    /// ```
+    /// use librtmp2::buffer::Buffer;
+    ///
+    /// let buf = Buffer::from_slice(b"RTMP");
+    /// assert_eq!(buf.peek(), b"RTMP");
+    /// // Peeking does not consume.
+    /// assert_eq!(buf.peek(), b"RTMP");
+    /// ```
     pub fn peek(&self) -> &[u8] {
         &self.data[self.read_pos..self.size]
     }
@@ -152,6 +231,22 @@ impl Buffer {
     }
 
     /// Drain (skip) `len` bytes from the read position.
+    ///
+    /// Clamps to the available bytes: draining more than is present empties the
+    /// buffer rather than panicking. Used to discard bytes already handled out of
+    /// band, e.g. after sending from [`Buffer::peek`].
+    ///
+    /// ```
+    /// use librtmp2::buffer::Buffer;
+    ///
+    /// let mut buf = Buffer::from_slice(&[1, 2, 3, 4]);
+    /// buf.drain(2);
+    /// assert_eq!(buf.peek(), &[3, 4]);
+    ///
+    /// // Over-draining clamps instead of panicking.
+    /// buf.drain(99);
+    /// assert_eq!(buf.available(), 0);
+    /// ```
     pub fn drain(&mut self, len: usize) {
         let available = self.available();
         self.read_pos += len.min(available);
@@ -163,6 +258,19 @@ impl Buffer {
     /// (the common case for a buffer that is only ever appended to and never
     /// partially read, e.g. per-CSID chunk reassembly) it just truncates and
     /// moves out the backing `Vec` in O(1).
+    ///
+    /// The buffer is left empty with no retained capacity.
+    ///
+    /// ```
+    /// use librtmp2::buffer::Buffer;
+    ///
+    /// let mut buf = Buffer::new();
+    /// buf.write(&[7, 8, 9]).unwrap();
+    ///
+    /// let bytes = buf.take();
+    /// assert_eq!(bytes, vec![7, 8, 9]);
+    /// assert_eq!(buf.available(), 0);
+    /// ```
     pub fn take(&mut self) -> Vec<u8> {
         let fixed_capacity = self.data.len();
         let mut out = std::mem::take(&mut self.data);

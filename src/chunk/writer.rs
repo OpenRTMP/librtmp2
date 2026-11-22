@@ -9,6 +9,46 @@ use crate::types::ErrorCode;
 use crate::types::Result;
 
 /// Write a full message to `out`, fragmenting the payload into chunks of at most `chunk_size` bytes.
+///
+/// Emits one fmt=0 first-chunk header followed by as many continuation chunks as
+/// the payload needs. `payload_len` must equal `msg.msg_length`; only
+/// `payload[..payload_len]` is written.
+///
+/// `chunk_size == 0` falls back to the RTMP default of 128.
+///
+/// # Errors
+///
+/// - [`ErrorCode::Chunk`] — `msg.csid` is below 2 or above 65599, i.e. not
+///   representable in a basic header.
+/// - [`ErrorCode::Internal`] — `msg.fmt` is not `0` (this stateless writer cannot
+///   compute the deltas fmt 1/2/3 require), `msg_length` exceeds the 24-bit wire
+///   maximum, or `payload_len` disagrees with `msg_length`.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::buffer::Buffer;
+/// use librtmp2::chunk::reader::ChunkMessage;
+/// use librtmp2::chunk::writer::chunk_write;
+///
+/// let msg = ChunkMessage {
+///     csid: 4,
+///     fmt: 0,
+///     timestamp: 1000,
+///     msg_length: 4,
+///     msg_type_id: 0x08, // audio
+///     msg_stream_id: 1,
+///     is_complete: true,
+/// };
+///
+/// let mut out = Buffer::new();
+/// chunk_write(&mut out, &msg, &[0xAA; 4], 4, 128).unwrap();
+/// assert!(out.available() > 4); // header bytes plus the 4-byte payload
+///
+/// // csid 1 is reserved by the basic-header encoding.
+/// let bad = ChunkMessage { csid: 1, ..msg };
+/// assert!(chunk_write(&mut out, &bad, &[0xAA; 4], 4, 128).is_err());
+/// ```
 pub fn chunk_write(
     out: &mut Buffer,
     msg: &ChunkMessage,
@@ -99,6 +139,23 @@ pub(crate) const RTMP_MAX_CSID: u32 = 65599;
 pub(crate) const RTMP_MIN_CSID: u32 = 2;
 
 /// Encoded size of a first-chunk header written by [`write_first_header`].
+///
+/// Use this to reserve output space before writing. Accounts for the basic-header
+/// length (which depends on `csid`), the format-dependent message header, and the
+/// extra four bytes when `ts_field` requires an extended timestamp.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::chunk::writer::first_header_len;
+///
+/// // fmt=0 is the full header: 12 bytes for a small csid.
+/// assert_eq!(first_header_len(4, 0, 0), 12);
+/// // fmt=1 drops the stream id: 8 bytes.
+/// assert_eq!(first_header_len(4, 1, 0), 8);
+/// // A timestamp needing the extended field adds 4 bytes.
+/// assert_eq!(first_header_len(4, 0, 0xFF_FFFF), 16);
+/// ```
 pub fn first_header_len(csid: u32, fmt: u8, ts_field: u32) -> usize {
     let (_, basic_len) = basic_header(csid, fmt);
     let msg_hdr = match fmt {

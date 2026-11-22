@@ -222,6 +222,21 @@ fn build_digest_s1s2(
 /* ── Server-side handshake ── */
 
 /// Initialize a server-side handshake.
+///
+/// Resets `hs` to [`HandshakeState::ServerWaitC0`] so
+/// [`server_read_c0`] can consume the client's version byte. Call this once per
+/// accepted connection, before any bytes are processed.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::handshake::{server_init, Handshake, HandshakeState};
+///
+/// let mut hs = Handshake::default();
+/// server_init(&mut hs);
+/// assert_eq!(hs.state, HandshakeState::ServerWaitC0);
+/// assert!(!hs.is_complete());
+/// ```
 pub fn server_init(hs: &mut Handshake) {
     hs.state = HandshakeState::ServerWaitC0;
     hs.version = 0;
@@ -229,6 +244,35 @@ pub fn server_init(hs: &mut Handshake) {
 }
 
 /// Read C0 (version byte) from the client.
+///
+/// Consumes one byte from `buf`, validates it is RTMP version 3, and queues S0
+/// and S1 in [`Handshake::out`] for the caller to send. Advances the state to
+/// [`HandshakeState::ServerWaitC1`].
+///
+/// # Errors
+///
+/// Returns [`ErrorCode::Io`] when no byte is buffered yet (the caller should
+/// retry after more data arrives) and [`ErrorCode::Handshake`] for a version
+/// byte this library does not speak.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::handshake::{server_init, server_read_c0, Handshake, HandshakeState};
+/// use librtmp2::buffer::Buffer;
+///
+/// let mut hs = Handshake::default();
+/// server_init(&mut hs);
+///
+/// // Empty input is a "need more data" signal, not an error to abort on.
+/// let mut empty = Buffer::new();
+/// assert!(server_read_c0(&mut hs, &mut empty).is_err());
+///
+/// // The RTMP 1.0 version byte is 0x03.
+/// let mut c0 = Buffer::from_slice(&[0x03]);
+/// server_read_c0(&mut hs, &mut c0).unwrap();
+/// assert_eq!(hs.state, HandshakeState::ServerWaitC1);
+/// ```
 pub fn server_read_c0(hs: &mut Handshake, buf: &mut Buffer) -> Result<()> {
     let mut ver = [0u8; 1];
     buf.read(&mut ver).map_err(|_| ErrorCode::Io)?;
@@ -311,6 +355,19 @@ pub fn server_read_c2(hs: &mut Handshake, buf: &mut Buffer) -> Result<()> {
 /* ── Client-side handshake ── */
 
 /// Initialize a client-side handshake.
+///
+/// Resets `hs` to [`HandshakeState::ClientWaitS0`]. Call it before
+/// [`client_generate_c0c1`], which produces the bytes to send to the server.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::handshake::{client_init, Handshake, HandshakeState};
+///
+/// let mut hs = Handshake::default();
+/// client_init(&mut hs);
+/// assert_eq!(hs.state, HandshakeState::ClientWaitS0);
+/// ```
 pub fn client_init(hs: &mut Handshake) {
     hs.state = HandshakeState::ClientWaitS0;
     hs.version = 0;
