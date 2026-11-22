@@ -433,6 +433,23 @@ pub fn build_reconnect_request(
 }
 
 /// A parsed `NetConnection.Connect.ReconnectRequest` onStatus event.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::message::command::ReconnectRequest;
+///
+/// let req = ReconnectRequest {
+///     tc_url: Some("rtmp://other/live".to_string()),
+///     description: Some("draining".to_string()),
+/// };
+///
+/// assert_eq!(req.tc_url.as_deref(), Some("rtmp://other/live"));
+///
+/// // A request with no URL tells the client to reuse its current connection.
+/// let reuse = ReconnectRequest::default();
+/// assert!(reuse.tc_url.is_none());
+/// ```
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReconnectRequest {
     /// New URL to reconnect to. `None` means reuse the current connection URL.
@@ -551,6 +568,22 @@ pub fn peek_name(buf: &mut Buffer, out: &mut [u8]) -> Result<usize> {
 }
 
 /// Read a connect command.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::buffer::Buffer;
+/// use librtmp2::message::command;
+/// use librtmp2::types::ConnectInfo;
+///
+/// let mut wire = Buffer::new();
+/// command::build_connect(&mut wire, "live", "rtmp://example.com/live", "", "", "", 0, 0, None)
+///     .unwrap();
+///
+/// let mut info = ConnectInfo::default();
+/// command::read_connect(&mut Buffer::from_slice(wire.peek()), &mut info).unwrap();
+/// assert_eq!(&info.app[..4], b"live");
+/// ```
 pub fn read_connect(buf: &mut Buffer, info: &mut ConnectInfo) -> Result<()> {
     read_connect_with_encoding(buf, info).map(|_| ())
 }

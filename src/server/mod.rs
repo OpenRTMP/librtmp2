@@ -39,6 +39,17 @@ const EXTERNAL_PUBLISHER_ID_BIT: u64 = 0x8000_0000_0000_0000;
 pub const EXTERNAL_RELAY_PUBLISHER_ID: u64 = u64::MAX;
 
 /// True when `id` belongs to the socket-less inject publisher-id range.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::server::{is_external_publisher_id, EXTERNAL_RELAY_PUBLISHER_ID};
+///
+/// // The sentinel used for socket-less publishers is always external.
+/// assert!(is_external_publisher_id(EXTERNAL_RELAY_PUBLISHER_ID));
+/// // Real connection ids start small and are never external.
+/// assert!(!is_external_publisher_id(1));
+/// ```
 #[inline]
 pub fn is_external_publisher_id(id: u64) -> bool {
     id & EXTERNAL_PUBLISHER_ID_BIT != 0
@@ -189,6 +200,23 @@ struct StreamCache {
 
 /// Public snapshot of a stream's init-cache contents for late joiners or
 /// remote subscribers.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::server::StreamInitSnapshot;
+///
+/// // Fields are plain owned bytes so a snapshot can be sent to another node.
+/// let snap = StreamInitSnapshot {
+///     metadata: None,
+///     avc_header: None,
+///     aac_header: None,
+///     video_track_headers: Vec::new(),
+///     audio_track_headers: Vec::new(),
+///     last_keyframe: None,
+/// };
+/// assert!(snap.avc_header.is_none());
+/// ```
 #[derive(Clone, Debug, Default)]
 pub struct StreamInitSnapshot {
     /// Last cached `onMetaData` / script payload, if any.
@@ -1488,6 +1516,19 @@ impl Server {
     /// Like [`Self::listen_tls`], but binds with `SO_REUSEPORT` -- see
     /// [`Self::listen_reuseport`]. Returns [`ErrorCode::Unsupported`] on
     /// Windows.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use librtmp2::server::Server;
+    /// use librtmp2::types::ServerConfig;
+    ///
+    /// let mut server = Server::from_config(ServerConfig::default(), None)?;
+    /// // Needs a PEM pair and SO_REUSEPORT support; the point here is the call shape.
+    /// let result = server.listen_tls_reuseport("127.0.0.1:0", "cert.pem", "key.pem");
+    /// assert!(result.is_err());
+    /// # Ok::<(), librtmp2::types::ErrorCode>(())
+    /// ```
     pub fn listen_tls_reuseport(
         &mut self,
         bind_addr: &str,
@@ -1558,6 +1599,23 @@ impl Server {
     /// computed before it existed) still gets its first processing pass
     /// immediately, matching [`Self::poll`]'s existing behavior of not
     /// delaying a freshly-accepted socket's first read by a full cycle.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::collections::HashSet;
+    ///
+    /// use librtmp2::server::Server;
+    /// use librtmp2::types::ServerConfig;
+    ///
+    /// let mut server = Server::from_config(ServerConfig::default(), None)?;
+    /// server.listen("127.0.0.1:0")?;
+    ///
+    /// // Only the connections the readiness loop marked readable are serviced.
+    /// let readable = HashSet::new();
+    /// server.poll_ready(0, &readable)?;
+    /// # Ok::<(), librtmp2::types::ErrorCode>(())
+    /// ```
     pub fn poll_ready(&mut self, timeout_ms: i32, readable: &HashSet<u64>) -> Result<()> {
         self.poll_impl(timeout_ms, Some(readable))
     }
@@ -1633,6 +1691,19 @@ impl Server {
     /// longer exists (the connection disconnected while authorization was
     /// pending) or if this authorization was already completed -- safe to call
     /// at most once per pending request, or extra times, without side effects.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use librtmp2::server::Server;
+    /// use librtmp2::types::ServerConfig;
+    ///
+    /// let mut server = Server::from_config(ServerConfig::default(), None)?;
+    ///
+    /// // No connection holds that id, so the completion is ignored without error.
+    /// let _ = server.complete_publish_authorization(1, 42, true);
+    /// # Ok::<(), librtmp2::types::ErrorCode>(())
+    /// ```
     pub fn complete_publish_authorization(
         &mut self,
         conn_id: u64,
@@ -1650,6 +1721,19 @@ impl Server {
     /// Resolve a `play` request that `on_play_auth_cb` left `Pending` on
     /// connection `conn_id`. See [`Self::complete_publish_authorization`]
     /// for the `request_id` semantics and no-op behaviour.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use librtmp2::server::Server;
+    /// use librtmp2::types::ServerConfig;
+    ///
+    /// let mut server = Server::from_config(ServerConfig::default(), None)?;
+    ///
+    /// // No connection holds that id; the completion is a no-op.
+    /// let _ = server.complete_play_authorization(1, 42, true);
+    /// # Ok::<(), librtmp2::types::ErrorCode>(())
+    /// ```
     pub fn complete_play_authorization(
         &mut self,
         conn_id: u64,

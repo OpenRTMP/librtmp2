@@ -28,6 +28,18 @@ pub const DEFAULT_MAX_ACTIVE_CSIDS: usize = 256;
 /// One of these exists per active chunk stream id (CSID) on a connection. It
 /// records the last message header seen on the CSID, the peer's current chunk
 /// size, and the partial body being reassembled.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::chunk::state::{ChunkStream, DEFAULT_CHUNK_SIZE};
+///
+/// let cs = ChunkStream::default();
+/// // A fresh stream has no message header yet and the default chunk size.
+/// assert!(!cs.has_message_header);
+/// assert_eq!(cs.chunk_size, DEFAULT_CHUNK_SIZE);
+/// assert_eq!(cs.reassembly_bytes_read, 0);
+/// ```
 #[derive(Debug)]
 pub struct ChunkStream {
     /// Chunk stream id this state belongs to.

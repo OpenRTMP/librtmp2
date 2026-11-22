@@ -345,6 +345,25 @@ pub fn write_four_cc_list_amf(buf: &mut Buffer, list: &FourCcList) -> Result<()>
 ///
 /// Returns [`ErrorCode::Amf`] for a FourCC that is not valid UTF-8, and
 /// propagates buffer-growth failures.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::buffer::Buffer;
+/// use librtmp2::ertmp::connect_amf::write_video_fourcc_info_map_amf;
+/// use librtmp2::types::{FourCc, VideoFourCcInfoMap, FOUR_CC_INFO_ALL};
+///
+/// let mut map = VideoFourCcInfoMap::default();
+/// map.entries[0] = FourCc { cc: *b"hvc1\0" };
+/// map.masks[0] = FOUR_CC_INFO_ALL;
+/// map.count = 1;
+///
+/// let mut buf = Buffer::new();
+/// write_video_fourcc_info_map_amf(&mut buf, &map).unwrap();
+///
+/// // An AMF0 object begins with marker 0x03.
+/// assert_eq!(buf.peek()[0], 0x03);
+/// ```
 pub fn write_video_fourcc_info_map_amf(buf: &mut Buffer, map: &VideoFourCcInfoMap) -> Result<()> {
     let count = map.count.min(map.entries.len()).min(map.masks.len());
     amf0::write_object_begin(buf)?;
