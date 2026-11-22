@@ -17,6 +17,22 @@ use crate::types::{
 };
 
 /// How a live media frame may be treated under congestion.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::media::DeliveryHint;
+///
+/// // Script/metadata and codec headers must always get through.
+/// assert_eq!(DeliveryHint::classify(librtmp2::types::FrameType::Script, &[], true),
+///            DeliveryHint::Critical);
+///
+/// // Every variant has a stable one-byte wire code and round-trips.
+/// for hint in [DeliveryHint::Critical, DeliveryHint::ResyncPoint] {
+///     assert_eq!(DeliveryHint::from_u8(hint.to_u8()), Some(hint));
+/// }
+/// assert_eq!(DeliveryHint::from_u8(255), None);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DeliveryHint {
     /// Codec headers (sequence headers, init data) and script/metadata:
@@ -38,6 +54,26 @@ impl DeliveryHint {
     /// `route_has_video` says whether the frame's stream carries video, so
     /// audio on an audio-only stream can serve as the resync point instead
     /// of waiting for a keyframe that never comes.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use librtmp2::media::DeliveryHint;
+    /// use librtmp2::types::FrameType;
+    ///
+    /// // A legacy AVC keyframe (0x17) is a resync point: a congested player may skip
+    /// // ahead to it.
+    /// let keyframe = [0x17, 0x01, 0x00, 0x00, 0x00];
+    /// assert_eq!(
+    ///     DeliveryHint::classify(FrameType::Video, &keyframe, true),
+    ///     DeliveryHint::ResyncPoint
+    /// );
+    ///
+    /// // An inter frame (0x27) is not.
+    /// let inter = [0x27, 0x01, 0x00, 0x00, 0x00];
+    /// assert_ne!(DeliveryHint::classify(FrameType::Video, &inter, true),
+    ///            DeliveryHint::ResyncPoint);
+    /// ```
     pub fn classify(frame_type: FrameType, payload: &[u8], route_has_video: bool) -> Self {
         match frame_type {
             FrameType::Script | FrameType::Metadata => return Self::Critical,
@@ -83,6 +119,16 @@ impl DeliveryHint {
     }
 
     /// Stable one-byte wire code (cluster media protocol).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use librtmp2::media::DeliveryHint;
+    ///
+    /// // The codes are stable across releases: they travel between cluster nodes.
+    /// assert_eq!(DeliveryHint::Critical.to_u8(), 0);
+    /// assert_eq!(DeliveryHint::ResyncPoint.to_u8(), 1);
+    /// ```
     pub fn to_u8(self) -> u8 {
         match self {
             Self::Critical => 0,
@@ -92,6 +138,17 @@ impl DeliveryHint {
     }
 
     /// Inverse of [`Self::to_u8`]; `None` for an unknown code.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use librtmp2::media::DeliveryHint;
+    ///
+    /// assert_eq!(DeliveryHint::from_u8(0), Some(DeliveryHint::Critical));
+    /// assert_eq!(DeliveryHint::from_u8(1), Some(DeliveryHint::ResyncPoint));
+    /// // Unknown codes from a newer peer degrade to `None` rather than panicking.
+    /// assert_eq!(DeliveryHint::from_u8(42), None);
+    /// ```
     pub fn from_u8(code: u8) -> Option<Self> {
         match code {
             0 => Some(Self::Critical),

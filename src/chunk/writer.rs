@@ -179,6 +179,22 @@ pub fn first_header_len(csid: u32, fmt: u8, ts_field: u32) -> usize {
 /// on this chunk stream, which the caller must track. fmt=1 omits the stream
 /// id; fmt=2 also omits length and type, so the caller must only pick them
 /// when those match the previous message on `csid`.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::buffer::Buffer;
+/// use librtmp2::chunk::writer::{first_header_len, write_first_header};
+///
+/// let mut out = Buffer::new();
+/// write_first_header(&mut out, 4, 0, 1000, 4, 0x08, 1).unwrap();
+///
+/// // fmt=0 for a small csid is the 12-byte full header.
+/// assert_eq!(out.available(), first_header_len(4, 0, 1000));
+/// assert_eq!(out.available(), 12);
+/// // The csid is in the low 6 bits of the first byte.
+/// assert_eq!(out.peek()[0] & 0x3F, 4);
+/// ```
 pub fn write_first_header(
     out: &mut Buffer,
     csid: u32,
@@ -233,6 +249,19 @@ pub fn write_first_header(
 }
 
 /// Encoded size of [`write_chunk_body`]'s output.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::chunk::writer::chunk_body_len;
+///
+/// // A payload that fits in one chunk needs no continuation header.
+/// assert_eq!(chunk_body_len(4, 100, 128, false), 100);
+///
+/// // A payload larger than the chunk size gains one 1-byte continuation header
+/// // per extra chunk.
+/// assert_eq!(chunk_body_len(4, 200, 128, false), 200 + 1);
+/// ```
 pub fn chunk_body_len(csid: u32, payload_len: usize, chunk_size: usize, ext_ts: bool) -> usize {
     let chunk_size = if chunk_size == 0 { 128 } else { chunk_size };
     let (_, cont_len) = basic_header(csid, 3);
@@ -249,6 +278,21 @@ pub fn chunk_body_len(csid: u32, payload_len: usize, chunk_size: usize, ext_ts: 
 /// stays in sync. The output depends only on `csid`, `chunk_size`, `ext_ts`
 /// and the payload, not on the first header's fmt, so a relay can encode it
 /// once and reuse it behind a different first header per receiver.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::buffer::Buffer;
+/// use librtmp2::chunk::writer::{chunk_body_len, write_chunk_body};
+///
+/// let payload = [0xAAu8; 200];
+/// let mut out = Buffer::new();
+/// write_chunk_body(&mut out, 4, &payload, 128, None).unwrap();
+///
+/// // 200 bytes at 128 per chunk: two chunks, so one continuation header.
+/// assert_eq!(out.available(), chunk_body_len(4, 200, 128, false));
+/// assert_eq!(out.available(), 201);
+/// ```
 pub fn write_chunk_body(
     out: &mut Buffer,
     csid: u32,
@@ -290,6 +334,22 @@ pub fn write_chunk_body(
 }
 
 /// Write an extended timestamp chunk (for protocol control messages).
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::buffer::Buffer;
+/// use librtmp2::chunk::writer::chunk_write_extended_timestamp;
+///
+/// let mut out = Buffer::new();
+/// // A timestamp at or above 0xFFFFFF cannot fit the 24-bit field.
+/// chunk_write_extended_timestamp(&mut out, 0x01_000000).unwrap();
+///
+/// // fmt=3 basic header on csid 2, then the 4-byte extended timestamp.
+/// assert_eq!(out.available(), 5);
+/// assert_eq!(out.peek()[0] >> 6, 3); // fmt=3
+/// assert_eq!(&out.peek()[1..], &0x01_000000u32.to_be_bytes());
+/// ```
 pub fn chunk_write_extended_timestamp(out: &mut Buffer, timestamp: u32) -> Result<()> {
     // Basic header: fmt=3, csid=2 (protocol control)
     let hdr = (3u8 << 6) | 2;

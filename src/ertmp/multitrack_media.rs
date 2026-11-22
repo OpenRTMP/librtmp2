@@ -23,6 +23,17 @@ pub const MAX_MULTITRACK_SUBTRACKS: usize = 4096;
 ///
 /// Encoded in the high nibble of the container's second byte; see
 /// [`crate::ertmp::multitrack`] for the full wire format.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::ertmp::multitrack_media::AvMultitrackType;
+///
+/// // Encoded in the high nibble of the container's second byte.
+/// assert_eq!(AvMultitrackType::OneTrack as u8, 0);
+/// assert_eq!(AvMultitrackType::ManyTracks as u8, 1);
+/// assert_eq!(AvMultitrackType::ManyTracksManyCodecs as u8, 2);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum AvMultitrackType {
@@ -38,6 +49,25 @@ pub enum AvMultitrackType {
 ///
 /// Borrowed from the container payload: [`MediaTrackSlice::payload`] points
 /// into the caller's `&[u8]` and is valid for exactly as long as that slice.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::ertmp::multitrack_media::MediaTrackSlice;
+///
+/// // A slice borrows from the container payload, so it costs no allocation.
+/// let body = [0xAAu8, 0xBB];
+/// let track = MediaTrackSlice {
+///     track_id: 0,
+///     packet_type: 1,
+///     fourcc: *b"avc1",
+///     video_frame_type: 1,
+///     payload: &body,
+/// };
+///
+/// assert_eq!(track.track_id, 0);
+/// assert_eq!(track.payload, &[0xAA, 0xBB]);
+/// ```
 #[derive(Debug, Clone, Copy)]
 pub struct MediaTrackSlice<'a> {
     /// Track id (`0` is the default track).
@@ -262,6 +292,21 @@ pub fn first_track_fourcc(frame_type: FrameType, payload: &[u8]) -> Option<[u8; 
 /// Whether a valid multitrack container carries at least one sequence-start
 /// track (packet type `0`), i.e. whether it holds a codec configuration for a
 /// track. Malformed containers report `false`.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::ertmp::multitrack_media::multitrack_has_sequence_start;
+/// use librtmp2::types::FrameType;
+///
+/// // Video container, shared packet type 0 = sequence start.
+/// let seq = [0x86, 0x10, b'a', b'v', b'c', b'1', 0, 0, 0, 0];
+/// assert!(multitrack_has_sequence_start(FrameType::Video, &seq));
+///
+/// // A coded-frames container (packet type 1) is not a sequence start.
+/// let coded = [0x86, 0x11, b'a', b'v', b'c', b'1', 0, 0, 0, 1, 0xAA];
+/// assert!(!multitrack_has_sequence_start(FrameType::Video, &coded));
+/// ```
 pub fn multitrack_has_sequence_start(frame_type: FrameType, payload: &[u8]) -> bool {
     let mut found = false;
     let valid = foreach_track(frame_type, payload, |track| {
@@ -299,6 +344,20 @@ pub fn multitrack_has_metadata(frame_type: FrameType, payload: &[u8]) -> bool {
 /// Whether a valid video multitrack container carries coded frames
 /// (`CodedFrames` or `CodedFramesX`) for a keyframe. Used by the relay to decide
 /// whether a player joining mid-stream can start decoding immediately.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::ertmp::multitrack_media::multitrack_has_keyframe;
+///
+/// // CodedFrames keyframe: container bit 7 set, frame type 1, packet type 1.
+/// let keyframe = [0x96, 0x13, b'a', b'v', b'c', b'1', 0, 0, 0, 1, 0xAA];
+/// assert!(multitrack_has_keyframe(&keyframe));
+///
+/// // A non-keyframe container is not a resync point.
+/// let inter = [0x86, 0x13, b'a', b'v', b'c', b'1', 0, 0, 0, 1, 0xAA];
+/// assert!(!multitrack_has_keyframe(&inter));
+/// ```
 pub fn multitrack_has_keyframe(payload: &[u8]) -> bool {
     if !is_multitrack_container(FrameType::Video, payload) {
         return false;
