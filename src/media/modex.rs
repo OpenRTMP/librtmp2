@@ -76,6 +76,22 @@ pub(crate) fn parse_modex_layer(payload: &[u8], pos: usize) -> Option<ModexLayer
 /// video tag, so legacy audio tags that also set bit 7 are peeled as before.
 /// Prefer [`normalize_modex_payload_with_frame_type`] when the frame type is
 /// known so legacy audio is not peeled.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::media::modex::normalize_modex_payload;
+/// use librtmp2::types::CAPS_EX_MASK_MODEX;
+///
+/// // A payload that is not a ModEx wrapper is returned as-is.
+/// let plain = [0x17u8, 0x01, 0xAA];
+/// let out = normalize_modex_payload(&plain, CAPS_EX_MASK_MODEX);
+/// assert_eq!(&*out, &plain);
+///
+/// // With ModEx not negotiated, nothing is unwrapped either.
+/// let out = normalize_modex_payload(&plain, 0);
+/// assert_eq!(&*out, &plain);
+/// ```
 pub fn normalize_modex_payload<'a>(payload: &'a [u8], caps_ex_mask: u32) -> Cow<'a, [u8]> {
     normalize_modex_payload_with_frame_type(payload, caps_ex_mask, FrameType::Video)
 }
@@ -87,6 +103,19 @@ pub fn normalize_modex_payload<'a>(payload: &'a [u8], caps_ex_mask: u32) -> Cow<
 /// bit 7 and can carry a low nibble of 7 (e.g. `0x87` G.711U), which must not
 /// be treated as a ModEx wrapper. Video is unambiguous (legacy video never
 /// sets bit 7), so it keeps the previous behavior.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::media::modex::normalize_modex_payload_with_frame_type;
+/// use librtmp2::types::{FrameType, CAPS_EX_MASK_MODEX};
+///
+/// // The audio and video forms differ in which nibble carries the packet type,
+/// // so the frame type must be supplied.
+/// let plain = [0xAFu8, 0x01, 0x00];
+/// let out = normalize_modex_payload_with_frame_type(&plain, CAPS_EX_MASK_MODEX, FrameType::Audio);
+/// assert_eq!(&*out, &plain);
+/// ```
 pub fn normalize_modex_payload_with_frame_type<'a>(
     payload: &'a [u8],
     caps_ex_mask: u32,

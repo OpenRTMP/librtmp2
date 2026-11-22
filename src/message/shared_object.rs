@@ -21,6 +21,27 @@ const MAX_SO_EVENTS: usize = 256;
 const MAX_SO_EVENT_DATA_BYTES: usize = 64 * 1024;
 
 /// Shared object event type, per the Adobe RTMP 1.0 specification §7.1.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::message::shared_object::SharedObjectEventType;
+///
+/// // The event types a peer can send, per the RTMP 1.0 spec.
+/// let events = [
+///     SharedObjectEventType::Use,
+///     SharedObjectEventType::Release,
+///     SharedObjectEventType::Change,
+///     SharedObjectEventType::SendMessage,
+/// ];
+/// assert_eq!(events.len(), 4);
+///
+/// // Values outside the spec are preserved so a round trip loses nothing.
+/// assert_ne!(
+///     SharedObjectEventType::Unknown(200),
+///     SharedObjectEventType::Use
+/// );
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SharedObjectEventType {
     /// Client requests to start using (subscribe to) the shared object.
@@ -88,6 +109,20 @@ impl SharedObjectEventType {
 }
 
 /// One event inside a shared-object message body.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::message::shared_object::{SharedObjectEvent, SharedObjectEventType};
+///
+/// let event = SharedObjectEvent {
+///     event_type: SharedObjectEventType::Use,
+///     // `Use`/`Release` carry no payload.
+///     data: Vec::new(),
+/// };
+/// assert_eq!(event.event_type, SharedObjectEventType::Use);
+/// assert!(event.data.is_empty());
+/// ```
 #[derive(Debug, Clone)]
 pub struct SharedObjectEvent {
     /// What the event is; selects how [`Self::data`] is interpreted.
@@ -99,6 +134,25 @@ pub struct SharedObjectEvent {
 }
 
 /// A parsed shared-object message body (name/version/flags header + events).
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::message::shared_object::SharedObjectMessage;
+///
+/// let msg = SharedObjectMessage {
+///     name: "chat".to_string(),
+///     version: 0,
+///     flags: 0,
+///     events: Vec::new(),
+/// };
+/// assert_eq!(msg.name, "chat");
+/// assert!(!msg.is_persistent());
+///
+/// // Flags of 2 mark a persistent shared object (Red5 convention).
+/// let persistent = SharedObjectMessage { flags: 2, ..msg };
+/// assert!(persistent.is_persistent());
+/// ```
 #[derive(Debug, Clone, Default)]
 pub struct SharedObjectMessage {
     /// Shared-object name as sent by the peer.
@@ -118,6 +172,18 @@ pub struct SharedObjectMessage {
 impl SharedObjectMessage {
     /// Whether this shared object is persistent per the wire convention
     /// (the persistence word is `2` for persistent, `0` otherwise).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use librtmp2::message::shared_object::SharedObjectMessage;
+    ///
+    /// let mut msg = SharedObjectMessage::default();
+    /// assert!(!msg.is_persistent());
+    ///
+    /// msg.flags = 2;
+    /// assert!(msg.is_persistent());
+    /// ```
     pub fn is_persistent(&self) -> bool {
         self.flags == 2
     }
@@ -128,6 +194,27 @@ impl SharedObjectMessage {
 /// by the caller). Every length field is bounds-checked against the
 /// remaining buffer before use, per this crate's parser-safety rule: unknown
 /// or malformed input is rejected, never trusted.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::message::shared_object::{parse, write, SharedObjectMessage};
+///
+/// let msg = SharedObjectMessage {
+///     name: "chat".to_string(),
+///     version: 0,
+///     flags: 0,
+///     events: Vec::new(),
+/// };
+///
+/// // Round-trips through the writer.
+/// let mut buf = librtmp2::buffer::Buffer::new();
+/// write(&msg, &mut buf).unwrap();
+///
+/// let back = parse(buf.peek()).unwrap();
+/// assert_eq!(back.name, "chat");
+/// assert_eq!(back.version, 0);
+/// ```
 pub fn parse(data: &[u8]) -> Result<SharedObjectMessage> {
     let mut buf = Buffer::from_slice(data);
 
@@ -177,6 +264,23 @@ pub fn parse(data: &[u8]) -> Result<SharedObjectMessage> {
 /// `parse` could not have produced (oversized name, too many events, an
 /// oversized event payload) so a round trip through `write` -> `parse` never
 /// silently drops data a receiver would otherwise reject or truncate.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::message::shared_object::{write, SharedObjectMessage};
+///
+/// let msg = SharedObjectMessage {
+///     name: "chat".to_string(),
+///     version: 0,
+///     flags: 0,
+///     events: Vec::new(),
+/// };
+///
+/// let mut buf = librtmp2::buffer::Buffer::new();
+/// write(&msg, &mut buf).unwrap();
+/// assert!(buf.available() > msg.name.len());
+/// ```
 pub fn write(msg: &SharedObjectMessage, buf: &mut Buffer) -> Result<()> {
     if msg.name.len() > MAX_SO_NAME_BYTES {
         return Err(ErrorCode::Amf);

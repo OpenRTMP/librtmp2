@@ -16,6 +16,21 @@ use crate::types::{
 /// Returned by [`classify_cache_frame`] and consumed by the stream cache, which
 /// keeps the newest sequence headers and the last keyframe so that a player
 /// joining mid-stream can decode immediately.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::media::init_cache::CacheFrameKind;
+///
+/// // Only sequence headers and keyframes are worth caching for late joiners.
+/// let kinds = [
+///     CacheFrameKind::VideoSequenceHeader,
+///     CacheFrameKind::AudioSequenceHeader,
+///     CacheFrameKind::VideoKeyframe,
+/// ];
+/// assert!(!kinds.contains(&CacheFrameKind::LiveOnly));
+/// assert_ne!(CacheFrameKind::LiveOnly, CacheFrameKind::VideoKeyframe);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CacheFrameKind {
     /// Not part of the decoder bootstrap; forward to live players only.
@@ -274,6 +289,25 @@ fn classify_audio(payload: &[u8]) -> CacheFrameKind {
 /// `fourcc_value` is the track's 4-byte codec id, `packet_type` the container's
 /// shared inner packet type (used only to set [`Frame::is_metadata`]), and
 /// `video_frame_type` the container's FLV frame type nibble.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::media::init_cache::populate_multitrack_frame;
+/// use librtmp2::types::{Frame, FrameType};
+///
+/// let mut frame = Frame {
+///     frame_type: FrameType::Video,
+///     ..Frame::default()
+/// };
+///
+/// // Inner track payloads carry no ExHeader, so the descriptor supplies the codec.
+/// populate_multitrack_frame(&mut frame, *b"hvc1", 1, 1);
+///
+/// assert_eq!(&frame.video_fourcc.cc[..4], b"hvc1");
+/// assert_eq!(frame.video_frame_type, 1);
+/// assert_eq!(frame.is_metadata, 0);
+/// ```
 pub fn populate_multitrack_frame(
     frame: &mut Frame,
     fourcc_value: [u8; 4],
