@@ -223,6 +223,30 @@ enum PublishRouteClaimOutcome {
 
 impl RelayFrame {
     /// Bytes used for codec parsing and cache classification.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use librtmp2::session::conn::RelayFrame;
+    /// use librtmp2::types::FrameType;
+    ///
+    /// let mut frame = RelayFrame {
+    ///     frame_type: FrameType::Video,
+    ///     timestamp: 0,
+    ///     payload: vec![0x17, 0x01, 0xAA],
+    ///     cache_payload: None,
+    ///     app: "live".into(),
+    ///     stream_name: "cam1".into(),
+    ///     publisher_conn_id: 1,
+    /// };
+    ///
+    /// // Without ModEx normalization the cache view is the wire payload.
+    /// assert_eq!(frame.cache_payload(), &[0x17, 0x01, 0xAA]);
+    ///
+    /// // ModEx-normalized bytes, when present, are used for parsing instead.
+    /// frame.cache_payload = Some(vec![0x17, 0x01]);
+    /// assert_eq!(frame.cache_payload(), &[0x17, 0x01]);
+    /// ```
     pub fn cache_payload(&self) -> &[u8] {
         self.cache_payload.as_deref().unwrap_or(&self.payload)
     }
@@ -257,6 +281,20 @@ impl RelayFrame {
 ///
 /// See [`crate::server::Server`] for the owner that accepts, polls, and reaps
 /// connections.
+
+/// # Examples
+///
+/// ```
+/// use librtmp2::session::conn::Conn;
+/// use librtmp2::types::ConnState;
+///
+/// let mut conn = Conn::new();
+/// assert_eq!(conn.state, ConnState::TcpAccepted);
+/// assert!(!conn.relay_enabled);
+///
+/// // Drive it by feeding bytes read from the socket.
+/// conn.recv(&[]).unwrap();
+/// ```
 pub struct Conn {
     /// Current point in the connection state machine.
     pub state: ConnState,
@@ -789,6 +827,20 @@ impl Conn {
     /// still buffered. Callers (e.g. the server poll loop) should keep
     /// calling `recv(&[])` until this returns false so a batch larger than
     /// the budget doesn't stall waiting on the peer to send more bytes.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use librtmp2::session::conn::Conn;
+    ///
+    /// let mut conn = Conn::new();
+    /// // Nothing read yet, so no budget stop has been recorded.
+    /// assert!(!conn.has_buffered_messages());
+    ///
+    /// // Draining with an empty slice starts a fresh batch.
+    /// conn.recv(&[]).unwrap();
+    /// assert!(!conn.has_buffered_messages());
+    /// ```
     pub fn has_buffered_messages(&self) -> bool {
         self.budget_exhausted
     }
@@ -1095,6 +1147,23 @@ impl Conn {
     /// publisher media, but skips `on_media_cb` / `on_frame_cb` (integrator-
     /// trusted). Does not require `relay_enabled`. Rejects playing-only
     /// connections so inject cannot squat publish routes from a player session.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use librtmp2::session::conn::Conn;
+    /// use librtmp2::types::FrameType;
+    ///
+    /// let mut conn = Conn::new();
+    /// // Routed by app name plus relay key. With no pinned
+    /// // relay_key the key comes from the current stream.
+    /// conn.app = "live".to_string();
+    /// conn.relay_key = "cam1".to_string();
+    ///
+    /// conn.inject_relay_frame(FrameType::Video, 0, &[0x17, 0x01]).unwrap();
+    /// assert_eq!(conn.pending_relay.len(), 1);
+    /// assert_eq!(conn.pending_relay[0].frame_type, FrameType::Video);
+    /// ```
     pub fn inject_relay_frame(
         &mut self,
         frame_type: FrameType,
@@ -1687,6 +1756,17 @@ impl Conn {
     ///
     /// The transport owns the socket; the value is for diagnostics and for
     /// registering the connection with an external readiness loop.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use librtmp2::net::INVALID_SOCKET;
+    /// use librtmp2::session::conn::Conn;
+    ///
+    /// // A connection that never had a transport reports the invalid handle.
+    /// let conn = Conn::new();
+    /// assert_eq!(conn.get_fd(), INVALID_SOCKET);
+    /// ```
     pub fn get_fd(&self) -> crate::net::RawSocket {
         self.client_fd
     }
@@ -2506,6 +2586,17 @@ impl Conn {
     }
 
     /// Send an RTMP ping when due and measure RTT from the client's response.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use librtmp2::session::conn::Conn;
+    ///
+    /// let mut conn = Conn::new();
+    /// // No ping is sent before the connection reaches `AppConnected`.
+    /// conn.maybe_send_ping().unwrap();
+    /// assert_eq!(conn.send_buffer.available(), 0);
+    /// ```
     pub fn maybe_send_ping(&mut self) -> Result<()> {
         if self.state < ConnState::AppConnected {
             return Ok(());
@@ -2998,6 +3089,16 @@ impl Conn {
     /// True while a `play` request is awaiting `complete_play_authorization`.
     /// Symmetric counterpart of [`Self::has_pending_publish_authorization`] for
     /// the player-side relay gates.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use librtmp2::session::conn::Conn;
+    ///
+    /// let conn = Conn::new();
+    /// assert!(!conn.has_pending_play_authorization());
+    /// assert!(!conn.has_pending_authorization());
+    /// ```
     pub fn has_pending_play_authorization(&self) -> bool {
         self.pending_play_auth.is_some()
     }
