@@ -10,6 +10,19 @@ use std::sync::atomic::{AtomicU8, Ordering};
 /// Ordered from most to least verbose; the library emits a message when its
 /// level is greater than or equal to the level set by [`set_level`]. The
 /// discriminants are the raw values accepted by the C ABI.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::log::LogLevel;
+///
+/// // Ordered from most to least verbose.
+/// assert!(LogLevel::Error > LogLevel::Debug);
+/// assert_eq!(LogLevel::Info as u8, 1);
+/// // Raw values from the C ABI map onto the enum.
+/// assert_eq!(LogLevel::from(0), LogLevel::Debug);
+/// assert_eq!(LogLevel::from(99), LogLevel::Error);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(C)]
 pub enum LogLevel {
@@ -88,6 +101,16 @@ pub fn set_callback(cb: LogFn, userdata: *mut u8) {
 }
 
 /// Log a message at the given level.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::log::{self, LogLevel};
+///
+/// // Normally written through the `log_info!` / `log_error!` macros, which fill in
+/// // the file and line automatically.
+/// log::log(LogLevel::Info, file!(), line!(), format_args!("connected"));
+/// ```
 pub fn log(level: LogLevel, file: &str, line: u32, args: std::fmt::Arguments<'_>) {
     if level < LOG_LEVEL.load(Ordering::Relaxed).into() {
         return;

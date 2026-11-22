@@ -14,6 +14,17 @@ use std::sync::atomic::{AtomicU32, Ordering};
 /// Created by [`Stream::new`] when a `createStream` is acknowledged, and turned
 /// into a publishing/playing stream by [`crate::session::publish::publish_begin`]
 /// or [`crate::session::play::play_begin`].
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::session::stream::Stream;
+///
+/// let stream = Stream::new(1);
+/// assert_eq!(stream.stream_id, 1);
+/// assert!(!stream.is_publishing);
+/// assert!(stream.receive_audio && stream.receive_video);
+/// ```
 #[derive(Debug)]
 pub struct Stream {
     /// Message stream id assigned by `createStream`.
@@ -60,11 +71,36 @@ impl Stream {
 }
 
 /// Begin publishing on this stream.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::session::stream::{publish_begin, Stream};
+///
+/// let mut stream = Stream::new(1);
+/// // Only flips the role flag; the name is set by
+/// // `session::publish::publish_begin`.
+/// publish_begin(&mut stream, "cam1");
+/// assert!(stream.is_publishing);
+/// assert!(stream.name.is_empty());
+/// ```
 pub fn publish_begin(stream: &mut Stream, _stream_key: &str) {
     stream.is_publishing = true;
 }
 
 /// Begin playing on this stream.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::session::stream::{play_begin, Stream};
+///
+/// let mut stream = Stream::new(1);
+/// // Only flips the role flag; use `session::play::play_begin` to record the name.
+/// play_begin(&mut stream);
+/// assert!(stream.is_playing);
+/// assert!(stream.name.is_empty());
+/// ```
 pub fn play_begin(stream: &mut Stream) {
     stream.is_playing = true;
 }

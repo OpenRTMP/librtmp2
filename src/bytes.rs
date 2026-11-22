@@ -3,16 +3,44 @@
 //! Mirrors `src/core/bytes.h` and `src/core/bytes.c`.
 
 /// Swap bytes of a u16 (big-endian ↔ little-endian).
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::bytes::byteswap16;
+///
+/// assert_eq!(byteswap16(0x1234), 0x3412);
+/// // The swap is its own inverse.
+/// assert_eq!(byteswap16(byteswap16(0x1234)), 0x1234);
+/// ```
 pub fn byteswap16(val: u16) -> u16 {
     val.swap_bytes()
 }
 
 /// Swap bytes of a u32 (big-endian ↔ little-endian).
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::bytes::byteswap32;
+///
+/// assert_eq!(byteswap32(0x1234_5678), 0x7856_3412);
+/// assert_eq!(byteswap32(byteswap32(0x1234_5678)), 0x1234_5678);
+/// ```
 pub fn byteswap32(val: u32) -> u32 {
     val.swap_bytes()
 }
 
 /// Swap bytes of a u64 (big-endian ↔ little-endian).
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::bytes::byteswap64;
+///
+/// assert_eq!(byteswap64(0x0102_0304_0506_0708), 0x0807_0605_0403_0201);
+/// assert_eq!(byteswap64(byteswap64(1)), 1);
+/// ```
 pub fn byteswap64(val: u64) -> u64 {
     val.swap_bytes()
 }

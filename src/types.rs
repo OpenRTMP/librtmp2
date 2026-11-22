@@ -31,24 +31,58 @@ use std::ffi::c_int;
 // These are opaque in the C API; in Rust they are pub(crate) structs.
 
 /// Opaque server handle
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::types::Server;
+///
+/// // A zero-sized marker standing in for the C `lrtmp2_server_t*` type. The real
+/// // state lives behind `librtmp2::server::Server`.
+/// assert_eq!(std::mem::size_of::<Server>(), 0);
+/// ```
 #[repr(C)]
 pub struct Server {
     _private: [u8; 0],
 }
 
 /// Opaque client handle
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::types::Client;
+///
+/// assert_eq!(std::mem::size_of::<Client>(), 0);
+/// ```
 #[repr(C)]
 pub struct Client {
     _private: [u8; 0],
 }
 
 /// Opaque connection handle
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::types::Conn;
+///
+/// assert_eq!(std::mem::size_of::<Conn>(), 0);
+/// ```
 #[repr(C)]
 pub struct Conn {
     _private: [u8; 0],
 }
 
 /// Opaque stream handle
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::types::Stream;
+///
+/// assert_eq!(std::mem::size_of::<Stream>(), 0);
+/// ```
 #[repr(C)]
 pub struct Stream {
     _private: [u8; 0],
@@ -57,6 +91,21 @@ pub struct Stream {
 /* ── Error codes ── */
 
 /// Error codes returned by librtmp2 functions.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::types::ErrorCode;
+///
+/// // The discriminants are the negative values the C ABI returns.
+/// assert_eq!(ErrorCode::Ok as i32, 0);
+/// assert_eq!(ErrorCode::Io as i32, -1);
+/// assert_eq!(ErrorCode::Internal as i32, -9);
+///
+/// // `as_str` and `Display` both give the human-readable form.
+/// assert_eq!(ErrorCode::Auth.as_str(), "Authentication error");
+/// assert_eq!(ErrorCode::Amf.to_string(), "AMF error");
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[repr(C)]
 pub enum ErrorCode {
@@ -84,6 +133,15 @@ pub enum ErrorCode {
 
 impl ErrorCode {
     /// Convert an error code to a human-readable string.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use librtmp2::types::ErrorCode;
+    ///
+    /// assert_eq!(ErrorCode::Ok.as_str(), "OK");
+    /// assert_eq!(ErrorCode::Unsupported.as_str(), "Unsupported");
+    /// ```
     pub fn as_str(self) -> &'static str {
         match self {
             ErrorCode::Ok => "OK",
@@ -118,6 +176,16 @@ pub type Result<T> = std::result::Result<T, ErrorCode>;
 /// module docs for the surrounding flow; the [`ConnState::CapsNegotiated`]
 /// state exists only when Enhanced RTMP v2 capability exchange runs and is
 /// skipped for legacy connects.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::types::ConnState;
+///
+/// // Ordered, so later states compare greater than earlier ones.
+/// assert!(ConnState::Closed > ConnState::TcpAccepted);
+/// assert_eq!(ConnState::Publishing as i32, 6);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(C)]
 pub enum ConnState {
@@ -162,6 +230,20 @@ pub enum ConnState {
 /// decision, or until the pending-authorization timeout denies it.
 ///
 /// [`Conn`]: crate::session::conn::Conn
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::types::AuthorizationResult;
+///
+/// // Synchronous decisions.
+/// assert_eq!(AuthorizationResult::Allow, AuthorizationResult::Allow);
+/// assert_ne!(AuthorizationResult::Allow, AuthorizationResult::Deny);
+///
+/// // `Pending` carries the integrator's request id, echoed back on completion.
+/// let pending = AuthorizationResult::Pending { request_id: 42 };
+/// assert_eq!(pending, AuthorizationResult::Pending { request_id: 42 });
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthorizationResult {
     /// Authorization succeeded; proceed with the normal publish/play flow.
@@ -991,6 +1073,16 @@ pub struct Reconnect {
 ///
 /// Classifies what a multitrack container carries. See
 /// [`crate::ertmp::multitrack`].
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::types::MultitrackType;
+///
+/// // The default is audio; the discriminants are the wire values.
+/// assert_eq!(MultitrackType::default(), MultitrackType::Audio);
+/// assert_eq!(MultitrackType::Video as u8, 1);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
 pub enum MultitrackType {
@@ -1286,6 +1378,24 @@ impl Default for ScriptTag {
 /// `connect` handshake. Each capability carries a `has_*` flag because the
 /// corresponding struct field is meaningless when the capability was not
 /// negotiated. See [`crate::ertmp::connect_amf`].
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::types::{NegotiatedCaps, CAPS_EX_MASK_MULTITRACK};
+///
+/// let caps = NegotiatedCaps {
+///     has_caps_ex: true,
+///     caps_ex_mask: CAPS_EX_MASK_MULTITRACK,
+///     multitrack_enabled: true,
+///     ..Default::default()
+/// };
+///
+/// assert!(caps.multitrack_enabled);
+/// assert!(caps.has_caps_ex);
+/// // The default negotiates nothing.
+/// assert!(!NegotiatedCaps::default().has_caps_ex);
+/// ```
 #[derive(Debug, Clone, Default)]
 pub struct NegotiatedCaps {
     /// Codecs advertised through `fourCcList`.
@@ -1315,6 +1425,21 @@ pub struct NegotiatedCaps {
 /// The parsed fields of an RTMP `connect` command, including the E-RTMP
 /// capability objects a peer sent. Fixed-size byte arrays hold strings so the
 /// struct stays `#[repr(C)]`-compatible; unused trailing bytes are zero.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::types::ConnectInfo;
+///
+/// let mut info = ConnectInfo::default();
+/// info.transaction_id = 1.0;
+/// info.app[..4].copy_from_slice(b"live");
+///
+/// // Fixed-size buffers keep this `#[repr(C)]`-compatible.
+/// assert_eq!(info.transaction_id, 1.0);
+/// assert_eq!(&info.app[..4], b"live");
+/// assert!(!info.has_caps_ex); // legacy connect
+/// ```
 #[derive(Debug, Clone)]
 #[repr(C)]
 pub struct ConnectInfo {
