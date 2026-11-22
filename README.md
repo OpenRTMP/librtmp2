@@ -126,6 +126,14 @@ Without TLS:
 librtmp2 = { path = "../librtmp2", default-features = false }
 ```
 
+The full API reference — every public module, type, and function, with runnable
+examples — is on [docs.rs/librtmp2](https://docs.rs/librtmp2). Start with the
+crate-level page for a feature overview and module map, then
+[`server::Server`](https://docs.rs/librtmp2/latest/librtmp2/server/struct.Server.html)
+for the ingest side or
+[`client::Client`](https://docs.rs/librtmp2/latest/librtmp2/client/struct.Client.html)
+for the outbound side.
+
 ### Constructing a server (Rust)
 
 Use the safe constructor — TLS material is given as filesystem paths, so no

@@ -57,3 +57,13 @@ jobs:
       env:
         RUSTDOCFLAGS: -D warnings
       run: cargo doc --locked --no-deps --all-features
+
+    - name: Docs (every public item must be documented)
+      run: |
+        RUSTFLAGS="-D missing_docs" cargo check --locked --lib --all-features
+        RUSTFLAGS="-D missing_docs" cargo check --locked --lib --no-default-features
+
+    - name: Doc tests (examples must compile and pass)
+      run: |
+        cargo test --locked --doc --all-features
+        cargo test --locked --doc --no-default-features
