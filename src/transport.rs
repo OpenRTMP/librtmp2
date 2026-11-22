@@ -260,6 +260,23 @@ impl Transport {
     /// bound `send()` places on writes post-handshake). Uses a fixed default
     /// timeout; call [`Transport::connect_tls_with_timeout`] to bound it by
     /// an existing deadline instead.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::net::{TcpListener, TcpStream};
+    ///
+    /// use librtmp2::transport::Transport;
+    ///
+    /// let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    /// let addr = listener.local_addr().unwrap();
+    /// let _client = TcpStream::connect(addr).unwrap();
+    /// let (server, _) = listener.accept().unwrap();
+    ///
+    /// // The peer is not speaking TLS, so the handshake fails instead of hanging.
+    /// let result = Transport::connect_tls(server, "localhost", None, false);
+    /// assert!(result.is_err());
+    /// ```
     #[cfg(feature = "tls")]
     pub fn connect_tls(
         stream: TcpStream,
@@ -281,6 +298,31 @@ impl Transport {
     /// connect deadline here — otherwise the TLS handshake could run well
     /// past the overall connect timeout the caller already spent on DNS/TCP
     /// connect.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::net::{TcpListener, TcpStream};
+    /// use std::time::Duration;
+    ///
+    /// use librtmp2::transport::Transport;
+    ///
+    /// let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    /// let addr = listener.local_addr().unwrap();
+    /// let _client = TcpStream::connect(addr).unwrap();
+    /// let (server, _) = listener.accept().unwrap();
+    ///
+    /// // A non-TLS peer is reported as an error rather than blocking for the full
+    /// // timeout.
+    /// let result = Transport::connect_tls_with_timeout(
+    ///     server,
+    ///     "localhost",
+    ///     None,
+    ///     false,
+    ///     Duration::from_millis(200),
+    /// );
+    /// assert!(result.is_err());
+    /// ```
     #[cfg(feature = "tls")]
     pub fn connect_tls_with_timeout(
         stream: TcpStream,
@@ -861,6 +903,19 @@ impl TlsCtx {
     ///
     /// On failure the fd is closed (via the dropped `TcpStream` inside the
     /// error value) — the caller must not close it again.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use librtmp2::transport::TlsCtx;
+    ///
+    /// // The accept path needs a validated context and a live client socket, so this
+    /// // documents the contract rather than opening a socket: on failure the fd is
+    /// // closed by the dropped `TcpStream`, so the caller must not close it again.
+    /// fn _accept_needs_a_tls_ctx(ctx: &TlsCtx) {
+    ///     let _ = ctx;
+    /// }
+    /// ```
     #[cfg(feature = "tls")]
     pub fn accept(&self, fd: RawSocket) -> Result<Transport> {
         // SAFETY: by this function's contract the caller hands over an open,

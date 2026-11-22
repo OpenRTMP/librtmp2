@@ -65,6 +65,30 @@ const MAX_AGGREGATE_SUBTAGS: usize = 4096;
 ///
 /// Implementors own their chunk registry and stream table; the dispatcher only
 /// calls the hooks below.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::message::message::{Connection, Stream};
+/// use librtmp2::types::{Frame, Result};
+///
+/// // The dispatcher only needs these six hooks; `session::conn::Conn` implements
+/// // the same dispatch inline on the hot path.
+/// struct Demo;
+///
+/// impl Connection for Demo {
+///     fn get_frame_callback(&self) -> Option<fn(&Frame)> { None }
+///     fn get_current_stream(&self) -> Option<&dyn Stream> { None }
+///     fn handle_command(&mut self, _payload: &[u8]) -> Result<()> { Ok(()) }
+///     fn set_window_ack_size(&mut self, _size: u32) {}
+///     fn reset_chunk_stream(&mut self, _csid: u32) {}
+///     fn set_all_chunk_size(&mut self, _chunk_size: u32) {}
+/// }
+///
+/// let mut conn = Demo;
+/// assert!(conn.get_frame_callback().is_none());
+/// assert!(conn.handle_command(b"").is_ok());
+/// ```
 pub trait Connection {
     /// Callback for every parsed audio/video frame, or `None` to drop frames.
     fn get_frame_callback(&self) -> Option<fn(&Frame)>;
@@ -85,6 +109,23 @@ pub trait Connection {
 /// The single piece of per-stream state the dispatcher needs: whether incoming
 /// media should be treated as a publish. Satisfied by
 /// [`crate::session::stream::Stream`].
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::message::message::Stream;
+///
+/// struct Player;
+///
+/// impl Stream for Player {
+///     fn is_publishing(&self) -> bool {
+///         false
+///     }
+/// }
+///
+/// let stream = Player;
+/// assert!(!stream.is_publishing());
+/// ```
 pub trait Stream {
     /// `true` while this stream is publishing.
     fn is_publishing(&self) -> bool;
@@ -145,6 +186,40 @@ fn deliver_video_frame(conn: &mut dyn Connection, timestamp: u32, payload: &[u8]
 }
 
 /// Decode an Aggregate message (type 0x16).
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::chunk::reader::ChunkMessage;
+/// use librtmp2::message::message::{decode_aggregate, Connection, Stream};
+/// use librtmp2::types::{Frame, Result};
+///
+/// struct Demo;
+///
+/// impl Connection for Demo {
+///     fn get_frame_callback(&self) -> Option<fn(&Frame)> { None }
+///     fn get_current_stream(&self) -> Option<&dyn Stream> { None }
+///     fn handle_command(&mut self, _p: &[u8]) -> Result<()> { Ok(()) }
+///     fn set_window_ack_size(&mut self, _s: u32) {}
+///     fn reset_chunk_stream(&mut self, _c: u32) {}
+///     fn set_all_chunk_size(&mut self, _c: u32) {}
+/// }
+///
+/// let mut conn = Demo;
+/// let msg = ChunkMessage::default();
+///
+/// // An empty aggregate carries no sub-tags and decodes to nothing.
+/// decode_aggregate(&mut conn, &msg, &[]).unwrap();
+///
+/// // A sub-tag whose declared size runs past the payload is rejected.
+/// let mut bad = vec![0x09, 0x00, 0x00, 0x05]; // video, 5-byte body
+/// bad.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0]); // timestamp + reserved
+/// assert_eq!(bad.len(), 11);
+/// assert_eq!(
+///     decode_aggregate(&mut conn, &msg, &bad),
+///     Err(librtmp2::types::ErrorCode::Protocol)
+/// );
+/// ```
 pub fn decode_aggregate(
     conn: &mut dyn Connection,
     chunk: &ChunkMessage,
@@ -205,6 +280,39 @@ pub fn decode_aggregate(
 }
 
 /// Decode a reassembled message.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::chunk::reader::ChunkMessage;
+/// use librtmp2::message::message::{decode, Connection, Stream};
+/// use librtmp2::types::{Frame, FrameType, Result};
+///
+/// struct Demo;
+///
+/// impl Connection for Demo {
+///     fn get_frame_callback(&self) -> Option<fn(&Frame)> { None }
+///     fn get_current_stream(&self) -> Option<&dyn Stream> { None }
+///     fn handle_command(&mut self, _p: &[u8]) -> Result<()> { Ok(()) }
+///     fn set_window_ack_size(&mut self, _s: u32) {}
+///     fn reset_chunk_stream(&mut self, _c: u32) {}
+///     fn set_all_chunk_size(&mut self, _c: u32) {}
+/// }
+///
+/// let mut conn = Demo;
+///
+/// // A WindowAckSize control message updates the connection's window.
+/// let mut msg = ChunkMessage::default();
+/// msg.msg_type_id = 0x05; // WindowAckSize
+/// msg.msg_length = 4;
+/// msg.msg_stream_id = 0;
+/// decode(&mut conn, &msg, &2_500_000u32.to_be_bytes()).unwrap();
+///
+/// // Unknown message types are ignored rather than rejected.
+/// let mut unknown = ChunkMessage::default();
+/// unknown.msg_type_id = 0x7F;
+/// assert!(decode(&mut conn, &unknown, &[]).is_ok());
+/// ```
 pub fn decode(conn: &mut dyn Connection, chunk: &ChunkMessage, payload: &[u8]) -> Result<()> {
     match chunk.msg_type_id {
         RTMP_MSG_SET_CHUNK_SIZE => {

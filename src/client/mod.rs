@@ -227,6 +227,16 @@ fn resolve_socket_addrs(
 /// the server-side [`crate::types::ConnState`], there is no closing state: a
 /// client that hits a terminal error reports it through
 /// [`Client::terminal_io_error`] and stops.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::client::ClientState;
+///
+/// // The client advances through these as the session is established.
+/// assert_eq!(ClientState::Disconnected as i32, 0);
+/// assert_ne!(ClientState::Publishing, ClientState::Playing);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
 pub enum ClientState {
@@ -253,6 +263,19 @@ pub enum ClientState {
 /// stream; [`Client::poll`] advances the state machine. All fields are public
 /// so embedders can inspect negotiated state and install callbacks, but the
 /// library owns their invariants — see each field.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::client::{Client, ClientState};
+///
+/// let client = Client::new();
+/// assert_eq!(client.state, ClientState::Disconnected);
+/// assert!(client.transport.is_none());
+///
+/// // A client can be inspected before connecting; the library owns the invariants.
+/// assert_eq!(client.stream_id, 0);
+/// ```
 pub struct Client {
     /// Copy of the connected transport's socket handle (`i32` file
     /// descriptor on Unix, `u64` Winsock `SOCKET` on Windows), or
@@ -422,6 +445,19 @@ impl Client {
     /// connect, TLS handshake, RTMP handshake, and each AMF command exchange
     /// share this budget within the call they belong to. Defaults to
     /// `TCP_CONNECT_TIMEOUT_SECS` when never called.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::time::Duration;
+    ///
+    /// use librtmp2::client::Client;
+    ///
+    /// let mut client = Client::new();
+    /// // Bound connect()/publish()/play() together, not per socket operation.
+    /// client.set_connect_timeout(Duration::from_secs(5));
+    /// assert_eq!(client.state, librtmp2::client::ClientState::Disconnected);
+    /// ```
     pub fn set_connect_timeout(&mut self, timeout: Duration) {
         self.connect_timeout = Some(timeout);
     }
@@ -779,6 +815,30 @@ impl Client {
     /// Returns [`ErrorCode::Protocol`] unless the client is
     /// [`ClientState::Publishing`], and [`ErrorCode::Internal`] when
     /// `frame.data` is null with a non-zero `size`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use librtmp2::client::Client;
+    /// use librtmp2::types::{Frame, FrameType};
+    ///
+    /// let mut client = Client::new();
+    ///
+    /// // The payload is read through `frame.data`/`frame.size`.
+    /// let payload = [0x17u8, 0x01];
+    /// let frame = Frame {
+    ///     frame_type: FrameType::Video,
+    ///     size: payload.len() as u32,
+    ///     data: payload.as_ptr(),
+    ///     ..Frame::default()
+    /// };
+    ///
+    /// // Without a publish session the frame is refused before it is read.
+    /// assert_eq!(
+    ///     client.send_frame(&frame),
+    ///     Err(librtmp2::types::ErrorCode::Protocol)
+    /// );
+    /// ```
     pub fn send_frame(&mut self, frame: &Frame) -> Result<()> {
         if self.state != ClientState::Publishing {
             return Err(ErrorCode::Protocol);
