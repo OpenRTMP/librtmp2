@@ -44,6 +44,40 @@ enum TransportInner {
 /// The transport OWNS the socket: it is closed exactly once, when the
 /// transport is dropped (plain: explicit `close(2)` / `closesocket`; TLS: via
 /// `TcpStream` drop inside the SSL stream).
+///
+/// # Examples
+///
+/// ```
+/// use std::net::{TcpListener, TcpStream};
+///
+/// use librtmp2::transport::Transport;
+///
+/// // A loopback pair so the example is runnable, not just illustrative.
+/// let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+/// let addr = listener.local_addr().unwrap();
+/// let client = TcpStream::connect(addr).unwrap();
+/// let (server, _) = listener.accept().unwrap();
+///
+/// let mut tx = Transport::from_tcp_stream(client);
+/// let mut rx = Transport::from_tcp_stream(server);
+///
+/// tx.send(b"rtmp").unwrap();
+///
+/// // A fresh non-blocking socket may not have the bytes yet, so poll until they
+/// // arrive; `recv` reports "not ready" via `again`.
+/// let mut buf = [0u8; 16];
+/// let mut n = 0isize;
+/// for _ in 0..1000 {
+///     let mut again = 0;
+///     n = rx.recv(&mut buf, &mut again);
+///     if n > 0 {
+///         break;
+///     }
+///     assert!(again != 0, "unexpected hard error from recv");
+///     std::thread::sleep(std::time::Duration::from_millis(1));
+/// }
+/// assert_eq!(&buf[..n as usize], b"rtmp");
+/// ```
 pub struct Transport {
     inner: TransportInner,
 }
@@ -54,6 +88,19 @@ pub struct Transport {
 /// Cheaply `Clone`: it's just an `Arc` bump, so a `Server` with multiple TLS
 /// listeners can hand each accepted connection its own owned handle without
 /// re-validating the certificate/key per listener.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::transport::TlsCtx;
+///
+/// // A context is only constructed from a certificate/key pair, or by
+/// // `Server::from_config` with TLS paths; see `TlsCtx::new_server`.
+/// fn _needs_certs(ctx: &TlsCtx) -> TlsCtx {
+///     // `Clone` is an `Arc` bump, so handing it to each listener is cheap.
+///     ctx.clone()
+/// }
+/// ```
 #[derive(Clone)]
 pub struct TlsCtx {
     #[cfg(feature = "tls")]
@@ -96,6 +143,24 @@ impl Transport {
     /// behaves like one on a dead peer: every operation fails and the
     /// connection is dropped, instead of a blocking socket stalling the poll
     /// loop.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::net::{TcpListener, TcpStream};
+    ///
+    /// use librtmp2::transport::Transport;
+    ///
+    /// let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    /// let addr = listener.local_addr().unwrap();
+    /// let client = TcpStream::connect(addr).unwrap();
+    /// let (_server, _) = listener.accept().unwrap();
+    ///
+    /// // The portable equivalent: takes ownership of the socket and needs no raw
+    /// // handle. `new_plain` exists for embedders that already hold an `fd`/`SOCKET`.
+    /// let tx = Transport::from_tcp_stream(client);
+    /// assert!(!tx.is_tls());
+    /// ```
     pub fn new_plain(mut fd: RawSocket) -> Self {
         if !net::prepare_transport_socket(fd) {
             net::close(fd);
@@ -109,6 +174,25 @@ impl Transport {
     /// Wrap a connected `TcpStream` as a plaintext transport, taking
     /// ownership of its socket. Portable equivalent of
     /// [`Transport::new_plain`] that needs no raw handle.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::net::{TcpListener, TcpStream};
+    ///
+    /// use librtmp2::transport::Transport;
+    ///
+    /// let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    /// let addr = listener.local_addr().unwrap();
+    /// let client = TcpStream::connect(addr).unwrap();
+    /// let (server, _) = listener.accept().unwrap();
+    ///
+    /// // The portable constructor: no raw handle, no unsafe, takes ownership.
+    /// let tx = Transport::from_tcp_stream(client);
+    /// assert!(!tx.is_tls());
+    ///
+    /// let _ = server;
+    /// ```
     pub fn from_tcp_stream(stream: TcpStream) -> Self {
         Self::new_plain(net::into_raw(stream))
     }
@@ -351,6 +435,25 @@ impl Transport {
     /// as a connection identifier; I/O is performed through this struct).
     /// A file descriptor (`i32`) on Unix, a Winsock `SOCKET` (`u64`) on
     /// Windows; see [`crate::net::RawSocket`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::net::{TcpListener, TcpStream};
+    ///
+    /// use librtmp2::transport::Transport;
+    ///
+    /// let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    /// let addr = listener.local_addr().unwrap();
+    /// let client = TcpStream::connect(addr).unwrap();
+    /// let (_server, _) = listener.accept().unwrap();
+    ///
+    /// let tx = Transport::from_tcp_stream(client);
+    /// // The transport owns the socket but still exposes its handle, so a host can
+    /// // register it with its own poll loop.
+    /// let fd = tx.fd();
+    /// assert_ne!(fd, librtmp2::net::INVALID_SOCKET);
+    /// ```
     pub fn fd(&self) -> RawSocket {
         match &self.inner {
             TransportInner::Plain(fd) => *fd,
@@ -360,6 +463,26 @@ impl Transport {
     }
 
     /// Check if this transport uses TLS.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::net::{TcpListener, TcpStream};
+    ///
+    /// use librtmp2::transport::Transport;
+    ///
+    /// // A loopback pair so the example is runnable, not just illustrative.
+    /// let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    /// let addr = listener.local_addr().unwrap();
+    /// let client = TcpStream::connect(addr).unwrap();
+    /// let (server, _) = listener.accept().unwrap();
+    ///
+    /// let plain = Transport::from_tcp_stream(client);
+    /// assert!(!plain.is_tls());
+    ///
+    /// // A TLS transport is only produced by `connect_tls`/`TlsCtx::accept`.
+    /// let _ = server;
+    /// ```
     pub fn is_tls(&self) -> bool {
         match &self.inner {
             TransportInner::Plain(_) => false,
@@ -375,6 +498,31 @@ impl Transport {
     ///   1 = wait for readable (EAGAIN / TLS WANT_READ)
     ///   2 = wait for writable (TLS WANT_WRITE during a read)
     ///   0 = fatal error.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::net::{TcpListener, TcpStream};
+    ///
+    /// use librtmp2::transport::Transport;
+    ///
+    /// // A loopback pair so the example is runnable, not just illustrative.
+    /// let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    /// let addr = listener.local_addr().unwrap();
+    /// let client = TcpStream::connect(addr).unwrap();
+    /// let (server, _) = listener.accept().unwrap();
+    ///
+    /// let mut rx = Transport::from_tcp_stream(server);
+    /// let mut buf = [0u8; 8];
+    /// let mut again = 0;
+    ///
+    /// // Nothing has been sent yet: `-1` with `again = 1` means "wait for readable".
+    /// let n = rx.recv(&mut buf, &mut again);
+    /// assert_eq!(n, -1);
+    /// assert_eq!(again, 1);
+    ///
+    /// let _ = client;
+    /// ```
     pub fn recv(&mut self, buf: &mut [u8], again: &mut i32) -> isize {
         match &mut self.inner {
             TransportInner::Plain(fd) => match net::recv(*fd, buf) {
@@ -412,6 +560,31 @@ impl Transport {
     ///   1 = wait for readable (TLS WANT_READ during write, e.g. renegotiation)
     ///   2 = wait for writable (EAGAIN/EWOULDBLOCK/EINTR/TLS WANT_WRITE)
     /// Used by the server poll loop so one slow peer cannot stall all connections.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::net::{TcpListener, TcpStream};
+    ///
+    /// use librtmp2::transport::Transport;
+    ///
+    /// // A loopback pair so the example is runnable, not just illustrative.
+    /// let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    /// let addr = listener.local_addr().unwrap();
+    /// let client = TcpStream::connect(addr).unwrap();
+    /// let (server, _) = listener.accept().unwrap();
+    ///
+    /// let mut tx = Transport::from_tcp_stream(client);
+    /// let mut again = 0;
+    ///
+    /// // Either the bytes went out or the socket was not ready; both are normal.
+    /// match tx.try_send(b"hello", &mut again) {
+    ///     Ok(n) => assert!(n <= 5),
+    ///     Err(_) => assert!(again != 0),
+    /// }
+    ///
+    /// let _ = server;
+    /// ```
     pub fn try_send(&mut self, data: &[u8], again: &mut i32) -> Result<usize> {
         if data.is_empty() {
             return Ok(0);
@@ -489,6 +662,27 @@ impl Transport {
     /// caller indefinitely. Correctly handles TLS WANT_READ during writes
     /// (e.g. renegotiation) by polling for read readiness instead of write
     /// readiness.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::net::{TcpListener, TcpStream};
+    ///
+    /// use librtmp2::transport::Transport;
+    ///
+    /// let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    /// let addr = listener.local_addr().unwrap();
+    /// let client = TcpStream::connect(addr).unwrap();
+    /// let (server, _) = listener.accept().unwrap();
+    ///
+    /// let mut tx = Transport::from_tcp_stream(client);
+    ///
+    /// // Queues the whole slice, retrying on would-block internally; a peer that
+    /// // stops reading is bounded by the internal deadline instead of hanging.
+    /// tx.send(b"hello").unwrap();
+    ///
+    /// let _ = server;
+    /// ```
     pub fn send(&mut self, data: &[u8]) -> Result<()> {
         // A single fixed poll timeout only bounds each individual wait, not
         // the send as a whole; poll against one absolute deadline so the
@@ -533,6 +727,28 @@ impl Transport {
     /// OpenSSL has already decrypted but the caller hasn't read yet -- data a
     /// `poll(2)` readiness check on the raw fd cannot see, since the kernel
     /// socket buffer it was decrypted from may already be empty.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::net::{TcpListener, TcpStream};
+    ///
+    /// use librtmp2::transport::Transport;
+    ///
+    /// // A loopback pair so the example is runnable, not just illustrative.
+    /// let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    /// let addr = listener.local_addr().unwrap();
+    /// let client = TcpStream::connect(addr).unwrap();
+    /// let (server, _) = listener.accept().unwrap();
+    ///
+    /// let tx = Transport::from_tcp_stream(client);
+    /// // Plaintext reads straight from the kernel socket, so nothing is buffered here.
+    /// assert_eq!(tx.pending(), 0);
+    ///
+    /// // For TLS this reports `SSL_pending()`, which a readiness check on the raw fd
+    /// // cannot see.
+    /// let _ = server;
+    /// ```
     pub fn pending(&self) -> i32 {
         match &self.inner {
             TransportInner::Plain(_) => 0,
@@ -560,6 +776,24 @@ impl TlsCtx {
     /// Validates the certificate and private key immediately; returns an error
     /// if the files cannot be read, are malformed, or the key doesn't match the
     /// certificate.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use librtmp2::transport::TlsCtx;
+    ///
+    /// // Validates the pair up front: unreadable or mismatched files fail here
+    /// // rather than on the first accepted connection.
+    /// let result = TlsCtx::new_server("cert.pem", "key.pem");
+    /// assert!(result.is_err(), "missing files must be reported");
+    ///
+    /// // Without the `tls` feature this always returns `Unsupported`.
+    /// #[cfg(not(feature = "tls"))]
+    /// {
+    ///     use librtmp2::types::ErrorCode;
+    ///     assert_eq!(result.unwrap_err(), ErrorCode::Unsupported);
+    /// }
+    /// ```
     #[cfg(feature = "tls")]
     pub fn new_server(cert_file: &str, key_file: &str) -> Result<Self> {
         use openssl::ssl::SslMode;
@@ -693,6 +927,13 @@ impl PendingTlsAccept {
 }
 
 /// Check if TLS support is available.
+///
+/// # Examples
+///
+/// ```
+/// // True when the crate was built with the default `tls` feature.
+/// assert_eq!(librtmp2::transport::tls_available(), cfg!(feature = "tls"));
+/// ```
 pub fn tls_available() -> bool {
     cfg!(feature = "tls")
 }

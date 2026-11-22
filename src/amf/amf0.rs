@@ -155,6 +155,22 @@ pub fn write_number(buf: &mut Buffer, value: f64) -> Result<()> {
 }
 
 /// Write an AMF0 boolean.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::amf::amf0;
+/// use librtmp2::buffer::Buffer;
+///
+/// let mut buf = Buffer::new();
+/// amf0::write_boolean(&mut buf, true).unwrap();
+/// // Marker 0x01 followed by the value byte.
+/// assert_eq!(buf.peek(), &[0x01, 0x01]);
+///
+/// buf.reset();
+/// amf0::write_boolean(&mut buf, false).unwrap();
+/// assert_eq!(buf.peek(), &[0x01, 0x00]);
+/// ```
 pub fn write_boolean(buf: &mut Buffer, value: bool) -> Result<()> {
     buf.write(&[Amf0Type::Boolean as u8])
         .map_err(|_| ErrorCode::Internal)?;
@@ -164,6 +180,18 @@ pub fn write_boolean(buf: &mut Buffer, value: bool) -> Result<()> {
 }
 
 /// Write an AMF0 null.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::amf::amf0;
+/// use librtmp2::buffer::Buffer;
+///
+/// let mut buf = Buffer::new();
+/// amf0::write_null(&mut buf).unwrap();
+/// // Null is a bare marker byte.
+/// assert_eq!(buf.peek(), &[0x05]);
+/// ```
 pub fn write_null(buf: &mut Buffer) -> Result<()> {
     buf.write(&[Amf0Type::Null as u8])
         .map_err(|_| ErrorCode::Internal)?;
@@ -171,6 +199,17 @@ pub fn write_null(buf: &mut Buffer) -> Result<()> {
 }
 
 /// Write an AMF0 undefined.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::amf::amf0;
+/// use librtmp2::buffer::Buffer;
+///
+/// let mut buf = Buffer::new();
+/// amf0::write_undefined(&mut buf).unwrap();
+/// assert_eq!(buf.peek(), &[0x06]);
+/// ```
 pub fn write_undefined(buf: &mut Buffer) -> Result<()> {
     buf.write(&[Amf0Type::Undefined as u8])
         .map_err(|_| ErrorCode::Internal)?;
@@ -209,11 +248,39 @@ pub fn write_string(buf: &mut Buffer, s: &str) -> Result<()> {
 }
 
 /// Write an AMF0 long string (4-byte length + UTF-8).
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::amf::amf0;
+/// use librtmp2::buffer::Buffer;
+///
+/// let mut buf = Buffer::new();
+/// amf0::write_long_string(&mut buf, "onMetaData").unwrap();
+///
+/// // Marker 0x0C, a 4-byte length, then the bytes.
+/// assert_eq!(buf.peek()[0], 0x0C);
+/// assert_eq!(&buf.peek()[1..5], &10u32.to_be_bytes());
+/// assert_eq!(&buf.peek()[5..], b"onMetaData");
+/// ```
 pub fn write_long_string(buf: &mut Buffer, s: &str) -> Result<()> {
     write_long_string_bytes(buf, s.as_bytes())
 }
 
 /// Write an AMF0 long string from raw bytes.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::amf::amf0;
+/// use librtmp2::buffer::Buffer;
+///
+/// let mut buf = Buffer::new();
+/// // The 4-byte length means arbitrary binary payloads are allowed.
+/// amf0::write_long_string_bytes(&mut buf, &[0x00, 0xFF, 0x80]).unwrap();
+/// assert_eq!(buf.peek()[0], 0x0C);
+/// assert_eq!(&buf.peek()[1..5], &3u32.to_be_bytes());
+/// ```
 pub fn write_long_string_bytes(buf: &mut Buffer, data: &[u8]) -> Result<()> {
     let len = data.len();
     if len > u32::MAX as usize {
@@ -278,6 +345,19 @@ pub fn write_object_end(buf: &mut Buffer) -> Result<()> {
 }
 
 /// Write an AMF0 object key (2-byte length + UTF-8).
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::amf::amf0;
+/// use librtmp2::buffer::Buffer;
+///
+/// let mut buf = Buffer::new();
+/// amf0::write_object_key(&mut buf, "app").unwrap();
+///
+/// // No type marker: a key is a bare 2-byte length plus the bytes.
+/// assert_eq!(buf.peek(), &[0x00, 0x03, b'a', b'p', b'p']);
+/// ```
 pub fn write_object_key(buf: &mut Buffer, key: &str) -> Result<()> {
     let len = key.len();
     if len > u16::MAX as usize {
@@ -495,6 +575,27 @@ pub fn read_string_alloc(buf: &mut Buffer) -> Result<String> {
 }
 
 /// Read an AMF0 long string.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::amf::amf0;
+/// use librtmp2::buffer::Buffer;
+///
+/// let mut buf = Buffer::new();
+/// amf0::write_long_string(&mut buf, "hello").unwrap();
+///
+/// let mut out = [0u8; 16];
+/// let n = amf0::read_long_string(&mut buf, &mut out).unwrap();
+/// assert_eq!(&out[..n], b"hello");
+///
+/// // A short-string marker is refused here.
+/// let mut short = [0u8; 8];
+/// assert!(
+///     amf0::read_long_string(&mut Buffer::from_slice(&[0x02, 0x00, 0x00]), &mut short)
+///         .is_err()
+/// );
+/// ```
 pub fn read_long_string(buf: &mut Buffer, out: &mut [u8]) -> Result<usize> {
     let ty = read_u8(buf)?;
     if ty != Amf0Type::LongString as u8 {
@@ -510,6 +611,21 @@ pub fn read_long_string(buf: &mut Buffer, out: &mut [u8]) -> Result<usize> {
 }
 
 /// Read the beginning of an AMF0 object.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::amf::amf0;
+/// use librtmp2::buffer::Buffer;
+///
+/// let mut buf = Buffer::new();
+/// amf0::write_object_begin(&mut buf).unwrap();
+/// amf0::read_object_begin(&mut buf).unwrap();
+/// assert_eq!(buf.available(), 0);
+///
+/// // Any other marker is rejected.
+/// assert!(amf0::read_object_begin(&mut Buffer::from_slice(&[0x05])).is_err());
+/// ```
 pub fn read_object_begin(buf: &mut Buffer) -> Result<()> {
     let ty = read_u8(buf)?;
     if ty != Amf0Type::Object as u8 {
@@ -519,6 +635,22 @@ pub fn read_object_begin(buf: &mut Buffer) -> Result<()> {
 }
 
 /// Read an AMF0 object key.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::amf::amf0;
+/// use librtmp2::buffer::Buffer;
+///
+/// let mut buf = Buffer::new();
+/// amf0::write_object_key(&mut buf, "app").unwrap();
+///
+/// let mut out = [0u8; 16];
+/// let n = amf0::read_object_key(&mut buf, &mut out).unwrap();
+/// assert_eq!(n, 3);
+/// assert_eq!(&out[..n], b"app");
+/// assert_eq!(out[n], 0); // NUL-terminated
+/// ```
 pub fn read_object_key(buf: &mut Buffer, out: &mut [u8]) -> Result<usize> {
     let klen = read_u16(buf)? as usize;
     if klen >= out.len() {
@@ -570,6 +702,18 @@ const MAX_SKIP_DEPTH: i32 = 32;
 pub const MAX_OBJECT_KEYS: usize = 256;
 
 /// Skip an AMF0 value whose type marker has already been consumed.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::amf::amf0;
+/// use librtmp2::buffer::Buffer;
+///
+/// // The caller has already read the marker, so skip only the body.
+/// let mut buf = Buffer::from_slice(&[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+/// amf0::skip_value_after_type(&mut buf, amf0::Amf0Type::Number).unwrap();
+/// assert_eq!(buf.available(), 0);
+/// ```
 pub fn skip_value_after_type(buf: &mut Buffer, ty: Amf0Type) -> Result<()> {
     skip_value_depth(buf, 0, ty)
 }
@@ -699,6 +843,18 @@ fn skip_value_depth(buf: &mut Buffer, depth: i32, ty: Amf0Type) -> Result<()> {
 }
 
 /// Skip an AMF0 value.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::amf::amf0;
+/// use librtmp2::buffer::Buffer;
+///
+/// // Unwanted values can be skipped without decoding them.
+/// let mut buf = Buffer::from_slice(&[0x05, 0x01, 0x01]); // null, then a bool
+/// amf0::skip_value(&mut buf).unwrap();
+/// assert_eq!(buf.peek(), &[0x01, 0x01]);
+/// ```
 pub fn skip_value(buf: &mut Buffer) -> Result<()> {
     let ty = read_type(buf)?;
     skip_value_depth(buf, 0, ty)
