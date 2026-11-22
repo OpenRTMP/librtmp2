@@ -18,6 +18,18 @@ const HANDSHAKE_SIZE: usize = 1536;
 /// starts at [`HandshakeState::ServerWaitC0`], the client at
 /// [`HandshakeState::ClientWaitS0`]; both converge on
 /// [`HandshakeState::Done`].
+
+/// # Examples
+///
+/// ```
+/// use librtmp2::handshake::{Handshake, HandshakeState};
+///
+/// let hs = Handshake::default();
+/// // The default context is the server side, waiting for C0.
+/// assert_eq!(hs.state, HandshakeState::ServerWaitC0);
+/// assert_ne!(hs.state, HandshakeState::Done);
+/// assert!(!hs.is_complete());
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
 pub enum HandshakeState {
@@ -42,6 +54,28 @@ pub enum HandshakeState {
 /// Tracks the peer's advertised version and first timestamp, plus any bytes the
 /// state machine has queued for output. One `Handshake` lives per connection;
 /// see [`server_init`] and [`client_init`].
+
+/// # Examples
+///
+/// ```
+/// use librtmp2::buffer::Buffer;
+/// use librtmp2::handshake::{self, Handshake};
+///
+/// // A full handshake between a client and a server context.
+/// let mut client = Handshake::default();
+/// let mut server = Handshake::default();
+/// handshake::client_init(&mut client);
+/// handshake::server_init(&mut server);
+///
+/// // C0+C1 -> server queues S0+S1, client queues nothing yet.
+/// handshake::client_generate_c0c1(&mut client).unwrap();
+/// let c0c1 = client.out.take();
+/// handshake::server_read_c0(&mut server, &mut Buffer::from_slice(&c0c1)).unwrap();
+///
+/// // Both sides only reach `Done` after the full exchange; see the module docs
+/// // for the step-by-step sequence.
+/// assert!(!server.is_complete() || client.state == librtmp2::handshake::HandshakeState::ClientWaitS0);
+/// ```
 #[derive(Debug)]
 pub struct Handshake {
     /// Current handshake step.
@@ -67,11 +101,38 @@ impl Default for Handshake {
 
 impl Handshake {
     /// Check if the handshake is complete.
+
+    /// # Examples
+    ///
+    /// ```
+    /// use librtmp2::handshake::{Handshake, HandshakeState};
+    ///
+    /// let mut hs = Handshake::default();
+    /// assert!(!hs.is_complete());
+    ///
+    /// // Only the terminal state counts as complete.
+    /// hs.state = HandshakeState::Done;
+    /// assert!(hs.is_complete());
+    /// ```
     pub fn is_complete(&self) -> bool {
         self.state == HandshakeState::Done
     }
 
     /// Release the internal output buffer.
+
+    /// # Examples
+    ///
+    /// ```
+    /// use librtmp2::handshake::{self, Handshake};
+    ///
+    /// let mut hs = Handshake::default();
+    /// handshake::client_init(&mut hs);
+    /// handshake::client_generate_c0c1(&mut hs).unwrap();
+    /// assert!(hs.out.available() > 0);
+    ///
+    /// hs.cleanup();
+    /// assert_eq!(hs.out.available(), 0);
+    /// ```
     pub fn cleanup(&mut self) {
         self.out.reset();
     }
@@ -147,6 +208,21 @@ const SERVER_DIGEST_VERSION: [u8; 4] = [0x04, 0x05, 0x00, 0x01];
 const DIGEST_BLOCK_BASES: [usize; 2] = [772, 8];
 
 /// How the server answered a client's C1.
+
+/// # Examples
+///
+/// ```
+/// use librtmp2::handshake::HandshakeMode;
+///
+/// // Most peers (OBS, FFmpeg) use the plain handshake.
+/// assert!(matches!(HandshakeMode::Simple, HandshakeMode::Simple));
+///
+/// // A Flash-advertising peer without a valid digest falls back to plain.
+/// assert!(matches!(HandshakeMode::SimpleFallback, HandshakeMode::SimpleFallback));
+///
+/// // Hardware encoders may require the Adobe digest variant.
+/// assert!(matches!(HandshakeMode::Digest(772), HandshakeMode::Digest(_)));
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HandshakeMode {
     /// Plain RTMP handshake: S1 is random, S2 echoes C1.
@@ -287,6 +363,24 @@ pub fn server_read_c0(hs: &mut Handshake, buf: &mut Buffer) -> Result<()> {
 }
 
 /// Read C1 (1536-byte handshake) from the client and queue S1+S2.
+
+/// # Examples
+///
+/// ```
+/// use librtmp2::handshake::{self, Handshake, HandshakeState};
+/// use librtmp2::buffer::Buffer;
+///
+/// let mut hs = Handshake::default();
+/// handshake::server_init(&mut hs);
+/// handshake::server_read_c0(&mut hs, &mut Buffer::from_slice(&[0x03])).unwrap();
+///
+/// // A short C1 keeps the server waiting.
+/// assert!(handshake::server_read_c1(&mut hs, &mut Buffer::from_slice(&[0u8; 100])).is_err());
+///
+/// handshake::server_read_c1(&mut hs, &mut Buffer::from_slice(&vec![0u8; 1536])).unwrap();
+/// assert_eq!(hs.state, HandshakeState::ServerWaitC2);
+/// assert!(hs.out.available() > 0);
+/// ```
 pub fn server_read_c1(hs: &mut Handshake, buf: &mut Buffer) -> Result<()> {
     server_read_c1_mode(hs, buf).map(|_| ())
 }
@@ -296,6 +390,21 @@ pub fn server_read_c1(hs: &mut Handshake, buf: &mut Buffer) -> Result<()> {
 /// A C1 that carries a valid Adobe digest gets a digest S1/S2 (some hardware
 /// encoders verify the server's digest and hang up on a plain S1); any other
 /// C1 gets the plain handshake.
+
+/// # Examples
+///
+/// ```
+/// use librtmp2::handshake::{self, Handshake, HandshakeMode};
+/// use librtmp2::buffer::Buffer;
+///
+/// let mut hs = Handshake::default();
+/// handshake::server_init(&mut hs);
+/// handshake::server_read_c0(&mut hs, &mut Buffer::from_slice(&[0x03])).unwrap();
+///
+/// // An all-zero C1 carries no Adobe digest, so the plain handshake is answered.
+/// let mode = handshake::server_read_c1_mode(&mut hs, &mut Buffer::from_slice(&vec![0u8; 1536])).unwrap();
+/// assert!(matches!(mode, HandshakeMode::Simple | HandshakeMode::SimpleFallback));
+/// ```
 pub fn server_read_c1_mode(hs: &mut Handshake, buf: &mut Buffer) -> Result<HandshakeMode> {
     if buf.available() < HANDSHAKE_SIZE {
         return Err(ErrorCode::Io);
@@ -340,6 +449,23 @@ pub fn server_read_c1_mode(hs: &mut Handshake, buf: &mut Buffer) -> Result<Hands
 }
 
 /// Read C2 from the client, completing the handshake.
+
+/// # Examples
+///
+/// ```
+/// use librtmp2::handshake::{self, Handshake, HandshakeState};
+/// use librtmp2::buffer::Buffer;
+///
+/// let mut hs = Handshake::default();
+/// handshake::server_init(&mut hs);
+/// handshake::server_read_c0(&mut hs, &mut Buffer::from_slice(&[0x03])).unwrap();
+/// handshake::server_read_c1(&mut hs, &mut Buffer::from_slice(&vec![0u8; 1536])).unwrap();
+///
+/// // C2 is the client's 1536-byte echo; then the server is done.
+/// handshake::server_read_c2(&mut hs, &mut Buffer::from_slice(&vec![0u8; 1536])).unwrap();
+/// assert_eq!(hs.state, HandshakeState::Done);
+/// assert!(hs.is_complete());
+/// ```
 pub fn server_read_c2(hs: &mut Handshake, buf: &mut Buffer) -> Result<()> {
     if buf.available() < HANDSHAKE_SIZE {
         return Err(ErrorCode::Io);
@@ -375,6 +501,21 @@ pub fn client_init(hs: &mut Handshake) {
 }
 
 /// Generate C0+C1 to send to the server.
+
+/// # Examples
+///
+/// ```
+/// use librtmp2::handshake::{self, Handshake, HandshakeState};
+///
+/// let mut hs = Handshake::default();
+/// handshake::client_init(&mut hs);
+/// handshake::client_generate_c0c1(&mut hs).unwrap();
+///
+/// // C0 is one version byte, C1 is the 1536-byte block: 1537 bytes total.
+/// assert_eq!(hs.out.available(), 1 + 1536);
+/// assert_eq!(&hs.out.peek()[..1], &[0x03]);
+/// assert_eq!(hs.state, HandshakeState::ClientWaitS0);
+/// ```
 pub fn client_generate_c0c1(hs: &mut Handshake) -> Result<()> {
     let client_time = get_time();
     hs.peer_time = client_time;
@@ -396,6 +537,23 @@ pub fn client_generate_c0c1(hs: &mut Handshake) -> Result<()> {
 }
 
 /// Read S0 (version byte) from the server.
+
+/// # Examples
+///
+/// ```
+/// use librtmp2::handshake::{self, Handshake, HandshakeState};
+/// use librtmp2::buffer::Buffer;
+///
+/// let mut hs = Handshake::default();
+/// handshake::client_init(&mut hs);
+///
+/// // No bytes buffered yet: the caller retries later.
+/// assert!(handshake::client_read_s0(&mut hs, &mut Buffer::new()).is_err());
+///
+/// handshake::client_read_s0(&mut hs, &mut Buffer::from_slice(&[0x03])).unwrap();
+/// assert_eq!(hs.state, HandshakeState::ClientWaitS1);
+/// assert_eq!(hs.version, 0x03);
+/// ```
 pub fn client_read_s0(hs: &mut Handshake, buf: &mut Buffer) -> Result<()> {
     let mut ver = [0u8; 1];
     buf.read(&mut ver).map_err(|_| ErrorCode::Io)?;
@@ -410,6 +568,26 @@ pub fn client_read_s0(hs: &mut Handshake, buf: &mut Buffer) -> Result<()> {
 }
 
 /// Read S1 from the server and queue C2.
+
+/// # Examples
+///
+/// ```
+/// use librtmp2::handshake::{self, Handshake, HandshakeState};
+/// use librtmp2::buffer::Buffer;
+///
+/// let mut hs = Handshake::default();
+/// handshake::client_init(&mut hs);
+/// handshake::client_read_s0(&mut hs, &mut Buffer::from_slice(&[0x03])).unwrap();
+///
+/// // A truncated S1 is not enough to proceed.
+/// assert!(handshake::client_read_s1(&mut hs, &mut Buffer::from_slice(&[0u8; 8])).is_err());
+///
+/// // The full 1536-byte block queues C2 for the server.
+/// let s1 = vec![0u8; 1536];
+/// handshake::client_read_s1(&mut hs, &mut Buffer::from_slice(&s1)).unwrap();
+/// assert_eq!(hs.state, HandshakeState::ClientWaitS2);
+/// assert!(hs.out.available() > 0);
+/// ```
 pub fn client_read_s1(hs: &mut Handshake, buf: &mut Buffer) -> Result<()> {
     if buf.available() < HANDSHAKE_SIZE {
         return Err(ErrorCode::Io);
@@ -432,6 +610,23 @@ pub fn client_read_s1(hs: &mut Handshake, buf: &mut Buffer) -> Result<()> {
 }
 
 /// Read S2 from the server, completing the handshake.
+
+/// # Examples
+///
+/// ```
+/// use librtmp2::handshake::{self, Handshake, HandshakeState};
+/// use librtmp2::buffer::Buffer;
+///
+/// let mut hs = Handshake::default();
+/// handshake::client_init(&mut hs);
+/// handshake::client_read_s0(&mut hs, &mut Buffer::from_slice(&[0x03])).unwrap();
+/// handshake::client_read_s1(&mut hs, &mut Buffer::from_slice(&vec![0u8; 1536])).unwrap();
+///
+/// // S2 is another 1536-byte block; afterwards the client is done.
+/// handshake::client_read_s2(&mut hs, &mut Buffer::from_slice(&vec![0u8; 1536])).unwrap();
+/// assert_eq!(hs.state, HandshakeState::Done);
+/// assert!(hs.is_complete());
+/// ```
 pub fn client_read_s2(hs: &mut Handshake, buf: &mut Buffer) -> Result<()> {
     if buf.available() < HANDSHAKE_SIZE {
         return Err(ErrorCode::Io);

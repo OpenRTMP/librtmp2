@@ -89,6 +89,19 @@ pub fn write_set_chunk_size(buf: &mut Buffer, chunk_size: u32) -> Result<()> {
 ///
 /// Bare 4-byte chunk-stream id; the control type is carried by the message
 /// header, not the payload.
+
+/// # Examples
+///
+/// ```
+/// use librtmp2::buffer::Buffer;
+/// use librtmp2::message::control;
+///
+/// let mut buf = Buffer::new();
+/// control::write_abort_message(&mut buf, 4).unwrap();
+///
+/// // Round-trips through the matching reader.
+/// assert_eq!(control::read_abort_message(buf.peek()).unwrap(), 4);
+/// ```
 pub fn write_abort_message(buf: &mut Buffer, csid: u32) -> Result<()> {
     buf.write(&csid.to_be_bytes())
         .map_err(|_| ErrorCode::Internal)?;
@@ -99,6 +112,17 @@ pub fn write_abort_message(buf: &mut Buffer, csid: u32) -> Result<()> {
 ///
 /// Bare 4-byte sequence number; the control type is carried by the message
 /// header, not the payload.
+
+/// # Examples
+///
+/// ```
+/// use librtmp2::buffer::Buffer;
+/// use librtmp2::message::control;
+///
+/// let mut buf = Buffer::new();
+/// control::write_acknowledgement(&mut buf, 123_456).unwrap();
+/// assert_eq!(control::read_acknowledgement_size(buf.peek()).unwrap(), 123_456);
+/// ```
 pub fn write_acknowledgement(buf: &mut Buffer, sequence_number: u32) -> Result<()> {
     buf.write(&sequence_number.to_be_bytes())
         .map_err(|_| ErrorCode::Internal)?;
@@ -109,6 +133,17 @@ pub fn write_acknowledgement(buf: &mut Buffer, sequence_number: u32) -> Result<(
 ///
 /// Bare 4-byte window size; the control type is carried by the message header,
 /// not the payload.
+
+/// # Examples
+///
+/// ```
+/// use librtmp2::buffer::Buffer;
+/// use librtmp2::message::control;
+///
+/// let mut buf = Buffer::new();
+/// control::write_window_ack_size(&mut buf, 2_500_000).unwrap();
+/// assert_eq!(buf.peek(), &2_500_000u32.to_be_bytes());
+/// ```
 pub fn write_window_ack_size(buf: &mut Buffer, window_size: u32) -> Result<()> {
     buf.write(&window_size.to_be_bytes())
         .map_err(|_| ErrorCode::Internal)?;
@@ -119,6 +154,20 @@ pub fn write_window_ack_size(buf: &mut Buffer, window_size: u32) -> Result<()> {
 ///
 /// Bare 4-byte window size followed by the 1-byte limit type; the control type
 /// is carried by the message header, not the payload.
+
+/// # Examples
+///
+/// ```
+/// use librtmp2::buffer::Buffer;
+/// use librtmp2::message::control;
+///
+/// let mut buf = Buffer::new();
+/// control::write_set_peer_bandwidth(&mut buf, 3_125_000, 2).unwrap();
+///
+/// let (window, limit_type) = control::read_set_peer_bandwidth(buf.peek()).unwrap();
+/// assert_eq!(window, 3_125_000);
+/// assert_eq!(limit_type, 2);
+/// ```
 pub fn write_set_peer_bandwidth(buf: &mut Buffer, window_size: u32, limit_type: u8) -> Result<()> {
     buf.write(&window_size.to_be_bytes())
         .map_err(|_| ErrorCode::Internal)?;
@@ -127,6 +176,20 @@ pub fn write_set_peer_bandwidth(buf: &mut Buffer, window_size: u32, limit_type: 
 }
 
 /// Write a User Control Stream Begin event.
+
+/// # Examples
+///
+/// ```
+/// use librtmp2::buffer::Buffer;
+/// use librtmp2::message::control;
+///
+/// let mut buf = Buffer::new();
+/// control::write_user_control_stream_begin(&mut buf, 1).unwrap();
+///
+/// let (event, stream_id, _) = control::read_user_control(buf.peek(), false).unwrap();
+/// assert_eq!(event, control::UCTRL_STREAM_BEGIN);
+/// assert_eq!(stream_id, 1);
+/// ```
 pub fn write_user_control_stream_begin(buf: &mut Buffer, stream_id: u32) -> Result<()> {
     buf.write(&UCTRL_STREAM_BEGIN.to_be_bytes())
         .map_err(|_| ErrorCode::Internal)?;
@@ -136,6 +199,20 @@ pub fn write_user_control_stream_begin(buf: &mut Buffer, stream_id: u32) -> Resu
 }
 
 /// Write a User Control Stream EOF event.
+
+/// # Examples
+///
+/// ```
+/// use librtmp2::buffer::Buffer;
+/// use librtmp2::message::control;
+///
+/// let mut buf = Buffer::new();
+/// control::write_user_control_stream_eof(&mut buf, 1).unwrap();
+///
+/// let (event, stream_id, _) = control::read_user_control(buf.peek(), false).unwrap();
+/// assert_eq!(event, control::UCTRL_STREAM_EOF);
+/// assert_eq!(stream_id, 1);
+/// ```
 pub fn write_user_control_stream_eof(buf: &mut Buffer, stream_id: u32) -> Result<()> {
     buf.write(&UCTRL_STREAM_EOF.to_be_bytes())
         .map_err(|_| ErrorCode::Internal)?;
@@ -145,6 +222,22 @@ pub fn write_user_control_stream_eof(buf: &mut Buffer, stream_id: u32) -> Result
 }
 
 /// Write a User Control SetBufferLength event.
+
+/// # Examples
+///
+/// ```
+/// use librtmp2::buffer::Buffer;
+/// use librtmp2::message::control;
+///
+/// let mut buf = Buffer::new();
+/// // Stream 1, 3000 ms of buffer.
+/// control::write_user_control_set_buffer_length(&mut buf, 1, 3000).unwrap();
+///
+/// let (event, stream_id, len) = control::read_user_control(buf.peek(), true).unwrap();
+/// assert_eq!(event, control::UCTRL_SET_BUFFER_LENGTH);
+/// assert_eq!(stream_id, 1);
+/// assert_eq!(len, Some(3000));
+/// ```
 pub fn write_user_control_set_buffer_length(
     buf: &mut Buffer,
     stream_id: u32,
@@ -160,6 +253,24 @@ pub fn write_user_control_set_buffer_length(
 }
 
 /// Write a User Control Ping Request event (4-byte opaque timestamp/token).
+
+/// # Examples
+///
+/// ```
+/// use librtmp2::buffer::Buffer;
+/// use librtmp2::message::control;
+///
+/// let mut buf = Buffer::new();
+/// control::write_user_control_ping_request(&mut buf, 0xDEAD_BEEF).unwrap();
+///
+/// // A PingRequest payload is 6 bytes: the event type plus the opaque token,
+/// // so the token arrives as `param1` and there is no second parameter.
+/// assert_eq!(buf.available(), 6);
+/// let (event, token, extra) = control::read_user_control(buf.peek(), true).unwrap();
+/// assert_eq!(event, control::UCTRL_PING_REQUEST);
+/// assert_eq!(token, 0xDEAD_BEEF);
+/// assert_eq!(extra, None);
+/// ```
 pub fn write_user_control_ping_request(buf: &mut Buffer, timestamp: u32) -> Result<()> {
     buf.write(&UCTRL_PING_REQUEST.to_be_bytes())
         .map_err(|_| ErrorCode::Internal)?;
@@ -169,6 +280,19 @@ pub fn write_user_control_ping_request(buf: &mut Buffer, timestamp: u32) -> Resu
 }
 
 /// Write a User Control Ping Response event (echoes the request timestamp/token).
+
+/// # Examples
+///
+/// ```
+/// use librtmp2::buffer::Buffer;
+/// use librtmp2::message::control;
+///
+/// let mut buf = Buffer::new();
+/// control::write_user_control_ping_response(&mut buf, 0xDEAD_BEEF).unwrap();
+///
+/// let (event, _, _) = control::read_user_control(buf.peek(), true).unwrap();
+/// assert_eq!(event, control::UCTRL_PING_RESPONSE);
+/// ```
 pub fn write_user_control_ping_response(buf: &mut Buffer, timestamp: u32) -> Result<()> {
     buf.write(&UCTRL_PING_RESPONSE.to_be_bytes())
         .map_err(|_| ErrorCode::Internal)?;
@@ -180,6 +304,23 @@ pub fn write_user_control_ping_response(buf: &mut Buffer, timestamp: u32) -> Res
 /* ── Decoder ── */
 
 /// Read a SetChunkSize message.
+
+/// # Examples
+///
+/// ```
+/// use librtmp2::message::control;
+///
+/// // Bare 4-byte payload: the control type lives in the message header.
+/// let payload = 4096u32.to_be_bytes();
+/// assert_eq!(control::read_set_chunk_size(&payload).unwrap(), 4096);
+///
+/// // Sizes below the RTMP default (128) are refused as amplification.
+/// let tiny = 64u32.to_be_bytes();
+/// assert!(control::read_set_chunk_size(&tiny).is_err());
+///
+/// // Truncated payloads are rejected rather than read out of bounds.
+/// assert!(control::read_set_chunk_size(&[0, 0]).is_err());
+/// ```
 pub fn read_set_chunk_size(data: &[u8]) -> Result<u32> {
     if data.len() < 4 {
         return Err(ErrorCode::Protocol);
@@ -194,6 +335,16 @@ pub fn read_set_chunk_size(data: &[u8]) -> Result<u32> {
 }
 
 /// Read an AbortMessage.
+
+/// # Examples
+///
+/// ```
+/// use librtmp2::message::control;
+///
+/// let payload = 4u32.to_be_bytes();
+/// assert_eq!(control::read_abort_message(&payload).unwrap(), 4);
+/// assert!(control::read_abort_message(&[]).is_err());
+/// ```
 pub fn read_abort_message(data: &[u8]) -> Result<u32> {
     if data.len() < 4 {
         return Err(ErrorCode::Protocol);
@@ -202,6 +353,15 @@ pub fn read_abort_message(data: &[u8]) -> Result<u32> {
 }
 
 /// Read an Acknowledgement size.
+
+/// # Examples
+///
+/// ```
+/// use librtmp2::message::control;
+///
+/// let payload = 1_000_000u32.to_be_bytes();
+/// assert_eq!(control::read_acknowledgement_size(&payload).unwrap(), 1_000_000);
+/// ```
 pub fn read_acknowledgement_size(data: &[u8]) -> Result<u32> {
     if data.len() < 4 {
         return Err(ErrorCode::Protocol);
@@ -210,6 +370,22 @@ pub fn read_acknowledgement_size(data: &[u8]) -> Result<u32> {
 }
 
 /// Read a WindowAckSize.
+
+/// # Examples
+///
+/// ```
+/// use librtmp2::message::control;
+///
+/// let ok = 2500000u32.to_be_bytes();
+/// assert_eq!(control::read_window_ack_size(&ok).unwrap(), 2_500_000);
+///
+/// // A non-zero window below MIN_WINDOW_ACK_SIZE would force ACK-per-byte.
+/// let too_small = 16u32.to_be_bytes();
+/// assert!(control::read_window_ack_size(&too_small).is_err());
+///
+/// // Zero disables acknowledgements and is accepted.
+/// assert_eq!(control::read_window_ack_size(&[0, 0, 0, 0]).unwrap(), 0);
+/// ```
 pub fn read_window_ack_size(data: &[u8]) -> Result<u32> {
     if data.len() < 4 {
         return Err(ErrorCode::Protocol);
@@ -222,6 +398,18 @@ pub fn read_window_ack_size(data: &[u8]) -> Result<u32> {
 }
 
 /// Read a SetPeerBandwidth.
+
+/// # Examples
+///
+/// ```
+/// use librtmp2::message::control;
+///
+/// // Four-byte window followed by a one-byte limit type.
+/// let payload = [0x00, 0x2F, 0xAF, 0x08, 0x02];
+/// let (window, limit_type) = control::read_set_peer_bandwidth(&payload).unwrap();
+/// assert_eq!(window, 3_125_000);
+/// assert_eq!(limit_type, 2);
+/// ```
 pub fn read_set_peer_bandwidth(data: &[u8]) -> Result<(u32, u8)> {
     if data.len() < 5 {
         return Err(ErrorCode::Protocol);
@@ -230,6 +418,26 @@ pub fn read_set_peer_bandwidth(data: &[u8]) -> Result<(u32, u8)> {
 }
 
 /// Read a User Control event.
+
+/// # Examples
+///
+/// ```
+/// use librtmp2::message::control;
+///
+/// // PingRequest (0x0006) carrying an opaque token, plus the 4-byte payload.
+/// let mut payload = vec![0x00, 0x06];
+/// payload.extend_from_slice(&7u32.to_be_bytes());
+/// payload.extend_from_slice(&0xDEAD_BEEFu32.to_be_bytes());
+///
+/// let (event, param1, param2) = control::read_user_control(&payload, true).unwrap();
+/// assert_eq!(event, librtmp2::message::control::UCTRL_PING_REQUEST);
+/// assert_eq!(param1, 7);
+/// assert_eq!(param2, Some(0xDEAD_BEEF));
+///
+/// // With `param2 = false` the trailing word is not read.
+/// let (_, _, none) = control::read_user_control(&payload, false).unwrap();
+/// assert_eq!(none, None);
+/// ```
 pub fn read_user_control(data: &[u8], param2: bool) -> Result<(u16, u32, Option<u32>)> {
     if data.len() < 6 {
         return Err(ErrorCode::Protocol);

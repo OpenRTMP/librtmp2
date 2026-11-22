@@ -105,6 +105,24 @@ impl Default for ChunkStream {
 
 impl ChunkStream {
     /// Reset stream state and release retained payload/reassembly allocations.
+
+    /// # Examples
+    ///
+    /// ```
+    /// use librtmp2::chunk::state::{ChunkRegistry, DEFAULT_CHUNK_SIZE};
+    ///
+    /// let mut reg = ChunkRegistry::new();
+    /// reg.init();
+    /// let cs = reg.get_or_create(4).unwrap();
+    /// cs.chunk_size = 4096;
+    /// cs.has_message_header = true;
+    ///
+    /// // `reset` clears per-stream state and restores the default chunk size.
+    /// cs.reset(DEFAULT_CHUNK_SIZE);
+    /// assert!(!cs.has_message_header);
+    /// assert_eq!(cs.chunk_size, DEFAULT_CHUNK_SIZE);
+    /// assert_eq!(cs.reassembly_bytes_read, 0);
+    /// ```
     pub fn reset(&mut self, default_chunk_size: u32) {
         self.has_message_header = false;
         self.type0_timestamp = 0;
@@ -127,6 +145,21 @@ impl ChunkStream {
 }
 
 /// Per-connection chunk-stream registry.
+
+/// # Examples
+///
+/// ```
+/// use librtmp2::chunk::state::ChunkRegistry;
+///
+/// let mut reg = ChunkRegistry::new();
+/// reg.init();
+///
+/// // One entry per active CSID, created on demand.
+/// reg.get_or_create(4).unwrap();
+/// reg.get_or_create(6).unwrap();
+/// assert!(reg.get(4).is_some());
+/// assert!(reg.get(5).is_none());
+/// ```
 #[derive(Debug)]
 pub struct ChunkRegistry {
     /// Per-connection chunk streams.
@@ -162,6 +195,16 @@ impl Default for ChunkRegistry {
 
 impl ChunkRegistry {
     /// Create a new chunk registry.
+
+    /// # Examples
+    ///
+    /// ```
+    /// use librtmp2::chunk::state::{ChunkRegistry, DEFAULT_CHUNK_SIZE};
+    ///
+    /// let reg = ChunkRegistry::new();
+    /// assert_eq!(reg.default_chunk_size, DEFAULT_CHUNK_SIZE);
+    /// assert!(reg.get(4).is_none());
+    /// ```
     pub fn new() -> Self {
         Self {
             streams: Vec::new(),
@@ -177,6 +220,22 @@ impl ChunkRegistry {
     }
 
     /// Initialize the registry, discarding any state from a previous session.
+
+    /// # Examples
+    ///
+    /// ```
+    /// use librtmp2::chunk::state::{ChunkRegistry, DEFAULT_CHUNK_SIZE};
+    ///
+    /// let mut reg = ChunkRegistry::new();
+    /// reg.get_or_create(4).unwrap();
+    /// reg.get_or_create(4).unwrap().chunk_size = 4096;
+    ///
+    /// // A new session must not inherit the previous peer's chunk size.
+    /// reg.init();
+    /// assert!(reg.get(4).is_none());
+    /// assert_eq!(reg.default_chunk_size, DEFAULT_CHUNK_SIZE);
+    /// assert!(reg.initialized);
+    /// ```
     pub fn init(&mut self) {
         // The C API's `lrtmp2_chunk_registry_init()` frees every chunk stream
         // and its reassembly buffer. Keeping them here would let a new peer's
@@ -188,6 +247,19 @@ impl ChunkRegistry {
     }
 
     /// Get or create a chunk stream for the given csid.
+
+    /// # Examples
+    ///
+    /// ```
+    /// use librtmp2::chunk::state::ChunkRegistry;
+    ///
+    /// let mut reg = ChunkRegistry::new();
+    /// reg.init();
+    ///
+    /// let cs = reg.get_or_create(4).unwrap();
+    /// assert_eq!(cs.csid, 4);
+    /// assert!(!cs.has_message_header);
+    /// ```
     pub fn get_or_create(&mut self, csid: u32) -> Result<&mut ChunkStream> {
         let idx = self.get_or_create_index(csid)?;
         Ok(&mut self.streams[idx])
@@ -235,6 +307,19 @@ impl ChunkRegistry {
     }
 
     /// Get a chunk stream by csid (returns None if not found).
+
+    /// # Examples
+    ///
+    /// ```
+    /// use librtmp2::chunk::state::ChunkRegistry;
+    ///
+    /// let mut reg = ChunkRegistry::new();
+    /// reg.init();
+    /// assert!(reg.get(4).is_none());
+    ///
+    /// reg.get_or_create(4).unwrap();
+    /// assert_eq!(reg.get(4).map(|cs| cs.csid), Some(4));
+    /// ```
     pub fn get(&self, csid: u32) -> Option<&ChunkStream> {
         let idx = *self.csid_index.get(&csid)?;
         let stream = &self.streams[idx];
@@ -246,6 +331,21 @@ impl ChunkRegistry {
     }
 
     /// Get a mutable chunk stream by csid.
+
+    /// # Examples
+    ///
+    /// ```
+    /// use librtmp2::chunk::state::ChunkRegistry;
+    ///
+    /// let mut reg = ChunkRegistry::new();
+    /// reg.init();
+    /// reg.get_or_create(4).unwrap();
+    ///
+    /// // The peer's announced chunk size is recorded per CSID.
+    /// reg.get_mut(4).unwrap().chunk_size = 4096;
+    /// assert_eq!(reg.get(4).unwrap().chunk_size, 4096);
+    /// assert!(reg.get_mut(9).is_none());
+    /// ```
     pub fn get_mut(&mut self, csid: u32) -> Option<&mut ChunkStream> {
         let idx = *self.csid_index.get(&csid)?;
         let stream = &self.streams[idx];
@@ -325,6 +425,25 @@ impl ChunkRegistry {
 
     /// Set chunk size for all streams. Values outside the RTMP-valid inbound
     /// range are ignored (peers must negotiate via `read_set_chunk_size`).
+
+    /// # Examples
+    ///
+    /// ```
+    /// use librtmp2::chunk::state::ChunkRegistry;
+    ///
+    /// let mut reg = ChunkRegistry::new();
+    /// reg.init();
+    /// reg.get_or_create(4).unwrap();
+    /// reg.get_or_create(6).unwrap();
+    ///
+    /// reg.set_all_chunk_size(4096);
+    /// assert_eq!(reg.get(4).unwrap().chunk_size, 4096);
+    /// assert_eq!(reg.get(6).unwrap().chunk_size, 4096);
+    ///
+    /// // Out-of-range values are ignored, not applied.
+    /// reg.set_all_chunk_size(1);
+    /// assert_eq!(reg.get(4).unwrap().chunk_size, 4096);
+    /// ```
     pub fn set_all_chunk_size(&mut self, chunk_size: u32) {
         if chunk_size < DEFAULT_CHUNK_SIZE || chunk_size > MAX_PEER_CHUNK_SIZE {
             return;
@@ -338,6 +457,27 @@ impl ChunkRegistry {
     }
 
     /// Check if a stream can grow its reassembly buffer.
+
+    /// # Examples
+    ///
+    /// ```
+    /// use librtmp2::chunk::state::{ChunkRegistry, DEFAULT_MAX_MSG_LENGTH};
+    ///
+    /// let mut reg = ChunkRegistry::new();
+    /// reg.init();
+    /// reg.get_or_create(4).unwrap();
+    ///
+    /// // Take an immutable borrow of the registry for the duration of the check.
+    /// {
+    ///     let cs = reg.get(4).unwrap();
+    ///     // A small growth fits the per-connection reassembly budget.
+    ///     assert!(reg.can_grow_reassembly(cs, 1024).is_ok());
+    ///     // Asking beyond the whole budget is refused before allocating.
+    ///     assert!(reg.can_grow_reassembly(cs, u32::MAX).is_err());
+    /// }
+    /// // The message-length cap is enforced separately from the byte budget.
+    /// assert!(DEFAULT_MAX_MSG_LENGTH > 0);
+    /// ```
     pub fn can_grow_reassembly(&self, cs: &ChunkStream, additional: u32) -> Result<()> {
         if self.reassembly_bytes_in_use + additional as usize > self.max_reassembly_bytes {
             return Err(ErrorCode::Chunk);
@@ -347,6 +487,23 @@ impl ChunkRegistry {
     }
 
     /// Reset a specific stream.
+
+    /// # Examples
+    ///
+    /// ```
+    /// use librtmp2::chunk::state::ChunkRegistry;
+    ///
+    /// let mut reg = ChunkRegistry::new();
+    /// reg.init();
+    /// reg.get_or_create(4).unwrap().has_message_header = true;
+    ///
+    /// // `reset_stream` clears the per-stream state in place; the slot stays
+    /// // allocated so the CSID can be reused without a new lookup.
+    /// reg.reset_stream(4);
+    /// let cs = reg.get(4).unwrap();
+    /// assert!(!cs.has_message_header);
+    /// assert_eq!(cs.csid, 4);
+    /// ```
     pub fn reset_stream(&mut self, csid: u32) {
         if let Some(idx) = self.csid_index.get(&csid).copied() {
             if self.streams[idx].in_use && self.streams[idx].csid == csid {
@@ -362,6 +519,28 @@ impl ChunkRegistry {
     /// (`type0_*` fields and `last_delta`): the next message on this CSID may
     /// still start with a compressed fmt=1/2/3 header that references the most
     /// recent header on the stream.
+
+    /// # Examples
+    ///
+    /// ```
+    /// use librtmp2::chunk::state::ChunkRegistry;
+    ///
+    /// let mut reg = ChunkRegistry::new();
+    /// reg.init();
+    /// {
+    ///     let cs = reg.get_or_create(4).unwrap();
+    ///     cs.has_message_header = true;
+    ///     cs.type0_msg_length = 4096;
+    ///     cs.reassembly_bytes_read = 128;
+    /// }
+    ///
+    /// // Abort clears the in-flight message but keeps the header context, so a
+    /// // following fmt=1/2/3 header still resolves correctly.
+    /// reg.abort_stream(4);
+    /// let cs = reg.get(4).unwrap();
+    /// assert_eq!(cs.reassembly_bytes_read, 0);
+    /// assert!(cs.has_message_header);
+    /// ```
     pub fn abort_stream(&mut self, csid: u32) {
         if let Some(idx) = self.csid_index.get(&csid).copied() {
             if self.streams[idx].in_use && self.streams[idx].csid == csid {
@@ -379,6 +558,21 @@ impl ChunkRegistry {
     }
 
     /// Destroy the registry.
+
+    /// # Examples
+    ///
+    /// ```
+    /// use librtmp2::chunk::state::ChunkRegistry;
+    ///
+    /// let mut reg = ChunkRegistry::new();
+    /// reg.init();
+    /// reg.get_or_create(4).unwrap();
+    /// reg.get_or_create(6).unwrap();
+    ///
+    /// reg.destroy();
+    /// assert!(reg.get(4).is_none());
+    /// assert!(reg.get(6).is_none());
+    /// ```
     pub fn destroy(&mut self) {
         self.streams.clear();
         self.csid_index.clear();
