@@ -24,8 +24,13 @@ pub const RTMP_WIRE_MAX_MSG_LENGTH: u32 = 0x00FF_FFFF;
 pub const DEFAULT_MAX_ACTIVE_CSIDS: usize = 256;
 
 /// Per-chunk-stream state.
+///
+/// One of these exists per active chunk stream id (CSID) on a connection. It
+/// records the last message header seen on the CSID, the peer's current chunk
+/// size, and the partial body being reassembled.
 #[derive(Debug)]
 pub struct ChunkStream {
+    /// Chunk stream id this state belongs to.
     pub csid: u32,
     /// peer's chunk size (SetChunkSize)
     pub chunk_size: u32,
@@ -35,8 +40,11 @@ pub struct ChunkStream {
     pub has_message_header: bool,
     /// running timestamp for this chunk stream
     pub type0_timestamp: u32,
+    /// Declared body length of the message currently being reassembled.
     pub type0_msg_length: u32,
+    /// RTMP message type id from the last fmt-0 header.
     pub type0_msg_type_id: u8,
+    /// Message stream id from the last fmt-0 header.
     pub type0_msg_stream_id: u32,
     /// current message uses extended timestamps
     pub type0_ext_ts: bool,
@@ -62,6 +70,7 @@ pub struct ChunkStream {
     /// with this flag set to enforce the active-CSID cap, so writing the
     /// field directly desyncs that count.
     pub reassembling: bool,
+    /// Whether this slot is currently allocated in the registry.
     pub in_use: bool,
 }
 
@@ -141,6 +150,7 @@ pub struct ChunkRegistry {
     pub max_active_csids: usize,
     /// Max reassembly bytes for this connection's chunk streams.
     pub max_reassembly_bytes: usize,
+    /// Set once [`ChunkRegistry::init`] has applied the limits above.
     pub initialized: bool,
 }
 

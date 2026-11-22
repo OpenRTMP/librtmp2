@@ -6,26 +6,49 @@
 use crate::ertmp::exvideo::VIDEO_FRAME_TYPE_COMMAND;
 use crate::types::FrameType;
 
+/// E-RTMP v2 `AudioPacketType` value identifying a multitrack audio container.
+///
+/// Same value as [`crate::types::ERTMP_AUDIO_PACKET_TYPE_MULTITRACK`], repeated
+/// here so this module is self-contained.
 pub const ERTMP_AUDIO_PACKET_TYPE_MULTITRACK: u8 = 5;
+/// E-RTMP v2 `VideoPacketType` value identifying a multitrack video container.
+///
+/// Same value as [`crate::types::ERTMP_VIDEO_PACKET_TYPE_MULTITRACK`].
 pub const ERTMP_VIDEO_PACKET_TYPE_MULTITRACK: u8 = 6;
 /// Cap sub-tracks unpacked from a single multitrack container (mirrors
 /// `message::message::MAX_AGGREGATE_SUBTAGS` and `session::conn::MAX_AGGREGATE_SUBTAGS`).
 pub const MAX_MULTITRACK_SUBTRACKS: usize = 4096;
 
+/// How the sub-tracks inside a multitrack container are laid out.
+///
+/// Encoded in the high nibble of the container's second byte; see
+/// [`crate::ertmp::multitrack`] for the full wire format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum AvMultitrackType {
+    /// Exactly one track; the container carries no per-track size field.
     OneTrack = 0,
+    /// Several tracks, all sharing one FourCC given once after the header.
     ManyTracks = 1,
+    /// Several tracks, each preceded by its own FourCC.
     ManyTracksManyCodecs = 2,
 }
 
+/// One sub-track extracted from a multitrack container.
+///
+/// Borrowed from the container payload: [`MediaTrackSlice::payload`] points
+/// into the caller's `&[u8]` and is valid for exactly as long as that slice.
 #[derive(Debug, Clone, Copy)]
 pub struct MediaTrackSlice<'a> {
+    /// Track id (`0` is the default track).
     pub track_id: u8,
+    /// Inner Enhanced RTMP packet type shared by every track in the container.
     pub packet_type: u8,
+    /// Codec FourCC for this track.
     pub fourcc: [u8; 4],
+    /// FLV video frame type nibble (`1` = keyframe); `0` for audio containers.
     pub video_frame_type: u8,
+    /// Track body, borrowed from the container payload.
     pub payload: &'a [u8],
 }
 
@@ -33,6 +56,26 @@ fn read_u24(data: &[u8]) -> usize {
     ((data[0] as usize) << 16) | ((data[1] as usize) << 8) | data[2] as usize
 }
 
+/// Whether `payload` is an E-RTMP v2 multitrack container for `frame_type`.
+///
+/// Checks only the container header nibble, not whether the track bodies are
+/// well formed; use [`foreach_track`] for full validation. Legacy FLV audio that
+/// happens to set bit 7 and carry a `5` low nibble (e.g. `0x85` G.711 µ-law) is
+/// correctly *not* treated as a container.
+///
+/// ```
+/// use librtmp2::ertmp::multitrack_media::is_multitrack_container;
+/// use librtmp2::types::FrameType;
+///
+/// // Enhanced video header with packet type 6 (multitrack).
+/// let container = [
+///     0x86, 0x10, b'a', b'v', b'c', b'1', 0, 0, 0, 1, 0xAA,
+/// ];
+/// assert!(is_multitrack_container(FrameType::Video, &container));
+///
+/// // A plain AVC keyframe (packet type 1) is not a container.
+/// assert!(!is_multitrack_container(FrameType::Video, &[0x97, 0x01, 0x00]));
+/// ```
 pub fn is_multitrack_container(frame_type: FrameType, payload: &[u8]) -> bool {
     if payload.is_empty() || payload[0] & 0x80 == 0 {
         return false;
@@ -163,6 +206,25 @@ fn walk_tracks(
 /// Visit every track of a valid multitrack container. Returns `false`
 /// without visiting anything when the container is malformed. Allocation-free:
 /// the container is validated in a first pass, then visited in a second.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::ertmp::multitrack_media::foreach_track;
+/// use librtmp2::types::FrameType;
+///
+/// // Two `avc1` tracks, each `u24` size-prefixed.
+/// let container = [
+///     0x86, 0x10, b'a', b'v', b'c', b'1',
+///     0x00, 0x00, 0x00, 0x02, 0xAA, 0xBB,
+///     0x01, 0x00, 0x00, 0x01, 0xCC,
+/// ];
+/// let mut ids = Vec::new();
+/// assert!(foreach_track(FrameType::Video, &container, |track| {
+///     ids.push(track.track_id);
+/// }));
+/// assert_eq!(ids, vec![0, 1]);
+/// ```
 pub fn foreach_track(
     frame_type: FrameType,
     payload: &[u8],
@@ -171,6 +233,19 @@ pub fn foreach_track(
     walk_tracks(frame_type, payload, |_| {}) && walk_tracks(frame_type, payload, visit)
 }
 
+/// FourCC of the first track in a valid multitrack container, or `None` when
+/// the container is malformed or empty.
+///
+/// ```
+/// use librtmp2::ertmp::multitrack_media::first_track_fourcc;
+/// use librtmp2::types::FrameType;
+///
+/// let container = [
+///     0x86, 0x10, b'h', b'v', b'c', b'1', 0, 0, 0, 1, 0xAA,
+/// ];
+/// assert_eq!(first_track_fourcc(FrameType::Video, &container), Some(*b"hvc1"));
+/// assert_eq!(first_track_fourcc(FrameType::Video, &[0x97, 0x01]), None);
+/// ```
 pub fn first_track_fourcc(frame_type: FrameType, payload: &[u8]) -> Option<[u8; 4]> {
     let mut result = None;
     if foreach_track(frame_type, payload, |track| {
@@ -184,6 +259,9 @@ pub fn first_track_fourcc(frame_type: FrameType, payload: &[u8]) -> Option<[u8; 
     }
 }
 
+/// Whether a valid multitrack container carries at least one sequence-start
+/// track (packet type `0`), i.e. whether it holds a codec configuration for a
+/// track. Malformed containers report `false`.
 pub fn multitrack_has_sequence_start(frame_type: FrameType, payload: &[u8]) -> bool {
     let mut found = false;
     let valid = foreach_track(frame_type, payload, |track| {
@@ -194,6 +272,17 @@ pub fn multitrack_has_sequence_start(frame_type: FrameType, payload: &[u8]) -> b
 
 /// True when a valid multitrack container carries Enhanced Metadata as the
 /// shared inner packet type (`ERTMP_PACKET_TYPE_METADATA` / audio metadata 3).
+///
+/// ```
+/// use librtmp2::ertmp::multitrack_media::multitrack_has_metadata;
+/// use librtmp2::types::FrameType;
+///
+/// // Video container, shared packet type 4 = metadata.
+/// let metadata = [
+///     0x86, 0x14, b'a', b'v', b'c', b'1', 0, 0, 0, 0,
+/// ];
+/// assert!(multitrack_has_metadata(FrameType::Video, &metadata));
+/// ```
 pub fn multitrack_has_metadata(frame_type: FrameType, payload: &[u8]) -> bool {
     let metadata_ty = match frame_type {
         FrameType::Video => 4, // ERTMP_PACKET_TYPE_METADATA
@@ -207,6 +296,9 @@ pub fn multitrack_has_metadata(frame_type: FrameType, payload: &[u8]) -> bool {
     valid && found
 }
 
+/// Whether a valid video multitrack container carries coded frames
+/// (`CodedFrames` or `CodedFramesX`) for a keyframe. Used by the relay to decide
+/// whether a player joining mid-stream can start decoding immediately.
 pub fn multitrack_has_keyframe(payload: &[u8]) -> bool {
     if !is_multitrack_container(FrameType::Video, payload) {
         return false;

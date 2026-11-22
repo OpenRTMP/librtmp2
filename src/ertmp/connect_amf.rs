@@ -184,6 +184,16 @@ pub fn write_negotiated_caps(buf: &mut Buffer, caps: &NegotiatedCaps) -> Result<
     Ok(())
 }
 
+/// Write a `fourCcList` value as an AMF0 strict array of FourCC strings.
+///
+/// Used inside the E-RTMP v2 `connect`/`_result` objects. `list.count` is
+/// clamped to the fixed array bound, so an inconsistent count from a C caller
+/// cannot read past [`crate::types::MAX_FOURCCS`].
+///
+/// # Errors
+///
+/// Propagates [`ErrorCode::Amf`] from [`amf0::write_string`] and
+/// [`ErrorCode::Internal`] when the buffer cannot grow.
 pub fn write_four_cc_list_amf(buf: &mut Buffer, list: &FourCcList) -> Result<()> {
     // `count` is a caller-controlled `pub` field on an FFI type; never index
     // past the fixed array when a C caller supplies an inconsistent count.
@@ -203,6 +213,16 @@ pub fn write_four_cc_list_amf(buf: &mut Buffer, list: &FourCcList) -> Result<()>
     Ok(())
 }
 
+/// Write a `videoFourCcInfoMap` value as an AMF0 object.
+///
+/// Maps each codec FourCC to its numeric capability mask (see
+/// [`crate::types::FOUR_CC_INFO_CAN_DECODE`] and friends). `count` is clamped to
+/// the smaller of the two fixed arrays.
+///
+/// # Errors
+///
+/// Returns [`ErrorCode::Amf`] for a FourCC that is not valid UTF-8, and
+/// propagates buffer-growth failures.
 pub fn write_video_fourcc_info_map_amf(buf: &mut Buffer, map: &VideoFourCcInfoMap) -> Result<()> {
     let count = map.count.min(map.entries.len()).min(map.masks.len());
     amf0::write_object_begin(buf)?;
@@ -218,10 +238,31 @@ pub fn write_video_fourcc_info_map_amf(buf: &mut Buffer, map: &VideoFourCcInfoMa
     amf0::write_object_end(buf)
 }
 
+/// Write the E-RTMP v2 `capsEx` capability mask as an AMF0 number.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::buffer::Buffer;
+/// use librtmp2::ertmp::connect_amf::write_caps_ex_amf;
+/// use librtmp2::types::CAPS_EX_MASK_MULTITRACK;
+///
+/// let mut buf = Buffer::new();
+/// write_caps_ex_amf(&mut buf, CAPS_EX_MASK_MULTITRACK).unwrap();
+/// // One AMF0 number marker plus an 8-byte double.
+/// assert_eq!(buf.available(), 9);
+/// ```
 pub fn write_caps_ex_amf(buf: &mut Buffer, caps_ex_mask: u32) -> Result<()> {
     amf0::write_number(buf, caps_ex_mask as f64)
 }
 
+/// Write a `reconnect` value as an AMF0 long string holding its 8-byte wire
+/// form.
+///
+/// # Errors
+///
+/// Returns [`ErrorCode::Internal`] if the fixed 8-byte encoding unexpectedly
+/// fails, and propagates buffer-growth failures.
 pub fn write_reconnect_amf(buf: &mut Buffer, rc: &Reconnect) -> Result<()> {
     let mut blob = [0u8; 8];
     if reconnect_write(rc, &mut blob) != 8 {

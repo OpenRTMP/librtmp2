@@ -7,7 +7,33 @@ use crate::types::{ErrorCode, Result, VideoCodec, VideoTag};
 /// Parse an FLV video tag.
 ///
 /// Returns `Err(ErrorCode::Unsupported)` if `IsExHeader` (bit 7) is set —
-/// the caller must route those frames through the E-RTMP enhanced parser instead.
+/// the caller must route those frames through the E-RTMP enhanced parser
+/// (see [`crate::ertmp::exvideo::exvideo_parse`]) instead.
+///
+/// [`VideoTag::data`] and [`VideoTag::size`] point into `data`; they stay valid
+/// only as long as `data` does. A truncated tag leaves the optional fields at
+/// their defaults rather than failing, as long as the header itself is complete.
+///
+/// # Errors
+///
+/// - [`ErrorCode::Internal`] — `data` is empty.
+/// - [`ErrorCode::Unsupported`] — Enhanced RTMP header, or an unknown codec id.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::flv::video_tag;
+/// use librtmp2::types::{VideoCodec, VideoTag};
+///
+/// // Legacy AVC keyframe: 0x17 = keyframe + AVC, 0x01 = NALU, cts = 0.
+/// let mut tag = VideoTag::default();
+/// video_tag::parse(&[0x17, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], &mut tag).unwrap();
+/// assert_eq!(tag.codec, VideoCodec::H264);
+/// assert_eq!(tag.frame_type, 1); // keyframe
+///
+/// // Enhanced RTMP headers belong to the E-RTMP parser.
+/// assert!(video_tag::parse(&[0x97, 0x01], &mut tag).is_err());
+/// ```
 pub fn parse(data: &[u8], tag: &mut VideoTag) -> Result<()> {
     *tag = VideoTag::default();
 

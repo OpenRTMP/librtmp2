@@ -13,23 +13,42 @@ const RTMP_VERSION: u8 = 0x03;
 const HANDSHAKE_SIZE: usize = 1536;
 
 /// Handshake state machine states.
+///
+/// The server and client each walk one half of the RTMP handshake. The server
+/// starts at [`HandshakeState::ServerWaitC0`], the client at
+/// [`HandshakeState::ClientWaitS0`]; both converge on
+/// [`HandshakeState::Done`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
 pub enum HandshakeState {
+    /// Server: waiting for the client's C0 version byte.
     ServerWaitC0 = 0,
+    /// Server: waiting for the 1536-byte C1 random block.
     ServerWaitC1,
+    /// Server: waiting for the client's C2 echo.
     ServerWaitC2,
+    /// Client: waiting for the server's S0 version byte.
     ClientWaitS0,
+    /// Client: waiting for the 1536-byte S1 random block.
     ClientWaitS1,
+    /// Client: waiting for the server's S2 echo.
     ClientWaitS2,
+    /// Both sides: handshake complete, RTMP chunks may flow.
     Done,
 }
 
 /// Handshake context.
+///
+/// Tracks the peer's advertised version and first timestamp, plus any bytes the
+/// state machine has queued for output. One `Handshake` lives per connection;
+/// see [`server_init`] and [`client_init`].
 #[derive(Debug)]
 pub struct Handshake {
+    /// Current handshake step.
     pub state: HandshakeState,
+    /// RTMP version byte from the peer's C0/S0; `0x03` for RTMP 1.0.
     pub version: u8,
+    /// Peer timestamp (echoed in the S1/C1 block) in milliseconds.
     pub peer_time: u32,
     /// queued output bytes
     pub out: Buffer,

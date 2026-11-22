@@ -1,7 +1,27 @@
-//! Core type definitions for librtmp2
+//! Core type definitions, error codes, and protocol constants.
 //!
-//! This module contains all public types, enums, structs, and constants
-//! that mirror the C header `include/librtmp2/types.h` and related headers.
+//! This module holds the vocabulary the rest of the crate is built from:
+//!
+//! - [`ErrorCode`] and the crate-wide [`Result`] alias.
+//! - The [`ConnState`] connection state machine.
+//! - Codec and frame classification ([`FrameType`], [`AudioCodec`],
+//!   [`VideoCodec`], [`FourCc`], [`Frame`]).
+//! - Enhanced RTMP (E-RTMP) v1/v2 constants: packet types, `capsEx` mask bits,
+//!   FourCC capability flags, and the negotiation structs
+//!   ([`NegotiatedCaps`], [`ConnectInfo`], [`Reconnect`]).
+//! - FLV tag views ([`AudioTag`], [`VideoTag`], [`ScriptTag`]).
+//!
+//! Most items here mirror the C header `include/librtmp2/types.h` so that the
+//! `extern "C"` layer and Rust callers share one definition. Rust-only
+//! additions (such as [`ResourceLimits`]) are marked as such.
+//!
+//! ```
+//! use librtmp2::types::{ErrorCode, FrameType};
+//!
+//! assert_eq!(ErrorCode::Ok as i32, 0);
+//! assert_eq!(ErrorCode::Auth.as_str(), "Authentication error");
+//! assert_eq!(FrameType::Video as i32, 1);
+//! ```
 
 #![allow(dead_code)]
 
@@ -92,18 +112,35 @@ pub type Result<T> = std::result::Result<T, ErrorCode>;
 /* ── Connection state machine ── */
 
 /// Connection state machine states.
+///
+/// A connection advances monotonically through these states as the RTMP
+/// session is established, used, and torn down. See the [`crate::session`]
+/// module docs for the surrounding flow; the [`ConnState::CapsNegotiated`]
+/// state exists only when Enhanced RTMP v2 capability exchange runs and is
+/// skipped for legacy connects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(C)]
 pub enum ConnState {
+    /// TCP connection accepted; no handshake bytes exchanged yet.
     TcpAccepted = 0,
+    /// Performing the C0/C1/C2 ↔ S0/S1/S2 handshake.
     Handshake,
+    /// Handshake complete; ready for the `connect` command.
     Connected,
+    /// E-RTMP v2 capabilities negotiated (between [`Self::Connected`] and
+    /// [`Self::AppConnected`]).
     CapsNegotiated,
+    /// `NetConnection.Connect.Success` sent/acknowledged; the app is attached.
     AppConnected,
+    /// `createStream` succeeded and a stream id was assigned.
     StreamCreated,
+    /// This connection is publishing a stream.
     Publishing,
+    /// This connection is playing a stream.
     Playing,
+    /// Teardown started; remaining queued output is being flushed.
     Closing,
+    /// Connection fully closed; no further I/O happens.
     Closed,
 }
 
@@ -144,38 +181,88 @@ pub enum AuthorizationResult {
     /// be unique per connection and role; a request reusing an id this
     /// connection already answered is refused, because its completion could not
     /// be told apart from the one owed for the earlier request.
-    Pending { request_id: u64 },
+    Pending {
+        /// The integrator's own identifier for this authorization request,
+        /// echoed back to `complete_publish_authorization` /
+        /// `complete_play_authorization`. Must be unique per connection and
+        /// role.
+        request_id: u64,
+    },
 }
 
 /* ── Frame types ── */
 
 /// Frame type classification.
+///
+/// Distinguishes the four kinds of RTMP message the library delivers as a
+/// [`Frame`]. Audio and video frames carry codec payloads; script and
+/// metadata frames carry AMF-encoded side data (e.g. `onMetaData`).
+///
+/// ```
+/// use librtmp2::types::FrameType;
+///
+/// assert_eq!(FrameType::Audio as i32, 0);
+/// assert_eq!(FrameType::Video as i32, 1);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
 pub enum FrameType {
+    /// Audio payload (RTMP message type `0x08`).
     Audio = 0,
+    /// Video payload (RTMP message type `0x09`).
     Video = 1,
+    /// Script data / metadata (RTMP message types `0x12`, `0x0F`).
     Script = 2,
+    /// Metadata side channel (Enhanced RTMP metadata packet).
     Metadata = 3,
 }
 
 /* ── Audio codec IDs ── */
 
 /// Audio codec identifiers.
+///
+/// The discriminants are the FLV `SoundFormat` values (high nibble of the first
+/// audio tag byte) used by legacy RTMP audio, so they match the wire format
+/// directly. SoundFormat `9` is Enhanced RTMP's ExHeader discriminator rather
+/// than a codec, and `12`/`13`/`15` are reserved by the FLV specification.
+///
+/// Enhanced RTMP identifies codecs through a FourCC instead — see
+/// [`crate::ertmp::fourcc`] — and reports them in [`Frame::audio_fourcc`]. Note
+/// that [`AudioCodec::Opus`] is reachable only through a FourCC: legacy
+/// SoundFormat `14` means MP3 at 8 kHz, not Opus.
+///
+/// ```
+/// use librtmp2::types::AudioCodec;
+///
+/// assert_eq!(AudioCodec::Aac as u8, 10);
+/// assert_eq!(AudioCodec::default(), AudioCodec::Pcm);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
 pub enum AudioCodec {
+    /// Uncompressed linear PCM, platform-endian.
     Pcm = 0,
+    /// ADPCM.
     Adpcm = 1,
+    /// MP3.
     Mp3 = 2,
+    /// Linear PCM, little-endian.
     PcmLe = 3,
+    /// Nellymoser 16 kHz.
     Nelly16k = 4,
+    /// Nellymoser 8 kHz.
     Nelly8k = 5,
+    /// Nellymoser.
     Nelly = 6,
+    /// G.711 A-law.
     G711A = 7,
+    /// G.711 µ-law.
     G711U = 8,
+    /// AAC.
     Aac = 10,
+    /// Speex.
     Speex = 11,
+    /// Opus (Enhanced RTMP `Opus` FourCC only; no legacy SoundFormat).
     Opus = 14,
 }
 
@@ -188,18 +275,40 @@ impl Default for AudioCodec {
 /* ── Video codec IDs (legacy) ── */
 
 /// Video codec identifiers (legacy).
+///
+/// The discriminants are the FLV `CodecID` values (low nibble of the first
+/// video tag byte) for legacy RTMP video. Enhanced RTMP identifies codecs
+/// through a FourCC instead — see [`VideoFourCcInfoMap`] and
+/// [`crate::ertmp::fourcc`] — and reports them in [`Frame::video_fourcc`].
+///
+/// ```
+/// use librtmp2::types::VideoCodec;
+///
+/// assert_eq!(VideoCodec::H264 as u8, 7);
+/// assert_eq!(VideoCodec::default(), VideoCodec::Jpeg);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
 pub enum VideoCodec {
+    /// JPEG (still image).
     Jpeg = 1,
+    /// Sorenson H.263.
     Sorenson = 2,
+    /// Screen video.
     Screen = 3,
+    /// On2 VP6.
     Vp6 = 4,
+    /// On2 VP6 with alpha channel.
     Vp6a = 5,
+    /// Screen video v2.
     Screen2 = 6,
+    /// AVC / H.264.
     H264 = 7,
+    /// HEVC / H.265 (Enhanced RTMP only).
     H265 = 12,
+    /// AV1 (Enhanced RTMP only).
     Av1 = 13,
+    /// VP9 (Enhanced RTMP only).
     Vp9 = 14,
 }
 
@@ -223,26 +332,58 @@ pub struct FourCc {
 
 /// A parsed frame.
 ///
-/// Input to the send path (`lrtmp2_client_send_frame`). The Rust client and
-/// server deliver parsed frames through an `on_frame` callback, which the
-/// C ABI does not yet expose.
+/// Input to the send path (`lrtmp2_client_send_frame`) and the value delivered
+/// to `on_frame` callbacks. The Rust client and server deliver parsed frames
+/// through an `on_frame` callback, which the C ABI does not yet expose.
+///
+/// # Data pointer lifetime
+///
+/// [`Frame::data`] points at a payload owned by the connection that produced
+/// the frame (for callbacks) or by the caller (for the send path). It is valid
+/// only for the duration of the callback, or for the duration of the
+/// `send_frame` call when sending; copy the bytes if you need to retain them.
+///
+/// # Example
+///
+/// ```
+/// use librtmp2::types::{Frame, FrameType};
+///
+/// let frame = Frame {
+///     frame_type: FrameType::Video,
+///     timestamp: 1000,
+///     size: 0,
+///     ..Frame::default()
+/// };
+/// assert_eq!(frame.frame_type, FrameType::Video);
+/// // `track_id` defaults to 255, meaning "not a multitrack frame".
+/// assert_eq!(frame.track_id, u8::MAX);
+/// ```
 #[derive(Debug, Clone)]
 #[repr(C)]
 pub struct Frame {
+    /// Audio, video, script, or metadata classification.
     pub frame_type: FrameType,
+    /// RTMP message timestamp in milliseconds.
     pub timestamp: u32,
+    /// Composition time offset in milliseconds (video only; 0 otherwise).
     pub composition_time: u32,
+    /// Length of the payload at [`Frame::data`], in bytes.
     pub size: u32,
+    /// Pointer to the payload bytes; validity is described on [`Frame`].
     pub data: *const u8,
-    /// Audio-specific
+    /// Audio-specific: codec identified from the legacy FLV sound format.
     pub audio_codec: AudioCodec,
+    /// Audio-specific: sample rate in Hz (`0` when unknown).
     pub audio_sample_rate: u32,
+    /// Audio-specific: channel count.
     pub audio_channels: u8,
+    /// Audio-specific: bit depth in bits (e.g. `8` or `16`).
     pub audio_bit_depth: u8,
     /// Enhanced: FourCC from ExAudioTagHeader
     pub audio_fourcc: FourCc,
-    /// Video-specific
+    /// Video-specific: codec identified from the legacy FLV codec id.
     pub video_codec: VideoCodec,
+    /// Video-specific: FourCC from the Enhanced RTMP video tag header.
     pub video_fourcc: FourCc,
     /// 1=keyframe, 2=inter, etc.
     pub video_frame_type: u8,
@@ -277,10 +418,16 @@ impl Default for Frame {
 /* ── Error info ── */
 
 /// Error information struct.
+///
+/// Pairs an [`ErrorCode`] with a fixed-size, NUL-padded human-readable message.
+/// The buffer is `[u8; 256]` to keep the struct `#[repr(C)]`-compatible with
+/// `include/librtmp2/types.h`.
 #[derive(Debug, Clone)]
 #[repr(C)]
 pub struct ErrorInfo {
+    /// Machine-readable error classification.
     pub code: ErrorCode,
+    /// NUL-terminated UTF-8 message; unused trailing bytes are zero.
     pub message: [u8; 256],
 }
 
@@ -324,10 +471,27 @@ impl Default for ResourceLimits {
 /// see that function's `# Safety` section. Rust callers should prefer
 /// [`crate::server::Server::from_config`], which takes TLS paths as `&Path`
 /// and never dereferences these fields.
+///
+/// ```
+/// use librtmp2::types::ServerConfig;
+///
+/// // Plaintext RTMP listener on 0.0.0.0 with library defaults:
+/// let cfg = ServerConfig {
+///     chunk_size: 4096,
+///     ..ServerConfig::default()
+/// };
+/// assert_eq!(cfg.tls_enabled, 0);
+/// assert!(cfg.tls_cert_file.is_null());
+/// ```
 #[derive(Clone, Copy)]
 #[repr(C)]
 pub struct ServerConfig {
+    /// Maximum number of concurrent accepted connections. `0` means "use the
+    /// library default" at the C ABI boundary; a negative value means
+    /// unlimited.
     pub max_connections: c_int,
+    /// Outbound chunk size announced to peers via `SetChunkSize`, in bytes.
+    /// Clamped by the server to a sane range.
     pub chunk_size: c_int,
     /// TLS / RTMPS fields
     pub tls_enabled: c_int,
@@ -446,87 +610,149 @@ const fn parse_version_component(s: &str) -> u32 {
     value
 }
 
+/// Major version number of the crate, parsed from `CARGO_PKG_VERSION_MAJOR`
+/// at compile time.
 pub const VERSION_MAJOR: u32 = parse_version_component(env!("CARGO_PKG_VERSION_MAJOR"));
+/// Minor version number of the crate, parsed from `CARGO_PKG_VERSION_MINOR`
+/// at compile time.
 pub const VERSION_MINOR: u32 = parse_version_component(env!("CARGO_PKG_VERSION_MINOR"));
+/// Patch version number of the crate, parsed from `CARGO_PKG_VERSION_PATCH`
+/// at compile time.
 pub const VERSION_PATCH: u32 = parse_version_component(env!("CARGO_PKG_VERSION_PATCH"));
+/// Full version string, e.g. `"0.17.2"`.
 pub const VERSION_STRING: &str = env!("CARGO_PKG_VERSION");
 
 /* ── E-RTMP constants ── */
 
-/// Enhanced RTMP v1 VideoPacketType
+/// Enhanced RTMP v1 VideoPacketType: start of a codec sequence header.
 pub const ERTMP_PACKET_TYPE_SEQUENCE_START: u8 = 0;
+/// Enhanced RTMP v1 VideoPacketType: a coded frame.
 pub const ERTMP_PACKET_TYPE_CODED_FRAMES: u8 = 1;
+/// Enhanced RTMP v1 VideoPacketType: end of a codec sequence.
 pub const ERTMP_PACKET_TYPE_SEQUENCE_END: u8 = 2;
+/// Enhanced RTMP v1 VideoPacketType: coded frames with an extended header.
 pub const ERTMP_PACKET_TYPE_CODED_FRAMES_X: u8 = 3;
+/// Enhanced RTMP v1 VideoPacketType: metadata (e.g. HDR `colorInfo`).
 pub const ERTMP_PACKET_TYPE_METADATA: u8 = 4;
+/// Enhanced RTMP v1 VideoPacketType: start of an MPEG-2 TS sequence.
 pub const ERTMP_PACKET_TYPE_MPEG2TS_SEQUENCE_START: u8 = 5;
 
-/// Enhanced RTMP v1/v2 AudioPacketType
+/// Enhanced RTMP v1/v2 AudioPacketType: start of an audio codec sequence header
+/// (e.g. AAC AudioSpecificConfig).
 pub const ERTMP_AUDIO_PACKET_TYPE_SEQUENCE_START: u8 = 0;
+/// Enhanced RTMP v1/v2 AudioPacketType: a coded audio frame.
 pub const ERTMP_AUDIO_PACKET_TYPE_CODED_FRAMES: u8 = 1;
+/// Enhanced RTMP v1/v2 AudioPacketType: end of an audio codec sequence.
 pub const ERTMP_AUDIO_PACKET_TYPE_SEQUENCE_END: u8 = 2;
+/// Enhanced RTMP v1/v2 AudioPacketType: metadata.
 pub const ERTMP_AUDIO_PACKET_TYPE_METADATA: u8 = 3;
+/// Enhanced RTMP v2 AudioPacketType: multichannel configuration.
 pub const ERTMP_AUDIO_PACKET_TYPE_MULTICHANNEL: u8 = 4;
+/// Enhanced RTMP v2 AudioPacketType: multitrack container.
 pub const ERTMP_AUDIO_PACKET_TYPE_MULTITRACK: u8 = 5;
+/// Enhanced RTMP v2 VideoPacketType: multitrack container.
 pub const ERTMP_VIDEO_PACKET_TYPE_MULTITRACK: u8 = 6;
 
 /// E-RTMP v2 `CapsExMask` bits carried in the connect `capsEx` AMF number.
+///
+/// Reconnect support requested by the client.
 pub const CAPS_EX_MASK_RECONNECT: u32 = 0x01;
+/// Multitrack (per-track audio/video containers) support.
 pub const CAPS_EX_MASK_MULTITRACK: u32 = 0x02;
+/// ModEx (modular extension wrapper) support.
 pub const CAPS_EX_MASK_MODEX: u32 = 0x04;
+/// Nanosecond timestamp-offset (`TimestampOffsetNano`) support.
 pub const CAPS_EX_MASK_TIMESTAMP_NANO: u32 = 0x08;
+/// Capability mask the built-in server advertises by default.
 pub const CAPS_EX_MASK_SERVER_DEFAULT: u32 =
     CAPS_EX_MASK_MULTITRACK | CAPS_EX_MASK_MODEX | CAPS_EX_MASK_TIMESTAMP_NANO;
 
-/// Enhanced RTMP v1 AudioSampleRate (legacy)
+/// Enhanced RTMP v1 AudioSampleRate (legacy): 5512 Hz.
 pub const ERTMP_AUDIO_RATE_5500: u8 = 0;
+/// 11025 Hz sample rate.
 pub const ERTMP_AUDIO_RATE_11025: u8 = 1;
+/// 22050 Hz sample rate.
 pub const ERTMP_AUDIO_RATE_22050: u8 = 2;
+/// 44100 Hz sample rate.
 pub const ERTMP_AUDIO_RATE_44100: u8 = 3;
 
-/// Enhanced RTMP v1 AudioSampleSize (legacy)
+/// Enhanced RTMP v1 AudioSampleSize (legacy): 8-bit samples.
 pub const ERTMP_AUDIO_SAMPLE_8BIT: u8 = 0;
+/// 16-bit samples.
 pub const ERTMP_AUDIO_SAMPLE_16BIT: u8 = 1;
 
 /* ── Parsed video tag header ── */
 
 /// Parsed video tag header.
+///
+/// The result of decoding the first bytes of an RTMP video payload, legacy FLV
+/// or Enhanced RTMP alike. See [`crate::ertmp::exvideo`] for the parser.
 #[derive(Debug, Clone, Default)]
 #[repr(C)]
 pub struct VideoHeader {
+    /// Non-zero when the tag used an Enhanced RTMP (ExHeader) header.
     pub is_ex_header: u8,
+    /// Enhanced RTMP [`ERTMP_PACKET_TYPE_*`](ERTMP_PACKET_TYPE_CODED_FRAMES)
+    /// packet type; `0` for legacy tags.
     pub packet_type: u8,
+    /// FourCC codec identifier, NUL-terminated (Enhanced RTMP only).
     pub fourcc: [u8; 5],
+    /// FLV frame type nibble (1 = keyframe, 2 = inter frame, ...).
     pub frame_type: u8,
+    /// Composition time offset in milliseconds.
     pub composition_time: u32,
+    /// Number of header bytes consumed; the codec payload starts here.
     pub header_size: usize,
 }
 
 /* ── Parsed audio tag header ── */
 
 /// Parsed audio tag header.
+///
+/// The result of decoding the first bytes of an RTMP audio payload, legacy FLV
+/// or Enhanced RTMP alike. See [`crate::ertmp::exaudio`] for the parser.
 #[derive(Debug, Clone, Default)]
 #[repr(C)]
 pub struct AudioHeader {
+    /// Non-zero when the tag used an Enhanced RTMP (ExHeader) header.
     pub is_ex_header: u8,
+    /// Enhanced RTMP
+    /// [`ERTMP_AUDIO_PACKET_TYPE_*`](ERTMP_AUDIO_PACKET_TYPE_CODED_FRAMES)
+    /// packet type; `0` for legacy tags.
     pub packet_type: u8,
+    /// FourCC codec identifier, NUL-terminated (Enhanced RTMP only).
     pub fourcc: [u8; 5],
+    /// Codec identified from the legacy FLV sound format.
     pub audio_codec: AudioCodec,
+    /// Raw
+    /// [`ERTMP_AUDIO_RATE_*`](ERTMP_AUDIO_RATE_44100) sample-rate code.
     pub sample_rate: u8,
+    /// Raw
+    /// [`ERTMP_AUDIO_SAMPLE_*`](ERTMP_AUDIO_SAMPLE_16BIT) sample-size code.
     pub sample_size: u8,
+    /// Number of audio channels (`1` = mono, `2` = stereo).
     pub channels: u8,
+    /// AAC packet type (0 = sequence header, 1 = raw) for legacy AAC tags.
     pub aac_packet_type: u8,
+    /// Number of header bytes consumed; the codec payload starts here.
     pub header_size: usize,
 }
 
 /* ── HDR color info ── */
 
 /// HDR color information.
+///
+/// Mirrors the Enhanced RTMP `colorInfo` object: the three CTA-861 style
+/// enumerations that describe an HDR signal. Values are passed through
+/// unchanged from the wire.
 #[derive(Debug, Clone, Copy, Default)]
 #[repr(C)]
 pub struct HdrInfo {
+    /// CTA-861 color primaries code (e.g. `9` = BT.2020).
     pub color_primaries: u16,
+    /// CTA-861 transfer-characteristics code (e.g. `16` = PQ).
     pub transfer_chars: u16,
+    /// CTA-861 matrix-coefficients code (e.g. `9` = BT.2020 non-constant).
     pub matrix_coeffs: u16,
 }
 
@@ -536,19 +762,41 @@ pub struct HdrInfo {
 pub const MAX_FOURCCS: usize = 16;
 
 /// A list of FourCC codes.
+///
+/// Used in E-RTMP v2 capability negotiation (`fourCcList` in the connect
+/// command) to advertise which codecs an endpoint supports.
+///
+/// ```
+/// use librtmp2::types::{FourCc, FourCcList, MAX_FOURCCS};
+///
+/// let mut list = FourCcList::default();
+/// list.entries[0] = FourCc { cc: *b"avc1\0" };
+/// list.count = 1;
+/// assert!(list.count <= MAX_FOURCCS);
+/// ```
 #[derive(Debug, Clone, Default)]
 #[repr(C)]
 pub struct FourCcList {
+    /// Codec entries; only the first [`FourCcList::count`] are meaningful.
     pub entries: [FourCc; MAX_FOURCCS],
+    /// Number of populated entries; never exceeds [`MAX_FOURCCS`].
     pub count: usize,
 }
 
 /* ── E-RTMP v2 capability negotiation ── */
 
 /// E-RTMP v2 per-codec capability flags.
+///
+/// Bit flags OR-ed together in [`VideoFourCcInfoMap::masks`] to describe what
+/// an endpoint can do with a given video codec.
+///
+/// This endpoint can decode the codec.
 pub const FOUR_CC_INFO_CAN_DECODE: u32 = 0x01;
+/// This endpoint can encode the codec.
 pub const FOUR_CC_INFO_CAN_ENCODE: u32 = 0x02;
+/// This endpoint can forward the codec without decoding it.
 pub const FOUR_CC_INFO_CAN_FORWARD: u32 = 0x04;
+/// Union of every capability flag.
 pub const FOUR_CC_INFO_ALL: u32 =
     FOUR_CC_INFO_CAN_DECODE | FOUR_CC_INFO_CAN_ENCODE | FOUR_CC_INFO_CAN_FORWARD;
 
@@ -556,38 +804,59 @@ pub const FOUR_CC_INFO_ALL: u32 =
 #[derive(Debug, Clone, Default)]
 #[repr(C)]
 pub struct VideoFourCcInfoMap {
+    /// Codec FourCC codes; only the first [`Self::count`] are meaningful.
     pub entries: [FourCc; MAX_FOURCCS],
+    /// Capability mask per entry, using `FOUR_CC_INFO_*` bits.
     pub masks: [u32; MAX_FOURCCS],
+    /// Number of populated entries; never exceeds [`MAX_FOURCCS`].
     pub count: usize,
 }
 
 /// Capability negotiation struct.
+///
+/// Sent as the `capsEx` numbers in the E-RTMP v2 `connect` command; carries the
+/// protocol version and the legacy 32-bit codec bitmasks.
 #[derive(Debug, Clone, Default)]
 #[repr(C)]
 pub struct CapsExit {
+    /// E-RTMP version the peer implements.
     pub version: u32,
+    /// Legacy 32-bit video codec bitmask, passed through unchanged.
     pub video_codec_32: i32,
+    /// Legacy 32-bit audio codec bitmask, passed through unchanged.
     pub audio_codec_32: i32,
 }
 
 /* ── E-RTMP v2 reconnect ── */
 
 /// Reconnect request struct.
+///
+/// E-RTMP v2 `reconnect` value advertised in `connect`. See
+/// [`crate::ertmp::reconnect`] for the wire codec.
 #[derive(Debug, Clone, Copy, Default)]
 #[repr(C)]
 pub struct Reconnect {
+    /// Non-zero when the endpoint wants the server to replay cached data on
+    /// reconnect.
     pub replay: u32,
+    /// Replay limit (number of frames or bytes) the endpoint can absorb.
     pub limit: u32,
 }
 
 /* ── E-RTMP v2 multitrack ── */
 
 /// Multitrack type.
+///
+/// Classifies what a multitrack container carries. See
+/// [`crate::ertmp::multitrack`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
 pub enum MultitrackType {
+    /// Audio tracks.
     Audio = 0,
+    /// Video tracks.
     Video = 1,
+    /// Metadata tracks.
     Metadata = 2,
 }
 
@@ -598,10 +867,15 @@ impl Default for MultitrackType {
 }
 
 /// Multitrack descriptor.
+///
+/// Describes one track in a multitrack container: its type and a UTF-8/ASCII
+/// name such as `"mono"` or `"camera2"`.
 #[derive(Debug, Clone)]
 #[repr(C)]
 pub struct Multitrack {
+    /// What the track carries.
     pub track_type: MultitrackType,
+    /// NUL-terminated track name.
     pub track_name: [u8; 64],
 }
 
@@ -655,10 +929,12 @@ impl ModexType {
 /// ModEx extension wrapper (E-RTMP v2 ModEx signalling).
 ///
 /// A wrapper is `sizeMinusOne` + `modExData` + one option byte holding
-/// `modExType:UB[4] | nextPacketType:UB[4]`; see `ertmp::modex`.
+/// `modExType:UB[4] | nextPacketType:UB[4]`; see
+/// [`crate::media::modex`].
 #[derive(Debug, Clone, Copy, Default)]
 #[repr(C)]
 pub struct Modex {
+    /// Recognized ModEx extension type.
     pub modex_type: ModexType,
     /// `TimestampOffsetNano` value. Only the low 24 bits are written, matching
     /// the spec's UI24.
@@ -672,15 +948,25 @@ pub struct Modex {
 /* ── FLV tag types ── */
 
 /// FLV audio tag.
+///
+/// A borrowed view of a parsed FLV audio tag. [`AudioTag::data`] points into the
+/// parser's input buffer and is only valid while that buffer lives.
 #[derive(Debug, Clone)]
 #[repr(C)]
 pub struct AudioTag {
+    /// Codec identified from the FLV sound format.
     pub codec: AudioCodec,
+    /// Raw FLV sample-rate code (see [`ERTMP_AUDIO_RATE_44100`]).
     pub sample_rate: u8,
+    /// Sample size in bits.
     pub bit_depth: u8,
+    /// Channel count.
     pub channels: u8,
+    /// AAC packet type (0 = sequence header, 1 = raw); meaningful for AAC only.
     pub aac_packet_type: u8,
+    /// Pointer to the codec payload.
     pub data: *const u8,
+    /// Length of the payload at [`AudioTag::data`], in bytes.
     pub size: usize,
 }
 
@@ -699,14 +985,23 @@ impl Default for AudioTag {
 }
 
 /// FLV video tag.
+///
+/// A borrowed view of a parsed FLV video tag. [`VideoTag::data`] points into the
+/// parser's input buffer and is only valid while that buffer lives.
 #[derive(Debug, Clone)]
 #[repr(C)]
 pub struct VideoTag {
+    /// FLV frame type nibble (1 = keyframe, 2 = inter frame, ...).
     pub frame_type: u8,
+    /// Codec identified from the FLV codec id.
     pub codec: VideoCodec,
+    /// AVC/HEVC packet type (0 = sequence header, 1 = NALU, 2 = end of seq).
     pub avc_packet_type: u8,
+    /// Composition time offset in milliseconds.
     pub composition_time: u32,
+    /// Pointer to the codec payload.
     pub data: *const u8,
+    /// Length of the payload at [`VideoTag::data`], in bytes.
     pub size: usize,
 }
 
@@ -724,11 +1019,18 @@ impl Default for VideoTag {
 }
 
 /// FLV script tag.
+///
+/// A borrowed view of a parsed FLV script (metadata) tag. [`ScriptTag::data`]
+/// points into the parser's input buffer and is only valid while that buffer
+/// lives.
 #[derive(Debug, Clone)]
 #[repr(C)]
 pub struct ScriptTag {
+    /// NUL-terminated script/tag name, e.g. `"onMetaData"`.
     pub name: [u8; 64],
+    /// Pointer to the AMF-encoded script body.
     pub data: *const u8,
+    /// Length of the payload at [`ScriptTag::data`], in bytes.
     pub size: usize,
 }
 
@@ -745,41 +1047,78 @@ impl Default for ScriptTag {
 /* ── Connect info ── */
 
 /// Negotiated E-RTMP capability set returned in connect `_result`.
+///
+/// The subset of E-RTMP v2 capabilities both peers agreed on during the
+/// `connect` handshake. Each capability carries a `has_*` flag because the
+/// corresponding struct field is meaningless when the capability was not
+/// negotiated. See [`crate::ertmp::connect_amf`].
 #[derive(Debug, Clone, Default)]
 pub struct NegotiatedCaps {
+    /// Codecs advertised through `fourCcList`.
     pub four_cc_list: FourCcList,
+    /// Version and legacy codec bitmasks from `capsEx`.
     pub caps_ex: CapsExit,
+    /// Per-codec encode/decode/forward capabilities.
     pub video_four_cc_info_map: VideoFourCcInfoMap,
+    /// Reconnect/replay parameters.
     pub reconnect: Reconnect,
+    /// Raw `capsEx` mask both peers agreed on; see [`CAPS_EX_MASK_RECONNECT`].
     pub caps_ex_mask: u32,
+    /// Whether [`Self::four_cc_list`] was negotiated.
     pub has_four_cc_list: bool,
+    /// Whether [`Self::caps_ex`] was negotiated.
     pub has_caps_ex: bool,
+    /// Whether [`Self::video_four_cc_info_map`] was negotiated.
     pub has_video_four_cc_info_map: bool,
+    /// Whether [`Self::reconnect`] was negotiated.
     pub has_reconnect: bool,
+    /// Whether multitrack containers may be exchanged on this connection.
     pub multitrack_enabled: bool,
 }
 
 /// Connect command information.
+///
+/// The parsed fields of an RTMP `connect` command, including the E-RTMP
+/// capability objects a peer sent. Fixed-size byte arrays hold strings so the
+/// struct stays `#[repr(C)]`-compatible; unused trailing bytes are zero.
 #[derive(Debug, Clone)]
 #[repr(C)]
 pub struct ConnectInfo {
+    /// Command name, normally `"connect"`.
     pub name: [u8; 64],
+    /// AMF transaction id of the `connect` command.
     pub transaction_id: f64,
+    /// Application name.
     pub app: [u8; 256],
+    /// `tcUrl` from the command object.
     pub tc_url: [u8; 512],
+    /// `pageUrl` from the command object.
     pub page_url: [u8; 512],
+    /// `swfUrl` from the command object.
     pub swf_url: [u8; 512],
+    /// Flash player version string.
     pub flash_ver: [u8; 64],
+    /// Legacy 32-bit audio codec bitmask.
     pub audio_codecs: i32,
+    /// Legacy 32-bit video codec bitmask.
     pub video_codecs: i32,
+    /// Codecs advertised through `fourCcList`.
     pub four_cc_list: FourCcList,
+    /// Version and legacy codec bitmasks from `capsEx`.
     pub caps_ex: CapsExit,
+    /// Per-codec encode/decode/forward capabilities.
     pub video_four_cc_info_map: VideoFourCcInfoMap,
+    /// Reconnect/replay parameters.
     pub reconnect: Reconnect,
+    /// Raw `capsEx` mask; see [`CAPS_EX_MASK_RECONNECT`].
     pub caps_ex_mask: u32,
+    /// Whether [`Self::four_cc_list`] was present.
     pub has_four_cc_list: bool,
+    /// Whether [`Self::caps_ex`] was present.
     pub has_caps_ex: bool,
+    /// Whether [`Self::video_four_cc_info_map`] was present.
     pub has_video_four_cc_info_map: bool,
+    /// Whether [`Self::reconnect`] was present.
     pub has_reconnect: bool,
 }
 

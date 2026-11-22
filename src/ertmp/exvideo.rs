@@ -10,6 +10,22 @@ use crate::types::{ERTMP_PACKET_TYPE_METADATA, ErrorCode, Result, VideoHeader};
 pub(crate) const VIDEO_FRAME_TYPE_COMMAND: u8 = 5;
 
 /// Parse a FourCC from raw bytes.
+///
+/// Copies the first 4 bytes into a NUL-terminated `[u8; 5]`, the layout
+/// [`crate::types::FourCc::cc`] uses.
+///
+/// # Errors
+///
+/// Returns [`ErrorCode::Io`] when `data` is shorter than 4 bytes.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::ertmp::exvideo::fourcc_parse;
+///
+/// assert_eq!(fourcc_parse(b"hvc1").unwrap(), *b"hvc1\0");
+/// assert!(fourcc_parse(b"avc").is_err());
+/// ```
 pub fn fourcc_parse(data: &[u8]) -> Result<[u8; 5]> {
     if data.len() < 4 {
         return Err(ErrorCode::Io);
@@ -26,6 +42,34 @@ fn is_composition_time_codec(fourcc: &[u8]) -> bool {
 }
 
 /// Parse an Enhanced RTMP v1 video tag header.
+///
+/// Fills `hdr` from the tag byte (and the 4-byte FourCC, plus the SI24
+/// composition time for `avc1`/`hvc1`/`vvc1` coded frames). Legacy tags are
+/// accepted too: `is_ex_header` is `0` and `hdr.frame_type` carries the FLV
+/// frame-type nibble.
+///
+/// [`crate::types::VideoHeader::header_size`] reports how many bytes were
+/// consumed, so the codec payload starts at `data[header_size..]`.
+///
+/// # Errors
+///
+/// Returns [`ErrorCode::Io`] on a truncated header and [`ErrorCode::Unsupported`]
+/// for packet types this crate does not model.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::ertmp::exvideo::exvideo_parse;
+/// use librtmp2::types::{ERTMP_PACKET_TYPE_SEQUENCE_START, VideoHeader};
+///
+/// // 0x90 = ex-header + frame type 1 (keyframe), packet type 0, FourCC "hvc1".
+/// let mut hdr = VideoHeader::default();
+/// exvideo_parse(&[0x90, b'h', b'v', b'c', b'1', 0xAA], &mut hdr).unwrap();
+/// assert_eq!(hdr.is_ex_header, 1);
+/// assert_eq!(hdr.packet_type, ERTMP_PACKET_TYPE_SEQUENCE_START);
+/// assert_eq!(hdr.frame_type, 1);
+/// assert_eq!(&hdr.fourcc[..4], b"hvc1");
+/// ```
 pub fn exvideo_parse(data: &[u8], hdr: &mut VideoHeader) -> Result<()> {
     *hdr = VideoHeader::default();
 

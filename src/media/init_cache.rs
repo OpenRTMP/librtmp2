@@ -12,15 +12,59 @@ use crate::types::{
 };
 
 /// How a relayed media frame should be treated by the init-frame cache.
+///
+/// Returned by [`classify_cache_frame`] and consumed by the stream cache, which
+/// keeps the newest sequence headers and the last keyframe so that a player
+/// joining mid-stream can decode immediately.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CacheFrameKind {
+    /// Not part of the decoder bootstrap; forward to live players only.
     LiveOnly,
+    /// Video codec sequence header (e.g. an AVC configuration record).
     VideoSequenceHeader,
+    /// Audio codec sequence header (e.g. an AAC AudioSpecificConfig).
     AudioSequenceHeader,
+    /// A video keyframe: a valid start point for a late joiner.
     VideoKeyframe,
 }
 
 /// Classify a publisher media frame for init-cache storage.
+///
+/// Looks only at the frame header and codec configuration length fields; it
+/// never decodes media. Frames that are malformed, or that carry an unknown
+/// codec without a validator, are classified [`CacheFrameKind::LiveOnly`] so
+/// they cannot evict a known-good cached header.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::media::init_cache::{CacheFrameKind, classify_cache_frame};
+/// use librtmp2::types::FrameType;
+///
+/// // A legacy AVC keyframe carrying a valid AVCDecoderConfigurationRecord:
+/// // 0x17 = keyframe + AVC, 0x00 = sequence header, 3-byte composition time,
+/// // then the record itself.
+/// let avc_sequence_header = [
+///     0x17, 0x00, 0x00, 0x00, 0x00, 0x01, 0x64, 0x00, 0x1F, 0xFF, 0xE1, 0x00, 0x02, 0x67, 0x64,
+///     0x01, 0x00, 0x02, 0x68, 0xEE,
+/// ];
+/// assert_eq!(
+///     classify_cache_frame(FrameType::Video, &avc_sequence_header),
+///     CacheFrameKind::VideoSequenceHeader
+/// );
+///
+/// // A truncated record is relayed live but never cached.
+/// assert_eq!(
+///     classify_cache_frame(FrameType::Video, &avc_sequence_header[..8]),
+///     CacheFrameKind::LiveOnly
+/// );
+///
+/// // Script data never enters the init cache.
+/// assert_eq!(
+///     classify_cache_frame(FrameType::Script, &[0x02, 0x00, 0x0A]),
+///     CacheFrameKind::LiveOnly
+/// );
+/// ```
 pub fn classify_cache_frame(frame_type: FrameType, payload: &[u8]) -> CacheFrameKind {
     match frame_type {
         FrameType::Video => classify_video(payload),
@@ -223,10 +267,13 @@ fn classify_audio(payload: &[u8]) -> CacheFrameKind {
     }
 }
 
-/// Fill codec/header fields on a [`Frame`] from raw RTMP A/V payload bytes.
 /// Fill codec/header fields for a per-track callback extracted from an E-RTMP
 /// multitrack container. Inner track payloads do not include the enhanced tag
 /// header or FourCC, so metadata comes from the track descriptor.
+///
+/// `fourcc_value` is the track's 4-byte codec id, `packet_type` the container's
+/// shared inner packet type (used only to set [`Frame::is_metadata`]), and
+/// `video_frame_type` the container's FLV frame type nibble.
 pub fn populate_multitrack_frame(
     frame: &mut Frame,
     fourcc_value: [u8; 4],
@@ -257,6 +304,30 @@ pub fn populate_multitrack_frame(
         }
     }
 }
+/// Fill codec/header fields on a [`Frame`] from raw RTMP A/V payload bytes.
+///
+/// Parses the legacy FLV or Enhanced RTMP tag header and fills
+/// [`Frame::audio_codec`]/[`Frame::video_codec`], the FourCC fields, the frame
+/// type and [`Frame::is_metadata`]. The payload pointer and `size` on `frame`
+/// are left untouched: this only fills metadata.
+///
+/// Unrecognized headers leave the codec fields at their defaults rather than
+/// failing, because the relay forwards media opaquely.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::media::init_cache::populate_av_frame;
+/// use librtmp2::types::{AudioCodec, Frame, FrameType};
+///
+/// // Legacy AAC sequence header: 0xAF = AAC + 44 kHz + 16-bit + stereo.
+/// let mut frame = Frame {
+///     frame_type: FrameType::Audio,
+///     ..Frame::default()
+/// };
+/// populate_av_frame(&mut frame, &[0xAF, 0x00, 0x12, 0x10]);
+/// assert_eq!(frame.audio_codec, AudioCodec::Aac);
+/// ```
 pub fn populate_av_frame(frame: &mut Frame, payload: &[u8]) {
     match frame.frame_type {
         FrameType::Video => populate_video_frame(frame, payload),
@@ -308,6 +379,17 @@ fn populate_video_frame(frame: &mut Frame, payload: &[u8]) {
 /// Returns `None` for any other packet type or on a parse error -- this is
 /// opportunistic, not part of `Frame` (see `docs/abi-policy.md`: `Frame`'s
 /// `#[repr(C)]` layout is ABI-stable across minor/patch releases).
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::media::init_cache::parse_video_metadata_hdr;
+///
+/// // A regular AVC keyframe carries no HDR metadata object.
+/// assert!(parse_video_metadata_hdr(&[0x17, 0x01, 0x00, 0x00, 0x00]).is_none());
+/// // An empty payload cannot be an enhanced metadata packet either.
+/// assert!(parse_video_metadata_hdr(&[]).is_none());
+/// ```
 ///
 /// Per the Enhanced RTMP v1 spec, a Metadata packet's body is an AMF0-encoded
 /// value, not a raw byte tuple: a `colorInfo` object containing a nested
@@ -514,6 +596,25 @@ fn legacy_video_codec(codec_id: u8) -> VideoCodec {
 }
 
 /// Returns true when `payload` is an AMF0 onMetaData (or @setDataFrame/onMetaData) message.
+///
+/// Used to tell a real metadata frame apart from other AMF0 data so the init
+/// cache and relay can treat `onMetaData` specially. Accepts both the bare
+/// `onMetaData` form and the `@setDataFrame` wrapper FFmpeg and OBS emit.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::media::init_cache::is_on_metadata_payload;
+///
+/// // AMF0 string "@setDataFrame" followed by a string.
+/// let mut payload = vec![0x02, 0x00, 0x0D];
+/// payload.extend_from_slice(b"@setDataFrame");
+/// payload.extend_from_slice(&[0x02, 0x00, 0x0A]);
+/// payload.extend_from_slice(b"onMetaData");
+/// assert!(is_on_metadata_payload(&payload));
+///
+/// assert!(!is_on_metadata_payload(&[0x02, 0x00, 0x0B]));
+/// ```
 pub fn is_on_metadata_payload(payload: &[u8]) -> bool {
     let mut buf = crate::buffer::Buffer::from_slice(payload);
     let first_byte = match buf.peek().first().copied() {

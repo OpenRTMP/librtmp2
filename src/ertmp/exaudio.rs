@@ -6,6 +6,34 @@ use super::fourcc;
 use crate::types::{AudioHeader, ErrorCode, Result};
 
 /// Parse an Enhanced RTMP v1 audio tag header.
+///
+/// Accepts both Enhanced RTMP tags (first byte `0x9X`) and legacy FLV audio
+/// tags, filling the same [`AudioHeader`]. For enhanced tags the FourCC selects
+/// the codec (so `Opus` is reachable here and nowhere else); for legacy tags the
+/// SoundFormat nibble does. A codec not present in the FourCC registry leaves
+/// [`AudioHeader::audio_codec`] at its default rather than failing, because the
+/// relay forwards media opaquely.
+///
+/// [`AudioHeader::header_size`] reports how many bytes were consumed.
+///
+/// # Errors
+///
+/// Returns [`ErrorCode::Io`] on a truncated header and [`ErrorCode::Unsupported`]
+/// for a reserved SoundFormat on the legacy path.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::ertmp::exaudio::exaudio_parse;
+/// use librtmp2::types::{AudioCodec, AudioHeader};
+///
+/// // 0x90 = ExHeader, packet type 0 (sequence start), FourCC "Opus".
+/// let mut hdr = AudioHeader::default();
+/// exaudio_parse(&[0x90, b'O', b'p', b'u', b's'], &mut hdr).unwrap();
+/// assert_eq!(hdr.is_ex_header, 1);
+/// assert_eq!(hdr.audio_codec, AudioCodec::Opus);
+/// assert_eq!(hdr.header_size, 5);
+/// ```
 pub fn exaudio_parse(data: &[u8], hdr: &mut AudioHeader) -> Result<()> {
     *hdr = AudioHeader::default();
 

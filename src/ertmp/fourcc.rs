@@ -87,6 +87,16 @@ static AUDIO_FOURCCS: &[AudioFourCcEntry] = &[
 /// Convert a FourCC string to a video codec.
 /// Returns Err for unknown or too-short FourCCs so callers can use is_ok()
 /// as a reliable enhanced-header discriminator.
+///
+/// ```
+/// use librtmp2::ertmp::fourcc::fourcc_to_video_codec;
+/// use librtmp2::types::VideoCodec;
+///
+/// assert_eq!(fourcc_to_video_codec(b"avc1").unwrap(), VideoCodec::H264);
+/// assert_eq!(fourcc_to_video_codec(b"hvc1").unwrap(), VideoCodec::H265);
+/// // Unknown codecs are rejected so this can gate the enhanced-header path.
+/// assert!(fourcc_to_video_codec(b"zzzz").is_err());
+/// ```
 pub fn fourcc_to_video_codec(fourcc: &[u8]) -> Result<VideoCodec> {
     if fourcc.len() < 4 {
         return Err(ErrorCode::Chunk);
@@ -102,6 +112,18 @@ pub fn fourcc_to_video_codec(fourcc: &[u8]) -> Result<VideoCodec> {
 /// Convert a FourCC string to an audio codec.
 /// Returns Err for unknown or too-short FourCCs so callers can use is_ok()
 /// as a reliable enhanced-header discriminator.
+///
+/// Several FourCCs share a codec variant because [`crate::types::AudioCodec`] is
+/// ABI-stable: AC-3, E-AC-3 and FLAC all map to [`crate::types::AudioCodec::Aac`].
+///
+/// ```
+/// use librtmp2::ertmp::fourcc::fourcc_to_audio_codec;
+/// use librtmp2::types::AudioCodec;
+///
+/// assert_eq!(fourcc_to_audio_codec(b"mp4a").unwrap(), AudioCodec::Aac);
+/// assert_eq!(fourcc_to_audio_codec(b"Opus").unwrap(), AudioCodec::Opus);
+/// assert!(fourcc_to_audio_codec(b"nope").is_err());
+/// ```
 pub fn fourcc_to_audio_codec(fourcc: &[u8]) -> Result<AudioCodec> {
     if fourcc.len() < 4 {
         return Err(ErrorCode::Chunk);
@@ -115,6 +137,16 @@ pub fn fourcc_to_audio_codec(fourcc: &[u8]) -> Result<AudioCodec> {
 }
 
 /// Convert a video codec to its FourCC string.
+///
+/// Falls back to `"avc1"` when the codec has no registered FourCC.
+///
+/// ```
+/// use librtmp2::ertmp::fourcc::video_codec_to_fourcc;
+/// use librtmp2::types::VideoCodec;
+///
+/// assert_eq!(video_codec_to_fourcc(VideoCodec::H264), "avc1");
+/// assert_eq!(video_codec_to_fourcc(VideoCodec::H265), "hvc1");
+/// ```
 pub fn video_codec_to_fourcc(codec: VideoCodec) -> &'static str {
     for entry in VIDEO_FOURCCS {
         if entry.codec == codec {
@@ -125,6 +157,16 @@ pub fn video_codec_to_fourcc(codec: VideoCodec) -> &'static str {
 }
 
 /// Convert an audio codec to its FourCC string.
+///
+/// Falls back to `"mp4a"` when the codec has no registered FourCC.
+///
+/// ```
+/// use librtmp2::ertmp::fourcc::audio_codec_to_fourcc;
+/// use librtmp2::types::AudioCodec;
+///
+/// assert_eq!(audio_codec_to_fourcc(AudioCodec::Aac), "mp4a");
+/// assert_eq!(audio_codec_to_fourcc(AudioCodec::Opus), "Opus");
+/// ```
 pub fn audio_codec_to_fourcc(codec: AudioCodec) -> &'static str {
     for entry in AUDIO_FOURCCS {
         if entry.codec == codec {
@@ -135,6 +177,15 @@ pub fn audio_codec_to_fourcc(codec: AudioCodec) -> &'static str {
 }
 
 /// Get the human-readable name for a video FourCC.
+///
+/// Returns `None` for unknown or too-short FourCCs.
+///
+/// ```
+/// use librtmp2::ertmp::fourcc::fourcc_video_name;
+///
+/// assert_eq!(fourcc_video_name(b"avc1"), Some("H.264/AVC"));
+/// assert_eq!(fourcc_video_name(b"zzzz"), None);
+/// ```
 pub fn fourcc_video_name(fourcc: &[u8]) -> Option<&'static str> {
     if fourcc.len() < 4 {
         return None;
@@ -148,6 +199,15 @@ pub fn fourcc_video_name(fourcc: &[u8]) -> Option<&'static str> {
 }
 
 /// Get the human-readable name for an audio FourCC.
+///
+/// Returns `None` for unknown or too-short FourCCs.
+///
+/// ```
+/// use librtmp2::ertmp::fourcc::fourcc_audio_name;
+///
+/// assert_eq!(fourcc_audio_name(b"Opus"), Some("Opus"));
+/// assert_eq!(fourcc_audio_name(b"zzzz"), None);
+/// ```
 pub fn fourcc_audio_name(fourcc: &[u8]) -> Option<&'static str> {
     if fourcc.len() < 4 {
         return None;

@@ -7,6 +7,35 @@ use crate::buffer::Buffer;
 use crate::types::{ErrorCode, Result, ScriptTag};
 
 /// Parse an FLV script tag.
+///
+/// Reads the leading AMF0 name (`"onMetaData"`, `"@setDataFrame"`, or a long
+/// string) into [`ScriptTag::name`] and points [`ScriptTag::data`] at the
+/// remaining AMF-encoded body. Both stay valid only as long as `data` does.
+///
+/// The reader walks the body's object keys only to validate framing; the AMF
+/// values themselves are not decoded here — pass `tag.data`/`tag.size` to
+/// [`crate::amf::amf0`] if you need them.
+///
+/// # Errors
+///
+/// - [`ErrorCode::Internal`] — `data` is shorter than 2 bytes.
+/// - [`ErrorCode::Amf`] — malformed AMF0, or more than `MAX_OBJECT_KEYS` keys.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::flv::script_tag;
+/// use librtmp2::types::ScriptTag;
+///
+/// // AMF0 string "onMetaData" followed by an empty object.
+/// let mut payload = vec![0x02, 0x00, 0x0A];
+/// payload.extend_from_slice(b"onMetaData");
+/// payload.extend_from_slice(&[0x03, 0x00, 0x00, 0x09]);
+///
+/// let mut tag = ScriptTag::default();
+/// script_tag::parse(&payload, &mut tag).unwrap();
+/// assert_eq!(&tag.name[..10], b"onMetaData");
+/// ```
 pub fn parse(data: &[u8], tag: &mut ScriptTag) -> Result<()> {
     *tag = ScriptTag::default();
 

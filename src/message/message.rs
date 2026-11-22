@@ -18,36 +18,75 @@ use crate::chunk::reader::{ChunkMessage, chunk_read};
 use crate::chunk::state::ChunkRegistry;
 use crate::types::{AudioCodec, ErrorCode, Frame, FrameType, Result, VideoCodec};
 
-/* RTMP message type IDs */
+/// RTMP message type IDs.
+///
+/// The `msg_type_id` byte of a chunk header selects how the reassembled message
+/// body is interpreted. Values match the RTMP 1.0 specification (section 5.4)
+/// and the FLV tag type ids for audio (8) and video (9).
+///
+/// Protocol control: set the chunk size.
 pub const RTMP_MSG_SET_CHUNK_SIZE: u8 = 0x01;
+/// Protocol control: abort a partially transmitted message.
 pub const RTMP_MSG_ABORT_MESSAGE: u8 = 0x02;
+/// Protocol control: acknowledge received bytes.
 pub const RTMP_MSG_ACKNOWLEDGEMENT: u8 = 0x03;
+/// Protocol control: user control event (ping, stream begin, ...).
 pub const RTMP_MSG_USER_CONTROL: u8 = 0x04;
+/// Protocol control: window acknowledgement size.
 pub const RTMP_MSG_WINDOW_ACK_SIZE: u8 = 0x05;
+/// Protocol control: set peer bandwidth.
 pub const RTMP_MSG_SET_PEER_BANDWIDTH: u8 = 0x06;
+/// Audio payload.
 pub const RTMP_MSG_AUDIO: u8 = 0x08;
+/// Video payload.
 pub const RTMP_MSG_VIDEO: u8 = 0x09;
+/// AMF3 data message.
 pub const RTMP_MSG_AMF3_DATA: u8 = 0x0F;
+/// AMF3 shared object message.
 pub const RTMP_MSG_AMF3_SHARED_OBJECT: u8 = 0x10;
+/// AMF3 command message.
 pub const RTMP_MSG_AMF3_COMMAND: u8 = 0x11;
+/// AMF0 data message (e.g. `onMetaData`).
 pub const RTMP_MSG_AMF0_DATA: u8 = 0x12;
+/// AMF0 command message (`connect`, `publish`, `play`, ...).
 pub const RTMP_MSG_AMF0_COMMAND: u8 = 0x14;
+/// Aggregate message: several FLV-style tags in one RTMP message.
 pub const RTMP_MSG_AGGREGATE: u8 = 0x16;
 
 const MAX_AGGREGATE_SUBTAGS: usize = 4096;
 
 /// Connection trait for message dispatch
+///
+/// A minimal abstraction over a connection, used by [`decode`] and
+/// [`decode_aggregate`] to route a reassembled message without depending on the
+/// concrete `session::conn::Conn` type. The production ingest path in
+/// `session::conn::Conn` implements the same dispatch inline instead of through
+/// this trait.
+///
+/// Implementors own their chunk registry and stream table; the dispatcher only
+/// calls the hooks below.
 pub trait Connection {
+    /// Callback for every parsed audio/video frame, or `None` to drop frames.
     fn get_frame_callback(&self) -> Option<fn(&Frame)>;
+    /// The stream a `publish`/`play` command applies to, if any.
     fn get_current_stream(&self) -> Option<&dyn Stream>;
+    /// Handle an AMF0 command payload (`connect`, `publish`, `play`, ...).
     fn handle_command(&mut self, payload: &[u8]) -> Result<()>;
+    /// Record the peer's `WindowAckSize` (0 disables acknowledgements).
     fn set_window_ack_size(&mut self, size: u32);
+    /// Drop any partially reassembled message on chunk stream `csid`.
     fn reset_chunk_stream(&mut self, csid: u32);
+    /// Apply a `SetChunkSize` to every chunk stream on this connection.
     fn set_all_chunk_size(&mut self, chunk_size: u32);
 }
 
 /// Stream trait for message dispatch
+///
+/// The single piece of per-stream state the dispatcher needs: whether incoming
+/// media should be treated as a publish. Satisfied by
+/// [`crate::session::stream::Stream`].
 pub trait Stream {
+    /// `true` while this stream is publishing.
     fn is_publishing(&self) -> bool;
 }
 

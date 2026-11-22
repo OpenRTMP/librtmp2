@@ -1,14 +1,26 @@
 //! Stream management within a connection
 //!
 //! Mirrors `src/session/stream.h` and `src/session/stream.c`.
+//!
+//! An RTMP connection may allocate several message streams, but at most one is
+//! "current" (the target of `publish`/`play`). [`Stream`] holds that stream's
+//! role and its pause/A/V-receive flags, which the server relay consults before
+//! queueing media for the player.
 
 use std::sync::atomic::{AtomicU32, Ordering};
 
 /// Per-stream state.
+///
+/// Created by [`Stream::new`] when a `createStream` is acknowledged, and turned
+/// into a publishing/playing stream by [`crate::session::publish::publish_begin`]
+/// or [`crate::session::play::play_begin`].
 #[derive(Debug)]
 pub struct Stream {
+    /// Message stream id assigned by `createStream`.
     pub stream_id: u32,
+    /// `true` while the peer is publishing on this stream.
     pub is_publishing: bool,
+    /// `true` while the peer is playing this stream.
     pub is_playing: bool,
     /// Stream name from the `publish` or `play` command.
     pub name: String,
@@ -16,11 +28,24 @@ pub struct Stream {
     pub paused: bool,
     /// Honored by server relay when forwarding to this player.
     pub receive_audio: bool,
+    /// Honored by server relay when forwarding to this player.
     pub receive_video: bool,
 }
 
 impl Stream {
     /// Create a new stream.
+    ///
+    /// The stream starts neither publishing nor playing, with both audio and
+    /// video enabled.
+    ///
+    /// ```
+    /// use librtmp2::session::stream::Stream;
+    ///
+    /// let stream = Stream::new(1);
+    /// assert_eq!(stream.stream_id, 1);
+    /// assert!(!stream.is_publishing && !stream.is_playing);
+    /// assert!(stream.receive_audio && stream.receive_video);
+    /// ```
     pub fn new(stream_id: u32) -> Self {
         Self {
             stream_id,

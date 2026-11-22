@@ -221,6 +221,7 @@ pub fn build_reconnect_request(
 pub struct ReconnectRequest {
     /// New URL to reconnect to. `None` means reuse the current connection URL.
     pub tc_url: Option<String>,
+    /// Human-readable reason from the server, if it supplied one.
     pub description: Option<String>,
 }
 

@@ -222,33 +222,63 @@ fn resolve_socket_addrs(
 }
 
 /// Client connection states.
+///
+/// The client advances through these as it connects to an RTMP server. Unlike
+/// the server-side [`crate::types::ConnState`], there is no closing state: a
+/// client that hits a terminal error reports it through
+/// [`Client::terminal_io_error`] and stops.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
 pub enum ClientState {
+    /// No socket yet, or the connection was closed.
     Disconnected = 0,
+    /// TCP is up; the handshake is in progress.
     Handshaking,
+    /// Handshake complete; about to send `connect`.
     Connected,
+    /// `NetConnection.Connect.Success` received.
     AppConnected,
+    /// `createStream` succeeded and a stream id was assigned.
     StreamCreated,
+    /// Actively publishing.
     Publishing,
+    /// Actively playing.
     Playing,
 }
 
 /// RTMP client object.
+///
+/// Drives an outbound RTMP/RTMPS session: [`Client::connect`] performs TCP,
+/// TLS, and the RTMP handshake; [`Client::publish`]/[`Client::play`] start a
+/// stream; [`Client::poll`] advances the state machine. All fields are public
+/// so embedders can inspect negotiated state and install callbacks, but the
+/// library owns their invariants — see each field.
 pub struct Client {
     /// Copy of the connected transport's socket handle (`i32` file
     /// descriptor on Unix, `u64` Winsock `SOCKET` on Windows), or
     /// [`net::INVALID_SOCKET`] when not connected. The transport owns it.
     pub client_fd: net::RawSocket,
+    /// Socket transport when connected; `None` before [`Client::connect`] and
+    /// after teardown.
     pub transport: Option<Transport>,
+    /// Handshake state machine for this connection.
     pub handshake: Handshake,
+    /// Current point in the [`ClientState`] progression.
     pub state: ClientState,
+    /// Bytes staged for the next flush to the socket.
     pub send_buffer: Buffer,
+    /// Bytes read from the socket but not yet parsed into chunks.
     pub recv_buffer: Buffer,
+    /// Per-connection chunk-stream registry and reassembly buffers.
     pub chunk_reg: ChunkRegistry,
+    /// Message stream id assigned by `createStream`.
     pub stream_id: u32,
+    /// Application name from the connection URL.
     pub app: String,
+    /// Stream key from the connection URL.
     pub stream_key: String,
+    /// Called for every parsed audio/video/script frame received while playing.
+    /// The `Frame` and its payload are only valid for the duration of the call.
     pub on_frame_cb: Option<fn(&Frame)>,
     /// Fired when the server sends `NetConnection.Connect.ReconnectRequest`
     /// (E-RTMP v2 reconnect mechanism). `tc_url` is `Some` when the server
@@ -323,6 +353,18 @@ const RTMP_DEFAULT_CHUNK_SIZE: usize = 128;
 
 impl Client {
     /// Create a new client.
+    ///
+    /// The client starts [`ClientState::Disconnected`] with no socket, no
+    /// callbacks, and default TLS verification. Configure it with
+    /// [`Client::set_tls_client_config`] / [`Client::set_connect_timeout`], then
+    /// call [`Client::connect`].
+    ///
+    /// ```
+    /// use librtmp2::client::{Client, ClientState};
+    ///
+    /// let client = Client::new();
+    /// assert_eq!(client.state, ClientState::Disconnected);
+    /// ```
     pub fn new() -> Self {
         Self {
             client_fd: net::INVALID_SOCKET,
@@ -358,6 +400,18 @@ impl Client {
     }
 
     /// Configure `rtmps://` verification for subsequent `connect()` calls.
+    ///
+    /// `ca_file` is a PEM bundle trusted *in addition to* the system trust
+    /// store; `None` uses the system store only. `insecure` disables certificate
+    /// and hostname verification entirely — only for testing against
+    /// self-signed deployments, never in production.
+    ///
+    /// ```
+    /// use librtmp2::client::Client;
+    ///
+    /// let mut client = Client::new();
+    /// client.set_tls_client_config(None, false); // system trust store
+    /// ```
     pub fn set_tls_client_config(&mut self, ca_file: Option<String>, insecure: bool) {
         self.tls_ca_file = ca_file;
         self.tls_insecure = insecure;
@@ -395,6 +449,31 @@ impl Client {
     /// command (e.g. `NetConnection.Connect.Rejected`); that rejection is
     /// reported as [`ErrorCode::Auth`] instead of blocking until the command
     /// deadline and reporting [`ErrorCode::Timeout`].
+    ///
+    /// # Errors
+    ///
+    /// - [`ErrorCode::Unsupported`] — `rtmps://` without the `tls` feature.
+    /// - [`ErrorCode::Io`] — DNS or TCP failure.
+    /// - [`ErrorCode::Timeout`] — the connection or command exchange exceeded
+    ///   the budget set by [`Client::set_connect_timeout`].
+    /// - [`ErrorCode::Handshake`] — the peer did not complete the RTMP
+    ///   handshake.
+    /// - [`ErrorCode::Auth`] — the server rejected the connection.
+    ///
+    /// Any failure tears down a previous session first, so a client is never
+    /// left pointing at the old server.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use librtmp2::client::Client;
+    ///
+    /// # fn main() -> Result<(), librtmp2::types::ErrorCode> {
+    /// let mut client = Client::new();
+    /// client.connect("rtmps://example.com/live/cam1")?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn connect(&mut self, url: &str) -> Result<()> {
         // Before any early return below: a failed connect must tear down the
         // previous session, or a later `publish()`/`play()` keeps streaming to
@@ -494,6 +573,24 @@ impl Client {
     /// Returns [`ErrorCode::Auth`] when the server rejects the request with an
     /// AMF0 `_error` command or an error-level `onStatus` instead of leaving
     /// the rejection to surface as a deadline [`ErrorCode::Timeout`].
+    ///
+    /// Requires [`ClientState::AppConnected`]; any other state returns
+    /// [`ErrorCode::Protocol`]. On success the state becomes
+    /// [`ClientState::Publishing`] and the client announces its publish chunk
+    /// size to the server.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use librtmp2::client::Client;
+    ///
+    /// # fn main() -> Result<(), librtmp2::types::ErrorCode> {
+    /// let mut client = Client::new();
+    /// client.connect("rtmp://127.0.0.1:1935/live/cam1")?;
+    /// client.publish()?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn publish(&mut self) -> Result<()> {
         if self.state != ClientState::AppConnected {
             return Err(ErrorCode::Protocol);
@@ -608,6 +705,31 @@ impl Client {
     /// Returns [`ErrorCode::Auth`] when the server rejects the request with an
     /// AMF0 `_error` command or an error-level `onStatus` instead of leaving
     /// the rejection to surface as a deadline [`ErrorCode::Timeout`].
+    ///
+    /// Requires [`ClientState::AppConnected`] and moves the state to
+    /// [`ClientState::Playing`]. Frames received afterwards are handed to
+    /// [`Client::on_frame_cb`].
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use librtmp2::client::Client;
+    ///
+    /// # fn main() -> Result<(), librtmp2::types::ErrorCode> {
+    /// let mut client = Client::new();
+    /// client.on_frame_cb = Some(|frame| {
+    ///     let _ = (frame.frame_type, frame.timestamp, frame.size);
+    /// });
+    /// client.connect("rtmp://127.0.0.1:1935/live/cam1")?;
+    /// client.play()?;
+    ///
+    /// loop {
+    ///     client.poll(100)?;
+    ///     # break;
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn play(&mut self) -> Result<()> {
         if self.state != ClientState::AppConnected {
             return Err(ErrorCode::Protocol);
@@ -648,6 +770,15 @@ impl Client {
     }
 
     /// Send a frame while publishing.
+    ///
+    /// Reads the payload through [`Frame::data`]/[`Frame::size`], which must
+    /// describe a valid buffer for the duration of this call.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorCode::Protocol`] unless the client is
+    /// [`ClientState::Publishing`], and [`ErrorCode::Internal`] when
+    /// `frame.data` is null with a non-zero `size`.
     pub fn send_frame(&mut self, frame: &Frame) -> Result<()> {
         if self.state != ClientState::Publishing {
             return Err(ErrorCode::Protocol);
@@ -657,6 +788,31 @@ impl Client {
     }
 
     /// Send a frame from an owned payload slice.
+    ///
+    /// `payload` is a complete RTMP tag body (including the FLV/Enhanced RTMP
+    /// tag header), not a raw codec frame — the library relays media opaquely.
+    /// `timestamp` is the RTMP message timestamp in milliseconds.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorCode::Protocol`] unless the client is
+    /// [`ClientState::Publishing`].
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use librtmp2::client::Client;
+    /// use librtmp2::types::FrameType;
+    ///
+    /// # fn main() -> Result<(), librtmp2::types::ErrorCode> {
+    /// let mut client = Client::new();
+    /// client.connect("rtmp://127.0.0.1:1935/live/cam1")?;
+    /// client.publish()?;
+    /// // AVC sequence header (keyframe, AVC, seq-header, cts = 0).
+    /// client.send_frame_payload(FrameType::Video, 0, &[0x17, 0x00, 0x00, 0x00, 0x00])?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn send_frame_payload(
         &mut self,
         frame_type: FrameType,
@@ -700,6 +856,30 @@ impl Client {
     }
 
     /// Poll for incoming control traffic and flush queued outbound bytes.
+    ///
+    /// Blocks for up to `timeout_ms` waiting for socket readiness, then services
+    /// inbound chunks (pings, `onStatus`, media when playing) and retries the
+    /// outbound queue. Call this in a loop while publishing or playing.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorCode::Protocol`] when the client is not publishing or
+    /// playing, and propagates socket and terminal I/O errors.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use librtmp2::client::Client;
+    ///
+    /// # fn main() -> Result<(), librtmp2::types::ErrorCode> {
+    /// let mut client = Client::new();
+    /// client.connect("rtmp://127.0.0.1:1935/live/cam1")?;
+    /// client.play()?;
+    /// // 100 ms ready-wait per iteration, then service what arrived.
+    /// client.poll(100)?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn poll(&mut self, timeout_ms: i32) -> Result<()> {
         if self.state == ClientState::Publishing {
             let send_poll_again = self.try_flush_send_buffer()?;

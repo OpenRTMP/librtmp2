@@ -31,8 +31,19 @@ use crate::session::stream::Stream;
 use crate::transport::Transport;
 use crate::types::*;
 
+/// Maximum number of concurrently active message streams per connection.
+///
+/// A peer that opens more is rejected rather than allowed to grow the stream
+/// table without bound.
 pub const MAX_STREAMS_PER_CONN: u32 = 16;
+/// Maximum number of relay frames queued for one player before the connection
+/// is considered fatally congested.
 pub const MAX_PENDING_RELAY_FRAMES: usize = 1024;
+/// Default cap on queued relay payload bytes per player.
+///
+/// Used when a connection does not carry an explicit
+/// [`Conn::max_pending_relay_bytes`] from the server's
+/// [`crate::types::ResourceLimits`].
 pub const MAX_PENDING_RELAY_BYTES: usize = 8 * 1024 * 1024;
 
 /// Invoke one C-ABI authorization callback with NUL-terminated names.
@@ -236,19 +247,37 @@ impl RelayFrame {
             .saturating_add(self.stream_name.len())
     }
 }
+/// One RTMP server-side connection.
+///
+/// Owns the socket-facing buffers, the chunk registry, the session state
+/// machine, and every callback the host application installs. A `Conn` is
+/// **not** internally locked for most fields: drive one connection from one
+/// thread at a time. [`Conn::send_mutex`] only guards the outbound buffer for
+/// hosts that fan relay writes in from another thread.
+///
+/// See [`crate::server::Server`] for the owner that accepts, polls, and reaps
+/// connections.
 pub struct Conn {
+    /// Current point in the connection state machine.
     pub state: ConnState,
+    /// Handshake state machine for this connection.
     pub handshake: Handshake,
+    /// Bytes read from the socket but not yet parsed into chunks.
     pub recv_buffer: Buffer,
+    /// Chunked output staged for the next [`Conn::flush`].
     pub send_buffer: Buffer,
+    /// Per-connection chunk-stream registry and reassembly buffers.
     pub chunk_reg: ChunkRegistry,
     /// Target chunk size announced to the peer (from server config).
     pub chunk_size: u32,
     /// Active outbound chunk size; stays at the RTMP default until SetChunkSize
     /// is negotiated on the wire.
     active_chunk_size: u32,
+    /// Peer's WindowAckSize (`0` = acknowledgements disabled).
     pub window_ack_size: u32,
+    /// Total socket bytes received on this connection.
     pub bytes_received: u64,
+    /// Value of [`Conn::bytes_received`] at the last Acknowledgement sent.
     pub bytes_at_last_ack: u64,
     /// Audio/video payload bytes received (excludes handshake/control overhead).
     pub media_bytes_received: u64,
@@ -305,7 +334,10 @@ pub struct Conn {
     pub conn_id: u64,
     /// Peer socket address for logging (not persisted).
     pub remote_addr: String,
+    /// Socket transport once the handshake has run; `None` before accept
+    /// completion and after teardown.
     pub transport: Option<Transport>,
+    /// Application name from the peer's `connect` command.
     pub app: String,
     /// Canonical relay route key. When set, publisher/player media is matched
     /// on this value instead of the RTMP stream name (e.g. separate publish/play keys).
@@ -317,10 +349,18 @@ pub struct Conn {
     /// commands free their slot, so this stays bounded by actual concurrent
     /// streams rather than the lifetime id counter.
     active_stream_count: u32,
+    /// The stream selected by `createStream`, i.e. the target of the peer's
+    /// `publish`/`play`/`pause`/`deleteStream` commands.
     pub current_stream: Option<Box<Stream>>,
+    /// Whether the `on_connect_cb` callback already fired for this connection.
     pub connect_cb_fired: bool,
+    /// Guards [`Conn::send_buffer`] for hosts that enqueue relay output from
+    /// another thread. The built-in single-threaded server does not need it.
     pub send_mutex: Mutex<()>,
+    /// Frames queued for relay but not yet chunked onto this peer's socket.
     pub pending_relay: Vec<RelayFrame>,
+    /// Set when this player needs the cached codec headers and keyframe before
+    /// live media resumes (e.g. after a pause or a route change).
     pub needs_init_frames: bool,
     /// Emit fmt=1/2 first-chunk headers for media messages whose chunk
     /// stream already carried a message on the same stream id, instead of
@@ -343,32 +383,46 @@ pub struct Conn {
     /// [`INIT_REPLAY_COOLDOWN`]. The server's replay gate re-arms it once the
     /// cooldown elapses instead of dropping the request.
     init_replay_deferred: bool,
+    /// Best-effort detected video codec FourCC/name from the publisher's media.
     pub detected_video_codec: Option<String>,
+    /// Best-effort detected audio codec FourCC/name from the publisher's media.
     pub detected_audio_codec: Option<String>,
+    /// Detected video width in pixels, when the publisher reports it.
     pub detected_video_width: Option<u32>,
+    /// Detected video height in pixels, when the publisher reports it.
     pub detected_video_height: Option<u32>,
+    /// Detected video frame rate in frames per second.
     pub detected_video_framerate: Option<f64>,
+    /// Detected audio sample rate in Hz.
     pub detected_audio_sample_rate: Option<u32>,
+    /// Detected audio channel count.
     pub detected_audio_channels: Option<u32>,
     /// HDR `colorInfo` parsed from the publisher's most recent enhanced video
     /// Metadata packet (`ERTMP_PACKET_TYPE_METADATA`), if any. Rust-only --
     /// not part of `Frame`'s ABI-stable `#[repr(C)]` layout (see
     /// `docs/abi-policy.md`).
     pub detected_hdr_info: Option<HdrInfo>,
+    /// When true, this connection's audio/video is relayed to matching players.
     pub relay_enabled: bool,
     /// When true, media relay stays off until the integrator sets `relay_enabled`
     /// after its own post-auth bookkeeping (used by librtmp2-server).
     pub defer_media_relay: bool,
     /// Cap on queued relay payload bytes for this connection.
     pub max_pending_relay_bytes: usize,
+    /// Called for every audio/video/script frame, before relay decisions.
     pub on_frame_cb: Option<fn(&Frame)>,
     /// When set, must return true before audio/video is queued for relay.
     /// For a multitrack (`ManyTracks`/`ManyTracksManyCodecs`) container, this
-    /// is called once per track with that track's codec, not once per frame â€”
+    /// is called once per track with that track's codec, not once per frame —
     /// any single denial rejects the whole frame.
     pub on_media_cb: Option<fn(u64, FrameType, Option<&str>) -> bool>,
+    /// Called once per connection when `NetConnection.Connect.Success` has been
+    /// sent.
     pub on_connect_cb: Option<fn()>,
+    /// Synchronous publish authorization. Return `true` to allow. When `false`,
+    /// the library sends the normal rejection status and closes the stream.
     pub on_publish_cb: Option<fn(conn_id: u64, app: &str, stream_name: &str) -> bool>,
+    /// Synchronous play authorization. Return `true` to allow.
     pub on_play_cb: Option<fn(conn_id: u64, app: &str, stream_name: &str) -> bool>,
     /// Three-state publish authorization: `Allow`/`Deny` behave like
     /// `on_publish_cb` returning `true`/`false`; `Pending` holds the
@@ -496,6 +550,21 @@ pub struct Conn {
 }
 
 impl Conn {
+    /// Create a new connection in [`ConnState::TcpAccepted`].
+    ///
+    /// Buffers and the chunk registry start empty, the handshake is at
+    /// `ServerWaitC0`, and no callbacks are installed. The built-in server uses
+    /// this for every accepted socket; embedders driving the state machine
+    /// themselves create one the same way.
+    ///
+    /// ```
+    /// use librtmp2::session::conn::Conn;
+    /// use librtmp2::types::ConnState;
+    ///
+    /// let conn = Conn::new();
+    /// assert_eq!(conn.state, ConnState::TcpAccepted);
+    /// assert!(conn.current_stream.is_none());
+    /// ```
     pub fn new() -> Self {
         let mut chunk_reg = ChunkRegistry::new();
         chunk_reg.init();
@@ -749,6 +818,20 @@ impl Conn {
             .unwrap_or_default()
     }
 
+    /// Whether this connection may exchange E-RTMP v2 multitrack containers.
+    ///
+    /// True when the peer did not request Enhanced RTMP at all (legacy RTMP has
+    /// no multitrack concept to violate), or when both sides negotiated
+    /// [`crate::types::CAPS_EX_MASK_MULTITRACK`]. Used to reject a multitrack
+    /// container from a peer that did not agree to one.
+    ///
+    /// ```
+    /// use librtmp2::session::conn::Conn;
+    ///
+    /// // A fresh connection has not negotiated Enhanced RTMP caps.
+    /// let conn = Conn::new();
+    /// assert!(conn.accepts_multitrack());
+    /// ```
     pub fn accepts_multitrack(&self) -> bool {
         !self.negotiated_caps.has_caps_ex || self.negotiated_caps.multitrack_enabled
     }
@@ -1599,10 +1682,37 @@ impl Conn {
         );
     }
 
+    /// The socket handle backing this connection, or
+    /// [`crate::net::INVALID_SOCKET`] once it is disconnected.
+    ///
+    /// The transport owns the socket; the value is for diagnostics and for
+    /// registering the connection with an external readiness loop.
     pub fn get_fd(&self) -> crate::net::RawSocket {
         self.client_fd
     }
 
+    /// Feed raw bytes read from the socket into the connection.
+    ///
+    /// Appends `data` to [`Conn::recv_buffer`] and then drains as many complete
+    /// messages as the per-batch budgets allow. An empty slice is legal and is
+    /// how a host asks the connection to keep draining a buffer that already
+    /// holds complete messages (see [`Conn::has_buffered_messages`]).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorCode::Protocol`] when accumulating `data` would exceed the
+    /// connection's inbound staging cap, after recording the close reason.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use librtmp2::session::conn::Conn;
+    ///
+    /// let mut conn = Conn::new();
+    /// // `recv` only stages bytes until the handshake has completed, but an
+    /// // empty feed is always a valid no-op drain request.
+    /// conn.recv(&[]).unwrap();
+    /// ```
     pub fn recv(&mut self, data: &[u8]) -> Result<()> {
         if !data.is_empty()
             && self.recv_buffer.available().saturating_add(data.len()) > MAX_RECV_BUFFER_BYTES
@@ -1691,6 +1801,30 @@ impl Conn {
         Ok(())
     }
 
+    /// Run one state-machine step for this connection.
+    ///
+    /// Dispatches on [`Conn::state`]: the handshake states advance the
+    /// handshake, the connected states drain and dispatch messages, and the
+    /// closing states are a no-op. `messages_budget` is a shared per-poll budget
+    /// of complete messages; each handled message decrements it.
+    ///
+    /// Returns `0` on success or progress, or a negative
+    /// [`ErrorCode`] value on failure. A failure means
+    /// the connection should be torn down.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use librtmp2::session::conn::Conn;
+    /// use librtmp2::types::ConnState;
+    ///
+    /// let mut conn = Conn::new();
+    /// let mut budget = 64usize;
+    /// // A freshly accepted connection has no bytes yet; the step performs no
+    /// // work and reports success.
+    /// assert_eq!(conn.process(&mut budget), 0);
+    /// assert_eq!(conn.state, ConnState::TcpAccepted);
+    /// ```
     pub fn process(&mut self, messages_budget: &mut usize) -> i32 {
         match self.state {
             ConnState::TcpAccepted | ConnState::Handshake => self.do_handshake(),
@@ -1704,6 +1838,26 @@ impl Conn {
         }
     }
 
+    /// Advance the RTMP handshake by as many steps as the buffered bytes allow.
+    ///
+    /// Reads C0/C1/C2 (or S0/S1/S2 for a client) from
+    /// [`Conn::recv_buffer`], queues the matching responses in
+    /// [`Conn::send_buffer`], and moves [`Conn::state`] to
+    /// [`ConnState::Handshake`] and then [`ConnState::Connected`].
+    ///
+    /// Returns `0` when more bytes are needed or the handshake completed, and a
+    /// negative [`ErrorCode`] value when the peer sent
+    /// something this library does not speak (an unsupported version byte, TLS
+    /// on a plaintext port, or an HTTP request) — the close reason is recorded
+    /// in that case.
+    ///
+    /// ```
+    /// use librtmp2::session::conn::Conn;
+    ///
+    /// // No bytes buffered yet, so the handshake reports "need more data".
+    /// let mut conn = Conn::new();
+    /// assert_eq!(conn.do_handshake(), 0);
+    /// ```
     pub fn do_handshake(&mut self) -> i32 {
         match self.handshake.state {
             HandshakeState::ServerWaitC0 => {
@@ -1794,6 +1948,20 @@ impl Conn {
         }
     }
 
+    /// Drain complete messages from [`Conn::recv_buffer`] and dispatch them.
+    ///
+    /// Each iteration reassembles one RTMP message from chunks and routes it to
+    /// the matching handler (control messages, AMF commands, audio/video,
+    /// shared objects, aggregates). Stops when the buffer runs out of complete
+    /// messages, the per-read message cap is hit, or `messages_budget` reaches
+    /// zero; in the latter two cases [`Conn::has_buffered_messages`] stays
+    /// `true` so the host keeps draining.
+    ///
+    /// Returns `0` on success and a negative
+    /// [`ErrorCode`] value on a protocol failure.
+    ///
+    /// Hosts that drive the state machine themselves call this instead of
+    /// [`Conn::process`]; doing so starts a fresh per-batch sub-track budget.
     pub fn read_messages(&mut self, messages_budget: &mut usize) -> i32 {
         // `recv` re-arms the per-batch track budget, but this public entry
         // point can also be driven directly by an embedding host (and is the
@@ -2870,6 +3038,18 @@ impl Conn {
         reaped
     }
 
+    /// Decode and dispatch one AMF0 command payload.
+    ///
+    /// Handles `connect`, `createStream`, `publish`, `play`, `pause`,
+    /// `deleteStream`, `closeStream`, `releaseStream`, `FCUnpublish` and
+    /// `FCPublish`, plus the `onStatus`/`_result`/`_error` replies a client
+    /// sends. Unknown commands are ignored rather than rejected, so a peer
+    /// sending an extension command cannot break the session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the payload is not a decodable AMF0 command; a
+    /// merely unknown command name is not an error.
     pub fn handle_command(&mut self, payload: &[u8]) -> Result<()> {
         let mut buf = Buffer::from_slice(payload);
         let mut name_buf = [0u8; 64];
@@ -3369,6 +3549,19 @@ impl Conn {
         Ok(())
     }
 
+    /// Send the `_result` reply to a `connect` command.
+    ///
+    /// Emits the RTMP control messages a server must send first
+    /// (WindowAckSize, SetPeerBandwidth, SetChunkSize), then the AMF0 `_result`
+    /// with the server properties FMS/nginx-rtmp/SRS send. When `caps` is
+    /// `Some`, the negotiated E-RTMP v2 capabilities are appended to the same
+    /// object.
+    ///
+    /// `transaction_id` must echo the id from the peer's `connect` command.
+    ///
+    /// # Errors
+    ///
+    /// Propagates encoding and buffer-growth failures.
     pub fn send_connect_response(
         &mut self,
         transaction_id: f64,
@@ -3416,6 +3609,16 @@ impl Conn {
         self.send_command(0, amf_buf.as_slice())
     }
 
+    /// Answer a command with an AMF0 `_error` reply.
+    ///
+    /// `code` is the `NetConnection`/`NetStream` status code (for example
+    /// `"NetConnection.Call.Failed"`) and `description` is the free-form
+    /// human-readable message. Sent on message stream 0 with `transaction_id`
+    /// echoed from the request.
+    ///
+    /// # Errors
+    ///
+    /// Propagates encoding and buffer-growth failures.
     pub fn send_command_error(
         &mut self,
         transaction_id: f64,
@@ -3431,6 +3634,14 @@ impl Conn {
         self.send_command(0, amf_buf.as_slice())
     }
 
+    /// Send the `_result` reply to a `createStream` command.
+    ///
+    /// `stream_id` is the message stream id to hand the peer; the connection
+    /// already recorded it in [`Conn::next_stream_id`].
+    ///
+    /// # Errors
+    ///
+    /// Propagates encoding and buffer-growth failures.
     pub fn send_create_stream_response(
         &mut self,
         transaction_id: f64,
@@ -3441,6 +3652,16 @@ impl Conn {
         self.send_command(0, amf_buf.as_slice())
     }
 
+    /// Send an `onStatus` command to the peer.
+    ///
+    /// `level` is the RTMP status level (`"status"`, `"warning"` or
+    /// `"error"`), `code` the status code (e.g. `"NetStream.Publish.Start"`),
+    /// and `description` a human-readable message. Errors are also logged at
+    /// warn level. `stream_id` selects the message stream the status applies to.
+    ///
+    /// # Errors
+    ///
+    /// Propagates encoding and buffer-growth failures.
     pub fn send_onstatus(
         &mut self,
         stream_id: u32,
@@ -3523,6 +3744,26 @@ impl Conn {
         self.send_command(0, amf_buf.as_slice())
     }
 
+    /// Write as much of [`Conn::send_buffer`] to the socket as it accepts.
+    ///
+    /// Non-blocking: stops at the first short write and keeps the remainder
+    /// queued for the next call. Releases buffer capacity once the queue drains
+    /// and tracks send progress for stall detection. Safe to call on a
+    /// connection with no transport, in which case it is a no-op.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorCode::Io`] when the socket reports a fatal error.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use librtmp2::session::conn::Conn;
+    ///
+    /// // Nothing queued and no socket: flushing is a no-op.
+    /// let mut conn = Conn::new();
+    /// conn.flush().unwrap();
+    /// ```
     pub fn flush(&mut self) -> Result<()> {
         if self.client_fd == crate::net::INVALID_SOCKET || self.send_buffer.available() == 0 {
             self.commit_flushed_ping();
@@ -3585,6 +3826,30 @@ impl Conn {
         self.queued_ping = None;
     }
 
+    /// Queue one audio/video/script message for sending.
+    ///
+    /// Chunks `payload` with this connection's outbound chunk size and stages it
+    /// in [`Conn::send_buffer`]; call [`Conn::flush`] to push it to the socket.
+    /// Updated codec/session state (detected codec, sequence-header caching,
+    /// media byte telemetry) is handled by the caller, not here.
+    ///
+    /// `timestamp` is the RTMP message timestamp in milliseconds.
+    ///
+    /// # Errors
+    ///
+    /// Propagates buffer-growth failures from the chunk writer.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use librtmp2::session::conn::Conn;
+    /// use librtmp2::types::FrameType;
+    ///
+    /// let mut conn = Conn::new();
+    /// conn.send_frame(FrameType::Script, 0, &[0x02, 0x00, 0x0A]).unwrap();
+    /// // The message is chunked into the send buffer, ready for `flush`.
+    /// assert!(conn.send_buffer.available() > 0);
+    /// ```
     pub fn send_frame(
         &mut self,
         frame_type: FrameType,

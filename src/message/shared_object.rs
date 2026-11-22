@@ -90,6 +90,7 @@ impl SharedObjectEventType {
 /// One event inside a shared-object message body.
 #[derive(Debug, Clone)]
 pub struct SharedObjectEvent {
+    /// What the event is; selects how [`Self::data`] is interpreted.
     pub event_type: SharedObjectEventType,
     /// Event payload; format depends on `event_type` (e.g. an AMF-encoded
     /// name/value pair for `Change`/`RequestChange`/`Success`, a list of AMF
@@ -100,7 +101,9 @@ pub struct SharedObjectEvent {
 /// A parsed shared-object message body (name/version/flags header + events).
 #[derive(Debug, Clone, Default)]
 pub struct SharedObjectMessage {
+    /// Shared-object name as sent by the peer.
     pub name: String,
+    /// Shared-object version counter from the wire header.
     pub version: u32,
     /// Persistence/type flags, passed through unmodified. The de-facto wire
     /// convention (Red5 `RTMPProtocolEncoder`/`RTMPProtocolDecoder`) is 2 for
@@ -108,6 +111,7 @@ pub struct SharedObjectMessage {
     ///
     /// [`is_persistent`]: SharedObjectMessage::is_persistent
     pub flags: u32,
+    /// Events carried by this message, in wire order.
     pub events: Vec<SharedObjectEvent>,
 }
 

@@ -1,12 +1,161 @@
-//! librtmp2 â€” A Rust port of the librtmp2 RTMP/RTMPS protocol library.
+//! librtmp2 — A Rust port of the librtmp2 RTMP/RTMPS protocol library.
 //!
-//! This is a complete 1:1 Rust port of the C library `librtmp2`.
-//! It provides server, client, handshake, chunk, message, AMF, FLV, and E-RTMP functionality.
+//! `librtmp2` speaks **Legacy RTMP** and **Enhanced RTMP (E-RTMP) v1/v2**: the
+//! handshake, chunking, AMF0/AMF3 commands, live publish/play relay, and RTMPS
+//! (RTMP over TLS). It is a protocol library, not a media server: the host
+//! application installs callbacks and the library delivers semantic events.
+//!
+//! It exposes two APIs over one implementation:
+//!
+//! - an idiomatic **Rust API** ([`server::Server`], [`client::Client`],
+//!   [`session::conn::Conn`]), and
+//! - a stable **`extern "C"` FFI layer** (mainly [`lrtmp2_server_create`] and
+//!   [`lrtmp2_client_create`]) for C, Go, Python, PHP and others.
+//!
+//! # What it does and does not do
+//!
+//! Supported today:
+//!
+//! - Live ingest and relay for OBS/FFmpeg-style workflows: H.264/AAC, plus
+//!   Enhanced RTMP passthrough for HEVC/AV1/Opus
+//! - A minimal RTMP server and client (`connect` → `createStream` →
+//!   `publish`/`play`)
+//! - RTMPS via the `tls` feature (OpenSSL), **enabled by default**
+//! - E-RTMP v1/v2 parsers and serializers: `capsEx` negotiation, multitrack,
+//!   ModEx, `fourCcList`, and reconnect signalling
+//!
+//! Not implemented: the encrypted/Adobe-digest handshake, VOD commands, and
+//! multi-client shared-object attribute sync (the envelope is delivered, the
+//! policy is left to the host). See the README's *Implementation status* table
+//! for the code-accurate breakdown.
+//!
+//! # Installation
+//!
+//! ```toml
+//! [dependencies]
+//! librtmp2 = "0.17"
+//! ```
+//!
+//! For a plaintext-only build without OpenSSL:
+//!
+//! ```toml
+//! [dependencies]
+//! librtmp2 = { version = "0.17", default-features = false }
+//! ```
+//!
+//! # Cargo features
+//!
+//! | Feature | Default | Effect |
+//! |---------|---------|--------|
+//! | `tls`   | yes     | Enables RTMPS and pulls in `openssl`. Without it, `rtmps://` URLs fail with [`types::ErrorCode::Unsupported`] and [`tls_supported`] returns `false`. |
+//!
+//! # Example: a minimal relay server
+//!
+//! ```
+//! use librtmp2::server::Server;
+//! use librtmp2::types::ServerConfig;
+//!
+//! # fn main() -> Result<(), librtmp2::types::ErrorCode> {
+//! let mut server = Server::from_config(ServerConfig::default(), None)?;
+//! // Plaintext RTMP on the standard port. Use `listen_tls` for RTMPS.
+//! server.listen("127.0.0.1:1935")?;
+//!
+//! // Drive the accept/poll loop from your own thread or event loop.
+//! // `poll` blocks up to `timeout_ms` and never returns a per-connection error.
+//! loop {
+//!     server.poll(100)?;
+//!     # break;
+//! }
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! # Example: publishing from the client
+//!
+//! ```no_run
+//! use librtmp2::client::Client;
+//! use librtmp2::types::FrameType;
+//!
+//! # fn main() -> Result<(), librtmp2::types::ErrorCode> {
+//! let mut client = Client::new();
+//! // Connect performs TCP (and TLS for rtmps://), the handshake, and the
+//! // `connect` + `createStream` command exchange in one call.
+//! client.connect("rtmp://127.0.0.1:1935/live/cam1")?;
+//! client.publish()?;
+//!
+//! // Send an already-framed audio/video payload (this is an opaque RTMP
+//! // tag body, not a raw codec frame).
+//! client.send_frame_payload(FrameType::Video, 0, &[0x17, 0x00, 0x00, 0x00, 0x00])?;
+//!
+//! // Flush outbound data and process inbound control traffic.
+//! client.poll(100)?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! # Error handling
+//!
+//! Nearly every fallible function returns [`types::Result<T>`], i.e.
+//! `Result<T, `[`types::ErrorCode`]`>`. [`ErrorCode`] is a
+//! small `#[repr(C)]` enum whose discriminants are the negative values the FFI
+//! layer returns, so the same classification works across the Rust and C APIs.
+//! Use [`error_string`] (or [`types::ErrorCode::as_str`]) for a human-readable
+//! description.
+//!
+//! ```
+//! use librtmp2::{error_string, types::ErrorCode};
+//!
+//! let err = ErrorCode::Auth;
+//! assert_eq!(error_string(err), "Authentication error");
+//! assert_eq!(err as i32, -8);
+//! ```
+//!
+//! # Threading
+//!
+//! The library is single-threaded per connection: chunk state and session state
+//! are per-connection, never global, so a client and a server can coexist in one
+//! process or on separate threads. Drive each [`session::conn::Conn`] or
+//! [`client::Client`] from one thread at a time.
+//!
+//! # Module map
+//!
+//! Every protocol layer is a module, lowest first:
+//!
+//! | Module | Responsibility |
+//! |--------|----------------|
+//! | [`alloc`], [`bytes`], [`buffer`], [`log`], [`types`] | Growable buffers, big-endian helpers, logging, error codes and shared types |
+//! | [`net`] | Per-OS socket layer and the [`net::RawSocket`] handle type |
+//! | [`transport`] | Plaintext and TLS transport on top of [`net`] |
+//! | [`handshake`] | C0/C1/C2 ↔ S0/S1/S2 handshake |
+//! | [`chunk`] | Chunk reader/writer and per-CSID state |
+//! | [`message`] | Reassembled message dispatch: control, commands, shared objects |
+//! | [`amf`] | AMF0 (mandatory) and AMF3 |
+//! | [`flv`] | FLV audio/video/script tag parsing |
+//! | [`ertmp`] | E-RTMP v1 (ExVideo/ExAudio, FourCC, HDR) and v2 (capsEx, reconnect, multitrack, ModEx) |
+//! | [`media`] | Init-frame classification, delivery hints, codec config validation |
+//! | [`session`] | Connection object, state machine, publish/play flows |
+//! | [`server`] | Listening sockets, accept loop, per-connection poll, relay |
+//! | [`client`] | Outbound connect → publish/play |
+//!
+//! Further reading: the README, `docs/protocol-mapping-legacy.md`,
+//! `docs/protocol-mapping-ertmp-v1.md` and
+//! `docs/protocol-mapping-ertmp-v2.md`, plus runnable programs under
+//! `examples/`.
+//!
+//! # FFI safety
+//!
+//! The `lrtmp2_*` functions are the C ABI. They take raw pointers, return
+//! negative [`ErrorCode`] values on failure, and carry a
+//! `# Safety` section describing exactly what the caller must guarantee. A null
+//! handle never aborts; it is rejected with an error or a no-op.
 
 #![allow(dead_code)]
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 #![allow(clippy::all)]
+// Every public item must be documented. The CI enforces this as an error via
+// `RUSTDOCFLAGS="-D warnings" cargo doc` and `RUSTFLAGS="-D missing_docs"`.
+#![warn(missing_docs)]
 
 pub mod alloc;
 pub mod amf;
@@ -33,14 +182,26 @@ pub use session::RelayFrame;
 pub use types::*;
 
 /// Library version string.
+///
+/// The same value as [`types::VERSION_STRING`]; both read `CARGO_PKG_VERSION`
+/// so the crate version has a single source of truth.
 pub const VERSION_STRING: &str = env!("CARGO_PKG_VERSION");
 
 /// Get the library version string.
+///
+/// ```
+/// assert_eq!(librtmp2::version_string(), env!("CARGO_PKG_VERSION"));
+/// ```
 pub fn version_string() -> &'static str {
     VERSION_STRING
 }
 
 /// Get the major version number.
+///
+/// ```
+/// let major: i32 = librtmp2::version_major();
+/// assert!(major >= 0);
+/// ```
 pub fn version_major() -> i32 {
     i32::try_from(types::VERSION_MAJOR).unwrap_or(0)
 }
@@ -56,11 +217,22 @@ pub fn version_patch() -> i32 {
 }
 
 /// Check if TLS support is available.
+///
+/// Returns `false` when the crate was built with `--no-default-features`, in
+/// which case `rtmps://` URLs fail with [`types::ErrorCode::Unsupported`].
+///
+/// ```
+/// // Matches the `tls` feature this test binary was built with.
+/// assert_eq!(librtmp2::tls_supported(), cfg!(feature = "tls"));
+/// ```
 pub fn tls_supported() -> bool {
     transport::tls_available()
 }
 
 /// Get the error string for an error code.
+///
+/// Equivalent to [`types::ErrorCode::as_str`]. The returned string is static
+/// and NUL-free.
 pub fn error_string(code: ErrorCode) -> &'static str {
     code.as_str()
 }
@@ -382,6 +554,13 @@ pub unsafe extern "C" fn lrtmp2_server_create(config: *const ServerConfig) -> *m
 /// this setter while `lrtmp2_server_poll` is running on that server.
 ///
 /// Returns `0` on success and a negative value when `server` is null.
+///
+/// # Safety
+///
+/// `server` must be a live pointer returned by [`lrtmp2_server_create`] that
+/// has not been destroyed, and it must not be in use by a concurrent
+/// `lrtmp2_server_poll` on another thread. When `cb` is non-null, `userdata`
+/// must stay valid until the callback is replaced or the server is destroyed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn lrtmp2_server_set_publish_auth_cb(
     server: *mut server::Server,
@@ -419,6 +598,13 @@ pub unsafe extern "C" fn lrtmp2_server_set_publish_auth_cb(
 /// See [`lrtmp2_server_set_publish_auth_cb`] for the return convention,
 /// `userdata` lifetime and re-entrancy rules. Passing a null callback clears
 /// it.
+///
+/// # Safety
+///
+/// `server` must be a live pointer returned by [`lrtmp2_server_create`] that
+/// has not been destroyed, and it must not be in use by a concurrent
+/// `lrtmp2_server_poll` on another thread. When `cb` is non-null, `userdata`
+/// must stay valid until the callback is replaced or the server is destroyed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn lrtmp2_server_set_play_auth_cb(
     server: *mut server::Server,
@@ -448,6 +634,15 @@ pub unsafe extern "C" fn lrtmp2_server_set_play_auth_cb(
 }
 
 /// Destroy a server (FFI-compatible).
+///
+/// A null pointer is accepted and does nothing.
+///
+/// # Safety
+///
+/// `server` must be either null or a pointer returned by
+/// [`lrtmp2_server_create`] that has not already been destroyed. After this
+/// call the pointer is dangling and must not be used again — in particular, no
+/// connection callback installed on the server may retain it.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn lrtmp2_server_destroy(server: *mut server::Server) {
     if !server.is_null() {
@@ -456,6 +651,18 @@ pub unsafe extern "C" fn lrtmp2_server_destroy(server: *mut server::Server) {
 }
 
 /// Start listening (FFI-compatible).
+///
+/// `bind_addr` is a NUL-terminated UTF-8 `"host:port"` string (port defaults to
+/// 1935). Returns `0` on success or a negative [`ErrorCode`] value; a null
+/// pointer or invalid UTF-8 yields [`ErrorCode::Internal`] rather than binding
+/// `0.0.0.0`.
+///
+/// # Safety
+///
+/// `server` must be a live pointer returned by [`lrtmp2_server_create`] that has
+/// not been destroyed. `bind_addr` must be null or point to a NUL-terminated C
+/// string valid for the duration of the call. The server must not be in use by a
+/// concurrent `lrtmp2_server_poll` on another thread.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn lrtmp2_server_listen(
     server: *mut server::Server,
@@ -478,6 +685,18 @@ pub unsafe extern "C" fn lrtmp2_server_listen(
 }
 
 /// Poll for events (FFI-compatible).
+///
+/// Blocks up to `timeout_ms` milliseconds, then accepts connections, advances
+/// every connection, and relays media. Returns `0` on success or a negative
+/// [`ErrorCode`] value.
+///
+/// # Safety
+///
+/// `server` must be a live pointer returned by [`lrtmp2_server_create`] that has
+/// not been destroyed. Because this call mutates the whole server, no other
+/// function may be called on the same server concurrently (including from a
+/// callback it fires), and `lrtmp2_server_destroy` must not run until the call
+/// returns.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn lrtmp2_server_poll(server: *mut server::Server, timeout_ms: i32) -> i32 {
     if server.is_null() {
@@ -491,6 +710,15 @@ pub unsafe extern "C" fn lrtmp2_server_poll(server: *mut server::Server, timeout
 }
 
 /// Stop the server (FFI-compatible).
+///
+/// Clears the running flag so a subsequent [`lrtmp2_server_poll`] returns
+/// [`ErrorCode::Internal`]. Safe on a null pointer (no-op).
+///
+/// # Safety
+///
+/// `server` must be null or a live pointer returned by [`lrtmp2_server_create`]
+/// that has not been destroyed, and it must not be in use by a concurrent
+/// `lrtmp2_server_poll` on another thread.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn lrtmp2_server_stop(server: *mut server::Server) {
     if !server.is_null() {
@@ -505,6 +733,13 @@ pub unsafe extern "C" fn lrtmp2_server_stop(server: *mut server::Server) {
 /// testing only) control `rtmps://` verification for this client. Returns NULL if
 /// `tls_ca_file` is non-NULL but not valid UTF-8, rather than silently
 /// falling back to default verification.
+///
+/// # Safety
+///
+/// `config` must be null or point to a readable [`ServerConfig`] valid for the
+/// duration of the call. When `config.tls_ca_file` is non-null it must point to
+/// a NUL-terminated C string (invalid UTF-8 is rejected with a null return). The
+/// other pointer fields are not dereferenced by this function.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn lrtmp2_client_create(config: *const ServerConfig) -> *mut client::Client {
     let mut c = client::Client::new();
@@ -529,6 +764,14 @@ pub unsafe extern "C" fn lrtmp2_client_create(config: *const ServerConfig) -> *m
 }
 
 /// Destroy a client (FFI-compatible).
+///
+/// A null pointer is accepted and does nothing.
+///
+/// # Safety
+///
+/// `c` must be either null or a pointer returned by [`lrtmp2_client_create`]
+/// that has not already been destroyed. After this call the pointer is dangling
+/// and must not be used again, including from any callback it installed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn lrtmp2_client_destroy(c: *mut client::Client) {
     if !c.is_null() {
@@ -537,6 +780,17 @@ pub unsafe extern "C" fn lrtmp2_client_destroy(c: *mut client::Client) {
 }
 
 /// Connect (FFI-compatible).
+///
+/// `url` is a NUL-terminated `rtmp://…` or `rtmps://…` URL. Returns `0` on
+/// success or a negative [`ErrorCode`] value.
+///
+/// # Safety
+///
+/// `c` must be a live pointer returned by [`lrtmp2_client_create`] that has not
+/// been destroyed, and `url` must be null or point to a NUL-terminated C string
+/// valid for the duration of the call. A non-UTF-8 `url` is treated as an empty
+/// URL and fails the connect. The client must not be used concurrently from
+/// another thread.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn lrtmp2_client_connect(
     c: *mut client::Client,
@@ -554,6 +808,14 @@ pub unsafe extern "C" fn lrtmp2_client_connect(
 }
 
 /// Publish (FFI-compatible).
+///
+/// Requires a successful [`lrtmp2_client_connect`] first. Returns `0` on success
+/// or a negative [`ErrorCode`] value.
+///
+/// # Safety
+///
+/// `c` must be a live pointer returned by [`lrtmp2_client_create`] that has not
+/// been destroyed, and it must not be used concurrently from another thread.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn lrtmp2_client_publish(c: *mut client::Client) -> i32 {
     if c.is_null() {
@@ -566,6 +828,15 @@ pub unsafe extern "C" fn lrtmp2_client_publish(c: *mut client::Client) -> i32 {
 }
 
 /// Play (FFI-compatible).
+///
+/// Requires a successful [`lrtmp2_client_connect`] first. Returns `0` on success
+/// or a negative [`ErrorCode`] value. Received frames are delivered to the Rust
+/// `on_frame_cb`, which has no C equivalent yet.
+///
+/// # Safety
+///
+/// `c` must be a live pointer returned by [`lrtmp2_client_create`] that has not
+/// been destroyed, and it must not be used concurrently from another thread.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn lrtmp2_client_play(c: *mut client::Client) -> i32 {
     if c.is_null() {
@@ -578,6 +849,20 @@ pub unsafe extern "C" fn lrtmp2_client_play(c: *mut client::Client) -> i32 {
 }
 
 /// Send a frame (FFI-compatible).
+///
+/// `frame` must describe a complete RTMP tag body. `frame.data`/`frame.size`
+/// are copied before the call returns, so they need only be valid during it.
+/// Frames larger than `client::MAX_CLIENT_FRAME_BYTES` are rejected with
+/// [`ErrorCode::Protocol`]. Requires the client to be publishing. Returns `0` on
+/// success or a negative [`ErrorCode`] value.
+///
+/// # Safety
+///
+/// `c` must be a live pointer returned by [`lrtmp2_client_create`] that has not
+/// been destroyed. `frame` must point to a readable [`Frame`] whose enum
+/// discriminants are valid and whose `data` points to `size` readable bytes (or
+/// is null when `size` is `0`) for the duration of the call. The client must not
+/// be used concurrently from another thread.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn lrtmp2_client_send_frame(
     c: *mut client::Client,
@@ -612,6 +897,16 @@ pub unsafe extern "C" fn lrtmp2_client_send_frame(
 }
 
 /// Poll client (FFI-compatible).
+///
+/// Blocks up to `timeout_ms` milliseconds, flushes outbound data, and services
+/// inbound control traffic. Returns `0` on success or a negative [`ErrorCode`]
+/// value.
+///
+/// # Safety
+///
+/// `c` must be a live pointer returned by [`lrtmp2_client_create`] that has not
+/// been destroyed, and it must not be used concurrently from another thread or
+/// from inside a callback it fires.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn lrtmp2_client_poll(c: *mut client::Client, timeout_ms: i32) -> i32 {
     if c.is_null() {
@@ -624,6 +919,14 @@ pub unsafe extern "C" fn lrtmp2_client_poll(c: *mut client::Client, timeout_ms: 
 }
 
 /// Get connection fd (FFI-compatible).
+///
+/// Reserved for ABI compatibility: it currently always returns `-1` and never
+/// touches `_conn`.
+///
+/// # Safety
+///
+/// The pointer is never dereferenced, so any pointer value — including null — is
+/// accepted. It is still marked `unsafe` to keep the C signature stable.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn lrtmp2_conn_get_fd(_conn: *const session::conn::Conn) -> i32 {
     -1
@@ -664,7 +967,13 @@ pub extern "C" fn lrtmp2_version_patch() -> i32 {
 /// Takes a raw `i32` rather than `ErrorCode` so that an out-of-range value
 /// from a caller (e.g. a weakly-typed binding forwarding an unrelated int)
 /// cannot construct an invalid enum discriminant, which would be undefined
-/// behavior.
+/// behavior. Out-of-range values map to [`ErrorCode::Internal`].
+///
+/// # Safety
+///
+/// The returned pointer is a `'static`, NUL-terminated string owned by the
+/// library. It must not be modified or freed, and stays valid for the whole
+/// process, so callers may keep it.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn lrtmp2_error_string(code: i32) -> *const std::ffi::c_char {
     error_c_string(error_code_from_raw(code)).as_ptr() as *const std::ffi::c_char

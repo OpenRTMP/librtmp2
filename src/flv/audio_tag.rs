@@ -5,6 +5,30 @@
 use crate::types::{AudioCodec, AudioTag, ErrorCode, Result};
 
 /// Parse an FLV audio tag.
+///
+/// [`AudioTag::data`] and [`AudioTag::size`] cover the whole of `data`
+/// (header included); they stay valid only as long as `data` does.
+///
+/// # Errors
+///
+/// - [`ErrorCode::Internal`] — `data` is empty.
+/// - [`ErrorCode::Unsupported`] — Enhanced RTMP ExHeader (SoundFormat `9`) or a
+///   reserved SoundFormat. Enhanced audio must be parsed with
+///   [`crate::ertmp::exaudio::exaudio_parse`] instead.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::flv::audio_tag;
+/// use librtmp2::types::{AudioCodec, AudioTag};
+///
+/// // 0xAF = AAC, 44 kHz, 16-bit, stereo; 0x00 = sequence header.
+/// let mut tag = AudioTag::default();
+/// audio_tag::parse(&[0xAF, 0x00, 0x12, 0x10], &mut tag).unwrap();
+/// assert_eq!(tag.codec, AudioCodec::Aac);
+/// assert_eq!(tag.aac_packet_type, 0);
+/// assert_eq!(tag.channels, 1); // FLV channel bit: 1 = stereo
+/// ```
 pub fn parse(data: &[u8], tag: &mut AudioTag) -> Result<()> {
     *tag = AudioTag::default();
 

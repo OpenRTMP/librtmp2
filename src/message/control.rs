@@ -7,21 +7,42 @@ use crate::bytes::ntoh32;
 use crate::types::ErrorCode;
 use crate::types::Result;
 
-/* Control message types */
+/// RTMP control message types.
+///
+/// These are the `msg_type_id` values of RTMP protocol control messages. Each
+/// control message must be sent on chunk stream 2 with message stream 0, per the
+/// RTMP specification.
+///
+/// SetChunkSize: changes the chunk payload size for subsequent chunks.
 pub const CTRL_SET_CHUNK_SIZE: u8 = 0x01;
+/// AbortMessage: discards a partially transmitted message on a chunk stream.
 pub const CTRL_ABORT_MESSAGE: u8 = 0x02;
+/// Acknowledgement: reports bytes received so far.
 pub const CTRL_ACKNOWLEDGEMENT: u8 = 0x03;
+/// UserControlMessage: carries a [`UCTRL_*`](UCTRL_STREAM_BEGIN) event.
 pub const CTRL_USER_CONTROL: u8 = 0x04;
+/// WindowAckSize: how many bytes may arrive before an Acknowledgement is due.
 pub const CTRL_WINDOW_ACK_SIZE: u8 = 0x05;
+/// SetPeerBandwidth: limits the peer's output bandwidth.
 pub const CTRL_SET_PEER_BANDWIDTH: u8 = 0x06;
 
-/* User Control event types */
+/// RTMP User Control event types.
+///
+/// The 16-bit event type that prefixes a [`CTRL_USER_CONTROL`] message.
+///
+/// StreamBegin: the stream is ready for playback.
 pub const UCTRL_STREAM_BEGIN: u16 = 0x00;
+/// StreamEOF: the stream ended.
 pub const UCTRL_STREAM_EOF: u16 = 0x01;
+/// StreamDry: the stream has no more data.
 pub const UCTRL_STREAM_DRY: u16 = 0x02;
+/// SetBufferLength: a player's buffer length in milliseconds.
 pub const UCTRL_SET_BUFFER_LENGTH: u16 = 0x03;
+/// StreamIsRecorded: the stream is being recorded.
 pub const UCTRL_STREAM_IS_RECORDED: u16 = 0x04;
+/// PingRequest: ask the peer to send a PingResponse.
 pub const UCTRL_PING_REQUEST: u16 = 0x06;
+/// PingResponse: answer to a PingRequest.
 pub const UCTRL_PING_RESPONSE: u16 = 0x07;
 
 /// Minimum inbound chunk size accepted from peers. Values below the RTMP default
@@ -47,6 +68,17 @@ pub const MIN_WINDOW_ACK_SIZE: u32 = 1024;
 /// Emits the bare 4-byte chunk size only. The RTMP control message type
 /// (`CTRL_SET_CHUNK_SIZE`) lives in the message header, not the payload, so it
 /// must NOT be prepended here (the matching decoder reads a bare value).
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::buffer::Buffer;
+/// use librtmp2::message::control;
+///
+/// let mut buf = Buffer::new();
+/// control::write_set_chunk_size(&mut buf, 4096).unwrap();
+/// assert_eq!(buf.peek(), &0x0000_1000u32.to_be_bytes());
+/// ```
 pub fn write_set_chunk_size(buf: &mut Buffer, chunk_size: u32) -> Result<()> {
     buf.write(&chunk_size.to_be_bytes())
         .map_err(|_| ErrorCode::Internal)?;

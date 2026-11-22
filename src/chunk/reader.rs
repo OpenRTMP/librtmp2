@@ -9,14 +9,27 @@ use crate::types::ErrorCode;
 use crate::types::Result;
 
 /// A chunk message (resembled from one or more chunk reads).
+///
+/// Filled in by [`chunk_read`] once a complete RTMP message has been
+/// reassembled. The chunk header fields refer to the *first* chunk of the
+/// message, whose fmt-0 header is authoritative for the whole message.
 #[derive(Debug, Clone, Default)]
 pub struct ChunkMessage {
+    /// Chunk stream id the message arrived on.
     pub csid: u32,
+    /// Chunk header format of the first chunk (0-3).
     pub fmt: u8,
+    /// Absolute message timestamp in milliseconds, with extended timestamps
+    /// already resolved.
     pub timestamp: u32,
+    /// Declared length of the message body in bytes.
     pub msg_length: u32,
+    /// RTMP message type id; see
+    /// [`RTMP_MSG_*`](crate::message::message::RTMP_MSG_AUDIO).
     pub msg_type_id: u8,
+    /// RTMP message stream id the message belongs to.
     pub msg_stream_id: u32,
+    /// `true` once the whole body has been reassembled.
     pub is_complete: bool,
 }
 

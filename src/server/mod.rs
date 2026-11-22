@@ -484,7 +484,10 @@ struct PendingTlsConnection {
 /// `Server` instances instead would silently split the relay: each instance
 /// only relays among its own `connections`.
 pub struct Server {
+    /// Configuration this server was created with; the C ABI and
+    /// [`Server::from_config`] both populate it.
     pub config: ServerConfig,
+    /// Per-connection and per-server memory ceilings.
     pub resource_limits: ResourceLimits,
     /// Maximum relay send operations allowed in one poll tick.
     ///
@@ -518,6 +521,8 @@ pub struct Server {
     /// possible instead of the full fmt=0 header on every message. Applied
     /// to connections accepted after it is changed.
     pub compact_media_headers: bool,
+    /// `true` while the server is accepting connections and
+    /// [`Server::poll`] is being driven. [`Server::stop`] clears it.
     pub running: bool,
     /// Identifies *one* bound listener (whichever was bound first) for
     /// diagnostics/backward compatibility. When more than one listener is
@@ -529,6 +534,7 @@ pub struct Server {
     /// Windows (see [`net::RawSocket`]); [`net::INVALID_SOCKET`] when no
     /// listener is bound.
     pub server_fd: net::RawSocket,
+    /// Live connections, in accept order. Entries are reaped as they close.
     pub connections: Vec<Conn>,
     /// Fired for every audio/video frame on every connection.
     pub on_frame_cb: Option<fn(&Frame)>,
@@ -859,6 +865,30 @@ impl Server {
     /// many unique routes **must** release finished feeds; new claims beyond
     /// [`MAX_EXTERNAL_PUBLISH_ROUTES`] are rejected (soft cap, no mid-feed
     /// eviction).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorCode::Internal`] when the payload exceeds
+    /// [`DEFAULT_MAX_MSG_LENGTH`], a route component is empty or too long, the
+    /// pending-relay backlog is full, or the route is already claimed by another
+    /// publisher.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use librtmp2::server::Server;
+    /// use librtmp2::types::{FrameType, ServerConfig};
+    ///
+    /// # fn main() -> Result<(), librtmp2::types::ErrorCode> {
+    /// let mut server = Server::from_config(ServerConfig::default(), None)?;
+    /// server.listen("127.0.0.1:1935")?;
+    ///
+    /// // Feed media that did not arrive over a socket.
+    /// server.inject_relay_frame("live", "cam1", FrameType::Video, 0, &[0x17, 0x01])?;
+    /// server.release_injected_route("live", "cam1");
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn inject_relay_frame(
         &mut self,
         app: &str,
@@ -1058,6 +1088,25 @@ impl Server {
 
     /// Copy the current init-cache snapshot for `(app, stream_name)`, if any
     /// entry exists (even when all fields are empty after partial eviction).
+    ///
+    /// The snapshot holds what a late joiner needs to decode immediately:
+    /// metadata, the AVC/AAC codec headers, per-track headers for multitrack
+    /// streams, and the last keyframe. Used by HA mirroring to seed a remote
+    /// node, which cannot see the live frame stream.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use librtmp2::server::Server;
+    /// use librtmp2::types::ServerConfig;
+    ///
+    /// # fn main() -> Result<(), librtmp2::types::ErrorCode> {
+    /// let server = Server::from_config(ServerConfig::default(), None)?;
+    /// // `None` until a publisher has cached at least one header.
+    /// assert!(server.stream_init_snapshot("live", "cam1").is_none());
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn stream_init_snapshot(&self, app: &str, stream_name: &str) -> Option<StreamInitSnapshot> {
         let cache = self
             .stream_cache
@@ -1283,6 +1332,34 @@ impl Server {
     }
 
     /// Poll for events (non-blocking).
+    ///
+    /// Waits up to `timeout_ms` for socket readiness, accepts pending
+    /// connections, advances every connection's state machine, relays media, and
+    /// flushes outbound queues. Call this in a loop.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorCode::Internal`] when the server was stopped. Individual
+    /// connection failures are handled internally (logged and reaped) and do not
+    /// surface here.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use librtmp2::server::Server;
+    /// use librtmp2::types::ServerConfig;
+    ///
+    /// # fn main() -> Result<(), librtmp2::types::ErrorCode> {
+    /// let mut server = Server::from_config(ServerConfig::default(), None)?;
+    /// server.listen("127.0.0.1:1935")?;
+    ///
+    /// loop {
+    ///     server.poll(100)?;
+    ///     # break;
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn poll(&mut self, timeout_ms: i32) -> Result<()> {
         self.poll_impl(timeout_ms, None)
     }

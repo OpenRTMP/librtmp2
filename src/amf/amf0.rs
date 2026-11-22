@@ -6,31 +6,74 @@ use crate::buffer::Buffer;
 use crate::types::ErrorCode;
 use crate::types::Result;
 
-/* AMF0 type markers */
+/// AMF0 type markers.
+///
+/// The discriminant of each variant is the marker byte written on the wire in
+/// front of a value, as defined by the AMF0 specification. Values only carry
+/// meaning through their marker; see [`read_type`] for decoding and
+/// [`write_number`]/[`write_string`] and friends for encoding.
+///
+/// ```
+/// use librtmp2::amf::amf0::Amf0Type;
+///
+/// assert_eq!(Amf0Type::Number as u8, 0x00);
+/// assert_eq!(Amf0Type::EcmaArray as u8, 0x08);
+/// assert_eq!(Amf0Type::Avmplus as u8, 0x11);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Amf0Type {
+    /// IEEE-754 double (marker `0x00`).
     Number = 0x00,
+    /// Boolean (marker `0x01`).
     Boolean = 0x01,
+    /// UTF-8 string with a 16-bit length (marker `0x02`).
     String = 0x02,
+    /// Anonymous object (marker `0x03`).
     Object = 0x03,
+    /// Reserved movieclip marker (marker `0x04`); not encodable.
     Movieclip = 0x04,
+    /// Null (marker `0x05`).
     Null = 0x05,
+    /// Undefined (marker `0x06`).
     Undefined = 0x06,
+    /// Reference to a previously sent object (marker `0x07`).
     Reference = 0x07,
+    /// Associative array (marker `0x08`).
     EcmaArray = 0x08,
+    /// Object-end sentinel (`0x00 0x00 0x09`).
     ObjectEnd = 0x09,
+    /// Dense array (marker `0x0A`).
     StrictArray = 0x0A,
+    /// Date with a millisecond double and a 16-bit timezone (marker `0x0B`).
     Date = 0x0B,
+    /// UTF-8 string with a 32-bit length (marker `0x0C`).
     LongString = 0x0C,
+    /// Unsupported marker (marker `0x0D`).
     Unsupported = 0x0D,
+    /// Reserved recordset marker (marker `0x0E`).
     Recordset = 0x0E,
+    /// XML document (marker `0x0F`).
     XmlDoc = 0x0F,
+    /// Typed object with a class name (marker `0x10`).
     TypedObject = 0x10,
+    /// Marker for a following AMF3 value (marker `0x11`).
     Avmplus = 0x11,
 }
 
 impl Amf0Type {
+    /// Short lowercase name of the marker, for diagnostics and log output.
+    ///
+    /// Markers without a dedicated name here -- and ones this crate does not
+    /// encode or decode -- are reported as `"unknown"`.
+    ///
+    /// ```
+    /// use librtmp2::amf::amf0::Amf0Type;
+    ///
+    /// assert_eq!(Amf0Type::Number.as_str(), "number");
+    /// assert_eq!(Amf0Type::EcmaArray.as_str(), "ecma_array");
+    /// assert_eq!(Amf0Type::Date.as_str(), "unknown");
+    /// ```
     pub fn as_str(self) -> &'static str {
         match self {
             Amf0Type::Number => "number",
@@ -79,6 +122,26 @@ fn read_double(buf: &mut Buffer) -> Result<f64> {
 /* ── ENCODER ── */
 
 /// Write an AMF0 number (double, 8 bytes big-endian).
+///
+/// Appends the `0x00` marker byte followed by the IEEE-754 bits in network
+/// byte order.
+///
+/// # Errors
+///
+/// Returns [`ErrorCode::Internal`] when the buffer cannot grow.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::amf::amf0;
+/// use librtmp2::buffer::Buffer;
+///
+/// let mut buf = Buffer::new();
+/// amf0::write_number(&mut buf, 42.0).unwrap();
+/// // Marker byte plus an 8-byte double.
+/// assert_eq!(buf.available(), 9);
+/// assert_eq!(buf.peek()[0], 0x00);
+/// ```
 pub fn write_number(buf: &mut Buffer, value: f64) -> Result<()> {
     buf.write(&[Amf0Type::Number as u8])
         .map_err(|_| ErrorCode::Internal)?;
@@ -115,6 +178,23 @@ pub fn write_undefined(buf: &mut Buffer) -> Result<()> {
 }
 
 /// Write an AMF0 string (2-byte length + UTF-8).
+///
+/// # Errors
+///
+/// Returns [`ErrorCode::Amf`] when `s` is longer than `u16::MAX` bytes, which
+/// the wire format cannot represent. Use [`write_long_string`] for longer
+/// values.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::amf::amf0;
+/// use librtmp2::buffer::Buffer;
+///
+/// let mut buf = Buffer::new();
+/// amf0::write_string(&mut buf, "onMetaData").unwrap();
+/// assert_eq!(buf.available(), 1 + 2 + "onMetaData".len());
+/// ```
 pub fn write_string(buf: &mut Buffer, s: &str) -> Result<()> {
     let len = s.len();
     if len > u16::MAX as usize {
@@ -185,6 +265,26 @@ pub fn write_ecma_array_begin(buf: &mut Buffer, count: u32) -> Result<()> {
 /* ── DECODER ── */
 
 /// Read an AMF0 type marker.
+///
+/// Consumes exactly one byte and maps it to an [`Amf0Type`].
+///
+/// # Errors
+///
+/// Returns [`ErrorCode::Amf`] for a marker byte this crate does not know, and
+/// [`ErrorCode::Io`] when no byte is available.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::amf::amf0::{self, Amf0Type};
+/// use librtmp2::buffer::Buffer;
+///
+/// let mut buf = Buffer::from_slice(&[0x0C]);
+/// assert_eq!(amf0::read_type(&mut buf).unwrap(), Amf0Type::LongString);
+/// // Unknown markers are rejected.
+/// let mut bad = Buffer::from_slice(&[0x42]);
+/// assert!(amf0::read_type(&mut bad).is_err());
+/// ```
 pub fn read_type(buf: &mut Buffer) -> Result<Amf0Type> {
     let t = read_u8(buf)?;
     Ok(match t {
@@ -295,6 +395,11 @@ pub fn is_object_end(buf: &mut Buffer) -> bool {
 }
 
 const MAX_SKIP_DEPTH: i32 = 32;
+/// Maximum number of object keys tolerated while decoding one AMF0 object
+/// before the decoder rejects the message.
+///
+/// Bounds the work a hostile peer can demand from an object that claims a huge
+/// number of keys, independent of how many bytes it actually sends.
 pub const MAX_OBJECT_KEYS: usize = 256;
 
 /// Skip an AMF0 value whose type marker has already been consumed.

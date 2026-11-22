@@ -6,12 +6,20 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU8, Ordering};
 
 /// Log levels.
+///
+/// Ordered from most to least verbose; the library emits a message when its
+/// level is greater than or equal to the level set by [`set_level`]. The
+/// discriminants are the raw values accepted by the C ABI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(C)]
 pub enum LogLevel {
+    /// Verbose diagnostics used while debugging the protocol layer.
     Debug = 0,
+    /// Informational messages about connection lifecycle.
     Info = 1,
+    /// Recoverable problems that do not stop the connection.
     Warn = 2,
+    /// Errors that cause a connection or operation to fail.
     Error = 3,
 }
 
@@ -34,11 +42,45 @@ static LOG_CALLBACK: Mutex<LogCallback> = Mutex::new(LogCallback {
 const LEVEL_STRINGS: [&str; 4] = ["DEBUG", "INFO", "WARN", "ERROR"];
 
 /// Set the minimum log level.
+///
+/// Messages below this level are discarded before any formatting work happens.
+/// The setting is process-global and applies to every connection.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::log::{LogLevel, set_level};
+///
+/// set_level(LogLevel::Debug);
+/// set_level(LogLevel::Info);
+/// ```
 pub fn set_level(level: LogLevel) {
     LOG_LEVEL.store(level as u8, Ordering::Relaxed);
 }
 
 /// Set a custom log callback.
+///
+/// The callback receives every message at or above the current
+/// [`LogLevel`], replacing the default `stderr` output.
+///
+/// `userdata` is passed back unchanged. The library stores it as a `usize` and
+/// never dereferences it, but the pointed-to data must stay alive for as long as
+/// the callback is installed.
+///
+/// The callback is invoked outside the internal lock, so it may itself log
+/// without deadlocking.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::log::{LogLevel, set_callback};
+///
+/// fn sink(level: LogLevel, msg: &str, _userdata: *mut u8) {
+///     let _ = (level, msg); // forward to your own logging framework
+/// }
+///
+/// set_callback(sink, std::ptr::null_mut());
+/// ```
 pub fn set_callback(cb: LogFn, userdata: *mut u8) {
     let mut guard = LOG_CALLBACK.lock().unwrap_or_else(|e| e.into_inner());
     guard.cb = Some(cb);

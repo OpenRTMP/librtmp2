@@ -9,15 +9,33 @@
 //! previously cached valid one and be replayed to late joiners.
 
 /// FourCC / codec families with a structural validator.
+///
+/// Selects which record layout [`validate_config_record`] applies. Any codec
+/// without a dedicated validator maps to [`ConfigCodec::Opaque`] and is only
+/// required to be non-empty.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfigCodec {
+    /// AVC/H.264 — an ISO/IEC 14496-15 `AVCDecoderConfigurationRecord`.
     Avc,
+    /// HEVC/H.265 — an ISO/IEC 14496-15 `HEVCDecoderConfigurationRecord`.
     Hevc,
     /// Any other codec: only a non-empty record is required.
     Opaque,
 }
 
 impl ConfigCodec {
+    /// Map a FourCC (e.g. `b"avc1"`, `b"hvc1"`) to its validator family.
+    ///
+    /// Unrecognized or too-short values map to [`ConfigCodec::Opaque`].
+    ///
+    /// ```
+    /// use librtmp2::media::codec_config::ConfigCodec;
+    ///
+    /// assert_eq!(ConfigCodec::from_fourcc(b"avc1"), ConfigCodec::Avc);
+    /// assert_eq!(ConfigCodec::from_fourcc(b"hvc1"), ConfigCodec::Hevc);
+    /// assert_eq!(ConfigCodec::from_fourcc(b"av01"), ConfigCodec::Opaque);
+    /// assert_eq!(ConfigCodec::from_fourcc(b"vp"), ConfigCodec::Opaque);
+    /// ```
     pub fn from_fourcc(fourcc: &[u8]) -> Self {
         match fourcc.get(..4) {
             Some(b"avc1") => Self::Avc,
