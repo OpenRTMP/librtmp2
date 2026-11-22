@@ -5,6 +5,30 @@
 use crate::types::{ErrorCode, Multitrack, Result};
 
 /// Parse a multitrack descriptor.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::amf::amf0;
+/// use librtmp2::buffer::Buffer;
+/// use librtmp2::ertmp::multitrack::multitrack_parse;
+/// use librtmp2::types::{Multitrack, MultitrackType};
+///
+/// // The descriptor is two AMF0 values: the track type as a Number, then the
+/// // name as a String.
+/// let mut wire = Buffer::new();
+/// amf0::write_number(&mut wire, 1.0).unwrap(); // 1 = video
+/// amf0::write_string(&mut wire, "camera2").unwrap();
+///
+/// let mut mt = Multitrack::default();
+/// multitrack_parse(&mut mt, wire.peek()).unwrap();
+///
+/// assert_eq!(mt.track_type, MultitrackType::Video);
+/// assert_eq!(&mt.track_name[..7], b"camera2");
+///
+/// // A truncated descriptor is rejected.
+/// assert!(multitrack_parse(&mut mt, &wire.peek()[..4]).is_err());
+/// ```
 pub fn multitrack_parse(mt: &mut Multitrack, data: &[u8]) -> Result<()> {
     *mt = Multitrack::default();
 
@@ -50,6 +74,25 @@ pub fn multitrack_parse(mt: &mut Multitrack, data: &[u8]) -> Result<()> {
 }
 
 /// Write a multitrack descriptor. Returns bytes written.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::ertmp::multitrack::{multitrack_parse, multitrack_write};
+/// use librtmp2::types::{Multitrack, MultitrackType};
+///
+/// let mut mt = Multitrack::default();
+/// mt.track_type = MultitrackType::Audio;
+/// mt.track_name[..4].copy_from_slice(b"mono");
+///
+/// let mut buf = [0u8; 64];
+/// let n = multitrack_write(&mt, &mut buf);
+/// assert!(n > 0);
+///
+/// let mut back = Multitrack::default();
+/// multitrack_parse(&mut back, &buf[..n]).unwrap();
+/// assert_eq!(back.track_type, MultitrackType::Audio);
+/// ```
 pub fn multitrack_write(mt: &Multitrack, buf: &mut [u8]) -> usize {
     let name_len = mt.track_name.iter().position(|&b| b == 0).unwrap_or(63);
     let needed = 1 + 8 + 1 + 2 + name_len;

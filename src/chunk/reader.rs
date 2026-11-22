@@ -13,6 +13,22 @@ use crate::types::Result;
 /// Filled in by [`chunk_read`] once a complete RTMP message has been
 /// reassembled. The chunk header fields refer to the *first* chunk of the
 /// message, whose fmt-0 header is authoritative for the whole message.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::chunk::reader::ChunkMessage;
+///
+/// let mut msg = ChunkMessage::default();
+/// // The default is an empty, incomplete message.
+/// assert!(!msg.is_complete);
+/// assert_eq!(msg.csid, 0);
+///
+/// msg.csid = 4;
+/// msg.msg_type_id = 0x08; // audio
+/// msg.msg_length = 2;
+/// assert_eq!(msg.msg_type_id, 0x08);
+/// ```
 #[derive(Debug, Clone, Default)]
 pub struct ChunkMessage {
     /// Chunk stream id the message arrived on.
@@ -44,6 +60,27 @@ pub struct ChunkMessage {
 /// happen BEFORE any bytes are consumed from `buf`.  This guarantees that every
 /// `Ok(0)` return leaves the cursor exactly where it was on entry, so the next
 /// call can retry without corruption.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::buffer::Buffer;
+/// use librtmp2::chunk::reader::{chunk_read, ChunkMessage};
+/// use librtmp2::chunk::state::ChunkRegistry;
+///
+/// let mut reg = ChunkRegistry::new();
+/// reg.init();
+///
+/// // An empty buffer cannot produce a chunk: `Ok(0)` means "need more data",
+/// // and the read cursor is left untouched.
+/// let mut buf = Buffer::new();
+/// let mut msg = ChunkMessage::default();
+/// let mut payload: *const u8 = std::ptr::null();
+/// let mut payload_len = 0usize;
+/// let rc = chunk_read(&mut buf, &mut reg, None, &mut msg, &mut payload, &mut payload_len).unwrap();
+/// assert_eq!(rc, 0);
+/// assert_eq!(buf.available(), 0);
+/// ```
 pub fn chunk_read(
     buf: &mut Buffer,
     reg: &mut ChunkRegistry,
@@ -473,6 +510,24 @@ pub fn chunk_read(
 }
 
 /// Read one RTMP chunk and return a complete message payload as an owned buffer.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::buffer::Buffer;
+/// use librtmp2::chunk::reader::{chunk_read_owned, ChunkMessage};
+/// use librtmp2::chunk::state::ChunkRegistry;
+///
+/// let mut reg = ChunkRegistry::new();
+/// reg.init();
+///
+/// // With nothing buffered the call reports "need more data" and returns no body.
+/// let mut buf = Buffer::new();
+/// let mut msg = ChunkMessage::default();
+/// let (rc, body) = chunk_read_owned(&mut buf, &mut reg, &mut msg).unwrap();
+/// assert_eq!(rc, 0);
+/// assert!(body.is_empty());
+/// ```
 pub fn chunk_read_owned(
     buf: &mut Buffer,
     reg: &mut ChunkRegistry,

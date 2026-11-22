@@ -165,6 +165,33 @@ pub fn exvideo_parse(data: &[u8], hdr: &mut VideoHeader) -> Result<()> {
 /// packet type) cannot be written through this helper: the writer would have
 /// to fabricate a command byte, silently turning e.g. an EndSeek into a
 /// StartSeek. The command-frame branch returns 0 instead.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::ertmp::exvideo::exvideo_write;
+/// use librtmp2::types::{
+///     ERTMP_PACKET_TYPE_SEQUENCE_START, VideoHeader,
+/// };
+///
+/// let hdr = VideoHeader {
+///     is_ex_header: 1,
+///     packet_type: ERTMP_PACKET_TYPE_SEQUENCE_START,
+///     fourcc: *b"hvc1\0",
+///     frame_type: 1,
+///     ..Default::default()
+/// };
+///
+/// let mut buf = [0u8; 8];
+/// let n = exvideo_write(&hdr, &mut buf);
+/// // ExHeader byte + FourCC.
+/// assert_eq!(n, 5);
+/// assert_eq!(buf[0] & 0x80, 0x80);
+///
+/// // A legacy (non-ExHeader) header cannot be written by this helper.
+/// let legacy = VideoHeader::default();
+/// assert_eq!(exvideo_write(&legacy, &mut buf), 0);
+/// ```
 pub fn exvideo_write(hdr: &VideoHeader, buf: &mut [u8]) -> usize {
     if hdr.is_ex_header == 0 {
         return 0;
@@ -203,6 +230,14 @@ pub fn exvideo_write(hdr: &VideoHeader, buf: &mut [u8]) -> usize {
 }
 
 /// Get the E-RTMP version string.
+///
+/// # Examples
+///
+/// ```
+/// // The Enhanced RTMP specification revision this crate implements.
+/// let v = librtmp2::ertmp::exvideo::version_string();
+/// assert!(!v.is_empty());
+/// ```
 pub fn version_string() -> &'static str {
     "E-RTMP v1 (ExVideoTagHeader/FourCC)"
 }

@@ -13,6 +13,17 @@
 /// Selects which record layout [`validate_config_record`] applies. Any codec
 /// without a dedicated validator maps to [`ConfigCodec::Opaque`] and is only
 /// required to be non-empty.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::media::codec_config::ConfigCodec;
+///
+/// assert_eq!(ConfigCodec::from_fourcc(b"avc1"), ConfigCodec::Avc);
+/// assert_eq!(ConfigCodec::from_fourcc(b"hvc1"), ConfigCodec::Hevc);
+/// // Anything else only gets the non-empty check.
+/// assert_eq!(ConfigCodec::from_fourcc(b"av01"), ConfigCodec::Opaque);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfigCodec {
     /// AVC/H.264 — an ISO/IEC 14496-15 `AVCDecoderConfigurationRecord`.
@@ -47,6 +58,27 @@ impl ConfigCodec {
 
 /// Validate a codec configuration record (the bytes after the video tag
 /// header, i.e. after the FourCC or the legacy AVCPacketType + CompositionTime).
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::media::codec_config::{validate_config_record, ConfigCodec};
+///
+/// // A valid AVC record: version 1, one SPS, one PPS, all lengths in bounds.
+/// let avc = [
+///     0x01, 0x64, 0x00, 0x1F, 0xFF, 0xE1,
+///     0x00, 0x02, 0x67, 0x64,
+///     0x01, 0x00, 0x02, 0x68, 0xEE,
+/// ];
+/// assert!(validate_config_record(ConfigCodec::Avc, &avc));
+///
+/// // Truncating the record invalidates it.
+/// assert!(!validate_config_record(ConfigCodec::Avc, &avc[..6]));
+///
+/// // Opaque codecs only require a non-empty record.
+/// assert!(validate_config_record(ConfigCodec::Opaque, &[0xAA]));
+/// assert!(!validate_config_record(ConfigCodec::Opaque, &[]));
+/// ```
 pub fn validate_config_record(codec: ConfigCodec, record: &[u8]) -> bool {
     match codec {
         ConfigCodec::Avc => validate_avc_record(record),
@@ -58,6 +90,20 @@ pub fn validate_config_record(codec: ConfigCodec, record: &[u8]) -> bool {
 /// Minimal structural check for an ISO/IEC 14496-3 AudioSpecificConfig: the
 /// audio object type, sampling-frequency index (or explicit frequency) and
 /// channel configuration must all be present. A one-byte `0x12` is rejected.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::media::codec_config::validate_aac_config;
+///
+/// // AAC-LC, 44.1 kHz, stereo: audio object type, frequency index and channel
+/// // configuration are all present.
+/// assert!(validate_aac_config(&[0x12, 0x10]));
+///
+/// // A single byte cannot carry all three fields.
+/// assert!(!validate_aac_config(&[0x12]));
+/// assert!(!validate_aac_config(&[]));
+/// ```
 pub fn validate_aac_config(record: &[u8]) -> bool {
     let mut bit_pos = 0usize;
     let mut read_bits = |count: usize| -> Option<u32> {
@@ -113,6 +159,29 @@ fn skip_param_set(record: &[u8], pos: usize) -> Option<usize> {
 
 /// ISO/IEC 14496-15 AVCDecoderConfigurationRecord: version 1, at least one
 /// SPS and one PPS, every parameter set non-empty and fully contained.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::media::codec_config::validate_avc_record;
+///
+/// let valid = [
+///     0x01, 0x64, 0x00, 0x1F, 0xFF, 0xE1,
+///     0x00, 0x02, 0x67, 0x64,
+///     0x01, 0x00, 0x02, 0x68, 0xEE,
+/// ];
+/// assert!(validate_avc_record(&valid));
+///
+/// // The version byte must be 1.
+/// let mut wrong_version = valid;
+/// wrong_version[0] = 2;
+/// assert!(!validate_avc_record(&wrong_version));
+///
+/// // At least one SPS is required.
+/// let mut no_sps = valid;
+/// no_sps[5] = 0xE0; // num_sps = 0
+/// assert!(!validate_avc_record(&no_sps));
+/// ```
 pub fn validate_avc_record(record: &[u8]) -> bool {
     if record.len() < 7 || record[0] != 1 {
         return false;
@@ -171,6 +240,19 @@ const HEVC_NAL_PPS: u8 = 34;
 /// ISO/IEC 14496-15 HEVCDecoderConfigurationRecord: version 1, every NAL unit
 /// array fully contained with non-empty entries, and at least one SPS and one
 /// PPS overall (a missing VPS is tolerated, as some encoders omit it).
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::media::codec_config::validate_hevc_record;
+///
+/// // An empty or version-0 record is rejected.
+/// assert!(!validate_hevc_record(&[]));
+/// assert!(!validate_hevc_record(&[0x00; 23]));
+///
+/// // A truncated header is not enough to contain a NAL unit array.
+/// assert!(!validate_hevc_record(&[0x01; 8]));
+/// ```
 pub fn validate_hevc_record(record: &[u8]) -> bool {
     const FIXED_HEADER: usize = 22;
     if record.len() <= FIXED_HEADER || record[0] != 1 {

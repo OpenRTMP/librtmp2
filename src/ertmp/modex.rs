@@ -46,6 +46,27 @@ const TIMESTAMP_OFFSET_NANO_LEN: usize = 3;
 /// zero offset, per the spec's graceful-degradation rule. Truncated input
 /// returns [`ErrorCode::Io`]; a `TimestampOffsetNano` wrapper whose `modExData`
 /// is shorter than three bytes returns [`ErrorCode::Protocol`].
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::ertmp::modex::modex_parse;
+/// use librtmp2::types::{Modex, ModexType};
+///
+/// // `data` starts at `sizeMinusOne`. 0x02 means three `modExData` bytes, then
+/// // the option byte: low nibble = next packet type, high nibble = modExType.
+/// let data = [0x02, 0x00, 0x00, 0x01, 0x01];
+///
+/// let mut m = Modex::default();
+/// modex_parse(&mut m, &data).unwrap();
+///
+/// assert_eq!(m.modex_type, ModexType::TimestampOffsetNano);
+/// assert_eq!(m.offset, 1);
+/// assert_eq!(m.next_packet_type, 1); // CodedFrames follows
+///
+/// // Truncated input is rejected.
+/// assert!(modex_parse(&mut m, &data[..2]).is_err());
+/// ```
 pub fn modex_parse(modex: &mut Modex, data: &[u8]) -> Result<()> {
     modex_parse_prefix(modex, data).map(|_| ())
 }
@@ -57,6 +78,22 @@ pub fn modex_parse(modex: &mut Modex, data: &[u8]) -> Result<()> {
 /// [`Modex::next_packet_type`] is
 /// [`crate::media::modex::ERTMP_PACKET_TYPE_MODEX`] another layer starts at the
 /// returned offset.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::ertmp::modex::modex_parse_prefix;
+/// use librtmp2::types::Modex;
+///
+/// // The wrapper is followed by the packet body; `modex_parse_prefix` reports the
+/// // boundary so the caller can continue at the right offset.
+/// let data = [0x02, 0x00, 0x00, 0x01, 0x01, 0xAA];
+///
+/// let mut m = Modex::default();
+/// let n = modex_parse_prefix(&mut m, &data).unwrap();
+/// assert_eq!(n, 5);
+/// assert_eq!(&data[n..], &[0xAA]);
+/// ```
 pub fn modex_parse_prefix(modex: &mut Modex, data: &[u8]) -> Result<usize> {
     let layer = parse_modex_layer(data, 0).ok_or(ErrorCode::Io)?;
 
@@ -94,6 +131,29 @@ pub fn modex_parse_prefix(modex: &mut Modex, data: &[u8]) -> Result<usize> {
 ///
 /// Returns the number of bytes written, or 0 when `buf` is too small — or when
 /// `modex` is a [`ModexType::Nop`], which has no v2 wire representation.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::ertmp::modex::modex_write;
+/// use librtmp2::types::{Modex, ModexType};
+///
+/// let m = Modex {
+///     modex_type: ModexType::TimestampOffsetNano,
+///     offset: 1_000,
+///     next_packet_type: 1,
+/// };
+///
+/// let mut buf = [0u8; 16];
+/// let n = modex_write(&m, &mut buf);
+/// // sizeMinusOne + three data bytes + option byte.
+/// assert_eq!(n, 5);
+/// assert_eq!(buf[0], 0x02);
+///
+/// // `Nop` has no v2 wire representation, so nothing is written.
+/// let nop = Modex::default();
+/// assert_eq!(modex_write(&nop, &mut buf), 0);
+/// ```
 pub fn modex_write(modex: &Modex, buf: &mut [u8]) -> usize {
     let modex_type = match modex.modex_type {
         ModexType::TimestampOffsetNano => MODEX_TYPE_TIMESTAMP_OFFSET_NANO,

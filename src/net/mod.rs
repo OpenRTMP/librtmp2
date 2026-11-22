@@ -178,6 +178,32 @@ pub(crate) const MAX_SEND_PARTS: usize = 512;
 /// `def_port` is copied into `port` whenever the input carries no port of its own.
 /// Returns Ok(()) on success, or an error if a destination buffer is too small
 /// or the bracketed form is malformed.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::net::split_host_port;
+///
+/// let (mut host, mut port) = (String::new(), String::new());
+///
+/// // An explicit port is parsed out.
+/// split_host_port("example.com:1935", &mut host, &mut port, "1935").unwrap();
+/// assert_eq!(host, "example.com");
+/// assert_eq!(port, "1935");
+///
+/// // A bare host falls back to the supplied default port.
+/// split_host_port("example.com", &mut host, &mut port, "1935").unwrap();
+/// assert_eq!(host, "example.com");
+/// assert_eq!(port, "1935");
+///
+/// // Bracketed IPv6 keeps the address but drops the brackets.
+/// split_host_port("[::1]:1935", &mut host, &mut port, "1935").unwrap();
+/// assert_eq!(host, "::1");
+///
+/// // A wildcard bind address has an empty host.
+/// split_host_port(":1935", &mut host, &mut port, "1935").unwrap();
+/// assert_eq!(host, "");
+/// ```
 pub fn split_host_port(
     input: &str,
     host: &mut String,

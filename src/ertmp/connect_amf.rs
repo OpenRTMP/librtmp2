@@ -18,6 +18,26 @@ use super::reconnect::{reconnect_parse, reconnect_write};
 const MAX_CAPS_BLOB_BYTES: usize = 4096;
 
 /// Read a `fourCcList` AMF value into a [`FourCcList`].
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::buffer::Buffer;
+/// use librtmp2::ertmp::connect_amf::{read_four_cc_list_amf, write_four_cc_list_amf};
+/// use librtmp2::types::{FourCc, FourCcList};
+///
+/// let mut list = FourCcList::default();
+/// list.entries[0] = FourCc { cc: *b"avc1\0" };
+/// list.count = 1;
+///
+/// let mut buf = Buffer::new();
+/// write_four_cc_list_amf(&mut buf, &list).unwrap();
+///
+/// let mut back = FourCcList::default();
+/// read_four_cc_list_amf(&mut buf, &mut back).unwrap();
+/// assert_eq!(back.count, 1);
+/// assert_eq!(&back.entries[0].cc[..4], b"avc1");
+/// ```
 pub fn read_four_cc_list_amf(buf: &mut Buffer, list: &mut FourCcList) -> Result<()> {
     fourcc_list_init(list);
     let ty = amf0::read_type(buf)?;
@@ -32,6 +52,29 @@ pub fn read_four_cc_list_amf(buf: &mut Buffer, list: &mut FourCcList) -> Result<
 }
 
 /// Read a `videoFourCcInfoMap` AMF value.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::buffer::Buffer;
+/// use librtmp2::ertmp::connect_amf::{
+///     read_video_fourcc_info_map_amf, write_video_fourcc_info_map_amf,
+/// };
+/// use librtmp2::types::{FourCc, VideoFourCcInfoMap, FOUR_CC_INFO_ALL};
+///
+/// let mut map = VideoFourCcInfoMap::default();
+/// map.entries[0] = FourCc { cc: *b"hvc1\0" };
+/// map.masks[0] = FOUR_CC_INFO_ALL;
+/// map.count = 1;
+///
+/// let mut buf = Buffer::new();
+/// write_video_fourcc_info_map_amf(&mut buf, &map).unwrap();
+///
+/// let mut back = VideoFourCcInfoMap::default();
+/// read_video_fourcc_info_map_amf(&mut buf, &mut back).unwrap();
+/// assert_eq!(back.count, 1);
+/// assert_eq!(&back.entries[0].cc[..4], b"hvc1");
+/// ```
 pub fn read_video_fourcc_info_map_amf(
     buf: &mut Buffer,
     map: &mut VideoFourCcInfoMap,
@@ -103,6 +146,28 @@ fn add_video_map_entry(map: &mut VideoFourCcInfoMap, key: &[u8], mask: u32) -> R
 }
 
 /// Read a `capsEx` AMF value (numeric bitmask per E-RTMP v2 spec).
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::buffer::Buffer;
+/// use librtmp2::ertmp::connect_amf::read_caps_ex_amf;
+/// use librtmp2::types::{CapsExit, CAPS_EX_MASK_MULTITRACK, CAPS_EX_MASK_MODEX};
+///
+/// // A capsEx AMF number: the capability mask as a double.
+/// let mut buf = Buffer::new();
+/// librtmp2::amf::amf0::write_number(
+///     &mut buf,
+///     (CAPS_EX_MASK_MULTITRACK | CAPS_EX_MASK_MODEX) as f64,
+/// )
+/// .unwrap();
+///
+/// let mut caps = CapsExit::default();
+/// let mut mask = 0u32;
+/// read_caps_ex_amf(&mut buf, &mut caps, &mut mask).unwrap();
+///
+/// assert_eq!(mask, CAPS_EX_MASK_MULTITRACK | CAPS_EX_MASK_MODEX);
+/// ```
 pub fn read_caps_ex_amf(buf: &mut Buffer, caps: &mut CapsExit, mask: &mut u32) -> Result<()> {
     let ty = amf0::read_type(buf)?;
     match ty {
@@ -157,6 +222,23 @@ pub fn read_caps_ex_amf(buf: &mut Buffer, caps: &mut CapsExit, mask: &mut u32) -
 }
 
 /// Read a v2 `reconnect` AMF value.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::buffer::Buffer;
+/// use librtmp2::ertmp::connect_amf::{read_reconnect_amf, write_reconnect_amf};
+/// use librtmp2::types::Reconnect;
+///
+/// let rc = Reconnect { replay: 1, limit: 4096 };
+/// let mut buf = Buffer::new();
+/// write_reconnect_amf(&mut buf, &rc).unwrap();
+///
+/// let mut back = Reconnect::default();
+/// read_reconnect_amf(&mut buf, &mut back).unwrap();
+/// assert_eq!(back.replay, 1);
+/// assert_eq!(back.limit, 4096);
+/// ```
 pub fn read_reconnect_amf(buf: &mut Buffer, rc: &mut Reconnect) -> Result<()> {
     let ty = amf0::read_type(buf)?;
     let data = read_amf_binary_blob(buf, ty)?;
@@ -164,6 +246,24 @@ pub fn read_reconnect_amf(buf: &mut Buffer, rc: &mut Reconnect) -> Result<()> {
 }
 
 /// Write negotiated caps into an AMF0 object (without surrounding object markers).
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::buffer::Buffer;
+/// use librtmp2::ertmp::connect_amf::{negotiate_caps, write_negotiated_caps};
+/// use librtmp2::types::{ConnectInfo, CAPS_EX_MASK_MULTITRACK};
+///
+/// let mut info = ConnectInfo::default();
+/// info.has_caps_ex = true;
+/// info.caps_ex_mask = CAPS_EX_MASK_MULTITRACK;
+/// let negotiated = negotiate_caps(&info);
+///
+/// let mut buf = Buffer::new();
+/// // Emitted between `write_object_begin` and `write_object_end`.
+/// write_negotiated_caps(&mut buf, &negotiated).unwrap();
+/// assert!(buf.available() > 0);
+/// ```
 pub fn write_negotiated_caps(buf: &mut Buffer, caps: &NegotiatedCaps) -> Result<()> {
     if caps.has_four_cc_list && caps.four_cc_list.count > 0 {
         amf0::write_object_key(buf, "fourCcList")?;
@@ -194,6 +294,28 @@ pub fn write_negotiated_caps(buf: &mut Buffer, caps: &NegotiatedCaps) -> Result<
 ///
 /// Propagates [`ErrorCode::Amf`] from [`amf0::write_string`] and
 /// [`ErrorCode::Internal`] when the buffer cannot grow.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::buffer::Buffer;
+/// use librtmp2::ertmp::connect_amf::{read_four_cc_list_amf, write_four_cc_list_amf};
+/// use librtmp2::types::{FourCc, FourCcList};
+///
+/// let mut list = FourCcList::default();
+/// list.entries[0] = FourCc { cc: *b"Opus\0" };
+/// list.count = 1;
+///
+/// let mut buf = Buffer::new();
+/// write_four_cc_list_amf(&mut buf, &list).unwrap();
+///
+/// // An AMF0 strict array starts with marker 0x0A.
+/// assert_eq!(buf.peek()[0], 0x0A);
+///
+/// let mut back = FourCcList::default();
+/// read_four_cc_list_amf(&mut buf, &mut back).unwrap();
+/// assert_eq!(back.count, 1);
+/// ```
 pub fn write_four_cc_list_amf(buf: &mut Buffer, list: &FourCcList) -> Result<()> {
     // `count` is a caller-controlled `pub` field on an FFI type; never index
     // past the fixed array when a C caller supplies an inconsistent count.
@@ -263,6 +385,21 @@ pub fn write_caps_ex_amf(buf: &mut Buffer, caps_ex_mask: u32) -> Result<()> {
 ///
 /// Returns [`ErrorCode::Internal`] if the fixed 8-byte encoding unexpectedly
 /// fails, and propagates buffer-growth failures.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::buffer::Buffer;
+/// use librtmp2::ertmp::connect_amf::write_reconnect_amf;
+/// use librtmp2::types::Reconnect;
+///
+/// let mut buf = Buffer::new();
+/// write_reconnect_amf(&mut buf, &Reconnect { replay: 1, limit: 1 << 20 }).unwrap();
+///
+/// // An AMF0 long string (0x0C) wrapping the 8-byte reconnect value.
+/// assert_eq!(buf.peek()[0], 0x0C);
+/// assert_eq!(&buf.peek()[1..5], &8u32.to_be_bytes());
+/// ```
 pub fn write_reconnect_amf(buf: &mut Buffer, rc: &Reconnect) -> Result<()> {
     let mut blob = [0u8; 8];
     if reconnect_write(rc, &mut blob) != 8 {
@@ -364,6 +501,26 @@ fn fourcc_entry_bytes(entry: &crate::types::FourCc) -> &[u8] {
 }
 
 /// Intersect client-offered E-RTMP caps with what this server supports.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::ertmp::connect_amf::negotiate_caps;
+/// use librtmp2::types::{ConnectInfo, CAPS_EX_MASK_MULTITRACK};
+///
+/// // What a client advertises in its `connect` command.
+/// let mut info = ConnectInfo::default();
+/// info.has_caps_ex = true;
+/// info.caps_ex_mask = CAPS_EX_MASK_MULTITRACK;
+///
+/// let agreed = negotiate_caps(&info);
+/// // The server enables multitrack because the client asked for it.
+/// assert!(agreed.multitrack_enabled);
+///
+/// // A legacy client (no capsEx at all) gets no Enhanced RTMP features.
+/// let legacy = negotiate_caps(&ConnectInfo::default());
+/// assert!(!legacy.has_caps_ex);
+/// ```
 pub fn negotiate_caps(client: &crate::types::ConnectInfo) -> NegotiatedCaps {
     let mut out = NegotiatedCaps::default();
 

@@ -22,6 +22,21 @@ static STATE_NAMES: &[&str] = &[
 /// `Publishing` and `Playing` are peer roles: Ord places Publishing before
 /// Playing for ABI/discriminant stability, not lifecycle order, so both
 /// directions between those two states are allowed.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::session::state_machine::conn_transition;
+/// use librtmp2::types::ConnState;
+///
+/// let mut state = ConnState::TcpAccepted;
+/// conn_transition(&mut state, ConnState::Handshake).unwrap();
+/// assert_eq!(state, ConnState::Handshake);
+///
+/// // Going backwards is a protocol error.
+/// assert!(conn_transition(&mut state, ConnState::TcpAccepted).is_err());
+/// assert_eq!(state, ConnState::Handshake);
+/// ```
 pub fn conn_transition(current: &mut ConnState, new_state: ConnState) -> Result<()> {
     let peer_role_switch = matches!(
         (*current, new_state),
@@ -35,6 +50,17 @@ pub fn conn_transition(current: &mut ConnState, new_state: ConnState) -> Result<
 }
 
 /// Get the string name of a connection state.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::session::state_machine::conn_state_str;
+/// use librtmp2::types::ConnState;
+///
+/// assert_eq!(conn_state_str(ConnState::TcpAccepted), "TCP_ACCEPTED");
+/// assert_eq!(conn_state_str(ConnState::Publishing), "PUBLISHING");
+/// assert_eq!(conn_state_str(ConnState::Closed), "CLOSED");
+/// ```
 pub fn conn_state_str(state: ConnState) -> &'static str {
     STATE_NAMES
         .get(state as usize)

@@ -107,6 +107,30 @@ pub fn exaudio_parse(data: &[u8], hdr: &mut AudioHeader) -> Result<()> {
 /// Write an Enhanced RTMP v1 audio tag header. Returns bytes written, or 0 if
 /// `buf` is too small or the codec cannot be represented in this tag layout
 /// (legacy Opus). Mirrors [`exaudio_parse`] in reverse.
+///
+/// # Examples
+///
+/// ```
+/// use librtmp2::ertmp::exaudio::{exaudio_parse, exaudio_write};
+/// use librtmp2::types::{AudioCodec, AudioHeader};
+///
+/// let hdr = AudioHeader {
+///     is_ex_header: 1,
+///     packet_type: 1,
+///     fourcc: *b"Opus\0",
+///     audio_codec: AudioCodec::Opus,
+///     ..Default::default()
+/// };
+///
+/// let mut buf = [0u8; 8];
+/// let n = exaudio_write(&hdr, &mut buf);
+/// assert_eq!(n, 5);
+///
+/// // Round-trips through the parser.
+/// let mut back = AudioHeader::default();
+/// exaudio_parse(&buf[..n], &mut back).unwrap();
+/// assert_eq!(back.audio_codec, AudioCodec::Opus);
+/// ```
 pub fn exaudio_write(hdr: &AudioHeader, buf: &mut [u8]) -> usize {
     if hdr.is_ex_header == 0 {
         let codec_nibble = match hdr.audio_codec {
