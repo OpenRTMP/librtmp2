@@ -31,4 +31,10 @@ cbindgen \
     --output "${OUTPUT_FILE}" \
     "${ROOT_DIR}"
 
+# cbindgen copies Rust doc comments verbatim, so the header would otherwise
+# carry Rust intra-doc links, `**emphasis**` and whole `# Examples` sections of
+# Rust code. Rewrite them into C-appropriate prose; the Rust sources keep their
+# links, which continue to work on docs.rs.
+python3 "${ROOT_DIR}/scripts/fix-header-docs.py" "${OUTPUT_FILE}"
+
 echo "Generated ${OUTPUT_FILE}"
