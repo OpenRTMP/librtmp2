@@ -13,6 +13,58 @@ begin at `1.0.0`.
 
 ## [Unreleased]
 
+## [0.17.3] — 2026-11-23
+
+### Added
+- Complete rustdoc coverage. Every public module, type, field, variant, method
+  and constant is documented, and every one of the items the docs.rs coverage
+  counter looks at now has a runnable example: 946/946 items documented and
+  408/408 with examples, measured with the same rustdoc counter docs.rs uses
+  (0.17.2 reported 605/946 and 2/406). The counters are reproducible locally
+  with `scripts/doc-coverage.sh`.
+- A rewritten crate-level documentation page: what the library does and does
+  not do, the Cargo feature table, a module map, working server and client
+  examples, the error-handling contract and the threading model.
+- Documentation CI gates, covering gaps the existing steps missed:
+  `RUSTFLAGS="-D missing_docs"` for both feature configurations,
+  broken-intra-doc-link failures via `RUSTDOCFLAGS="-D warnings"`,
+  `cargo test --doc` for both feature sets, and `scripts/doc-coverage.sh`.
+
+### Fixed
+- Documentation that contradicted the implementation. Writing executable
+  examples surfaced these:
+  - `amf3::read_double` and `read_integer` do not consume the type marker while
+    their writers emit one, so a naive write/read round trip reads the marker as
+    data. The asymmetry is now documented.
+  - `Conn::handle_command` ignores a payload whose command name cannot be read
+    and returns `Ok`, so a peer sending an extension command cannot break the
+    session. It previously claimed to report an error.
+  - `session::stream::publish_begin`/`play_begin` only set the role flag; the
+    stream name is recorded by their `session::publish`/`session::play`
+    counterparts.
+  - `bytes::hton16`/`hton32` already byte-swap, so serializing them with
+    `to_be_bytes()` converts twice; `to_ne_bytes()` is the correct pairing.
+  - Wire-format details: the E-RTMP multitrack descriptor is two AMF0 values (a
+    Number then a String), the FourCC list is a UI32 count followed by
+    UI16-length entries, `capsEx` is two UI32 masks with an implied version, and
+    a User Control PingRequest payload is six bytes so the token arrives as
+    `param1`.
+  - `Conn::inject_relay_frame` requires an app name and a resolvable route key,
+    `Conn::relay_route_key` prefers a pinned `relay_key`, and
+    `ChunkRegistry::reset_stream` clears state in place rather than freeing the
+    slot.
+- The generated C header no longer carries Rust-only markdown. Intra-doc links,
+  `# Safety`/`# Errors`/`# Examples` section markers and whole fenced blocks of
+  Rust code are rewritten to plain prose by `scripts/fix-header-docs.py`, run
+  from `scripts/generate-header.sh`. The header is 429 lines shorter and still
+  compiles under `cc -Wall -Wextra -Werror`.
+
+### Notes
+- Documentation and CI only. No public signature, ABI, export name, dependency
+  or runtime behaviour changed; the ABI checks report the same surface as
+  0.17.2.
+
+
 ## [0.17.2] — 2026-11-21
 
 ### Fixed
@@ -1355,6 +1407,7 @@ and others.
 - `CONTRIBUTING.md` guidelines
 
 [Unreleased]: https://github.com/OpenRTMP/librtmp2/compare/v0.17.2...HEAD
+[0.17.3]: https://github.com/OpenRTMP/librtmp2/compare/v0.17.2...v0.17.3
 [0.17.2]: https://github.com/OpenRTMP/librtmp2/compare/v0.17.1...v0.17.2
 [0.17.1]: https://github.com/OpenRTMP/librtmp2/compare/v0.17.0...v0.17.1
 [0.17.0]: https://github.com/OpenRTMP/librtmp2/compare/v0.16.1...v0.17.0
